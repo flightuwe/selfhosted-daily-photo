@@ -21,6 +21,8 @@ services:
       - BOOTSTRAP_ADMIN_PASSWORD=HIER_STARKES_ADMIN_PASSWORT_EINTRAGEN
     volumes:
       - /volume1/docker/selfhosted-daily-photo/backend-data:/app/data:rw
+    networks:
+      - shp-net
 
   admin:
     image: ghcr.io/flightuwe/selfhosted-bereal-admin:latest
@@ -28,6 +30,8 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    networks:
+      - shp-net
 
   gateway:
     image: nginx:1.27-alpine
@@ -42,3 +46,9 @@ services:
       - "13379:80"
     volumes:
       - /volume1/docker/selfhosted-daily-photo/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - shp-net
+
+networks:
+  shp-net:
+    driver: bridge
