@@ -20,22 +20,37 @@ Monorepo mit:
 3. Admin auf `http://localhost`
 4. API auf `http://localhost/api`
 
-## Synology Deployment
+## Synology mit Portainer (empfohlen)
 
-1. Repo auf die Synology klonen (z. B. `/volume1/docker/selfhosted-bereal`).
-2. `backend/.env` erstellen:
-   - `PUBLIC_BASE_URL=https://deine-domain.tld`
-   - `JWT_SECRET` setzen
-   - `BOOTSTRAP_ADMIN_USER` und `BOOTSTRAP_ADMIN_PASSWORD` setzen
-3. Ports/Reverse Proxy so konfigurieren, dass deine Domain auf den `nginx`-Service zeigt.
-4. Start:
-   - `docker compose -f deploy/docker-compose.yml up -d --build`
-5. Persistenz:
-   - Daten liegen in `deploy/data/backend` (DB + Uploads)
+### Voraussetzungen
+
+1. In GitHub muessen die Workflows `ci` und `publish-server-images` erfolgreich sein.
+2. Die GHCR Images muessen vorhanden sein:
+   - `ghcr.io/flightuwe/selfhosted-bereal-backend:latest`
+   - `ghcr.io/flightuwe/selfhosted-bereal-admin:latest`
+3. Wenn dein Repo/Package privat ist: in Portainer unter `Registries` eine GitHub Container Registry mit Personal Access Token hinterlegen.
+
+### Stack in Portainer anlegen
+
+1. Portainer -> `Stacks` -> `Add stack`
+2. Name: z. B. `selfhosted-daily-photo`
+3. Den Inhalt aus `deploy/portainer-stack.yml` in den Editor kopieren.
+4. Platzhalterwerte ersetzen:
+   - `PUBLIC_BASE_URL`
+   - `CORS_ORIGINS`
+   - `JWT_SECRET`
+   - `BOOTSTRAP_ADMIN_PASSWORD`
+5. `Deploy the stack` klicken.
+
+### Netzwerk / Domain
+
+- Der Stack stellt standardmaessig `8088` auf der Synology bereit (`gateway` Service).
+- In Synology Reverse Proxy deine Domain (z. B. `photos.example.com`) auf `http://<synology-ip>:8088` weiterleiten.
+- TLS/Let's Encrypt ueber Synology terminieren.
 
 ## Android App
 
-- API Basis-URL in `android/app/build.gradle.kts` bei `API_BASE_URL` auf deine Domain setzen, z. B. `https://deine-domain.tld/api/`.
+- API Basis-URL in `android/app/build.gradle.kts` bei `API_BASE_URL` auf deine Domain setzen, z. B. `https://photos.example.com/api/`.
 - Build lokal:
   - `gradle -p android :app:assembleRelease`
 
