@@ -101,3 +101,17 @@ Danach liegt `app-release.apk` in GitHub Releases.
 2. Kamera-Flow in Android (Front/Back Capture im Prompt-Moment).
 3. Rollen/Rechte erweitern und Audit-Log im Admin-Panel.
 4. Optionaler Wechsel von SQLite auf Postgres fuer groessere Nutzerzahl.
+
+## Konkrete Synology Werte
+
+Fuer Portainer Stack (`deploy/portainer-stack.yml`) setze mindestens:
+
+- `PUBLIC_BASE_URL=https://photos.<deine-domain>`
+- `CORS_ORIGINS=https://photos.<deine-domain>`
+- `JWT_SECRET=<langes-zufaelliges-secret>`
+- `BOOTSTRAP_ADMIN_PASSWORD=<starkes-passwort>`
+- Host-Pfad fuer Daten: `/volume1/docker/selfhosted-daily-photo/backend-data`
+
+Danach in Synology Reverse Proxy:
+- Quelle: `https://photos.<deine-domain>`
+- Ziel: `http://127.0.0.1:8088`

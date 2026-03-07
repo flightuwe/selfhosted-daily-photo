@@ -5,30 +5,36 @@ services:
     image: ghcr.io/flightuwe/selfhosted-bereal-backend:latest
     container_name: shp-backend
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       - APP_ADDRESS=:8080
       - DB_PATH=/app/data/app.db
       - UPLOAD_DIR=/app/data/uploads
-      - JWT_SECRET=CHANGE_ME_LONG_RANDOM_SECRET
+      - JWT_SECRET=REPLACE_WITH_LONG_RANDOM_SECRET
       - TOKEN_TTL_HOURS=72
-      - CORS_ORIGINS=https://photos.example.com
-      - PUBLIC_BASE_URL=https://photos.example.com
+      - CORS_ORIGINS=https://photos.your-domain.tld
+      - PUBLIC_BASE_URL=https://photos.your-domain.tld
       - APP_TIMEZONE=Europe/Berlin
       - SCHEDULER_ENABLED=true
       - BOOTSTRAP_ADMIN_USER=admin
-      - BOOTSTRAP_ADMIN_PASSWORD=CHANGE_ME_STRONG_PASSWORD
+      - BOOTSTRAP_ADMIN_PASSWORD=REPLACE_WITH_STRONG_ADMIN_PASSWORD
     volumes:
-      - backend-data:/app/data
+      - /volume1/docker/selfhosted-daily-photo/backend-data:/app/data:rw
 
   admin:
     image: ghcr.io/flightuwe/selfhosted-bereal-admin:latest
     container_name: shp-admin
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
   gateway:
     image: nginx:1.27-alpine
     container_name: shp-gateway
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - backend
       - admin
@@ -54,6 +60,7 @@ services:
           proxy_pass http://backend:8080/uploads/;
           proxy_set_header Host $$host;
           proxy_set_header X-Real-IP $$remote_addr;
+          add_header Cache-Control 'public, max-age=31536000';
         }
 
         location / {
@@ -65,6 +72,3 @@ services:
       EOF
       && nginx -g 'daemon off;'
       "
-
-volumes:
-  backend-data:
