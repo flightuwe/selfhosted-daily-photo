@@ -115,3 +115,15 @@ Fuer Portainer Stack (`deploy/portainer-stack.yml`) setze mindestens:
 Danach in Synology Reverse Proxy:
 - Quelle: `https://photos.<deine-domain>`
 - Ziel: `http://127.0.0.1:8088`
+
+## Synology Setup fuer deine Domain
+
+Empfohlenes Ziel im Reverse Proxy:
+- Quelle (Host): `daily.teacloud.synology.me`
+- Ziel: `http://127.0.0.1:13379`
+
+Direkter Test im LAN (ohne Reverse Proxy):
+- `http://192.168.178.80:13379`
+
+Android API URL:
+- `https://daily.teacloud.synology.me/api/`

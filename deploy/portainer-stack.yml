@@ -13,8 +13,8 @@ services:
       - UPLOAD_DIR=/app/data/uploads
       - JWT_SECRET=REPLACE_WITH_LONG_RANDOM_SECRET
       - TOKEN_TTL_HOURS=72
-      - CORS_ORIGINS=https://photos.your-domain.tld
-      - PUBLIC_BASE_URL=https://photos.your-domain.tld
+      - CORS_ORIGINS=https://daily.teacloud.synology.me
+      - PUBLIC_BASE_URL=https://daily.teacloud.synology.me
       - APP_TIMEZONE=Europe/Berlin
       - SCHEDULER_ENABLED=true
       - BOOTSTRAP_ADMIN_USER=admin
@@ -39,7 +39,7 @@ services:
       - backend
       - admin
     ports:
-      - "8088:80"
+      - "13379:80"
     command: >
       /bin/sh -c "
       cat <<'EOF' > /etc/nginx/conf.d/default.conf
