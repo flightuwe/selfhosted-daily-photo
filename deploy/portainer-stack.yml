@@ -40,7 +40,7 @@ services:
       - admin
     ports:
       - "13379:80"
-    command: >
+    command: |
       /bin/sh -c "
       cat <<'EOF' > /etc/nginx/conf.d/default.conf
       server {
