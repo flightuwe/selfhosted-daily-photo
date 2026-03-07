@@ -1,0 +1,21 @@
+# Node
+admin/node_modules/
+admin/dist/
+
+# Android
+android/.gradle/
+android/local.properties
+android/app/build/
+android/build/
+
+# Go
+backend/data/
+backend/.env
+
+# Deploy runtime
+deploy/data/
+deploy/certs/
+
+# OS
+.DS_Store
+Thumbs.db
