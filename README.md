@@ -127,3 +127,14 @@ Direkter Test im LAN (ohne Reverse Proxy):
 
 Android API URL:
 - `https://daily.teacloud.synology.me/api/`
+
+## Fix fuer Gateway-Container auf Synology/Portainer
+
+Wenn der `gateway`-Container mit `cat: can't open 'server'` abstuerzt, nutze die Datei-basierte Nginx-Konfiguration:
+
+1. Ordner anlegen:
+   - `/volume1/docker/selfhosted-daily-photo/nginx`
+2. Datei anlegen:
+   - `/volume1/docker/selfhosted-daily-photo/nginx/default.conf`
+3. Inhalt aus `deploy/synology/nginx-default.conf` uebernehmen.
+4. Stack mit `deploy/portainer-stack.yml` neu deployen.
