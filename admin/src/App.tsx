@@ -677,6 +677,9 @@ export function App() {
 
         {activeTab === "commands" && (
           <div className="stack">
+            <article className="settings-current">
+              <p>Alle Chat-Command-Einstellungen werden nur hier verwaltet. Im Tab Einstellungen sind keine Command-Optionen mehr.</p>
+            </article>
             <div className="row">
               <h2>Command-Builder</h2>
               <button onClick={() => { setEditingCommandId(null); setCommandDraft(emptyCommandDraft); }}>Neuer Command</button>
@@ -998,8 +1001,6 @@ export function App() {
                 <p><strong>Upload-Fenster:</strong> {savedSettings.uploadWindowMinutes} Minuten</p>
                 <p><strong>Max Upload:</strong> {savedSettings.maxUploadBytes <= 0 ? "Unbegrenzt" : `${Math.round(savedSettings.maxUploadBytes / (1024 * 1024))} MB`}</p>
                 <p><strong>Notification-Text:</strong> {savedSettings.promptNotificationText}</p>
-                <p><strong>Chat-Command:</strong> {savedSettings.chatCommandEnabled ? "aktiv" : "deaktiviert"} ({savedSettings.chatCommandValue})</p>
-                <p><strong>Command-Aktionen:</strong> Trigger={savedSettings.chatCommandTrigger ? "an" : "aus"}, Push={savedSettings.chatCommandSendPush ? "an" : "aus"}, Chat={savedSettings.chatCommandEchoChat ? "an" : "aus"}</p>
               </div>
             </article>
 
@@ -1040,60 +1041,6 @@ export function App() {
                 <input
                   value={settings.promptNotificationText}
                   onChange={(e) => setSettings({ ...settings, promptNotificationText: e.target.value })}
-                />
-              </label>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={settings.chatCommandEnabled}
-                  onChange={(e) => setSettings({ ...settings, chatCommandEnabled: e.target.checked })}
-                />
-                Chat-Command aktivieren
-              </label>
-              <label>
-                Chat-Command Text
-                <input
-                  value={settings.chatCommandValue}
-                  onChange={(e) => setSettings({ ...settings, chatCommandValue: e.target.value })}
-                  placeholder="-moment"
-                />
-              </label>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={settings.chatCommandTrigger}
-                  onChange={(e) => setSettings({ ...settings, chatCommandTrigger: e.target.checked })}
-                />
-                Aktion: Moment triggern
-              </label>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={settings.chatCommandSendPush}
-                  onChange={(e) => setSettings({ ...settings, chatCommandSendPush: e.target.checked })}
-                />
-                Aktion: Push an alle senden
-              </label>
-              <label>
-                Push-Text (Platzhalter: {"{user}"})
-                <input
-                  value={settings.chatCommandPushText}
-                  onChange={(e) => setSettings({ ...settings, chatCommandPushText: e.target.value })}
-                />
-              </label>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={settings.chatCommandEchoChat}
-                  onChange={(e) => setSettings({ ...settings, chatCommandEchoChat: e.target.checked })}
-                />
-                Aktion: Chat-Meldung erzeugen
-              </label>
-              <label>
-                Chat-Meldungstext (Platzhalter: {"{user}"})
-                <input
-                  value={settings.chatCommandEchoText}
-                  onChange={(e) => setSettings({ ...settings, chatCommandEchoText: e.target.value })}
                 />
               </label>
               <label>
