@@ -19,12 +19,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -36,9 +38,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
@@ -60,7 +64,7 @@ import java.io.FileOutputStream
 data class User(val id: Long, val username: String, val isAdmin: Boolean)
 data class AuthResponse(val token: String, val user: User)
 data class LoginRequest(val username: String, val password: String)
-data class PromptResponse(val day: String, val canUpload: Boolean)
+data class PromptResponse(val day: String, val canUpload: Boolean, val triggered: String? = null)
 data class FeedItem(val id: Long, val day: String, val promptOnly: Boolean, val caption: String?, val url: String, val user: User)
 data class FeedResponse(val items: List<FeedItem>)
 
@@ -90,6 +94,12 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun saveToken(token: String) {
         prefs.edit().putString("token", token).apply()
+    }
+
+    fun seenPromptMarker(): String = prefs.getString("seen_prompt_marker", "") ?: ""
+
+    fun setSeenPromptMarker(marker: String) {
+        prefs.edit().putString("seen_prompt_marker", marker).apply()
     }
 
     suspend fun login(username: String, password: String): User {
@@ -134,7 +144,8 @@ data class UiState(
     val prompt: PromptResponse? = null,
     val feed: List<FeedItem> = emptyList(),
     val loading: Boolean = false,
-    val message: String = ""
+    val message: String = "",
+    val showPromptDialog: Boolean = false
 )
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
@@ -159,7 +170,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val feed = repo.feed()
             prompt to feed
         }.onSuccess { (prompt, feed) ->
-            state = state.copy(prompt = prompt, feed = feed, loading = false)
+            val marker = "${prompt.day}:${prompt.triggered ?: ""}"
+            val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && marker != repo.seenPromptMarker()
+            if (shouldPopup) {
+                repo.setSeenPromptMarker(marker)
+            }
+            state = state.copy(
+                prompt = prompt,
+                feed = feed,
+                loading = false,
+                showPromptDialog = state.showPromptDialog || shouldPopup
+            )
         }.onFailure {
             state = state.copy(loading = false, message = it.message ?: "Laden fehlgeschlagen")
         }
@@ -173,6 +194,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 refresh()
             }
             .onFailure { state = state.copy(loading = false, message = it.message ?: "Upload fehlgeschlagen") }
+    }
+
+    fun dismissPromptDialog() {
+        state = state.copy(showPromptDialog = false)
     }
 }
 
@@ -206,19 +231,52 @@ class MainActivity : ComponentActivity() {
 fun AppScreen(vm: MainVm) {
     val state = vm.state
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var asPrompt by remember { mutableStateOf(true) }
+    var pendingCaptureUri by remember { mutableStateOf<Uri?>(null) }
 
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             scope.launch { vm.upload(uri, asPrompt) }
         }
     }
 
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val uri = pendingCaptureUri
+        if (success && uri != null) {
+            scope.launch { vm.upload(uri, true) }
+        }
+        pendingCaptureUri = null
+    }
+
     LaunchedEffect(state.token) {
-        if (state.token.isNotBlank()) vm.refresh()
+        if (state.token.isBlank()) return@LaunchedEffect
+        while (true) {
+            vm.refresh()
+            delay(15_000)
+        }
+    }
+
+    if (state.showPromptDialog) {
+        AlertDialog(
+            onDismissRequest = { vm.dismissPromptDialog() },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.dismissPromptDialog()
+                    val uri = createTempImageUri(context)
+                    pendingCaptureUri = uri
+                    cameraLauncher.launch(uri)
+                }) { Text("Kamera öffnen") }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.dismissPromptDialog() }) { Text("Später") }
+            },
+            title = { Text("Daily Event gestartet") },
+            text = { Text("Jetzt Foto aufnehmen und als Prompt-Bild hochladen.") }
+        )
     }
 
     Column(
@@ -237,12 +295,17 @@ fun AppScreen(vm: MainVm) {
             }
         } else {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { launcher.launch("image/*") }) { Text("Bild waehlen") }
+                Button(onClick = {
+                    val uri = createTempImageUri(context)
+                    pendingCaptureUri = uri
+                    cameraLauncher.launch(uri)
+                }) { Text("Kamera (Prompt)") }
+                Button(onClick = { galleryLauncher.launch("image/*") }) { Text("Bild waehlen") }
                 Button(onClick = { scope.launch { vm.refresh() } }) { Text("Refresh") }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = asPrompt, onCheckedChange = { asPrompt = it })
-                Text("Als Prompt-Upload")
+                Text("Als Prompt-Upload (Galerie)")
             }
             Text("Heute: ${state.prompt?.day ?: "-"} | Prompt Upload offen: ${state.prompt?.canUpload ?: false}")
             Spacer(modifier = Modifier.height(8.dp))
@@ -262,4 +325,10 @@ fun AppScreen(vm: MainVm) {
         if (state.loading) Text("Lade...")
         if (state.message.isNotBlank()) Text(state.message)
     }
+}
+
+private fun createTempImageUri(context: Context): Uri {
+    val dir = File(context.cacheDir, "camera").apply { mkdirs() }
+    val file = File.createTempFile("prompt_", ".jpg", dir)
+    return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 }

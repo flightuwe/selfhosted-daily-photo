@@ -58,11 +58,11 @@ export function App() {
     }
   }
 
-  async function onTrigger() {
+  async function onTriggerEvent() {
     setMessage("");
     try {
       await triggerPrompt(token);
-      setMessage("Prompt wurde ausgelöst");
+      setMessage("Daily Event ausgelöst. Nutzer koennen jetzt Prompt-Fotos hochladen.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -168,8 +168,8 @@ export function App() {
           <button type="submit">Settings speichern</button>
         </form>
 
-        <button className="accent" onClick={onTrigger}>
-          Prompt jetzt auslösen
+        <button className="accent" onClick={onTriggerEvent}>
+          Daily Event manuell auslösen
         </button>
 
         <h2>User anlegen</h2>
