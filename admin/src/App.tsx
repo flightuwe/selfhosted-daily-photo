@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   broadcastNotification,
+  createChatCommand,
   clearChat,
   createUser,
+  deleteChatCommand,
   deleteUser,
   getAdminFeed,
   getCalendar,
   getChat,
+  getChatCommands,
   getSettings,
   getStats,
   listUsers,
@@ -15,9 +18,11 @@ import {
   resetTodayPrompt,
   triggerPrompt,
   updateCalendarDay,
+  updateChatCommand,
   updateSettings,
   updateUser,
   type AdminStats,
+  type ChatCommand,
   type AdminUser,
   type ChatItem,
   type CalendarItem,
@@ -25,7 +30,7 @@ import {
   type Settings,
 } from "./api";
 
-type Tab = "dashboard" | "events" | "users" | "feed" | "chat" | "calendar" | "settings";
+type Tab = "dashboard" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "settings";
 
 const DEFAULT_SETTINGS: Settings = {
   promptWindowStartHour: 8,
@@ -50,6 +55,32 @@ const emptyStats: AdminStats = {
   prompts: 0,
 };
 
+type CommandDraft = {
+  name: string;
+  command: string;
+  action: ChatCommand["action"];
+  enabled: boolean;
+  requireAdmin: boolean;
+  sendPush: boolean;
+  postChat: boolean;
+  pushText: string;
+  responseText: string;
+  cooldownSecond: number;
+};
+
+const emptyCommandDraft: CommandDraft = {
+  name: "",
+  command: "-",
+  action: "trigger_moment",
+  enabled: true,
+  requireAdmin: false,
+  sendPush: true,
+  postChat: true,
+  pushText: "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
+  responseText: "Moment wurde von {user} angefordert.",
+  cooldownSecond: 0,
+};
+
 export function App() {
   const [token, setToken] = useState<string>(() => localStorage.getItem("admin-token") || "");
   const [username, setUsername] = useState("admin");
@@ -60,6 +91,9 @@ export function App() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
+  const [chatCommands, setChatCommands] = useState<ChatCommand[]>([]);
+  const [editingCommandId, setEditingCommandId] = useState<number | null>(null);
+  const [commandDraft, setCommandDraft] = useState<CommandDraft>(emptyCommandDraft);
   const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
   const [calendarDrafts, setCalendarDrafts] = useState<Record<string, string>>({});
   const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -99,15 +133,24 @@ export function App() {
     if (activeTab === "calendar") {
       void loadCalendar(token);
     }
+    if (activeTab === "commands") {
+      void loadCommands(token);
+    }
   }, [token, activeTab, feedDay]);
 
   async function loadAdminData(authToken: string) {
     try {
-      const [s, st, u] = await Promise.all([getSettings(authToken), getStats(authToken), listUsers(authToken)]);
+      const [s, st, u, cmds] = await Promise.all([
+        getSettings(authToken),
+        getStats(authToken),
+        listUsers(authToken),
+        getChatCommands(authToken),
+      ]);
       setSettings(s);
       setSavedSettings(s);
       setStats(st);
       setUsers(u);
+      setChatCommands(cmds);
     } catch (err) {
       setMessage((err as Error).message);
       setToken("");
@@ -127,6 +170,15 @@ export function App() {
     try {
       const items = await getChat(authToken);
       setChatItems(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function loadCommands(authToken: string) {
+    try {
+      const items = await getChatCommands(authToken);
+      setChatCommands(items);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -165,6 +217,74 @@ export function App() {
     if (activeTab === "feed") await loadFeed(token, feedDay);
     if (activeTab === "chat") await loadChat(token);
     if (activeTab === "calendar") await loadCalendar(token);
+    if (activeTab === "commands") await loadCommands(token);
+  }
+
+  function commandPayloadFromDraft(d: CommandDraft) {
+    return {
+      name: d.name,
+      command: d.command,
+      action: d.action,
+      enabled: d.enabled,
+      requireAdmin: d.requireAdmin,
+      sendPush: d.sendPush,
+      postChat: d.postChat,
+      pushText: d.pushText,
+      responseText: d.responseText,
+      cooldownSecond: d.cooldownSecond,
+    };
+  }
+
+  async function onSaveCommand(e: React.FormEvent) {
+    e.preventDefault();
+    setMessage("");
+    try {
+      if (editingCommandId == null) {
+        await createChatCommand(token, commandPayloadFromDraft(commandDraft));
+        setMessage("Command erstellt.");
+      } else {
+        await updateChatCommand(token, editingCommandId, commandPayloadFromDraft(commandDraft));
+        setMessage("Command aktualisiert.");
+      }
+      setEditingCommandId(null);
+      setCommandDraft(emptyCommandDraft);
+      await loadCommands(token);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  function onEditCommand(cmd: ChatCommand) {
+    setEditingCommandId(cmd.id);
+    setCommandDraft({
+      name: cmd.name,
+      command: cmd.command,
+      action: cmd.action,
+      enabled: cmd.enabled,
+      requireAdmin: cmd.requireAdmin,
+      sendPush: cmd.sendPush,
+      postChat: cmd.postChat,
+      pushText: cmd.pushText || "",
+      responseText: cmd.responseText || "",
+      cooldownSecond: cmd.cooldownSecond || 0,
+    });
+    setActiveTab("commands");
+  }
+
+  async function onDeleteCommand(cmd: ChatCommand) {
+    if (!confirm(`Command ${cmd.command} wirklich loeschen?`)) return;
+    setMessage("");
+    try {
+      await deleteChatCommand(token, cmd.id);
+      if (editingCommandId === cmd.id) {
+        setEditingCommandId(null);
+        setCommandDraft(emptyCommandDraft);
+      }
+      setMessage("Command geloescht.");
+      await loadCommands(token);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
   }
 
   async function onSaveCalendarDay(day: string) {
@@ -378,6 +498,7 @@ export function App() {
         <div className="tabs">
           <button className={activeTab === "dashboard" ? "tab active" : "tab"} onClick={() => setActiveTab("dashboard")}>Dashboard</button>
           <button className={activeTab === "events" ? "tab active" : "tab"} onClick={() => setActiveTab("events")}>Events & Notifications</button>
+          <button className={activeTab === "commands" ? "tab active" : "tab"} onClick={() => setActiveTab("commands")}>Chat-Commands</button>
           <button className={activeTab === "users" ? "tab active" : "tab"} onClick={() => setActiveTab("users")}>Benutzerverwaltung</button>
           <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => setActiveTab("feed")}>Feed</button>
           <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => setActiveTab("chat")}>Chat</button>
@@ -426,6 +547,115 @@ export function App() {
               <input value={updateNoticeVersion} onChange={(e) => setUpdateNoticeVersion(e.target.value)} />
             </label>
             <button onClick={onSendUpdateNotice}>Update-Hinweis senden</button>
+          </div>
+        )}
+
+        {activeTab === "commands" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Command-Builder</h2>
+              <button onClick={() => { setEditingCommandId(null); setCommandDraft(emptyCommandDraft); }}>Neuer Command</button>
+            </div>
+
+            <form onSubmit={onSaveCommand} className="stack">
+              <label>
+                Name
+                <input value={commandDraft.name} onChange={(e) => setCommandDraft({ ...commandDraft, name: e.target.value })} required />
+              </label>
+              <label>
+                Command (z. B. -moment)
+                <input value={commandDraft.command} onChange={(e) => setCommandDraft({ ...commandDraft, command: e.target.value })} required />
+              </label>
+              <label>
+                Aktion
+                <select
+                  value={commandDraft.action}
+                  onChange={(e) => setCommandDraft({ ...commandDraft, action: e.target.value as CommandDraft["action"] })}
+                >
+                  <option value="trigger_moment">Moment ausloesen</option>
+                  <option value="clear_chat">Chat leeren</option>
+                  <option value="broadcast_push">Push an alle</option>
+                  <option value="send_chat_message">Bot-Chatnachricht</option>
+                </select>
+              </label>
+              <div className="row">
+                <label className="checkbox">
+                  <input type="checkbox" checked={commandDraft.enabled} onChange={(e) => setCommandDraft({ ...commandDraft, enabled: e.target.checked })} />
+                  Aktiv
+                </label>
+                <label className="checkbox">
+                  <input type="checkbox" checked={commandDraft.requireAdmin} onChange={(e) => setCommandDraft({ ...commandDraft, requireAdmin: e.target.checked })} />
+                  Nur Admin
+                </label>
+              </div>
+              <div className="row">
+                <label className="checkbox">
+                  <input type="checkbox" checked={commandDraft.sendPush} onChange={(e) => setCommandDraft({ ...commandDraft, sendPush: e.target.checked })} />
+                  Push senden
+                </label>
+                <label className="checkbox">
+                  <input type="checkbox" checked={commandDraft.postChat} onChange={(e) => setCommandDraft({ ...commandDraft, postChat: e.target.checked })} />
+                  Chat-Meldung posten
+                </label>
+              </div>
+              <label>
+                Push-Text (Platzhalter: {"{user}"})
+                <input value={commandDraft.pushText} onChange={(e) => setCommandDraft({ ...commandDraft, pushText: e.target.value })} />
+              </label>
+              <label>
+                Chat-Text (Platzhalter: {"{user}"})
+                <input value={commandDraft.responseText} onChange={(e) => setCommandDraft({ ...commandDraft, responseText: e.target.value })} />
+              </label>
+              <label>
+                Cooldown (Sekunden)
+                <input
+                  type="number"
+                  min={0}
+                  value={commandDraft.cooldownSecond}
+                  onChange={(e) => setCommandDraft({ ...commandDraft, cooldownSecond: Number(e.target.value) })}
+                />
+              </label>
+              <div className="row">
+                <button type="submit">{editingCommandId == null ? "Command erstellen" : "Command speichern"}</button>
+                {editingCommandId != null && (
+                  <button type="button" onClick={() => { setEditingCommandId(null); setCommandDraft(emptyCommandDraft); }}>
+                    Bearbeitung abbrechen
+                  </button>
+                )}
+              </div>
+            </form>
+
+            <h2>Vorhandene Commands</h2>
+            {chatCommands.length === 0 && <p>Keine Commands angelegt.</p>}
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Command</th>
+                  <th>Aktion</th>
+                  <th>Status</th>
+                  <th>Zuletzt genutzt</th>
+                  <th>Aktionen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chatCommands.map((cmd) => (
+                  <tr key={cmd.id}>
+                    <td>{cmd.name}</td>
+                    <td><code>{cmd.command}</code></td>
+                    <td>{cmd.action}</td>
+                    <td>{cmd.enabled ? "Aktiv" : "Aus"}</td>
+                    <td>{cmd.lastUsedAt ? formatDateTime(cmd.lastUsedAt) : "-"}</td>
+                    <td>
+                      <div className="row">
+                        <button onClick={() => onEditCommand(cmd)}>Bearbeiten</button>
+                        <button className="danger" onClick={() => onDeleteCommand(cmd)}>Loeschen</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
 

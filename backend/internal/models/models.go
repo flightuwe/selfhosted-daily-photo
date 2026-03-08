@@ -77,3 +77,20 @@ type ChatMessage struct {
     Body      string    `gorm:"size:500;not null" json:"body"`
     CreatedAt time.Time `json:"createdAt"`
 }
+
+type ChatCommand struct {
+    ID             uint      `gorm:"primaryKey" json:"id"`
+    Name           string    `gorm:"size:64;not null" json:"name"`
+    Command        string    `gorm:"uniqueIndex;size:64;not null" json:"command"`
+    Action         string    `gorm:"size:32;not null" json:"action"`
+    Enabled        bool      `gorm:"default:true" json:"enabled"`
+    RequireAdmin   bool      `gorm:"default:false" json:"requireAdmin"`
+    SendPush       bool      `gorm:"default:false" json:"sendPush"`
+    PostChat       bool      `gorm:"default:true" json:"postChat"`
+    PushText       string    `gorm:"size:255" json:"pushText"`
+    ResponseText   string    `gorm:"size:255" json:"responseText"`
+    CooldownSecond int       `gorm:"default:0" json:"cooldownSecond"`
+    LastUsedAt     *time.Time `json:"lastUsedAt"`
+    CreatedAt      time.Time `json:"createdAt"`
+    UpdatedAt      time.Time `json:"updatedAt"`
+}

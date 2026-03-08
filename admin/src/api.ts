@@ -70,6 +70,23 @@ export type CalendarItem = {
   requestedByUser?: string;
 };
 
+export type ChatCommand = {
+  id: number;
+  name: string;
+  command: string;
+  action: "trigger_moment" | "clear_chat" | "broadcast_push" | "send_chat_message";
+  enabled: boolean;
+  requireAdmin: boolean;
+  sendPush: boolean;
+  postChat: boolean;
+  pushText: string;
+  responseText: string;
+  cooldownSecond: number;
+  lastUsedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const apiBase = import.meta.env.VITE_API_BASE || "/api";
 
 async function parse<T>(res: Response): Promise<T> {
@@ -219,6 +236,46 @@ export async function getChat(token: string): Promise<ChatItem[]> {
 export async function clearChat(token: string): Promise<void> {
   const res = await fetch(`${apiBase}/admin/chat/clear`, {
     method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  await parse(res);
+}
+
+export async function getChatCommands(token: string): Promise<ChatCommand[]> {
+  const res = await fetch(`${apiBase}/admin/chat/commands`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: ChatCommand[] }>(res);
+  return data.items;
+}
+
+export async function createChatCommand(token: string, body: Omit<ChatCommand, "id" | "lastUsedAt" | "createdAt" | "updatedAt">): Promise<ChatCommand> {
+  const res = await fetch(`${apiBase}/admin/chat/commands`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+  return parse<ChatCommand>(res);
+}
+
+export async function updateChatCommand(token: string, id: number, body: Omit<ChatCommand, "id" | "lastUsedAt" | "createdAt" | "updatedAt">): Promise<ChatCommand> {
+  const res = await fetch(`${apiBase}/admin/chat/commands/${id}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+  return parse<ChatCommand>(res);
+}
+
+export async function deleteChatCommand(token: string, id: number): Promise<void> {
+  const res = await fetch(`${apiBase}/admin/chat/commands/${id}`, {
+    method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });
   await parse(res);

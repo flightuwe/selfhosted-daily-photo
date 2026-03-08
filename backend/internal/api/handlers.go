@@ -83,6 +83,10 @@ func (s *Server) Router() *gin.Engine {
             admin.POST("/notifications/broadcast", s.handleBroadcastNotification)
             admin.POST("/notifications/user/:id", s.handleUserNotification)
             admin.POST("/chat/clear", s.handleAdminClearChat)
+            admin.GET("/chat/commands", s.handleAdminListChatCommands)
+            admin.POST("/chat/commands", s.handleAdminCreateChatCommand)
+            admin.PUT("/chat/commands/:id", s.handleAdminUpdateChatCommand)
+            admin.DELETE("/chat/commands/:id", s.handleAdminDeleteChatCommand)
 
             admin.GET("/users", s.handleAdminListUsers)
             admin.POST("/users", s.handleAdminCreateUser)
@@ -1004,13 +1008,7 @@ func (s *Server) handleChatCreate(c *gin.Context) {
         return
     }
 
-    var settings models.AppSettings
-    if err := s.DB.First(&settings).Error; err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
-        return
-    }
-    settings = normalizeSettings(settings)
-    if handled, err := s.tryHandleChatMomentCommand(c, user, body, settings); handled || err != nil {
+    if handled, err := s.tryHandleChatCommand(c, user, body); handled || err != nil {
         return
     }
 
@@ -1031,69 +1029,214 @@ func (s *Server) handleChatCreate(c *gin.Context) {
     })
 }
 
-func (s *Server) tryHandleChatMomentCommand(c *gin.Context, user models.User, body string, settings models.AppSettings) (bool, error) {
-    if !settings.ChatCommandEnabled {
-        return false, nil
-    }
-    if !isChatCommandMatch(body, settings.ChatCommandValue) {
+func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body string) (bool, error) {
+    normalized := normalizeCommandValue(body)
+    if normalized == "" {
         return false, nil
     }
 
+    var cmd models.ChatCommand
+    if err := s.DB.Where("enabled = ? AND command = ?", true, normalized).First(&cmd).Error; err != nil {
+        return false, nil
+    }
+    if cmd.RequireAdmin && !user.IsAdmin {
+        c.JSON(http.StatusForbidden, gin.H{"error": "command requires admin"})
+        return true, errors.New("command requires admin")
+    }
+    if cmd.CooldownSecond > 0 && cmd.LastUsedAt != nil {
+        if time.Since(*cmd.LastUsedAt) < time.Duration(cmd.CooldownSecond)*time.Second {
+            c.JSON(http.StatusTooManyRequests, gin.H{"error": "command cooldown active"})
+            return true, errors.New("command cooldown")
+        }
+    }
+
     var (
-        prompt        models.DailyPrompt
-        sendResult    notify.SendResult
-        sendErr       error
-        invalidRemove int64
+        prompt         models.DailyPrompt
+        sendResult     notify.SendResult
+        sendErr        error
+        invalidRemoved int64
+        chatMessage    models.ChatMessage
+        hasChatMessage bool
     )
-    if settings.ChatCommandTrigger {
+
+    switch cmd.Action {
+    case "trigger_moment":
         var triggerErr error
         prompt, _, triggerErr = s.Prompt.TriggerNowWithSource("chat_command", &user)
         if triggerErr != nil {
             c.JSON(http.StatusInternalServerError, gin.H{"error": "command trigger failed"})
             return true, triggerErr
         }
-    }
-
-    pushText := strings.ReplaceAll(settings.ChatCommandPushText, "{user}", user.Username)
-    if settings.ChatCommandSendPush && settings.ChatCommandTrigger {
-        tokens := s.allDeviceTokens()
-        sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
-        invalidRemove = s.removeInvalidTokens(sendResult.InvalidTokens)
-    }
-
-    echoBody := strings.ReplaceAll(settings.ChatCommandEchoText, "{user}", user.Username)
-    createdMessage := models.ChatMessage{UserID: user.ID, Body: echoBody}
-    if settings.ChatCommandEchoChat {
-        if err := s.DB.Create(&createdMessage).Error; err != nil {
+        if cmd.SendPush {
+            pushText := renderCommandText(cmd.PushText, user.Username)
+            tokens := s.allDeviceTokens()
+            sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
+            invalidRemoved = s.removeInvalidTokens(sendResult.InvalidTokens)
+        }
+        if cmd.PostChat {
+            chatMessage = models.ChatMessage{
+                UserID: user.ID,
+                Body:   renderCommandText(defaultIfBlank(cmd.ResponseText, "Moment wurde von {user} angefordert."), user.Username),
+            }
+            if err := s.DB.Create(&chatMessage).Error; err != nil {
+                c.JSON(http.StatusInternalServerError, gin.H{"error": "command chat write failed"})
+                return true, err
+            }
+            hasChatMessage = true
+        }
+    case "clear_chat":
+        if err := s.DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.ChatMessage{}).Error; err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "chat clear failed"})
+            return true, err
+        }
+        if cmd.PostChat {
+            chatMessage = models.ChatMessage{
+                UserID: user.ID,
+                Body:   renderCommandText(defaultIfBlank(cmd.ResponseText, "Chat wurde von {user} geleert."), user.Username),
+            }
+            if err := s.DB.Create(&chatMessage).Error; err != nil {
+                c.JSON(http.StatusInternalServerError, gin.H{"error": "command chat write failed"})
+                return true, err
+            }
+            hasChatMessage = true
+        }
+    case "broadcast_push":
+        if cmd.SendPush {
+            pushText := renderCommandText(defaultIfBlank(cmd.PushText, "{user} hat eine Nachricht gesendet."), user.Username)
+            tokens := s.allDeviceTokens()
+            sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
+            invalidRemoved = s.removeInvalidTokens(sendResult.InvalidTokens)
+        }
+        if cmd.PostChat {
+            chatMessage = models.ChatMessage{
+                UserID: user.ID,
+                Body:   renderCommandText(defaultIfBlank(cmd.ResponseText, "Push wurde von {user} gesendet."), user.Username),
+            }
+            if err := s.DB.Create(&chatMessage).Error; err != nil {
+                c.JSON(http.StatusInternalServerError, gin.H{"error": "command chat write failed"})
+                return true, err
+            }
+            hasChatMessage = true
+        }
+    case "send_chat_message":
+        chatMessage = models.ChatMessage{
+            UserID: user.ID,
+            Body:   renderCommandText(defaultIfBlank(cmd.ResponseText, "Command von {user} ausgefuehrt."), user.Username),
+        }
+        if err := s.DB.Create(&chatMessage).Error; err != nil {
             c.JSON(http.StatusInternalServerError, gin.H{"error": "command chat write failed"})
             return true, err
         }
-    } else {
-        createdMessage.Body = body
+        hasChatMessage = true
+    default:
+        c.JSON(http.StatusBadRequest, gin.H{"error": "unknown command action"})
+        return true, errors.New("unknown action")
     }
 
+    now := time.Now()
+    _ = s.DB.Model(&models.ChatCommand{}).Where("id = ?", cmd.ID).Update("last_used_at", &now).Error
+
     resp := gin.H{
-        "id":            createdMessage.ID,
-        "body":          createdMessage.Body,
-        "createdAt":     createdMessage.CreatedAt,
-        "user":          gin.H{"id": user.ID, "username": user.Username, "favoriteColor": defaultColor(user.FavoriteColor)},
-        "command":       true,
-        "commandValue":  settings.ChatCommandValue,
-        "triggerSource": "chat_command",
-        "requestedByUser": user.Username,
-        "provider":      s.Notifier.Name(),
-        "sentTo":        sendResult.Sent,
-        "failed":        sendResult.Failed,
-        "invalidRemoved": invalidRemove,
+        "command":        true,
+        "commandId":      cmd.ID,
+        "commandValue":   cmd.Command,
+        "action":         cmd.Action,
+        "provider":       s.Notifier.Name(),
+        "sentTo":         sendResult.Sent,
+        "failed":         sendResult.Failed,
+        "invalidRemoved": invalidRemoved,
     }
-    if settings.ChatCommandTrigger {
+    if hasChatMessage {
+        resp["id"] = chatMessage.ID
+        resp["body"] = chatMessage.Body
+        resp["createdAt"] = chatMessage.CreatedAt
+        resp["user"] = gin.H{
+            "id":            user.ID,
+            "username":      user.Username,
+            "favoriteColor": defaultColor(user.FavoriteColor),
+        }
+    }
+    if cmd.Action == "trigger_moment" {
         resp["prompt"] = prompt
+        resp["triggerSource"] = "chat_command"
+        resp["requestedByUser"] = user.Username
     }
     if sendErr != nil {
         resp["notificationErr"] = sendErr.Error()
     }
     c.JSON(http.StatusCreated, resp)
     return true, nil
+}
+
+func (s *Server) handleAdminListChatCommands(c *gin.Context) {
+    var cmds []models.ChatCommand
+    if err := s.DB.Order("created_at asc").Find(&cmds).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"items": cmds})
+}
+
+func (s *Server) handleAdminCreateChatCommand(c *gin.Context) {
+    var req models.ChatCommand
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+    cmd, err := sanitizeChatCommand(req)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+    if err := s.DB.Create(&cmd).Error; err != nil {
+        c.JSON(http.StatusConflict, gin.H{"error": "command exists"})
+        return
+    }
+    c.JSON(http.StatusCreated, cmd)
+}
+
+func (s *Server) handleAdminUpdateChatCommand(c *gin.Context) {
+    id, err := parseUintParam(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid command id"})
+        return
+    }
+    var existing models.ChatCommand
+    if err := s.DB.First(&existing, id).Error; err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "command not found"})
+        return
+    }
+    var req models.ChatCommand
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+    req.ID = existing.ID
+    req.CreatedAt = existing.CreatedAt
+    req.LastUsedAt = existing.LastUsedAt
+    cmd, err := sanitizeChatCommand(req)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+    if err := s.DB.Save(&cmd).Error; err != nil {
+        c.JSON(http.StatusConflict, gin.H{"error": "command save failed"})
+        return
+    }
+    c.JSON(http.StatusOK, cmd)
+}
+
+func (s *Server) handleAdminDeleteChatCommand(c *gin.Context) {
+    id, err := parseUintParam(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid command id"})
+        return
+    }
+    if err := s.DB.Delete(&models.ChatCommand{}, id).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (s *Server) handleDualUpload(c *gin.Context) {
@@ -1332,8 +1475,50 @@ func normalizeSettings(settings models.AppSettings) models.AppSettings {
     return settings
 }
 
-func isChatCommandMatch(body string, command string) bool {
-    b := strings.ToLower(strings.TrimSpace(body))
-    c := strings.ToLower(strings.TrimSpace(command))
-    return b != "" && c != "" && b == c
+func normalizeCommandValue(v string) string {
+    out := strings.ToLower(strings.TrimSpace(v))
+    if out == "" {
+        return ""
+    }
+    if !strings.HasPrefix(out, "-") {
+        out = "-" + out
+    }
+    return out
+}
+
+func sanitizeChatCommand(in models.ChatCommand) (models.ChatCommand, error) {
+    out := in
+    out.Name = strings.TrimSpace(out.Name)
+    out.Command = normalizeCommandValue(out.Command)
+    out.Action = strings.TrimSpace(out.Action)
+    out.PushText = strings.TrimSpace(out.PushText)
+    out.ResponseText = strings.TrimSpace(out.ResponseText)
+    if out.CooldownSecond < 0 {
+        out.CooldownSecond = 0
+    }
+    if out.Name == "" {
+        return out, errors.New("name required")
+    }
+    if out.Command == "" {
+        return out, errors.New("command required")
+    }
+    switch out.Action {
+    case "trigger_moment", "clear_chat", "broadcast_push", "send_chat_message":
+    default:
+        return out, errors.New("invalid action")
+    }
+    return out, nil
+}
+
+func defaultIfBlank(v string, fallback string) string {
+    x := strings.TrimSpace(v)
+    if x == "" {
+        return fallback
+    }
+    return x
+}
+
+func renderCommandText(template string, username string) string {
+    t := defaultIfBlank(template, "{user}")
+    return strings.ReplaceAll(t, "{user}", username)
 }
