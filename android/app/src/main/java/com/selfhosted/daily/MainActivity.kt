@@ -801,6 +801,8 @@ fun AppScreen(vm: MainVm) {
     var requestFrontCapture by remember { mutableStateOf(false) }
     var cameraUploading by remember { mutableStateOf(false) }
     var cameraUploadPercent by remember { mutableStateOf(0) }
+    var cameraUploadError by remember { mutableStateOf("") }
+    var cameraUploadDone by remember { mutableStateOf(false) }
     val feedListState = remember { LazyListState() }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
@@ -819,6 +821,8 @@ fun AppScreen(vm: MainVm) {
                     if (back != null && front != null && !cameraUploading) {
                         cameraUploading = true
                         cameraUploadPercent = 0
+                        cameraUploadError = ""
+                        cameraUploadDone = false
                         val asPrompt = captureAsPrompt
                         scope.launch {
                             val ok = vm.uploadDual(back, front, asPrompt) { sent, total ->
@@ -829,7 +833,11 @@ fun AppScreen(vm: MainVm) {
                                 backPreviewUri = null
                                 frontPreviewUri = null
                                 cameraUploadPercent = 100
+                                cameraUploadDone = true
                                 if (asPrompt) vm.setTab(AppTab.FEED)
+                            } else {
+                                cameraUploadDone = false
+                                cameraUploadError = vm.state.message.ifBlank { "Upload fehlgeschlagen" }
                             }
                         }
                     }
@@ -853,6 +861,8 @@ fun AppScreen(vm: MainVm) {
     fun startDualCapture(asPrompt: Boolean) {
         captureAsPrompt = asPrompt
         cameraUploadPercent = 0
+        cameraUploadError = ""
+        cameraUploadDone = false
         openCameraFor("back")
     }
 
@@ -1004,10 +1014,41 @@ fun AppScreen(vm: MainVm) {
                         frontPreviewUri = null
                         cameraUploading = false
                         cameraUploadPercent = 0
+                        cameraUploadError = ""
+                        cameraUploadDone = false
+                    },
+                    onRetryUpload = {
+                        val back = backPreviewUri
+                        val front = frontPreviewUri
+                        if (back != null && front != null && !cameraUploading) {
+                            cameraUploading = true
+                            cameraUploadPercent = 0
+                            cameraUploadError = ""
+                            cameraUploadDone = false
+                            val asPrompt = captureAsPrompt
+                            scope.launch {
+                                val ok = vm.uploadDual(back, front, asPrompt) { sent, total ->
+                                    cameraUploadPercent = ((sent * 100) / total.coerceAtLeast(1L)).toInt().coerceIn(0, 100)
+                                }
+                                cameraUploading = false
+                                if (ok) {
+                                    cameraUploadPercent = 100
+                                    cameraUploadDone = true
+                                    backPreviewUri = null
+                                    frontPreviewUri = null
+                                    if (asPrompt) vm.setTab(AppTab.FEED)
+                                } else {
+                                    cameraUploadDone = false
+                                    cameraUploadError = vm.state.message.ifBlank { "Upload fehlgeschlagen" }
+                                }
+                            }
+                        }
                     },
                     onGoFeed = { vm.setTab(AppTab.FEED) },
                     uploading = cameraUploading,
                     uploadPercent = cameraUploadPercent,
+                    uploadDone = cameraUploadDone,
+                    uploadError = cameraUploadError,
                     onOpenViewer = { urls ->
                         viewerUrls = urls
                         viewerIndex = 0
@@ -1126,9 +1167,12 @@ fun CameraTab(
     onCapturePrompt: () -> Unit,
     onCaptureExtra: () -> Unit,
     onReset: () -> Unit,
+    onRetryUpload: () -> Unit,
     onGoFeed: () -> Unit,
     uploading: Boolean,
     uploadPercent: Int,
+    uploadDone: Boolean,
+    uploadError: String,
     onOpenViewer: (List<String>) -> Unit
 ) {
     val hasPosted = prompt?.hasPosted == true
@@ -1202,8 +1246,13 @@ fun CameraTab(
                             modifier = Modifier.fillMaxWidth()
                         )
                         Text("Du kannst den Tab wechseln. Upload laeuft weiter, solange die App offen bleibt.")
-                    } else {
+                    } else if (uploadDone) {
                         Text("Upload automatisch abgeschlossen.")
+                    } else if (uploadError.isNotBlank()) {
+                        Text("Upload fehlgeschlagen: $uploadError", color = Color(0xFF8B0000))
+                        Button(onClick = onRetryUpload, modifier = Modifier.fillMaxWidth()) { Text("Upload erneut versuchen") }
+                    } else {
+                        Text("Bereit fuer Upload.")
                     }
                     Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
                 }
@@ -1582,10 +1631,16 @@ private fun createdAtDay(value: String): String {
 
 private fun apiError(t: Throwable, fallback: String): String {
     if (t is HttpException) {
+        val raw = runCatching { t.response()?.errorBody()?.string().orEmpty() }.getOrDefault("").lowercase()
         return when (t.code()) {
             400 -> "Ungueltige Eingabe"
             401 -> "Login fehlgeschlagen"
-            403 -> "Aktion nicht erlaubt"
+            403 -> when {
+                raw.contains("prompt inactive") -> "Heute ist kein aktiver Moment. Bitte im Admin-Panel Event ausloesen."
+                raw.contains("upload window closed") -> "Upload-Zeitfenster ist geschlossen."
+                raw.contains("poste zuerst dein tagesmoment") -> "Poste zuerst dein Tagesmoment."
+                else -> "Aktion nicht erlaubt"
+            }
             409 -> "Du hast heute bereits gepostet"
             else -> fallback
         }

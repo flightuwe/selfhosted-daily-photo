@@ -555,17 +555,41 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 
 func (s *Server) handleAdminResetToday(c *gin.Context) {
     day := time.Now().In(s.Location).Format("2006-01-02")
+    now := time.Now().In(s.Location)
 
-    if err := s.DB.Where("day = ?", day).Delete(&models.Photo{}).Error; err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete photos failed"})
+    var settings models.AppSettings
+    if err := s.DB.First(&settings).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
         return
     }
-    if err := s.DB.Where("day = ?", day).Delete(&models.DailyPrompt{}).Error; err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete prompt failed"})
+    uploadUntil := now.Add(time.Duration(settings.UploadWindowMinutes) * time.Minute)
+
+    txErr := s.DB.Transaction(func(tx *gorm.DB) error {
+        if err := tx.Where("day = ?", day).Delete(&models.Photo{}).Error; err != nil {
+            return err
+        }
+        if err := tx.Where("day = ?", day).Delete(&models.DailyPrompt{}).Error; err != nil {
+            return err
+        }
+        prompt := models.DailyPrompt{
+            Day:         day,
+            TriggeredAt: &now,
+            UploadUntil: &uploadUntil,
+        }
+        return tx.Create(&prompt).Error
+    })
+    if txErr != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "reset failed"})
         return
     }
 
-    c.JSON(http.StatusOK, gin.H{"ok": true, "day": day, "message": "heutiger Moment wurde zurückgesetzt"})
+    c.JSON(http.StatusOK, gin.H{
+        "ok":          true,
+        "day":         day,
+        "triggeredAt": now,
+        "uploadUntil": uploadUntil,
+        "message":     "heutiger Moment wurde zurueckgesetzt und neu gestartet",
+    })
 }
 
 func (s *Server) handleAdminCreateUser(c *gin.Context) {
