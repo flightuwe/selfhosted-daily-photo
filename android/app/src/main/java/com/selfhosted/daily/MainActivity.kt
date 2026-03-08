@@ -1531,6 +1531,16 @@ fun AppScreen(vm: MainVm) {
             confirmButton = {
                 TextButton(onClick = { vm.dismissChangelogDialog() }) { Text("Schliessen") }
             },
+            dismissButton = {
+                TextButton(onClick = {
+                    context.startActivity(
+                        Intent(
+                            Intent.ACTION_VIEW,
+                            Uri.parse("https://github.com/flightuwe/selfhosted-daily-photo")
+                        )
+                    )
+                }) { Text("GitHub") }
+            },
             title = { Text("Changelog ${BuildConfig.VERSION_NAME}") },
             text = {
                 Column(
