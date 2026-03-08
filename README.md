@@ -1,173 +1,182 @@
 # Daily
 
-Monorepo mit:
-- `backend/` Go API (JWT, Prompt-Fenster, Uploads, Feed, Admin-Endpoints)
-- `admin/` React Admin-Panel
-- `android/` Android App (Kotlin + Compose)
-- `deploy/` Docker Compose + Nginx fuer Synology
+![Daily Logo](assets/daily-logo.png)
+
+Private, selfhosted Daily-Moment App (Android + Admin Web + Go Backend) fuer kleine Gruppen.
+
+## Inhalt
+- Ein Foto-Moment pro Tag
+- Feed-Sperre bis zum eigenen Tagesmoment
+- Extra-Bilder, Kalender, Chat, Sondermoment
+- Admin-Panel fuer Nutzer, Events, Commands, Systemzustand
+- Vollstaendig selfhosted auf Synology/Portainer moeglich
 
 ## Architektur
+- `backend/` Go API + SQLite + Upload-Speicher
+- `admin/` React/Vite Admin-Panel
+- `android/` Kotlin/Compose App
+- `deploy/` Compose/Portainer/Nginx Vorlagen
 
-- Bilder liegen auf deinem Server-Dateisystem (`/app/data/uploads` im Backend-Container).
-- DB ist SQLite (`/app/data/app.db`) fuer kleinen Serverbetrieb.
-- Prompt-Zeitfenster und Upload-Dauer sind im Admin-Panel konfigurierbar.
-- Scheduler erzeugt einmal taeglich einen zufaelligen Prompt-Zeitpunkt innerhalb des konfigurierten Fensters.
+Datenhaltung:
+- DB: `backend-data/app.db`
+- Bilder: `backend-data/uploads/*`
 
-## Schnellstart lokal
+## Quick Start (Synology + Portainer)
 
-1. `Copy-Item backend/.env.example backend/.env`
-2. `docker compose -f deploy/docker-compose.yml up --build`
-3. Admin auf `http://localhost`
-4. API auf `http://localhost/api`
+### 1. Accounts und Dienste, die du brauchst
+Pflicht:
+- GitHub Account (Repo + Actions)
+- Synology mit Docker/Portainer
+- Eigene Domain/Subdomain (z. B. `daily.deine-domain.tld`)
 
-## Synology mit Portainer (empfohlen)
+Fuer echte Push-Benachrichtigungen (FCM) zusaetzlich:
+- Firebase Account
+- Firebase Projekt
+- Android App in Firebase mit Paketname `com.selfhosted.daily`
 
-### Voraussetzungen
+### 2. Ordner auf Synology anlegen
+Empfohlen:
+- `/volume1/docker/selfhosted-daily-photo/backend-data`
+- `/volume1/docker/selfhosted-daily-photo/nginx`
+- `/volume1/docker/selfhosted-daily-photo/secrets`
 
-1. In GitHub muessen die Workflows `ci` und `publish-server-images` erfolgreich sein.
-2. Die GHCR Images muessen vorhanden sein:
-   - `ghcr.io/flightuwe/daily-backend:latest`
-   - `ghcr.io/flightuwe/daily-admin:latest`
-3. Wenn dein Repo/Package privat ist: in Portainer unter `Registries` eine GitHub Container Registry mit Personal Access Token hinterlegen.
+Datei anlegen:
+- `/volume1/docker/selfhosted-daily-photo/nginx/default.conf`
+  Inhalt aus: `deploy/synology/nginx-default.conf`
 
-### Stack in Portainer anlegen
+### 3. Firebase Service Account (nur fuer echte Push)
+- Firebase Console -> Project Settings -> Service Accounts -> neuen JSON Key erstellen
+- Datei speichern als:
+  `/volume1/docker/selfhosted-daily-photo/secrets/firebase-service-account.json`
 
-1. Portainer -> `Stacks` -> `Add stack`
-2. Name: z. B. `selfhosted-daily-photo`
-3. Den Inhalt aus `deploy/portainer-stack.yml` in den Editor kopieren.
-4. Platzhalterwerte ersetzen:
-   - `PUBLIC_BASE_URL`
-   - `CORS_ORIGINS`
-   - `JWT_SECRET`
-   - `BOOTSTRAP_ADMIN_PASSWORD`
-5. `Deploy the stack` klicken.
+### 4. Portainer Stack deployen
+- In Portainer: `Stacks` -> `Add stack`
+- Inhalt von `deploy/portainer-stack.yml` einfuegen
+- Mindestens diese Werte ersetzen:
+  - `JWT_SECRET`
+  - `BOOTSTRAP_ADMIN_PASSWORD`
+  - `PUBLIC_BASE_URL`
+  - `CORS_ORIGINS`
+  - `FCM_PROJECT_ID` (wenn FCM aktiv)
+- Deploy
 
-### Netzwerk / Domain
+### 5. Synology Reverse Proxy
+Empfohlen:
+- Source: `https://daily.deine-domain.tld`
+- Destination: `http://127.0.0.1:13379`
 
-- Der Stack stellt standardmaessig `8088` auf der Synology bereit (`gateway` Service).
-- In Synology Reverse Proxy deine Domain (z. B. `photos.example.com`) auf `http://<synology-ip>:8088` weiterleiten.
-- TLS/Let's Encrypt ueber Synology terminieren.
+Dann erreichbar:
+- Admin Web: `https://daily.deine-domain.tld`
+- API: `https://daily.deine-domain.tld/api/health`
 
-## Android App
+## GitHub Setup (CI/CD)
 
-- API Basis-URL in `android/app/build.gradle.kts` bei `API_BASE_URL` auf deine Domain setzen, z. B. `https://photos.example.com/api/`.
-- Android Paketname: `com.selfhosted.daily`
-- Fuer FCM muss `android/app/google-services.json` vorhanden sein (lokal) oder in CI als Secret gesetzt werden.
-- Build lokal:
-  - `gradle -p android :app:assembleRelease`
+### Workflows
+- `ci.yml`: Backend Tests + Admin Build
+- `publish-images.yml`: baut/pusht Server-Images bei Push auf `main`
+- `release-android.yml`: baut signierte APK bei Tag `v*`
 
-## GitHub Setup
+### Server-Image Tags
+Beim Push auf `main`:
+- `ghcr.io/flightuwe/daily-backend:latest`
+- `ghcr.io/flightuwe/daily-backend:sha-<shortsha>`
+- `ghcr.io/flightuwe/daily-backend:srv-<run>.<attempt>`
 
-### 1. Repo anlegen und pushen
+Wichtig fuer App-Anzeige:
+- Wenn im Stack `APP_VERSION=dev` bleibt, zeigt der Server trotzdem die Build-Version `srv-...` an.
+- So kannst du in der App unter Profil sofort sehen, welche Server-Version wirklich laeuft.
 
-```powershell
-git init
-git add .
-git commit -m "Initial selfhosted daily photo stack"
-git branch -M main
-git remote add origin <dein-github-repo-url>
-git push -u origin main
-```
+## GitHub Secrets (vollstaendig)
 
-### 2. CI/CD
-
-Vorhandene Workflows:
-- `.github/workflows/ci.yml` (Go + Admin Build)
-- `.github/workflows/publish-images.yml` (GHCR Images bei Push auf main)
-- `.github/workflows/release-android.yml` (APK bei Tag `v*`)
-
-### 3. APK Release
-
-```powershell
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-Danach liegt `app-release.apk` in GitHub Releases.
-
-## API Kurzuebersicht
-
-- `POST /api/auth/register`
-- `POST /api/auth/login`
-- `GET /api/prompt/current`
-- `POST /api/uploads` (`multipart/form-data`: `photo`, `kind=prompt|extra`, optional `caption`)
-- `GET /api/feed`
-- `GET /api/admin/settings`
-- `PUT /api/admin/settings`
-- `POST /api/admin/prompt/trigger`
-- `POST /api/admin/users`
-- `POST /api/devices` (FCM Device-Token registrieren)
-- `PUT /api/me/password`
-- `GET /api/me/photos`
-
-## FCM Push aktivieren
-
-1. Firebase Projekt anlegen und Cloud Messaging aktivieren.
-   - Android App in Firebase mit Paketname `com.selfhosted.daily`
-2. Service Account JSON laden und auf Synology ablegen:
-   - `/volume1/docker/selfhosted-daily-photo/secrets/firebase-service-account.json`
-3. Im Backend setzen:
-   - `FCM_ENABLED=true`
-   - `FCM_PROJECT_ID=<dein-project-id>`
-   - `FCM_SERVICE_ACCOUNT_FILE=/app/secrets/firebase-service-account.json`
-4. Android `google-services.json` nutzen:
-   - lokal nach `android/app/google-services.json`
-   - in GitHub Secret `ANDROID_GOOGLE_SERVICES_JSON_BASE64`
-
-## Konkrete Synology Werte
-
-Fuer Portainer Stack (`deploy/portainer-stack.yml`) setze mindestens:
-
-- `PUBLIC_BASE_URL=https://photos.<deine-domain>`
-- `CORS_ORIGINS=https://photos.<deine-domain>`
-- `JWT_SECRET=<langes-zufaelliges-secret>`
-- `BOOTSTRAP_ADMIN_PASSWORD=<starkes-passwort>`
-- Host-Pfad fuer Daten: `/volume1/docker/selfhosted-daily-photo/backend-data`
-- Host-Pfad fuer FCM Secret: `/volume1/docker/selfhosted-daily-photo/secrets/firebase-service-account.json`
-
-Danach in Synology Reverse Proxy:
-- Quelle: `https://photos.<deine-domain>`
-- Ziel: `http://127.0.0.1:8088`
-
-## Synology Setup fuer deine Domain
-
-Empfohlenes Ziel im Reverse Proxy:
-- Quelle (Host): `daily.teacloud.synology.me`
-- Ziel: `http://127.0.0.1:13379`
-
-Direkter Test im LAN (ohne Reverse Proxy):
-- `http://192.168.178.80:13379`
-
-Android API URL:
-- `https://daily.teacloud.synology.me/api/`
-
-## Fix fuer Gateway-Container auf Synology/Portainer
-
-Wenn der `gateway`-Container mit `cat: can't open 'server'` abstuerzt, nutze die Datei-basierte Nginx-Konfiguration:
-
-1. Ordner anlegen:
-   - `/volume1/docker/selfhosted-daily-photo/nginx`
-2. Datei anlegen:
-   - `/volume1/docker/selfhosted-daily-photo/nginx/default.conf`
-3. Inhalt aus `deploy/synology/nginx-default.conf` uebernehmen.
-4. Stack mit `deploy/portainer-stack.yml` neu deployen.
-
-## Optionaler Debug-Pfad (ein-/ausschaltbar)`r`n`r`nDebugging ist im Haupt-Stack enthalten (Service `dozzle`) und per Compose-Profil schaltbar.`r`n`r`nAktivieren in Portainer:`r`n1. Stack -> Editor -> Env Vars`r`n2. `COMPOSE_PROFILES=debug` setzen`r`n3. Stack updaten`r`n4. Log-UI: `http://<synology-ip>:13380``r`n`r`nDeaktivieren:`r`n1. `COMPOSE_PROFILES` entfernen oder leeren`r`n2. Stack updaten`r`n`r`nDetails: `deploy/DEBUGGING.md`
-
-### Android Signing (wichtig fuer installierbare APK)
-
-In GitHub unter `Settings -> Secrets and variables -> Actions` folgende Repository Secrets setzen:
-
-- `ANDROID_KEYSTORE_BASE64` (Base64 von deiner `.jks`/`.keystore` Datei)
+### Fuer Android Release (Pflicht)
+Diese 5 Secrets muessen gesetzt sein:
+- `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEYSTORE_PASSWORD`
 - `ANDROID_KEY_PASSWORD`
-- `ANDROID_GOOGLE_SERVICES_JSON_BASE64` (Base64 von `google-services.json`)
+- `ANDROID_GOOGLE_SERVICES_JSON_BASE64`
 
-PowerShell zum Base64-Erzeugen:
+### Fuer GHCR Pull auf Synology (nur wenn Images privat)
+- In Portainer Registry hinterlegen (GitHub PAT mit `read:packages`)
+- Name/Passwort dann in Portainer, nicht zwingend als GitHub Secret
 
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\\path\\to\\release.keystore"))
-```
+## Android Build/Release
 
-Ohne diese Secrets bricht `release-android` absichtlich ab, damit keine unsigned APK mehr veroeffentlicht wird.
+### Neue App-Version releasen
+1. `android/app/build.gradle.kts`:
+   - `versionCode` erhoehen
+   - `versionName` erhoehen
+2. Commit auf `main`
+3. Tag pushen:
+   - `git tag vX.Y.Z`
+   - `git push origin vX.Y.Z`
+4. APK liegt danach im GitHub Release als `app-release.apk`
+
+## Erste Inbetriebnahme testen
+1. `https://daily.deine-domain.tld/api/health` -> `ok: true`
+2. Admin Login mit Bootstrap-Admin
+3. Testnutzer anlegen
+4. Event manuell triggern
+5. Android App installieren und einloggen
+6. Tagesmoment posten, Feed/Kalender/Chat pruefen
+
+## Updates ohne Portainer-Klickorgie
+Option A (manuell, schnell):
+- In Portainer Stack: `Pull latest image` + `Redeploy`
+
+Option B (empfohlen):
+- GitHub Actions Deploy via SSH auf Synology (automatisches `docker compose pull && up -d`)
+- Dann musst du nicht jedes Mal Portainer oeffnen
+
+## Debugging
+- Debug-UI (Dozzle) im Stack enthalten
+- Aktivieren per Compose Profile:
+  - `COMPOSE_PROFILES=debug`
+- Log-UI dann unter:
+  - `http://<synology-ip>:13380`
+- Details: `deploy/DEBUGGING.md`
+
+## Wichtige Umgebungsvariablen (Backend)
+Siehe `backend/.env.example`:
+- `APP_ADDRESS`
+- `DB_PATH`
+- `UPLOAD_DIR`
+- `JWT_SECRET`
+- `TOKEN_TTL_HOURS`
+- `CORS_ORIGINS`
+- `PUBLIC_BASE_URL`
+- `APP_TIMEZONE`
+- `SCHEDULER_ENABLED`
+- `APP_VERSION`
+- `BOOTSTRAP_ADMIN_USER`
+- `BOOTSTRAP_ADMIN_PASSWORD`
+- `FCM_ENABLED`
+- `FCM_PROJECT_ID`
+- `FCM_SERVICE_ACCOUNT_FILE`
+
+## Troubleshooting
+
+### App zeigt `Server-Version: dev`
+- Backend-Container ist alt oder nicht neu gezogen
+- Stack neu deployen (mit aktuellem Image)
+- Danach sollte `srv-...` erscheinen
+
+### Keine Push-Benachrichtigung
+- FCM nicht aktiv oder Service Account fehlt
+- `/app/secrets/firebase-service-account.json` pruefen
+- `FCM_ENABLED=true`, `FCM_PROJECT_ID` korrekt
+
+### `invalid payload` im Admin
+- Meist inkompatible alte Frontend-Version gecached
+- Hard reload im Browser (`Ctrl+F5`)
+
+### Android Release bricht ab
+- Einer der 5 Android-Secrets fehlt/falsch
+- Workflow `release-android` Log pruefen
+
+## Sicherheit (kurz)
+- Starkes `JWT_SECRET`
+- Starkes Admin-Passwort
+- Reverse Proxy nur ueber HTTPS
+- Optional IP-Restriktion fuer Admin-Portal
+- Debug-Profile in Produktivbetrieb nur bei Bedarf aktivieren
