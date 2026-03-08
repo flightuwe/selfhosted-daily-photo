@@ -18,18 +18,18 @@ android {
         buildConfigField("String", "API_BASE_URL", "\"https://daily.teacloud.synology.me/api/\"")
     }
 
-    val keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
-    val keyAlias = System.getenv("ANDROID_KEY_ALIAS")
-    val storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
-    val keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+    val keystorePathEnv = System.getenv("ANDROID_KEYSTORE_PATH")
+    val keyAliasEnv = System.getenv("ANDROID_KEY_ALIAS")
+    val storePasswordEnv = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+    val keyPasswordEnv = System.getenv("ANDROID_KEY_PASSWORD")
 
     signingConfigs {
-        if (!keystorePath.isNullOrBlank() && !keyAlias.isNullOrBlank() && !storePassword.isNullOrBlank() && !keyPassword.isNullOrBlank()) {
+        if (!keystorePathEnv.isNullOrBlank() && !keyAliasEnv.isNullOrBlank() && !storePasswordEnv.isNullOrBlank() && !keyPasswordEnv.isNullOrBlank()) {
             create("release") {
-                storeFile = file(keystorePath)
-                storePassword = storePassword
-                keyAlias = keyAlias
-                keyPassword = keyPassword
+                storeFile = file(keystorePathEnv)
+                storePassword = storePasswordEnv
+                keyAlias = keyAliasEnv
+                keyPassword = keyPasswordEnv
             }
         }
     }
