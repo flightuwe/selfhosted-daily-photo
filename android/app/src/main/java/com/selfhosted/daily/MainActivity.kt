@@ -828,7 +828,7 @@ fun ProfileTab(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     userScrollEnabled = false,
-                    modifier = Modifier.height(((photos.size / 3) + 2) * 96.dp)
+                    modifier = Modifier.height((((photos.size / 3) + 2) * 96).dp)
                 ) {
                     items(photos) { photo ->
                         Column {
