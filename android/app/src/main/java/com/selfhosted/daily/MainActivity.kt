@@ -64,6 +64,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -1191,14 +1196,7 @@ fun AppScreen(vm: MainVm) {
                 }
             },
             text = {
-                AsyncImage(
-                    model = viewerUrls[viewerIndex],
-                    contentDescription = "Vollbild",
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(420.dp),
-                    contentScale = ContentScale.Fit
-                )
+                ZoomableViewerImage(url = viewerUrls[viewerIndex])
             }
         )
     }
@@ -2118,5 +2116,45 @@ private fun createTempImageUri(context: Context): Uri {
     val dir = File(context.cacheDir, "camera").apply { mkdirs() }
     val file = File.createTempFile("moment_", ".jpg", dir)
     return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}
+
+@Composable
+private fun ZoomableViewerImage(url: String) {
+    var scale by remember(url) { mutableStateOf(1f) }
+    var offset by remember(url) { mutableStateOf(Offset.Zero) }
+
+    AsyncImage(
+        model = url,
+        contentDescription = "Vollbild",
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(420.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                translationX = offset.x
+                translationY = offset.y
+            }
+            .pointerInput(url) {
+                detectTapGestures(
+                    onDoubleTap = {
+                        scale = 1f
+                        offset = Offset.Zero
+                    }
+                )
+            }
+            .pointerInput(url) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    val nextScale = (scale * zoom).coerceIn(1f, 5f)
+                    if (nextScale == 1f) {
+                        offset = Offset.Zero
+                    } else {
+                        offset += pan
+                    }
+                    scale = nextScale
+                }
+            },
+        contentScale = ContentScale.Fit
+    )
 }
 
