@@ -21,6 +21,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v3
         with:
           cache-disabled: true
+      - name: Prepare Android SDK
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          if command -v sdkmanager >/dev/null 2>&1; then
+            yes | sdkmanager --licenses >/dev/null || true
+            sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
+          fi
       - name: Verify toolchain
         run: |
           java -version
@@ -40,10 +47,7 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.build.outcome }}" != "success" ]; then
-            msg=$(grep -E "Execution failed for task|Could not resolve|FAILURE: Build failed|e: file:" android-build.log | head -n 6 | tr '\n' ' ')
-            if [ -z "$msg" ]; then
-              msg=$(tail -n 20 android-build.log | tr '\n' ' ')
-            fi
+            msg=$(tail -n 80 android-build.log | tr '\n' ' ')
             echo "::error title=Android build summary::$msg"
           fi
       - name: Upload build log
