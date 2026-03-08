@@ -26,6 +26,7 @@ services:
       - PUBLIC_BASE_URL=https://daily.teacloud.synology.me
       - APP_TIMEZONE=Europe/Berlin
       - SCHEDULER_ENABLED=true
+      - APP_VERSION=dev
       - BOOTSTRAP_ADMIN_USER=admin
       - BOOTSTRAP_ADMIN_PASSWORD=HIER_STARKES_ADMIN_PASSWORT_EINTRAGEN
       - FCM_ENABLED=true

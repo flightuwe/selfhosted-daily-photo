@@ -43,9 +43,9 @@ func (s *Server) Router() *gin.Engine {
 
     r.Static("/uploads", s.Config.UploadDir)
 
-    api := r.Group("/api")
-    {
-        api.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	api := r.Group("/api")
+	{
+		api.GET("/health", s.handleHealth)
         api.POST("/auth/register", s.handleRegister)
         api.POST("/auth/login", s.handleLogin)
 
@@ -590,6 +590,14 @@ func (s *Server) handleBroadcastNotification(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"ok":      true,
 		"sentTo":  len(tokens),
+		"provider": s.Notifier.Name(),
+	})
+}
+
+func (s *Server) handleHealth(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"ok":       true,
+		"version":  s.Config.AppVersion,
 		"provider": s.Notifier.Name(),
 	})
 }

@@ -116,8 +116,12 @@ data class FeedItem(
 data class FeedResponse(val items: List<FeedItem>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
 data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
+data class HealthResponse(val ok: Boolean, val version: String = "unknown", val provider: String = "unknown")
 
 interface Api {
+    @GET("health")
+    suspend fun health(): HealthResponse
+
     @POST("auth/login")
     suspend fun login(@Body body: LoginRequest): AuthResponse
 
@@ -182,6 +186,8 @@ class AppRepo(private val api: Api, private val context: Context) {
         saveToken(res.token)
         return res.user
     }
+
+    suspend fun health(): HealthResponse = api.health()
 
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
 
@@ -295,6 +301,10 @@ data class UiState(
     val loading: Boolean = false,
     val message: String = "",
     val activeTab: AppTab = AppTab.CAMERA,
+    val startupDone: Boolean = false,
+    val serverConnected: Boolean = false,
+    val serverVersion: String = "unbekannt",
+    val pushProvider: String = "unknown",
     val showPromptDialog: Boolean = false,
     val updateInfo: UpdateInfo? = null
 )
@@ -302,6 +312,24 @@ data class UiState(
 class MainVm(private val repo: AppRepo) : ViewModel() {
     var state by mutableStateOf(UiState(token = repo.token()))
         private set
+
+    suspend fun bootstrap() {
+        if (state.startupDone) return
+        state = state.copy(startupDone = false)
+        val started = System.currentTimeMillis()
+        val health = runCatching { repo.health() }.getOrNull()
+        val elapsed = System.currentTimeMillis() - started
+        if (elapsed < 900) {
+            delay(900 - elapsed)
+        }
+        state = state.copy(
+            startupDone = true,
+            serverConnected = health?.ok == true,
+            serverVersion = health?.version ?: "nicht erreichbar",
+            pushProvider = health?.provider ?: "unknown",
+            message = if (health?.ok == true) "" else "Server nicht erreichbar"
+        )
+    }
 
     suspend fun login(username: String, password: String) {
         state = state.copy(loading = true, message = "")
@@ -317,7 +345,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun logout() {
         repo.clearToken()
-        state = UiState()
+        state = UiState(
+            startupDone = true,
+            serverConnected = state.serverConnected,
+            serverVersion = state.serverVersion,
+            pushProvider = state.pushProvider
+        )
     }
 
     fun setTab(tab: AppTab) {
@@ -445,11 +478,22 @@ fun AppScreen(vm: MainVm) {
     ) {}
 
     LaunchedEffect(Unit) {
+        vm.bootstrap()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    if (!state.startupDone) {
+        StartupScreen(
+            serverConnected = state.serverConnected,
+            serverVersion = state.serverVersion,
+            appVersion = BuildConfig.VERSION_NAME,
+            pushProvider = state.pushProvider
+        )
+        return
     }
 
     LaunchedEffect(state.token) {
@@ -588,6 +632,26 @@ fun AppScreen(vm: MainVm) {
                 Text(state.message, modifier = Modifier.padding(top = 8.dp), color = Color(0xFF8B0000))
             }
         }
+    }
+}
+
+@Composable
+fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: String, pushProvider: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("Selfhosted Daily Moment", style = MaterialTheme.typography.headlineSmall)
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(if (serverConnected) "Server verbunden" else "Server wird geprüft ...")
+        Text("Server-Version: $serverVersion")
+        Text("Push-Provider: $pushProvider")
+        Text("App-Version: $appVersion")
+        Spacer(modifier = Modifier.height(12.dp))
+        Text("Lade ...")
     }
 }
 

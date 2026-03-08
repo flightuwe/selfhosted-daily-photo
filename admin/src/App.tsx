@@ -47,8 +47,8 @@ export function App() {
   const [newIsAdmin, setNewIsAdmin] = useState(false);
 
   const [resetPassword, setResetPassword] = useState<Record<number, string>>({});
-  const [broadcastBody, setBroadcastBody] = useState("Server-Test: Bitte App Ã¶ffnen und Daily Foto posten.");
-  const [updateNoticeVersion, setUpdateNoticeVersion] = useState("0.2.6");
+  const [broadcastBody, setBroadcastBody] = useState("Server-Test: Bitte App öffnen und Daily Foto posten.");
+  const [updateNoticeVersion, setUpdateNoticeVersion] = useState("0.2.8");
 
   const isLoggedIn = useMemo(() => token.length > 0, [token]);
 
@@ -104,7 +104,7 @@ export function App() {
     setMessage("");
     try {
       await triggerPrompt(token);
-      setMessage("Daily Event ausgelÃ¶st. Nutzer kÃ¶nnen Prompt-Fotos hochladen.");
+      setMessage("Daily Event ausgelöst. Nutzer können Prompt-Fotos hochladen.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -114,18 +114,18 @@ export function App() {
     setMessage("");
     try {
       const result = await broadcastNotification(token, broadcastBody);
-      setMessage(`Benachrichtigung an ${result.sentTo} GerÃ¤te gesendet (Provider: ${result.provider}).`);
+      setMessage(`Benachrichtigung an ${result.sentTo} Geräte gesendet (Provider: ${result.provider}).`);
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
   async function onSendUpdateNotice() {
-    const text = `Update verfÃ¼gbar: Version ${updateNoticeVersion}. Bitte App aktualisieren.`;
+    const text = `Update verfügbar: Version ${updateNoticeVersion}. Bitte App aktualisieren.`;
     setBroadcastBody(text);
     try {
       const result = await broadcastNotification(token, text);
-      setMessage(`Update-Hinweis an ${result.sentTo} GerÃ¤te gesendet (Provider: ${result.provider}).`);
+      setMessage(`Update-Hinweis an ${result.sentTo} Geräte gesendet (Provider: ${result.provider}).`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -150,7 +150,7 @@ export function App() {
     setMessage("");
     try {
       await updateUser(token, user.id, { isAdmin });
-      setMessage(`Rolle fÃ¼r ${user.username} aktualisiert`);
+      setMessage(`Rolle für ${user.username} aktualisiert`);
       await refreshAll();
     } catch (err) {
       setMessage((err as Error).message);
@@ -167,18 +167,18 @@ export function App() {
     try {
       await updateUser(token, user.id, { password: pwd });
       setResetPassword((prev) => ({ ...prev, [user.id]: "" }));
-      setMessage(`Passwort fÃ¼r ${user.username} geÃ¤ndert`);
+      setMessage(`Passwort für ${user.username} geändert`);
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
   async function onDeleteUser(user: AdminUser) {
-    if (!confirm(`User ${user.username} wirklich lÃ¶schen?`)) return;
+    if (!confirm(`User ${user.username} wirklich löschen?`)) return;
     setMessage("");
     try {
       await deleteUser(token, user.id);
-      setMessage(`User ${user.username} gelÃ¶scht`);
+      setMessage(`User ${user.username} gelöscht`);
       await refreshAll();
     } catch (err) {
       setMessage((err as Error).message);
@@ -220,19 +220,21 @@ export function App() {
           <h1>Admin Panel</h1>
           <div className="row">
             <button onClick={refreshAll}>Reload</button>
-            <button onClick={logout}>Logout</button>`r`n          </div>
+            <button onClick={logout}>Logout</button>
+          </div>
         </div>
 
         <div className="tabs">
           <button className={activeTab === "dashboard" ? "tab active" : "tab"} onClick={() => setActiveTab("dashboard")}>Dashboard</button>
           <button className={activeTab === "events" ? "tab active" : "tab"} onClick={() => setActiveTab("events")}>Events & Notifications</button>
           <button className={activeTab === "users" ? "tab active" : "tab"} onClick={() => setActiveTab("users")}>Benutzerverwaltung</button>
-          <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => setActiveTab("settings")}>Einstellungen</button>`r`n          </div>
+          <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => setActiveTab("settings")}>Einstellungen</button>
+        </div>
 
         {activeTab === "dashboard" && (
           <div className="grid4">
             <CardStat title="Nutzer" value={stats.users} />
-            <CardStat title="GerÃ¤te" value={stats.devices} />
+            <CardStat title="Geräte" value={stats.devices} />
             <CardStat title="Fotos" value={stats.photos} />
             <CardStat title="Prompt-Events" value={stats.prompts} />
           </div>
@@ -240,19 +242,20 @@ export function App() {
 
         {activeTab === "events" && (
           <div className="stack">
-            <button className="accent" onClick={onTriggerEvent}>Daily Event manuell auslÃ¶sen</button>
+            <button className="accent" onClick={onTriggerEvent}>Daily Event manuell auslösen</button>
 
             <label>
-              Custom Nachricht an alle GerÃ¤te
+              Custom Nachricht an alle Geräte
               <input value={broadcastBody} onChange={(e) => setBroadcastBody(e.target.value)} />
             </label>
             <button onClick={onBroadcast}>Benachrichtigung senden</button>
 
             <label>
-              Update-Version fÃ¼r Hinweis
+              Update-Version für Hinweis
               <input value={updateNoticeVersion} onChange={(e) => setUpdateNoticeVersion(e.target.value)} />
             </label>
-            <button onClick={onSendUpdateNotice}>Update-Hinweis senden</button>`r`n          </div>
+            <button onClick={onSendUpdateNotice}>Update-Hinweis senden</button>
+          </div>
         )}
 
         {activeTab === "users" && (
@@ -281,9 +284,9 @@ export function App() {
                   <th>User</th>
                   <th>Rolle</th>
                   <th>Fotos</th>
-                  <th>GerÃ¤te</th>
-                  <th>Passwort Ã¤ndern</th>
-                  <th>LÃ¶schen</th>
+                  <th>Geräte</th>
+                  <th>Passwort ändern</th>
+                  <th>Löschen</th>
                 </tr>
               </thead>
               <tbody>
@@ -306,10 +309,11 @@ export function App() {
                           value={resetPassword[u.id] || ""}
                           onChange={(e) => setResetPassword((prev) => ({ ...prev, [u.id]: e.target.value }))}
                         />
-                        <button onClick={() => onResetPassword(u)}>Setzen</button>`r`n          </div>
+                        <button onClick={() => onResetPassword(u)}>Setzen</button>
+                      </div>
                     </td>
                     <td>
-                      <button className="danger" onClick={() => onDeleteUser(u)}>LÃ¶schen</button>
+                      <button className="danger" onClick={() => onDeleteUser(u)}>Löschen</button>
                     </td>
                   </tr>
                 ))}
