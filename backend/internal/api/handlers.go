@@ -78,6 +78,7 @@ func (s *Server) Router() *gin.Engine {
             admin.POST("/prompt/trigger", s.handleTriggerPrompt)
             admin.POST("/prompt/reset-today", s.handleAdminResetToday)
             admin.POST("/notifications/broadcast", s.handleBroadcastNotification)
+            admin.POST("/chat/clear", s.handleAdminClearChat)
 
             admin.GET("/users", s.handleAdminListUsers)
             admin.POST("/users", s.handleAdminCreateUser)
@@ -726,6 +727,14 @@ func (s *Server) handleBroadcastNotification(c *gin.Context) {
 		"sentTo":  len(tokens),
 		"provider": s.Notifier.Name(),
 	})
+}
+
+func (s *Server) handleAdminClearChat(c *gin.Context) {
+    if err := s.DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.ChatMessage{}).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "chat clear failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (s *Server) handleChatList(c *gin.Context) {

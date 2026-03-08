@@ -189,6 +189,14 @@ export async function getChat(token: string): Promise<ChatItem[]> {
   return data.items;
 }
 
+export async function clearChat(token: string): Promise<void> {
+  const res = await fetch(`${apiBase}/admin/chat/clear`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  await parse(res);
+}
+
 export async function getCalendar(token: string, days = 7): Promise<CalendarItem[]> {
   const res = await fetch(`${apiBase}/admin/calendar?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },

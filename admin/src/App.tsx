@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   broadcastNotification,
+  clearChat,
   createUser,
   deleteUser,
   getAdminFeed,
@@ -108,6 +109,18 @@ export function App() {
     try {
       const items = await getChat(authToken);
       setChatItems(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onClearChat() {
+    if (!confirm("Chat wirklich komplett leeren?")) return;
+    setMessage("");
+    try {
+      await clearChat(token);
+      setChatItems([]);
+      setMessage("Chat wurde geleert.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -454,17 +467,20 @@ export function App() {
           <div className="stack">
             <div className="row">
               <h2>Chatverlauf</h2>
-              <button onClick={() => loadChat(token)}>Aktualisieren</button>
+              <div className="row">
+                <button onClick={() => loadChat(token)}>Aktualisieren</button>
+                <button className="danger" onClick={onClearChat}>Chat leeren</button>
+              </div>
             </div>
             {chatItems.length === 0 && <p>Keine Chat-Nachrichten.</p>}
             <div className="chat-list">
               {chatItems.map((msg) => (
-                <article key={msg.id} className="chat-item">
-                  <div className="row">
-                    <strong>{msg.user.username}</strong>
-                    <span className="small">{formatDateTime(msg.createdAt)}</span>
+                <article key={msg.id} className="chat-item clean">
+                  <div className="chat-head">
+                    <strong className="chat-user">{msg.user.username}</strong>
+                    <span className="small chat-time">{formatDateTime(msg.createdAt)}</span>
                   </div>
-                  <p>{msg.body}</p>
+                  <p className="chat-body">{msg.body}</p>
                 </article>
               ))}
             </div>

@@ -750,22 +750,6 @@ fun AppScreen(vm: MainVm) {
                         frontPreviewUri = null
                         cameraUploading = false
                     },
-                    onPostNow = {
-                        val back = backPreviewUri ?: return@CameraTab
-                        val front = frontPreviewUri ?: return@CameraTab
-                        if (cameraUploading) return@CameraTab
-                        cameraUploading = true
-                        val canPrompt = state.prompt?.canUpload == true && state.prompt.hasPosted.not()
-                        scope.launch {
-                            val ok = vm.uploadDual(back, front, canPrompt)
-                            cameraUploading = false
-                            if (ok) {
-                                backPreviewUri = null
-                                frontPreviewUri = null
-                                vm.setTab(AppTab.FEED)
-                            }
-                        }
-                    },
                     onGoFeed = { vm.setTab(AppTab.FEED) },
                     uploading = cameraUploading,
                     onOpenViewer = { urls ->
@@ -863,7 +847,6 @@ fun CameraTab(
     frontPreviewUri: Uri?,
     onCaptureBack: () -> Unit,
     onReset: () -> Unit,
-    onPostNow: () -> Unit,
     onGoFeed: () -> Unit,
     uploading: Boolean,
     onOpenViewer: (List<String>) -> Unit
@@ -934,7 +917,7 @@ fun CameraTab(
                     if (uploading) {
                         Text("Upload laeuft ...")
                     } else {
-                        Button(onClick = onPostNow, modifier = Modifier.fillMaxWidth()) { Text("Jetzt hochladen") }
+                        Text("Upload wurde automatisch gestartet.")
                     }
                     Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
                 }
