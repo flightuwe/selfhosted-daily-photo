@@ -80,7 +80,7 @@ export async function triggerPrompt(token: string): Promise<void> {
   await parse(res);
 }
 
-export async function broadcastNotification(token: string, body: string): Promise<{ sentTo: number }> {
+export async function broadcastNotification(token: string, body: string): Promise<{ sentTo: number; hint?: string }> {
   const res = await fetch(`${apiBase}/admin/notifications/broadcast`, {
     method: "POST",
     headers: {
@@ -89,7 +89,7 @@ export async function broadcastNotification(token: string, body: string): Promis
     },
     body: JSON.stringify({ body }),
   });
-  return parse<{ sentTo: number }>(res);
+  return parse<{ sentTo: number; hint?: string }>(res);
 }
 
 export async function listUsers(token: string): Promise<AdminUser[]> {
