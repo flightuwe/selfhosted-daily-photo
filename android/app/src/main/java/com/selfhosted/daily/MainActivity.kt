@@ -64,6 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -111,6 +112,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 import java.time.LocalDate
+import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
@@ -275,6 +277,12 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun setSeenPromptMarker(marker: String) {
         prefs.edit().putString("seen_prompt_marker", marker).apply()
+    }
+
+    fun lastSeenOtherChatMillis(): Long = prefs.getLong("chat_seen_other_ms", 0L)
+
+    fun setLastSeenOtherChatMillis(value: Long) {
+        prefs.edit().putLong("chat_seen_other_ms", value.coerceAtLeast(0L)).apply()
     }
 
     suspend fun login(username: String, password: String): User {
@@ -520,6 +528,8 @@ data class UiState(
     val feedFocusDay: String? = null,
     val feedPaging: Boolean = false,
     val feedTodayLocked: Boolean = false,
+    val chatHasOtherMessages: Boolean = false,
+    val chatHasUnreadMessages: Boolean = false,
     val photos: List<PromptPhoto> = emptyList(),
     val chat: List<ChatItem> = emptyList(),
     val loading: Boolean = false,
@@ -596,6 +606,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun setTab(tab: AppTab) {
+        if (tab == AppTab.CHAT) {
+            val latestOther = latestOtherChatMillis(state.chat, state.user?.id)
+            if (latestOther > 0L) {
+                repo.setLastSeenOtherChatMillis(latestOther)
+            }
+            state = state.copy(
+                activeTab = tab,
+                chatHasOtherMessages = latestOther > 0L,
+                chatHasUnreadMessages = false
+            )
+            return
+        }
         state = state.copy(activeTab = tab)
     }
 
@@ -621,6 +643,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photos = payload.photos
             val chat = payload.chat
             val calendarDays = payload.feedDays
+            val latestOtherChat = latestOtherChatMillis(chat, me.id)
+            val seenChat = repo.lastSeenOtherChatMillis()
+            var hasUnreadChat = latestOtherChat > seenChat
+            if (state.activeTab == AppTab.CHAT && latestOtherChat > 0L) {
+                repo.setLastSeenOtherChatMillis(latestOtherChat)
+                hasUnreadChat = false
+            }
             val marker = "${prompt.day}:${prompt.triggered ?: ""}"
             val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && !prompt.hasPosted && marker != repo.seenPromptMarker()
             if (shouldPopup) repo.setSeenPromptMarker(marker)
@@ -630,6 +659,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 prompt = prompt,
                 photos = photos,
                 chat = chat,
+                chatHasOtherMessages = latestOtherChat > 0L,
+                chatHasUnreadMessages = hasUnreadChat,
                 calendarDays = calendarDays,
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
@@ -829,6 +860,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 refreshAll()
             }
             .onFailure { state = state.copy(loading = false, message = apiError(it, "Profil speichern fehlgeschlagen")) }
+    }
+
+    private fun latestOtherChatMillis(items: List<ChatItem>, meId: Long?): Long {
+        if (meId == null) return 0L
+        var latest = 0L
+        for (item in items) {
+            if (item.user.id == meId) continue
+            val ts = parseChatMillis(item.createdAt)
+            if (ts > latest) latest = ts
+        }
+        return latest
+    }
+
+    private fun parseChatMillis(value: String): Long {
+        return runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrDefault(0L)
     }
 }
 
@@ -1081,7 +1127,17 @@ fun AppScreen(vm: MainVm) {
                 NavigationBarItem(selected = state.activeTab == AppTab.CAMERA, onClick = { vm.setTab(AppTab.CAMERA) }, label = { Text("Kamera") }, icon = { Text("C") })
                 NavigationBarItem(selected = state.activeTab == AppTab.FEED, onClick = { vm.setTab(AppTab.FEED) }, label = { Text("Feed") }, icon = { Text("F") })
                 NavigationBarItem(selected = state.activeTab == AppTab.CALENDAR, onClick = { vm.setTab(AppTab.CALENDAR) }, label = { Text("Kalender") }, icon = { Text("D") })
-                NavigationBarItem(selected = state.activeTab == AppTab.CHAT, onClick = { vm.setTab(AppTab.CHAT) }, label = { Text("Chat") }, icon = { Text("M") })
+                NavigationBarItem(
+                    selected = state.activeTab == AppTab.CHAT,
+                    onClick = { vm.setTab(AppTab.CHAT) },
+                    label = { Text("Chat") },
+                    icon = {
+                        ChatTabIcon(
+                            showIndicator = state.chatHasOtherMessages,
+                            unread = state.chatHasUnreadMessages
+                        )
+                    }
+                )
                 NavigationBarItem(selected = state.activeTab == AppTab.PROFILE, onClick = { vm.setTab(AppTab.PROFILE) }, label = { Text("Profil") }, icon = { Text("P") })
             }
         }
@@ -1364,6 +1420,24 @@ fun CameraTab(
                     Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun ChatTabIcon(showIndicator: Boolean, unread: Boolean) {
+    Box(modifier = Modifier.size(20.dp)) {
+        Text("M", modifier = Modifier.align(Alignment.Center))
+        if (showIndicator) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(8.dp)
+                    .background(
+                        color = if (unread) Color(0xFFD32F2F) else Color(0xFF2E7D32),
+                        shape = CircleShape
+                    )
+            )
         }
     }
 }
