@@ -50,6 +50,24 @@ services:
     networks:
       - shp-net
 
+  dozzle:
+    image: amir20/dozzle:v8.14.9
+    container_name: shp-dozzle
+    restart: unless-stopped
+    profiles: ["debug"]
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "13380:8080"
+    environment:
+      - DOZZLE_NO_ANALYTICS=true
+      - DOZZLE_LEVEL=info
+      - DOZZLE_FILTER=name=shp-
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - shp-net
+
 networks:
   shp-net:
     driver: bridge

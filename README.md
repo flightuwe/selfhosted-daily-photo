@@ -139,17 +139,4 @@ Wenn der `gateway`-Container mit `cat: can't open 'server'` abstuerzt, nutze die
 3. Inhalt aus `deploy/synology/nginx-default.conf` uebernehmen.
 4. Stack mit `deploy/portainer-stack.yml` neu deployen.
 
-## Optionaler Debug-Pfad (ein-/ausschaltbar)
-
-Fuer schnellere Fehleranalyse kannst du einen separaten Debug-Stack deployen:
-
-- Datei: `deploy/portainer-debug-stack.yml`
-- Zweck: Dozzle Log-UI fuer alle Container mit Namen `shp-*`
-- URL: `http://<synology-ip>:13380`
-
-Ablauf:
-1. Nur bei Bedarf deployen.
-2. Fehler sammeln (gateway, backend, admin gleichzeitig).
-3. Danach Debug-Stack wieder stoppen/loeschen.
-
-Details: `deploy/DEBUGGING.md`
+## Optionaler Debug-Pfad (ein-/ausschaltbar)`r`n`r`nDebugging ist im Haupt-Stack enthalten (Service `dozzle`) und per Compose-Profil schaltbar.`r`n`r`nAktivieren in Portainer:`r`n1. Stack -> Editor -> Env Vars`r`n2. `COMPOSE_PROFILES=debug` setzen`r`n3. Stack updaten`r`n4. Log-UI: `http://<synology-ip>:13380``r`n`r`nDeaktivieren:`r`n1. `COMPOSE_PROFILES` entfernen oder leeren`r`n2. Stack updaten`r`n`r`nDetails: `deploy/DEBUGGING.md`

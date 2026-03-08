@@ -1,17 +1,18 @@
-# Optional debug stack for Synology/Portainer
+# Debug profile in main stack
 
-## Purpose
-Provides a temporary log UI for all project containers (`shp-*`).
+Dozzle is integrated directly in `deploy/portainer-stack.yml` and controlled via Compose profile `debug`.
 
-## Deploy
-1. Portainer -> Stacks -> Add stack
-2. Paste `deploy/portainer-debug-stack.yml`
-3. Deploy
+## Enable debug in Portainer
+1. Open your stack -> Editor
+2. Add env var:
+   - `COMPOSE_PROFILES=debug`
+3. Update stack
 4. Open `http://<synology-ip>:13380`
 
-## Security note
-Dozzle can expose logs for all containers available via Docker socket.
-Use only in trusted networks or protect via Synology reverse proxy/auth.
+## Disable debug
+1. Remove env var `COMPOSE_PROFILES` (or set empty)
+2. Update stack
 
-## Disable
-Stop/remove the debug stack when not needed.
+## Security note
+Dozzle reads Docker logs via `/var/run/docker.sock`.
+Use only in trusted networks or protect via Synology reverse proxy/auth.
