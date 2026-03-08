@@ -41,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -83,6 +84,10 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.Buffer
+import okio.BufferedSink
+import okio.ForwardingSink
+import okio.buffer
 import org.json.JSONObject
 import retrofit2.HttpException
 import retrofit2.Retrofit
@@ -273,21 +278,45 @@ class AppRepo(private val api: Api, private val context: Context) {
         api.upload("Bearer ${token()}", part, kind)
     }
 
-    suspend fun uploadDual(backUri: Uri, frontUri: Uri, isPrompt: Boolean) {
+    suspend fun uploadDual(
+        backUri: Uri,
+        frontUri: Uri,
+        isPrompt: Boolean,
+        onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
+    ) {
         val backFile = copyUriToTemp(backUri)
         val frontFile = copyUriToTemp(frontUri)
+        val totalBytes = (backFile.length() + frontFile.length()).coerceAtLeast(1L)
+        var backSent = 0L
+        var frontSent = 0L
+        fun emit() = onProgress((backSent + frontSent).coerceAtMost(totalBytes), totalBytes)
+
+        val backBody = ProgressRequestBody(
+            delegate = backFile.asRequestBody("image/*".toMediaTypeOrNull())
+        ) { sent, _ ->
+            backSent = sent
+            emit()
+        }
+        val frontBody = ProgressRequestBody(
+            delegate = frontFile.asRequestBody("image/*".toMediaTypeOrNull())
+        ) { sent, _ ->
+            frontSent = sent
+            emit()
+        }
         val backPart = MultipartBody.Part.createFormData(
             "photo_back",
             backFile.name,
-            backFile.asRequestBody("image/*".toMediaTypeOrNull())
+            backBody
         )
         val frontPart = MultipartBody.Part.createFormData(
             "photo_front",
             frontFile.name,
-            frontFile.asRequestBody("image/*".toMediaTypeOrNull())
+            frontBody
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
+        emit()
         api.uploadDual("Bearer ${token()}", backPart, frontPart, kind)
+        onProgress(totalBytes, totalBytes)
     }
 
     suspend fun checkForUpdate(currentVersion: String): UpdateInfo? = withContext(Dispatchers.IO) {
@@ -347,6 +376,31 @@ private fun isVersionNewer(latest: String, current: String): Boolean {
         if (av < bv) return false
     }
     return false
+}
+
+private class ProgressRequestBody(
+    private val delegate: RequestBody,
+    private val onProgress: (sentBytes: Long, totalBytes: Long) -> Unit
+) : RequestBody() {
+    override fun contentType() = delegate.contentType()
+
+    override fun contentLength() = delegate.contentLength()
+
+    override fun writeTo(sink: BufferedSink) {
+        val total = contentLength().coerceAtLeast(1L)
+        var sent = 0L
+        val forwarding = object : ForwardingSink(sink) {
+            override fun write(source: Buffer, byteCount: Long) {
+                super.write(source, byteCount)
+                sent += byteCount
+                onProgress(sent.coerceAtMost(total), total)
+            }
+        }
+        val buffered = forwarding.buffer()
+        delegate.writeTo(buffered)
+        buffered.flush()
+        onProgress(total, total)
+    }
 }
 
 data class UiState(
@@ -538,7 +592,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             map[day] = fetchDaySafe(day)
         }
         val today = state.prompt?.day ?: LocalDate.now().toString()
-        val todayLocked = state.prompt?.hasPosted == false
+        val postedToday = state.prompt?.hasPosted == true
+        val hasVisibleTodayFeed = map[today].orEmpty().isNotEmpty()
+        val todayLocked = !postedToday && !hasVisibleTodayFeed
         state = state.copy(
             feedDays = days.distinct(),
             feedByDay = map,
@@ -556,10 +612,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
-    suspend fun uploadDual(back: Uri, front: Uri, asPrompt: Boolean): Boolean {
+    suspend fun uploadDual(
+        back: Uri,
+        front: Uri,
+        asPrompt: Boolean,
+        onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
+    ): Boolean {
         state = state.copy(loading = true)
         return try {
-            repo.uploadDual(back, front, asPrompt)
+            repo.uploadDual(back, front, asPrompt, onProgress)
             state = state.copy(loading = false, message = "Fotos gepostet")
             refreshAll()
             true
@@ -661,6 +722,7 @@ fun AppScreen(vm: MainVm) {
     var viewerIndex by remember { mutableStateOf(0) }
     var requestFrontCapture by remember { mutableStateOf(false) }
     var cameraUploading by remember { mutableStateOf(false) }
+    var cameraUploadPercent by remember { mutableStateOf(0) }
     val feedListState = remember { LazyListState() }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
@@ -678,13 +740,17 @@ fun AppScreen(vm: MainVm) {
                     val front = shotUri
                     if (back != null && front != null && !cameraUploading) {
                         cameraUploading = true
+                        cameraUploadPercent = 0
                         val asPrompt = captureAsPrompt
                         scope.launch {
-                            val ok = vm.uploadDual(back, front, asPrompt)
+                            val ok = vm.uploadDual(back, front, asPrompt) { sent, total ->
+                                cameraUploadPercent = ((sent * 100) / total.coerceAtLeast(1L)).toInt().coerceIn(0, 100)
+                            }
                             cameraUploading = false
                             if (ok) {
                                 backPreviewUri = null
                                 frontPreviewUri = null
+                                cameraUploadPercent = 100
                                 if (asPrompt) vm.setTab(AppTab.FEED)
                             }
                         }
@@ -708,6 +774,7 @@ fun AppScreen(vm: MainVm) {
 
     fun startDualCapture(asPrompt: Boolean) {
         captureAsPrompt = asPrompt
+        cameraUploadPercent = 0
         openCameraFor("back")
     }
 
@@ -858,9 +925,11 @@ fun AppScreen(vm: MainVm) {
                         backPreviewUri = null
                         frontPreviewUri = null
                         cameraUploading = false
+                        cameraUploadPercent = 0
                     },
                     onGoFeed = { vm.setTab(AppTab.FEED) },
                     uploading = cameraUploading,
+                    uploadPercent = cameraUploadPercent,
                     onOpenViewer = { urls ->
                         viewerUrls = urls
                         viewerIndex = 0
@@ -913,6 +982,11 @@ fun AppScreen(vm: MainVm) {
                     darkMode = state.darkMode,
                     currentPassword = pwCurrent,
                     newPassword = pwNext,
+                    appVersion = BuildConfig.VERSION_NAME,
+                    serverVersion = state.serverVersion,
+                    pushProvider = state.pushProvider,
+                    apiBaseUrl = BuildConfig.API_BASE_URL,
+                    serverConnected = state.serverConnected,
                     onDarkModeChange = { vm.setDarkMode(it) },
                     onCurrentPasswordChange = { pwCurrent = it },
                     onNewPasswordChange = { pwNext = it },
@@ -974,6 +1048,7 @@ fun CameraTab(
     onReset: () -> Unit,
     onGoFeed: () -> Unit,
     uploading: Boolean,
+    uploadPercent: Int,
     onOpenViewer: (List<String>) -> Unit
 ) {
     val hasPosted = prompt?.hasPosted == true
@@ -1041,7 +1116,12 @@ fun CameraTab(
                         contentScale = ContentScale.Crop
                     )
                     if (uploading) {
-                        Text("Upload laeuft im Hintergrund ...")
+                        Text("Upload laeuft im Hintergrund ... $uploadPercent%")
+                        LinearProgressIndicator(
+                            progress = uploadPercent / 100f,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text("Du kannst den Tab wechseln. Upload laeuft weiter, solange die App offen bleibt.")
                     } else {
                         Text("Upload automatisch abgeschlossen.")
                     }
@@ -1275,6 +1355,11 @@ fun ProfileTab(
     darkMode: Boolean,
     currentPassword: String,
     newPassword: String,
+    appVersion: String,
+    serverVersion: String,
+    pushProvider: String,
+    apiBaseUrl: String,
+    serverConnected: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
     onCurrentPasswordChange: (String) -> Unit,
     onNewPasswordChange: (String) -> Unit,
@@ -1299,6 +1384,19 @@ fun ProfileTab(
             ) {
                 Text("Dark Mode")
                 Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
+            }
+        }
+
+        item {
+            Text("App & Verbindung", style = MaterialTheme.typography.titleMedium)
+            Card {
+                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Status: ${if (serverConnected) "Verbunden" else "Nicht verbunden"}")
+                    Text("App-Version: $appVersion")
+                    Text("Server-Version: $serverVersion")
+                    Text("Push-Provider: $pushProvider")
+                    Text("API: $apiBaseUrl")
+                }
             }
         }
 
