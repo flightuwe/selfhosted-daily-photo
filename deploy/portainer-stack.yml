@@ -1,5 +1,13 @@
 version: "3.9"
 
+# DEBUG SWITCH (visible)
+# 1) Set DEBUGGING to "on" or "off" below.
+# 2) In Portainer stack environment vars:
+#    - if DEBUGGING=on  -> set COMPOSE_PROFILES=debug
+#    - if DEBUGGING=off -> remove COMPOSE_PROFILES
+x-debug:
+  DEBUGGING: "off"
+
 services:
   backend:
     image: ghcr.io/flightuwe/selfhosted-bereal-backend:latest
@@ -60,6 +68,7 @@ services:
     ports:
       - "13380:8080"
     environment:
+      - DEBUGGING=${DEBUGGING:-off}
       - DOZZLE_NO_ANALYTICS=true
       - DOZZLE_LEVEL=info
       - DOZZLE_FILTER=name=shp-
