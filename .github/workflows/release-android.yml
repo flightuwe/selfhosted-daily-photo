@@ -17,11 +17,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v3
       - name: Build release APK
         run: gradle -p android :app:assembleRelease
+      - name: Show generated APK files
+        run: ls -la android/app/build/outputs/apk/release || true
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: android/app/build/outputs/apk/release/*.apk
 
   github-release:
     needs: build-apk
@@ -35,4 +37,4 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/app-release.apk
+          files: dist/*.apk
