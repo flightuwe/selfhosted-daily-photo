@@ -4,17 +4,20 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v3
         with:
           cache-disabled: true
@@ -22,12 +25,14 @@ jobs:
         run: |
           java -version
           gradle --version
-          sdkmanager --version || true
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          ls -la "$ANDROID_SDK_ROOT" || true
       - name: Build release APK (capture log)
         run: |
           set -o pipefail
-          gradle -p android :app:assembleRelease --stacktrace 2>&1 | tee android-build.log || true
+          gradle -p android :app:assembleRelease --stacktrace 2>&1 | tee android-build.log
       - name: Show generated APK files
+        if: always()
         run: ls -la android/app/build/outputs/apk/release || true
       - name: Upload build log
         if: always()
@@ -40,9 +45,7 @@ jobs:
         with:
           name: app-release-apk
           path: android/app/build/outputs/apk/release/*.apk
-      - name: Fail if APK missing
-        run: |
-          ls android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
 
   github-release:
     needs: build-apk
