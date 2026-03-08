@@ -14,20 +14,35 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: "8.10.2"
-      - name: Verify gradle
-        run: gradle --version
-      - name: Build release APK
-        run: gradle -p android :app:assembleRelease
+          cache-disabled: true
+      - name: Verify toolchain
+        run: |
+          java -version
+          gradle --version
+          sdkmanager --version || true
+      - name: Build release APK (capture log)
+        run: |
+          set -o pipefail
+          gradle -p android :app:assembleRelease --stacktrace 2>&1 | tee android-build.log || true
       - name: Show generated APK files
         run: ls -la android/app/build/outputs/apk/release || true
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-log
+          path: android-build.log
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
           path: android/app/build/outputs/apk/release/*.apk
+      - name: Fail if APK missing
+        run: |
+          ls android/app/build/outputs/apk/release/*.apk
 
   github-release:
     needs: build-apk
