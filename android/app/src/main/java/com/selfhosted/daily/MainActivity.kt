@@ -25,10 +25,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -454,16 +456,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
-    suspend fun uploadDual(back: Uri, front: Uri, asPrompt: Boolean) {
+    suspend fun uploadDual(back: Uri, front: Uri, asPrompt: Boolean): Boolean {
         state = state.copy(loading = true)
-        runCatching { repo.uploadDual(back, front, asPrompt) }
-            .onSuccess {
-                state = state.copy(loading = false, message = "Fotos gepostet")
-                refreshAll()
-            }
-            .onFailure {
-                state = state.copy(loading = false, message = apiError(it, "Upload fehlgeschlagen"))
-            }
+        return try {
+            repo.uploadDual(back, front, asPrompt)
+            state = state.copy(loading = false, message = "Fotos gepostet")
+            refreshAll()
+            true
+        } catch (t: Throwable) {
+            state = state.copy(loading = false, message = apiError(t, "Upload fehlgeschlagen"))
+            false
+        }
     }
 
     suspend fun sendChat(body: String) {
@@ -556,6 +559,7 @@ fun AppScreen(vm: MainVm) {
     var viewerUrls by remember { mutableStateOf<List<String>>(emptyList()) }
     var viewerIndex by remember { mutableStateOf(0) }
     var requestFrontCapture by remember { mutableStateOf(false) }
+    var cameraUploading by remember { mutableStateOf(false) }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         val target = captureTarget
@@ -570,13 +574,17 @@ fun AppScreen(vm: MainVm) {
                     frontPreviewUri = shotUri
                     val back = backPreviewUri
                     val front = shotUri
-                    if (back != null && front != null) {
+                    if (back != null && front != null && !cameraUploading) {
+                        cameraUploading = true
                         val canPrompt = state.prompt?.canUpload == true && state.prompt.hasPosted.not()
                         scope.launch {
-                            vm.uploadDual(back, front, canPrompt)
-                            backPreviewUri = null
-                            frontPreviewUri = null
-                            vm.setTab(AppTab.FEED)
+                            val ok = vm.uploadDual(back, front, canPrompt)
+                            cameraUploading = false
+                            if (ok) {
+                                backPreviewUri = null
+                                frontPreviewUri = null
+                                vm.setTab(AppTab.FEED)
+                            }
                         }
                     }
                 }
@@ -740,8 +748,26 @@ fun AppScreen(vm: MainVm) {
                     onReset = {
                         backPreviewUri = null
                         frontPreviewUri = null
+                        cameraUploading = false
+                    },
+                    onPostNow = {
+                        val back = backPreviewUri ?: return@CameraTab
+                        val front = frontPreviewUri ?: return@CameraTab
+                        if (cameraUploading) return@CameraTab
+                        cameraUploading = true
+                        val canPrompt = state.prompt?.canUpload == true && state.prompt.hasPosted.not()
+                        scope.launch {
+                            val ok = vm.uploadDual(back, front, canPrompt)
+                            cameraUploading = false
+                            if (ok) {
+                                backPreviewUri = null
+                                frontPreviewUri = null
+                                vm.setTab(AppTab.FEED)
+                            }
+                        }
                     },
                     onGoFeed = { vm.setTab(AppTab.FEED) },
+                    uploading = cameraUploading,
                     onOpenViewer = { urls ->
                         viewerUrls = urls
                         viewerIndex = 0
@@ -837,13 +863,18 @@ fun CameraTab(
     frontPreviewUri: Uri?,
     onCaptureBack: () -> Unit,
     onReset: () -> Unit,
+    onPostNow: () -> Unit,
     onGoFeed: () -> Unit,
+    uploading: Boolean,
     onOpenViewer: (List<String>) -> Unit
 ) {
     val hasPosted = prompt?.hasPosted == true
     val canUpload = prompt?.canUpload == true
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(
+        modifier = Modifier.verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         Text("Heutiger Moment", style = MaterialTheme.typography.titleLarge)
         Text(prompt?.day ?: "-")
 
@@ -900,7 +931,11 @@ fun CameraTab(
                             .height(220.dp),
                         contentScale = ContentScale.Crop
                     )
-                    Text("Upload laeuft ...")
+                    if (uploading) {
+                        Text("Upload laeuft ...")
+                    } else {
+                        Button(onClick = onPostNow, modifier = Modifier.fillMaxWidth()) { Text("Jetzt hochladen") }
+                    }
                     Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
                 }
             }
