@@ -138,3 +138,18 @@ Wenn der `gateway`-Container mit `cat: can't open 'server'` abstuerzt, nutze die
    - `/volume1/docker/selfhosted-daily-photo/nginx/default.conf`
 3. Inhalt aus `deploy/synology/nginx-default.conf` uebernehmen.
 4. Stack mit `deploy/portainer-stack.yml` neu deployen.
+
+## Optionaler Debug-Pfad (ein-/ausschaltbar)
+
+Fuer schnellere Fehleranalyse kannst du einen separaten Debug-Stack deployen:
+
+- Datei: `deploy/portainer-debug-stack.yml`
+- Zweck: Dozzle Log-UI fuer alle Container mit Namen `shp-*`
+- URL: `http://<synology-ip>:13380`
+
+Ablauf:
+1. Nur bei Bedarf deployen.
+2. Fehler sammeln (gateway, backend, admin gleichzeitig).
+3. Danach Debug-Stack wieder stoppen/loeschen.
+
+Details: `deploy/DEBUGGING.md`
