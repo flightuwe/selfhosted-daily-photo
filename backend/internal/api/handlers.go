@@ -53,6 +53,8 @@ func (s *Server) Router() *gin.Engine {
         protected.Use(s.requireAuth)
         {
             protected.GET("/me", s.handleMe)
+            protected.PUT("/me/password", s.handleChangePassword)
+            protected.GET("/me/photos", s.handleMyPhotos)
             protected.POST("/devices", s.handleDevice)
             protected.GET("/prompt/current", s.handleCurrentPrompt)
             protected.POST("/uploads", s.handleUpload)
@@ -134,6 +136,33 @@ func (s *Server) handleMe(c *gin.Context) {
     c.JSON(http.StatusOK, gin.H{"user": user})
 }
 
+func (s *Server) handleChangePassword(c *gin.Context) {
+    user, _ := userFromContext(c)
+
+    var req struct {
+        CurrentPassword string `json:"currentPassword" binding:"required,min=6,max=128"`
+        NewPassword     string `json:"newPassword" binding:"required,min=6,max=128"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+    if !auth.CheckPassword(user.PasswordHash, req.CurrentPassword) {
+        c.JSON(http.StatusUnauthorized, gin.H{"error": "current password invalid"})
+        return
+    }
+    hash, err := auth.HashPassword(req.NewPassword)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "hash failed"})
+        return
+    }
+    if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("password_hash", hash).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 type deviceRequest struct {
     Token string `json:"token" binding:"required,max=255"`
 }
@@ -152,6 +181,7 @@ func (s *Server) handleDevice(c *gin.Context) {
 }
 
 func (s *Server) handleCurrentPrompt(c *gin.Context) {
+    user, _ := userFromContext(c)
     now := time.Now().In(s.Location)
     day := now.Format("2006-01-02")
 
@@ -163,11 +193,29 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
     }
 
     canUpload := prompt.UploadUntil != nil && now.Before(*prompt.UploadUntil)
+    hasPosted, _ := s.userHasPostedForDay(user.ID, day)
+    var ownPhoto gin.H
+    if hasPosted {
+        var p models.Photo
+        if err := s.DB.Where("user_id = ? AND day = ?", user.ID, day).Order("created_at desc").First(&p).Error; err == nil {
+            ownPhoto = gin.H{
+                "id":         p.ID,
+                "day":        p.Day,
+                "promptOnly": p.PromptOnly,
+                "caption":    p.Caption,
+                "createdAt":  p.CreatedAt,
+                "url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
+            }
+        }
+    }
+
     c.JSON(http.StatusOK, gin.H{
         "day":         day,
         "triggered":   prompt.TriggeredAt,
         "uploadUntil": prompt.UploadUntil,
         "canUpload":   canUpload,
+        "hasPosted":   hasPosted,
+        "ownPhoto":    ownPhoto,
     })
 }
 
@@ -201,6 +249,16 @@ func (s *Server) handleUpload(c *gin.Context) {
 
     now := time.Now().In(s.Location)
     day := now.Format("2006-01-02")
+
+    hasPosted, err := s.userHasPostedForDay(user.ID, day)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    if hasPosted {
+        c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+        return
+    }
 
     if kind == "prompt" {
         var prompt models.DailyPrompt
@@ -253,10 +311,29 @@ func (s *Server) handleUpload(c *gin.Context) {
 }
 
 func (s *Server) handleFeed(c *gin.Context) {
+    user, _ := userFromContext(c)
     day := c.Query("day")
     if day == "" {
         day = time.Now().In(s.Location).Format("2006-01-02")
     }
+    today := time.Now().In(s.Location).Format("2006-01-02")
+    if day == today {
+        hasPosted, err := s.userHasPostedForDay(user.ID, day)
+        if err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+            return
+        }
+        if !hasPosted {
+            c.JSON(http.StatusForbidden, gin.H{
+                "error": "Poste zuerst dein Foto, um die Beitraege der anderen zu sehen",
+                "code":  "feed_locked",
+            })
+            return
+        }
+    }
+
+    var prompt models.DailyPrompt
+    _ = s.DB.Where("day = ?", day).First(&prompt).Error
 
     var photos []models.Photo
     if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
@@ -266,11 +343,16 @@ func (s *Server) handleFeed(c *gin.Context) {
 
     out := make([]gin.H, 0, len(photos))
     for _, p := range photos {
+        isLate := false
+        if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
+            isLate = true
+        }
         out = append(out, gin.H{
             "id":         p.ID,
             "day":        p.Day,
             "promptOnly": p.PromptOnly,
             "caption":    p.Caption,
+            "isLate":     isLate,
             "createdAt":  p.CreatedAt,
             "url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
             "user": gin.H{
@@ -512,6 +594,29 @@ func (s *Server) handleBroadcastNotification(c *gin.Context) {
     })
 }
 
+func (s *Server) handleMyPhotos(c *gin.Context) {
+    user, _ := userFromContext(c)
+
+    var photos []models.Photo
+    if err := s.DB.Where("user_id = ?", user.ID).Order("created_at desc").Limit(120).Find(&photos).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+
+    out := make([]gin.H, 0, len(photos))
+    for _, p := range photos {
+        out = append(out, gin.H{
+            "id":         p.ID,
+            "day":        p.Day,
+            "promptOnly": p.PromptOnly,
+            "caption":    p.Caption,
+            "createdAt":  p.CreatedAt,
+            "url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
+        })
+    }
+    c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
 func (s *Server) allDeviceTokens() []string {
     var rows []models.DeviceToken
     _ = s.DB.Find(&rows).Error
@@ -539,4 +644,12 @@ func toAdminUser(u models.User, photoCount, tokenCount int64) gin.H {
         "photoCount":  photoCount,
         "deviceCount": tokenCount,
     }
+}
+
+func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {
+    var count int64
+    if err := s.DB.Model(&models.Photo{}).Where("user_id = ? AND day = ?", userID, day).Count(&count).Error; err != nil {
+        return false, err
+    }
+    return count > 0, nil
 }
