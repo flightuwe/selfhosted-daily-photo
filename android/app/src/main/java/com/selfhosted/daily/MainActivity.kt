@@ -4,6 +4,9 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -43,6 +46,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -67,6 +71,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -102,6 +107,7 @@ import retrofit2.http.Part
 import retrofit2.http.Query
 import java.io.File
 import java.io.FileOutputStream
+import java.util.UUID
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
@@ -200,6 +206,7 @@ interface Api {
 class AppRepo(private val api: Api, private val context: Context) {
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     private val http = OkHttpClient()
+    private val maxUploadDimensionPx = 1600
 
     fun token(): String = prefs.getString("token", "") ?: ""
 
@@ -215,6 +222,12 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun setDarkMode(enabled: Boolean) {
         prefs.edit().putBoolean("dark_mode", enabled).apply()
+    }
+
+    fun uploadQuality(): Int = prefs.getInt("upload_quality", 82).coerceIn(45, 95)
+
+    fun setUploadQuality(value: Int) {
+        prefs.edit().putInt("upload_quality", value.coerceIn(45, 95)).apply()
     }
 
     private fun lastSyncedDeviceToken(): String = prefs.getString("last_synced_device_token", "") ?: ""
@@ -350,17 +363,69 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     private fun copyUriToTemp(uri: Uri): File {
         val resolver = context.contentResolver
-        val filename = resolver.query(uri, null, null, null, null)?.use { cursor ->
+        val originalName = resolver.query(uri, null, null, null, null)?.use { cursor ->
             val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
         } ?: "upload.jpg"
-        val target = File(context.cacheDir, filename)
-        resolver.openInputStream(uri).use { input ->
-            FileOutputStream(target).use { out ->
-                input?.copyTo(out)
+        val safeBase = originalName.substringBeforeLast(".").ifBlank { "upload" }
+        val target = File(context.cacheDir, "${safeBase}_${UUID.randomUUID()}.jpg")
+        return runCatching {
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            resolver.openInputStream(uri).use { input ->
+                BitmapFactory.decodeStream(input, null, opts)
             }
+            val sample = calculateInSampleSize(opts.outWidth, opts.outHeight, maxUploadDimensionPx)
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+            val decoded = resolver.openInputStream(uri).use { input ->
+                BitmapFactory.decodeStream(input, null, decodeOpts)
+            } ?: error("Bild konnte nicht gelesen werden")
+
+            val rotation = resolver.openInputStream(uri).use { input ->
+                if (input == null) 0 else exifRotation(input)
+            }
+            val processed = if (rotation == 0) decoded else rotateBitmap(decoded, rotation)
+            if (processed !== decoded) decoded.recycle()
+            FileOutputStream(target).use { out ->
+                processed.compress(Bitmap.CompressFormat.JPEG, uploadQuality(), out)
+            }
+            processed.recycle()
+            target
+        }.getOrElse {
+            val fallback = File(context.cacheDir, "${safeBase}_${UUID.randomUUID()}_raw")
+            resolver.openInputStream(uri).use { input ->
+                FileOutputStream(fallback).use { out ->
+                    input?.copyTo(out)
+                }
+            }
+            fallback
         }
-        return target
+    }
+
+    private fun calculateInSampleSize(width: Int, height: Int, maxSide: Int): Int {
+        if (width <= 0 || height <= 0) return 1
+        var sample = 1
+        var w = width
+        var h = height
+        while (w > maxSide || h > maxSide) {
+            sample *= 2
+            w /= 2
+            h /= 2
+        }
+        return sample.coerceAtLeast(1)
+    }
+
+    private fun exifRotation(input: java.io.InputStream): Int {
+        return when (ExifInterface(input).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+    }
+
+    private fun rotateBitmap(src: Bitmap, degrees: Int): Bitmap {
+        val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
     }
 }
 
@@ -425,7 +490,8 @@ data class UiState(
     val pushProvider: String = "unknown",
     val showPromptDialog: Boolean = false,
     val updateInfo: UpdateInfo? = null,
-    val darkMode: Boolean = false
+    val darkMode: Boolean = false,
+    val uploadQuality: Int = 82
 )
 
 data class DashboardData(
@@ -436,7 +502,13 @@ data class DashboardData(
 )
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
-    var state by mutableStateOf(UiState(token = repo.token(), darkMode = repo.isDarkMode()))
+    var state by mutableStateOf(
+        UiState(
+            token = repo.token(),
+            darkMode = repo.isDarkMode(),
+            uploadQuality = repo.uploadQuality()
+        )
+    )
         private set
 
     suspend fun bootstrap() {
@@ -476,7 +548,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverConnected = state.serverConnected,
             serverVersion = state.serverVersion,
             pushProvider = state.pushProvider,
-            darkMode = state.darkMode
+            darkMode = state.darkMode,
+            uploadQuality = state.uploadQuality
         )
     }
 
@@ -669,6 +742,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun setDarkMode(enabled: Boolean) {
         repo.setDarkMode(enabled)
         state = state.copy(darkMode = enabled)
+    }
+
+    fun setUploadQuality(value: Int) {
+        repo.setUploadQuality(value)
+        state = state.copy(uploadQuality = repo.uploadQuality())
     }
 }
 
@@ -987,7 +1065,9 @@ fun AppScreen(vm: MainVm) {
                     pushProvider = state.pushProvider,
                     apiBaseUrl = BuildConfig.API_BASE_URL,
                     serverConnected = state.serverConnected,
+                    uploadQuality = state.uploadQuality,
                     onDarkModeChange = { vm.setDarkMode(it) },
+                    onUploadQualityChange = { vm.setUploadQuality(it) },
                     onCurrentPasswordChange = { pwCurrent = it },
                     onNewPasswordChange = { pwNext = it },
                     onChangePassword = {
@@ -1360,7 +1440,9 @@ fun ProfileTab(
     pushProvider: String,
     apiBaseUrl: String,
     serverConnected: Boolean,
+    uploadQuality: Int,
     onDarkModeChange: (Boolean) -> Unit,
+    onUploadQualityChange: (Int) -> Unit,
     onCurrentPasswordChange: (String) -> Unit,
     onNewPasswordChange: (String) -> Unit,
     onChangePassword: () -> Unit,
@@ -1396,6 +1478,21 @@ fun ProfileTab(
                     Text("Server-Version: $serverVersion")
                     Text("Push-Provider: $pushProvider")
                     Text("API: $apiBaseUrl")
+                }
+            }
+        }
+
+        item {
+            Text("Upload-Komprimierung", style = MaterialTheme.typography.titleMedium)
+            Card {
+                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("JPEG-Qualitaet: $uploadQuality%")
+                    Slider(
+                        value = uploadQuality.toFloat(),
+                        onValueChange = { onUploadQualityChange(it.toInt()) },
+                        valueRange = 45f..95f
+                    )
+                    Text("Weniger Qualitaet = kleiner und schnellerer Upload")
                 }
             }
         }

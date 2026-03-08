@@ -12,8 +12,8 @@ android {
         applicationId = "com.selfhosted.daily"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "0.3.8"
+        versionCode = 14
+        versionName = "0.3.12"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "API_BASE_URL", "\"https://daily.teacloud.synology.me/api/\"")
@@ -79,6 +79,7 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.1")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.6.1")
