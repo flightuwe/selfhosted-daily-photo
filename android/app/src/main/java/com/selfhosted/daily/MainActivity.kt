@@ -1347,6 +1347,7 @@ fun AppScreen(vm: MainVm) {
 
                 AppTab.PROFILE -> ProfileTab(
                     username = state.user?.username ?: "",
+                    streakDays = computePostingStreak(state.photos),
                     photos = state.photos,
                     darkMode = state.darkMode,
                     currentPassword = pwCurrent,
@@ -1842,6 +1843,7 @@ fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onS
 @Composable
 fun ProfileTab(
     username: String,
+    streakDays: Int,
     photos: List<PromptPhoto>,
     darkMode: Boolean,
     currentPassword: String,
@@ -1871,7 +1873,10 @@ fun ProfileTab(
 ) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
         item {
-            Text("@$username", style = MaterialTheme.typography.titleLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("@$username", style = MaterialTheme.typography.titleLarge)
+                Text("🔥 $streakDays", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            }
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onCheckUpdate) { Text("Update pruefen") }
@@ -2047,6 +2052,24 @@ private fun formatRemaining(seconds: Long): String {
     val days = sec / 86400
     val hours = (sec % 86400) / 3600
     return "${days}d ${hours}h"
+}
+
+private fun computePostingStreak(photos: List<PromptPhoto>): Int {
+    if (photos.isEmpty()) return 0
+    val postedDays = photos
+        .asSequence()
+        .filter { it.promptOnly }
+        .mapNotNull { runCatching { LocalDate.parse(it.day) }.getOrNull() }
+        .toSet()
+    if (postedDays.isEmpty()) return 0
+
+    var streak = 0
+    var day = LocalDate.now()
+    while (postedDays.contains(day)) {
+        streak++
+        day = day.minusDays(1)
+    }
+    return streak
 }
 
 private fun normalizeHexColor(input: String): String {
