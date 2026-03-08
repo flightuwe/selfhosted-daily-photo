@@ -115,6 +115,7 @@ import retrofit2.http.Path
 import retrofit2.http.Query
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.util.UUID
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -349,6 +350,19 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun clearToken() {
         prefs.edit().remove("token").apply()
+        UploadQueueManager.clear(context)
+    }
+
+    fun uploadQueue(): List<QueuedUploadItem> = UploadQueueManager.list(context)
+
+    fun syncUploadQueueScheduler() {
+        UploadQueueScheduler.sync(context)
+    }
+
+    fun retryUploadQueueItem(id: String): Boolean {
+        val ok = UploadQueueManager.markWaiting(context, id)
+        if (ok) UploadQueueScheduler.enqueueNow(context)
+        return ok
     }
 
     fun isDarkMode(): Boolean = prefs.getBoolean("dark_mode", false)
@@ -531,6 +545,21 @@ class AppRepo(private val api: Api, private val context: Context) {
         onProgress(totalBytes, totalBytes)
     }
 
+    suspend fun enqueueDualUpload(backUri: Uri, frontUri: Uri, isPrompt: Boolean): QueuedUploadItem {
+        val backFile = copyUriToTemp(backUri)
+        val frontFile = copyUriToTemp(frontUri)
+        val queuedDir = File(context.filesDir, "upload-queue").apply { mkdirs() }
+        val backQueued = moveToQueueFile(backFile, queuedDir, "back")
+        val frontQueued = moveToQueueFile(frontFile, queuedDir, "front")
+        return UploadQueueManager.enqueueFromFiles(
+            context = context,
+            backPath = backQueued.absolutePath,
+            frontPath = frontQueued.absolutePath,
+            isPrompt = isPrompt,
+            authToken = token()
+        )
+    }
+
     suspend fun checkForUpdate(currentVersion: String): UpdateInfo? =
         UpdateReleaseChecker.checkForUpdate(currentVersion)
 
@@ -588,6 +617,20 @@ class AppRepo(private val api: Api, private val context: Context) {
             h /= 2
         }
         return sample.coerceAtLeast(1)
+    }
+
+    private fun moveToQueueFile(source: File, dir: File, suffix: String): File {
+        val target = File(dir, "${System.currentTimeMillis()}_${UUID.randomUUID()}_$suffix.jpg")
+        if (!source.exists()) throw IOException("Quelldatei fehlt fuer Queue")
+        if (source.renameTo(target)) return target
+        runCatching {
+            source.inputStream().use { input ->
+                FileOutputStream(target).use { out -> input.copyTo(out) }
+            }
+            source.delete()
+            return target
+        }
+        throw IOException("Queue-Datei konnte nicht gespeichert werden")
     }
 
     private fun exifRotation(input: java.io.InputStream): Int {
@@ -663,6 +706,7 @@ data class UiState(
     val chatHasUnreadMessages: Boolean = false,
     val photos: List<PromptPhoto> = emptyList(),
     val chat: List<ChatItem> = emptyList(),
+    val uploadQueue: List<QueuedUploadItem> = emptyList(),
     val photoInteractions: PhotoInteractionsResponse? = null,
     val interactionsLoading: Boolean = false,
     val loading: Boolean = false,
@@ -712,6 +756,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (state.startupDone) return
         state = state.copy(startupDone = false)
         repo.syncAutoUpdateScheduler()
+        repo.syncUploadQueueScheduler()
         val started = System.currentTimeMillis()
         val health = runCatching { repo.health() }.getOrNull()
         val elapsed = System.currentTimeMillis() - started
@@ -727,6 +772,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             pushProvider = health?.provider ?: "unknown",
             showChangelogDialog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME),
             changelogLines = changelogLines,
+            uploadQueue = repo.uploadQueue(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
     }
@@ -860,6 +906,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 chatHasOtherMessages = true,
                 chatHasUnreadMessages = hasUnreadChat,
                 calendarDays = calendarDays,
+                uploadQueue = repo.uploadQueue(),
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
@@ -1010,6 +1057,29 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         } catch (t: Throwable) {
             state = state.copy(loading = false, message = apiError(t, "Upload fehlgeschlagen"))
             false
+        }
+    }
+
+    suspend fun enqueueDualUpload(back: Uri, front: Uri, asPrompt: Boolean): Boolean {
+        state = state.copy(loading = true)
+        return runCatching {
+            repo.enqueueDualUpload(back, front, asPrompt)
+        }.onSuccess {
+            repo.syncUploadQueueScheduler()
+            state = state.copy(
+                loading = false,
+                uploadQueue = repo.uploadQueue(),
+                message = "Upload in Warteschlange. Wird im Hintergrund hochgeladen."
+            )
+        }.onFailure {
+            state = state.copy(loading = false, message = apiError(it, "Upload-Queue fehlgeschlagen"))
+        }.isSuccess
+    }
+
+    fun retryQueuedUpload(id: String) {
+        val ok = repo.retryUploadQueueItem(id)
+        if (ok) {
+            state = state.copy(uploadQueue = repo.uploadQueue(), message = "Upload erneut geplant")
         }
     }
 
@@ -1279,9 +1349,7 @@ fun AppScreen(vm: MainVm) {
                         cameraUploadDone = false
                         val asPrompt = captureAsPrompt
                         scope.launch {
-                            val ok = vm.uploadDual(back, front, asPrompt) { sent, total ->
-                                cameraUploadPercent = ((sent * 100) / total.coerceAtLeast(1L)).toInt().coerceIn(0, 100)
-                            }
+                            val ok = vm.enqueueDualUpload(back, front, asPrompt)
                             cameraUploading = false
                             if (ok) {
                                 backPreviewUri = null
@@ -1702,9 +1770,7 @@ fun AppScreen(vm: MainVm) {
                             cameraUploadDone = false
                             val asPrompt = captureAsPrompt
                             scope.launch {
-                                val ok = vm.uploadDual(back, front, asPrompt) { sent, total ->
-                                    cameraUploadPercent = ((sent * 100) / total.coerceAtLeast(1L)).toInt().coerceIn(0, 100)
-                                }
+                                val ok = vm.enqueueDualUpload(back, front, asPrompt)
                                 cameraUploading = false
                                 if (ok) {
                                     cameraUploadPercent = 100
@@ -1724,6 +1790,8 @@ fun AppScreen(vm: MainVm) {
                     uploadPercent = cameraUploadPercent,
                     uploadDone = cameraUploadDone,
                     uploadError = cameraUploadError,
+                    uploadQueue = state.uploadQueue,
+                    onRetryQueued = { id -> vm.retryQueuedUpload(id) },
                     onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
                         viewerIndex = 0
@@ -1901,6 +1969,8 @@ fun CameraTab(
     uploadPercent: Int,
     uploadDone: Boolean,
     uploadError: String,
+    uploadQueue: List<QueuedUploadItem>,
+    onRetryQueued: (String) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     val hasPosted = prompt?.hasPosted == true
@@ -2000,9 +2070,9 @@ fun CameraTab(
                             progress = uploadPercent / 100f,
                             modifier = Modifier.fillMaxWidth()
                         )
-                        Text("Du kannst den Tab wechseln. Upload laeuft weiter, solange die App offen bleibt.")
+                        Text("Du kannst den Tab wechseln oder die App schliessen. Die Queue versucht den Upload automatisch erneut.")
                     } else if (uploadDone) {
-                        Text("Upload automatisch abgeschlossen.")
+                        Text("Upload wurde zur Queue hinzugefuegt.")
                     } else if (uploadError.isNotBlank()) {
                         Text("Upload fehlgeschlagen: $uploadError", color = Color(0xFF8B0000))
                         Button(onClick = onRetryUpload, modifier = Modifier.fillMaxWidth()) { Text("Upload erneut versuchen") }
@@ -2010,6 +2080,28 @@ fun CameraTab(
                         Text("Bereit fuer Upload.")
                     }
                     Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
+                }
+            }
+        }
+
+        val queueItems = uploadQueue.take(6)
+        if (queueItems.isNotEmpty()) {
+            Text("Upload-Queue", style = MaterialTheme.typography.titleMedium)
+            queueItems.forEach { item ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        val kindLabel = if (item.isPrompt) "Tagesmoment" else "Extra"
+                        Text("$kindLabel - ${queueStatusLabel(item.status)}", fontWeight = FontWeight.SemiBold)
+                        Text("Versuche: ${item.attempts}")
+                        if (item.lastError.isNotBlank()) {
+                            Text(item.lastError, color = Color(0xFF8B0000), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (item.status == UploadQueueStatus.FAILED) {
+                            Button(onClick = { onRetryQueued(item.id) }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Erneut versuchen")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2611,6 +2703,16 @@ private fun momentReasonLine(triggerSource: String?, requestedByUser: String?): 
         "⏳ Daily-Moment"
     } else {
         null
+    }
+}
+
+private fun queueStatusLabel(status: String): String {
+    return when (status) {
+        UploadQueueStatus.WAITING -> "wartend"
+        UploadQueueStatus.RUNNING -> "laeuft"
+        UploadQueueStatus.FAILED -> "fehlgeschlagen"
+        UploadQueueStatus.SUCCESS -> "erfolgreich"
+        else -> status
     }
 }
 
