@@ -82,6 +82,24 @@ type Photo struct {
     CreatedAt  time.Time `json:"createdAt"`
 }
 
+type PhotoReaction struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	PhotoID    uint      `gorm:"index:idx_photo_user_reaction,unique;not null" json:"photoId"`
+	UserID     uint      `gorm:"index:idx_photo_user_reaction,unique;not null" json:"userId"`
+	Emoji      string    `gorm:"size:16;not null" json:"emoji"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+type PhotoComment struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	PhotoID    uint      `gorm:"index;not null" json:"photoId"`
+	UserID     uint      `gorm:"index;not null" json:"userId"`
+	User       User      `json:"user"`
+	Body       string    `gorm:"size:500;not null" json:"body"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
 type ChatMessage struct {
     ID        uint      `gorm:"primaryKey" json:"id"`
     UserID    uint      `gorm:"index;not null" json:"userId"`

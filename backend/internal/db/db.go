@@ -28,8 +28,10 @@ func Connect(path string) (*gorm.DB, error) {
         &models.AppSettings{},
         &models.DailyPrompt{},
         &models.PromptPlan{},
-        &models.Photo{},
-        &models.ChatMessage{},
+		&models.Photo{},
+		&models.PhotoReaction{},
+		&models.PhotoComment{},
+		&models.ChatMessage{},
         &models.ChatCommand{},
         &models.SpecialMomentRequest{},
     ); err != nil {

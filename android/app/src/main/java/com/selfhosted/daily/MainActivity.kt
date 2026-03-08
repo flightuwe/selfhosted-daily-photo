@@ -110,6 +110,7 @@ import retrofit2.http.Multipart
 import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Part
+import retrofit2.http.Path
 import retrofit2.http.Query
 import java.io.File
 import java.io.FileOutputStream
@@ -201,6 +202,16 @@ data class DayListResponse(val items: List<String>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
 data class ChatItem(val id: Long, val body: String, val createdAt: String, val user: User)
 data class ChatResponse(val items: List<ChatItem>)
+data class ReactionCount(val emoji: String, val count: Long)
+data class PhotoCommentItem(val id: Long, val body: String, val createdAt: String, val user: User)
+data class PhotoInteractionsResponse(
+    val photoId: Long,
+    val reactions: List<ReactionCount> = emptyList(),
+    val myReaction: String = "",
+    val comments: List<PhotoCommentItem> = emptyList()
+)
+data class PhotoReactionRequest(val emoji: String)
+data class PhotoCommentRequest(val body: String)
 data class SpecialMomentStatus(
     val canRequest: Boolean,
     val requestedThisWeek: Boolean,
@@ -301,6 +312,26 @@ interface Api {
 
     @POST("chat")
     suspend fun sendChat(@Header("Authorization") token: String, @Body body: ChatMessageRequest)
+
+    @GET("photos/{id}/interactions")
+    suspend fun photoInteractions(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): PhotoInteractionsResponse
+
+    @POST("photos/{id}/reaction")
+    suspend fun reactPhoto(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long,
+        @Body body: PhotoReactionRequest
+    ): PhotoInteractionsResponse
+
+    @POST("photos/{id}/comments")
+    suspend fun commentPhoto(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long,
+        @Body body: PhotoCommentRequest
+    ): PhotoInteractionsResponse
 }
 
 class AppRepo(private val api: Api, private val context: Context) {
@@ -416,6 +447,15 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun sendChat(body: String) {
         api.sendChat("Bearer ${token()}", ChatMessageRequest(body))
     }
+
+    suspend fun photoInteractions(photoId: Long): PhotoInteractionsResponse =
+        api.photoInteractions("Bearer ${token()}", photoId)
+
+    suspend fun reactPhoto(photoId: Long, emoji: String): PhotoInteractionsResponse =
+        api.reactPhoto("Bearer ${token()}", photoId, PhotoReactionRequest(emoji))
+
+    suspend fun commentPhoto(photoId: Long, body: String): PhotoInteractionsResponse =
+        api.commentPhoto("Bearer ${token()}", photoId, PhotoCommentRequest(body))
 
     suspend fun changePassword(currentPassword: String, newPassword: String) {
         api.changePassword("Bearer ${token()}", PasswordChangeRequest(currentPassword, newPassword))
@@ -620,6 +660,8 @@ data class UiState(
     val chatHasUnreadMessages: Boolean = false,
     val photos: List<PromptPhoto> = emptyList(),
     val chat: List<ChatItem> = emptyList(),
+    val photoInteractions: PhotoInteractionsResponse? = null,
+    val interactionsLoading: Boolean = false,
     val loading: Boolean = false,
     val message: String = "",
     val activeTab: AppTab = AppTab.CAMERA,
@@ -976,6 +1018,35 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure { state = state.copy(message = apiError(it, "Chat senden fehlgeschlagen")) }
     }
 
+    suspend fun loadPhotoInteractions(photoId: Long) {
+        if (photoId <= 0) return
+        state = state.copy(interactionsLoading = true)
+        runCatching { repo.photoInteractions(photoId) }
+            .onSuccess { state = state.copy(interactionsLoading = false, photoInteractions = it) }
+            .onFailure { state = state.copy(interactionsLoading = false, message = apiError(it, "Interaktionen laden fehlgeschlagen")) }
+    }
+
+    suspend fun reactPhoto(photoId: Long, emoji: String) {
+        if (photoId <= 0 || emoji.isBlank()) return
+        state = state.copy(interactionsLoading = true)
+        runCatching { repo.reactPhoto(photoId, emoji) }
+            .onSuccess { state = state.copy(interactionsLoading = false, photoInteractions = it) }
+            .onFailure { state = state.copy(interactionsLoading = false, message = apiError(it, "Reaktion fehlgeschlagen")) }
+    }
+
+    suspend fun commentPhoto(photoId: Long, body: String) {
+        val trimmed = body.trim()
+        if (photoId <= 0 || trimmed.isBlank()) return
+        state = state.copy(interactionsLoading = true)
+        runCatching { repo.commentPhoto(photoId, trimmed) }
+            .onSuccess { state = state.copy(interactionsLoading = false, photoInteractions = it) }
+            .onFailure { state = state.copy(interactionsLoading = false, message = apiError(it, "Kommentar fehlgeschlagen")) }
+    }
+
+    fun clearPhotoInteractions() {
+        state = state.copy(photoInteractions = null, interactionsLoading = false)
+    }
+
     suspend fun changePassword(current: String, next: String) {
         state = state.copy(loading = true)
         runCatching { repo.changePassword(current, next) }
@@ -1175,6 +1246,8 @@ fun AppScreen(vm: MainVm) {
     var chatInput by remember { mutableStateOf("") }
     var viewerUrls by remember { mutableStateOf<List<String>>(emptyList()) }
     var viewerIndex by remember { mutableStateOf(0) }
+    var viewerPhotoId by remember { mutableStateOf<Long?>(null) }
+    var viewerComment by remember { mutableStateOf("") }
     var showSpecialMomentConfirm by remember { mutableStateOf(false) }
     var requestFrontCapture by remember { mutableStateOf(false) }
     var cameraUploading by remember { mutableStateOf(false) }
@@ -1291,6 +1364,11 @@ fun AppScreen(vm: MainVm) {
         }
     }
 
+    LaunchedEffect(viewerPhotoId) {
+        val pid = viewerPhotoId ?: return@LaunchedEffect
+        vm.loadPhotoInteractions(pid)
+    }
+
     if (state.showPromptDialog) {
         AlertDialog(
             onDismissRequest = { vm.dismissPromptDialog() },
@@ -1392,6 +1470,9 @@ fun AppScreen(vm: MainVm) {
             onDismissRequest = {
                 viewerUrls = emptyList()
                 viewerIndex = 0
+                viewerPhotoId = null
+                viewerComment = ""
+                vm.clearPhotoInteractions()
             },
             confirmButton = {
                 if (viewerUrls.size > 1 && viewerIndex < viewerUrls.lastIndex) {
@@ -1400,6 +1481,9 @@ fun AppScreen(vm: MainVm) {
                     TextButton(onClick = {
                         viewerUrls = emptyList()
                         viewerIndex = 0
+                        viewerPhotoId = null
+                        viewerComment = ""
+                        vm.clearPhotoInteractions()
                     }) { Text("Schliessen") }
                 }
             },
@@ -1409,7 +1493,65 @@ fun AppScreen(vm: MainVm) {
                 }
             },
             text = {
-                ZoomableViewerImage(url = viewerUrls[viewerIndex])
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(520.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ZoomableViewerImage(url = viewerUrls[viewerIndex])
+                    Text("Unter diesem Bild kannst du reagieren oder kommentieren.")
+                    if (viewerPhotoId != null) {
+                        val interactions = state.photoInteractions
+                        val countByEmoji = interactions?.reactions.orEmpty().associate { it.emoji to it.count }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                            listOf("❤️", "👍", "😂", "🔥", "😮").forEach { emoji ->
+                                val selected = interactions?.myReaction == emoji
+                                Button(
+                                    onClick = { scope.launch { vm.reactPhoto(viewerPhotoId ?: 0L, emoji) } },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    val count = countByEmoji[emoji] ?: 0L
+                                    Text("${if (selected) "✓" else ""}$emoji $count")
+                                }
+                            }
+                        }
+                        OutlinedTextField(
+                            value = viewerComment,
+                            onValueChange = { viewerComment = it },
+                            label = { Text("Kommentar") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Button(
+                            onClick = {
+                                val body = viewerComment
+                                if (body.isNotBlank()) {
+                                    scope.launch {
+                                        vm.commentPhoto(viewerPhotoId ?: 0L, body)
+                                        viewerComment = ""
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Kommentieren") }
+                        if (state.interactionsLoading) {
+                            Text("Interaktionen werden geladen ...")
+                        }
+                        interactions?.comments?.takeLast(40)?.forEach { item ->
+                            Card {
+                                Column(modifier = Modifier.padding(8.dp)) {
+                                    Text(
+                                        item.user.username,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = parseUserColor(item.user.favoriteColor)
+                                    )
+                                    Text(item.body)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         )
     }
@@ -1560,9 +1702,10 @@ fun AppScreen(vm: MainVm) {
                     uploadPercent = cameraUploadPercent,
                     uploadDone = cameraUploadDone,
                     uploadError = cameraUploadError,
-                    onOpenViewer = { urls ->
+                    onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
                         viewerIndex = 0
+                        viewerPhotoId = photoId
                     }
                 )
 
@@ -1579,9 +1722,10 @@ fun AppScreen(vm: MainVm) {
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
                     onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
-                    onOpenViewer = { urls ->
+                    onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
                         viewerIndex = 0
+                        viewerPhotoId = photoId
                     }
                 )
 
@@ -1674,9 +1818,10 @@ fun AppScreen(vm: MainVm) {
                         }
                     },
                     onLogout = { vm.logout() },
-                    onOpenViewer = { urls ->
+                    onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
                         viewerIndex = 0
+                        viewerPhotoId = photoId
                     }
                 )
             }
@@ -1734,7 +1879,7 @@ fun CameraTab(
     uploadPercent: Int,
     uploadDone: Boolean,
     uploadError: String,
-    onOpenViewer: (List<String>) -> Unit
+    onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     val hasPosted = prompt?.hasPosted == true
     val canUpload = prompt?.canUpload == true
@@ -1773,9 +1918,9 @@ fun CameraTab(
                             modifier = Modifier
                                 .weight(1f)
                                 .height(220.dp)
-                                .clickable { onOpenViewer(ownUrls) },
-                            contentScale = ContentScale.Crop
-                        )
+                                .clickable { onOpenViewer(ownUrls, prompt?.ownPhoto?.id) },
+                                contentScale = ContentScale.Crop
+                            )
                     }
                 }
             }
@@ -1881,7 +2026,7 @@ fun FeedTab(
     onTakePhoto: () -> Unit,
     onLoadOlder: () -> Unit,
     onLoadNewer: () -> Unit,
-    onOpenViewer: (List<String>) -> Unit
+    onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     val rows = remember(days, byDay, monthRecapByDay, promptMetaByDay) {
         buildList {
@@ -1995,7 +2140,7 @@ fun FeedTab(
                                         modifier = Modifier
                                             .weight(1f)
                                             .height(180.dp)
-                                            .clickable { onOpenViewer(urls) },
+                                            .clickable { onOpenViewer(urls, item.photo.id) },
                                         contentScale = ContentScale.Crop
                                     )
                                 }
@@ -2183,7 +2328,7 @@ fun ProfileTab(
     onRollInviteCode: () -> Unit,
     onShareInviteCode: () -> Unit,
     onLogout: () -> Unit,
-    onOpenViewer: (List<String>) -> Unit
+    onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
         item {
@@ -2363,7 +2508,7 @@ fun ProfileTab(
                                 modifier = Modifier
                                     .size(96.dp)
                                     .background(Color.LightGray)
-                                    .clickable { onOpenViewer(urls) },
+                                    .clickable { onOpenViewer(urls, photo.id) },
                                 contentScale = ContentScale.Crop
                             )
                             if (photo.secondUrl != null) {

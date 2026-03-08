@@ -61,8 +61,8 @@ func (s *Server) Router() *gin.Engine {
         api.POST("/auth/login", s.handleLogin)
 
         protected := api.Group("")
-        protected.Use(s.requireAuth)
-        {
+		protected.Use(s.requireAuth)
+		{
             protected.GET("/me", s.handleMe)
             protected.GET("/me/invite", s.handleMyInvite)
             protected.POST("/me/invite/roll", s.handleRollMyInvite)
@@ -78,9 +78,12 @@ func (s *Server) Router() *gin.Engine {
             protected.POST("/uploads/dual", s.handleDualUpload)
             protected.GET("/feed", s.handleFeed)
             protected.GET("/feed/days", s.handleFeedDays)
-            protected.GET("/chat", s.handleChatList)
-            protected.POST("/chat", s.handleChatCreate)
-        }
+			protected.GET("/chat", s.handleChatList)
+			protected.POST("/chat", s.handleChatCreate)
+			protected.GET("/photos/:id/interactions", s.handlePhotoInteractions)
+			protected.POST("/photos/:id/reaction", s.handlePhotoReaction)
+			protected.POST("/photos/:id/comments", s.handlePhotoComment)
+		}
 
         admin := api.Group("/admin")
         admin.Use(s.requireAuth, s.requireAdmin)
@@ -1627,7 +1630,148 @@ func (s *Server) handleMyPhotos(c *gin.Context) {
     for _, p := range photos {
         out = append(out, s.photoJSON(p))
     }
-    c.JSON(http.StatusOK, gin.H{"items": out})
+	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) handlePhotoInteractions(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photoID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+
+	photo, err := s.loadPhotoForInteraction(photoID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+		return
+	}
+	if ok, lockErr := s.ensurePhotoVisibleToUser(user.ID, photo); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": lockErr})
+		return
+	}
+
+	out, err := s.photoInteractionsPayload(photoID, user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (s *Server) handlePhotoReaction(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photoID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+	var req struct {
+		Emoji string `json:"emoji" binding:"required,max=16"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	emoji := strings.TrimSpace(req.Emoji)
+	if emoji == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "emoji required"})
+		return
+	}
+
+	photo, err := s.loadPhotoForInteraction(photoID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+		return
+	}
+	if ok, lockErr := s.ensurePhotoVisibleToUser(user.ID, photo); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": lockErr})
+		return
+	}
+
+	var existing models.PhotoReaction
+	findErr := s.DB.Where("photo_id = ? AND user_id = ?", photoID, user.ID).First(&existing).Error
+	if findErr == nil {
+		if existing.Emoji == emoji {
+			if err := s.DB.Delete(&existing).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "reaction delete failed"})
+				return
+			}
+		} else {
+			if err := s.DB.Model(&existing).Update("emoji", emoji).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "reaction update failed"})
+				return
+			}
+		}
+	} else if errors.Is(findErr, gorm.ErrRecordNotFound) {
+		row := models.PhotoReaction{
+			PhotoID: photoID,
+			UserID:  user.ID,
+			Emoji:   emoji,
+		}
+		if err := s.DB.Create(&row).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "reaction create failed"})
+			return
+		}
+	} else {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "reaction query failed"})
+		return
+	}
+
+	out, err := s.photoInteractionsPayload(photoID, user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (s *Server) handlePhotoComment(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photoID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+	var req struct {
+		Body string `json:"body" binding:"required,max=500"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	body := strings.TrimSpace(req.Body)
+	if body == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "comment required"})
+		return
+	}
+
+	photo, err := s.loadPhotoForInteraction(photoID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+		return
+	}
+	if ok, lockErr := s.ensurePhotoVisibleToUser(user.ID, photo); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": lockErr})
+		return
+	}
+
+	comment := models.PhotoComment{
+		PhotoID: photoID,
+		UserID:  user.ID,
+		Body:    body,
+	}
+	if err := s.DB.Create(&comment).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "comment create failed"})
+		return
+	}
+
+	out, err := s.photoInteractionsPayload(photoID, user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	c.JSON(http.StatusCreated, out)
 }
 
 type monthReliableRow struct {
@@ -1803,6 +1947,93 @@ func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+type photoReactionCountRow struct {
+	Emoji string
+	Count int64
+}
+
+func (s *Server) loadPhotoForInteraction(photoID uint) (models.Photo, error) {
+	var photo models.Photo
+	if err := s.DB.First(&photo, photoID).Error; err != nil {
+		return models.Photo{}, err
+	}
+	return photo, nil
+}
+
+func (s *Server) ensurePhotoVisibleToUser(userID uint, photo models.Photo) (bool, string) {
+	today := time.Now().In(s.Location).Format("2006-01-02")
+	if photo.Day != today {
+		return true, ""
+	}
+	if photo.UserID == userID {
+		return true, ""
+	}
+	hasPosted, err := s.userHasPostedForDay(userID, today)
+	if err != nil {
+		return false, "query failed"
+	}
+	if !hasPosted {
+		return false, "Poste zuerst dein Foto, um die Beitraege der anderen zu sehen"
+	}
+	return true, ""
+}
+
+func (s *Server) photoInteractionsPayload(photoID uint, viewerID uint) (gin.H, error) {
+	reactionRows := make([]photoReactionCountRow, 0)
+	if err := s.DB.Model(&models.PhotoReaction{}).
+		Select("emoji, COUNT(*) as count").
+		Where("photo_id = ?", photoID).
+		Group("emoji").
+		Order("count desc, emoji asc").
+		Scan(&reactionRows).Error; err != nil {
+		return nil, err
+	}
+
+	var my models.PhotoReaction
+	myReaction := ""
+	if err := s.DB.Where("photo_id = ? AND user_id = ?", photoID, viewerID).First(&my).Error; err == nil {
+		myReaction = my.Emoji
+	}
+
+	var comments []models.PhotoComment
+	if err := s.DB.Preload("User").
+		Where("photo_id = ?", photoID).
+		Order("created_at asc").
+		Limit(200).
+		Find(&comments).Error; err != nil {
+		return nil, err
+	}
+
+	reactions := make([]gin.H, 0, len(reactionRows))
+	for _, row := range reactionRows {
+		reactions = append(reactions, gin.H{
+			"emoji": row.Emoji,
+			"count": row.Count,
+		})
+	}
+
+	commentItems := make([]gin.H, 0, len(comments))
+	for _, item := range comments {
+		commentItems = append(commentItems, gin.H{
+			"id":        item.ID,
+			"body":      item.Body,
+			"createdAt": item.CreatedAt,
+			"user": gin.H{
+				"id":            item.User.ID,
+				"username":      item.User.Username,
+				"favoriteColor": defaultColor(item.User.FavoriteColor),
+			},
+		})
+	}
+
+	return gin.H{
+		"photoId":    photoID,
+		"reactions":  reactions,
+		"myReaction": myReaction,
+		"comments":   commentItems,
+	}, nil
 }
 
 func (s *Server) ensurePromptForPostingDay(day string) (models.DailyPrompt, error) {
