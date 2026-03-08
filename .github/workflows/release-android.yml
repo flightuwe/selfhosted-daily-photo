@@ -15,6 +15,10 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.10.2"
+      - name: Verify gradle
+        run: gradle --version
       - name: Build release APK
         run: gradle -p android :app:assembleRelease
       - name: Show generated APK files
