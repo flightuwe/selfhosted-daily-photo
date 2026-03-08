@@ -233,6 +233,18 @@ export async function getChat(token: string): Promise<ChatItem[]> {
   return data.items;
 }
 
+export async function sendChat(token: string, body: string): Promise<void> {
+  const res = await fetch(`${apiBase}/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ body }),
+  });
+  await parse(res);
+}
+
 export async function clearChat(token: string): Promise<void> {
   const res = await fetch(`${apiBase}/admin/chat/clear`, {
     method: "POST",

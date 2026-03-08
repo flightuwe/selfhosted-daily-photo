@@ -16,6 +16,7 @@ import {
   login,
   notifyUser,
   resetTodayPrompt,
+  sendChat,
   triggerPrompt,
   updateCalendarDay,
   updateChatCommand,
@@ -91,6 +92,7 @@ export function App() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
+  const [chatDraft, setChatDraft] = useState("");
   const [chatCommands, setChatCommands] = useState<ChatCommand[]>([]);
   const [editingCommandId, setEditingCommandId] = useState<number | null>(null);
   const [commandDraft, setCommandDraft] = useState<CommandDraft>(emptyCommandDraft);
@@ -191,6 +193,21 @@ export function App() {
       await clearChat(token);
       setChatItems([]);
       setMessage("Chat wurde geleert.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onSendAdminChat(e: React.FormEvent) {
+    e.preventDefault();
+    const text = chatDraft.trim();
+    if (!text) return;
+    setMessage("");
+    try {
+      await sendChat(token, text);
+      setChatDraft("");
+      await loadChat(token);
+      setMessage("Nachricht in Chat gesendet.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -769,6 +786,14 @@ export function App() {
                 <button className="danger" onClick={onClearChat}>Chat leeren</button>
               </div>
             </div>
+            <form onSubmit={onSendAdminChat} className="row">
+              <input
+                value={chatDraft}
+                onChange={(e) => setChatDraft(e.target.value)}
+                placeholder="Als Admin in den Chat schreiben..."
+              />
+              <button type="submit">Senden</button>
+            </form>
             {chatItems.length === 0 && <p>Keine Chat-Nachrichten.</p>}
             <div className="chat-list">
               {chatItems.map((msg) => (
