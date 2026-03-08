@@ -50,6 +50,7 @@ func main() {
         log.Printf("notifications: provider=%s", notifier.Name())
     }
     promptService := &scheduler.DailyPromptService{DB: database, Location: location}
+    monitor := api.NewMonitor()
     server := &api.Server{
         DB:       database,
         Config:   cfg,
@@ -58,6 +59,7 @@ func main() {
         Notifier: notifier,
         Prompt:   promptService,
         Location: location,
+        Monitor:  monitor,
     }
 
     promptService.Start(cfg.SchedulerEnabled, func(_ models.DailyPrompt, settings models.AppSettings) {
@@ -71,6 +73,7 @@ func main() {
             tokens = append(tokens, t.Token)
         }
         result, err := notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
+        monitor.RecordPush(result.Sent, result.Failed, len(result.InvalidTokens), err != nil)
         if len(result.InvalidTokens) > 0 {
             if dbErr := database.Where("token IN ?", result.InvalidTokens).Delete(&models.DeviceToken{}).Error; dbErr != nil {
                 log.Printf("failed to remove invalid tokens: %v", dbErr)

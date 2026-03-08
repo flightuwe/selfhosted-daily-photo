@@ -87,6 +87,45 @@ export type ChatCommand = {
   updatedAt: string;
 };
 
+export type SystemComponent = {
+  name: string;
+  ok: boolean;
+  message: string;
+};
+
+export type SystemHealth = {
+  ok: boolean;
+  version: string;
+  provider: string;
+  time: string;
+  uploadSizeBytes: number;
+  latestPrompt?: {
+    day?: string;
+    triggeredAt?: string | null;
+    uploadUntil?: string | null;
+    triggerSource?: string;
+    requestedByUser?: string;
+  };
+  components: SystemComponent[];
+  metrics?: {
+    startedAt?: string;
+    uptimeSec?: number;
+    requestsTotal?: number;
+    errorsTotal?: number;
+    errors4xx?: number;
+    errors5xx?: number;
+    errorRatePercent?: number;
+    p95LatencyMs?: number;
+    recentRequestsCnt?: number;
+    push?: {
+      sent?: number;
+      failed?: number;
+      invalidTokens?: number;
+      errors?: number;
+    };
+  };
+};
+
 const apiBase = import.meta.env.VITE_API_BASE || "/api";
 
 async function parse<T>(res: Response): Promise<T> {
@@ -311,4 +350,11 @@ export async function updateCalendarDay(token: string, day: string, plannedAt: s
     body: JSON.stringify({ plannedAt }),
   });
   return parse<CalendarItem>(res);
+}
+
+export async function getSystemHealth(token: string): Promise<SystemHealth> {
+  const res = await fetch(`${apiBase}/admin/system/health`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<SystemHealth>(res);
 }

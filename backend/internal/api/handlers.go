@@ -30,10 +30,12 @@ type Server struct {
     Notifier notify.Sender
     Prompt   *scheduler.DailyPromptService
     Location *time.Location
+    Monitor  *Monitor
 }
 
 func (s *Server) Router() *gin.Engine {
     r := gin.Default()
+    r.Use(s.requestIDMiddleware(), s.metricsMiddleware())
     r.Use(cors.New(cors.Config{
         AllowOrigins:     s.Config.AllowedOrigins,
         AllowMethods:     []string{"GET", "POST", "PUT", "DELETE"},
@@ -48,6 +50,9 @@ func (s *Server) Router() *gin.Engine {
 	api := r.Group("/api")
 	{
 		api.GET("/health", s.handleHealth)
+        api.GET("/health/live", s.handleLiveHealth)
+        api.GET("/health/ready", s.handleReadyHealth)
+        api.GET("/metrics", s.handleMetrics)
         api.POST("/auth/register", s.handleRegister)
         api.POST("/auth/login", s.handleLogin)
 
@@ -87,6 +92,7 @@ func (s *Server) Router() *gin.Engine {
             admin.POST("/chat/commands", s.handleAdminCreateChatCommand)
             admin.PUT("/chat/commands/:id", s.handleAdminUpdateChatCommand)
             admin.DELETE("/chat/commands/:id", s.handleAdminDeleteChatCommand)
+            admin.GET("/system/health", s.handleAdminSystemHealth)
 
             admin.GET("/users", s.handleAdminListUsers)
             admin.POST("/users", s.handleAdminCreateUser)
@@ -653,6 +659,7 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 
     tokens := s.allDeviceTokens()
     sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
+    s.recordPushResult(sendResult, sendErr)
     removed := s.removeInvalidTokens(sendResult.InvalidTokens)
     if sendErr != nil {
         c.JSON(http.StatusOK, gin.H{
@@ -875,6 +882,7 @@ func (s *Server) handleBroadcastNotification(c *gin.Context) {
 
     tokens := s.allDeviceTokens()
     sendResult, err := s.Notifier.SendDailyPrompt(tokens, req.Body)
+    s.recordPushResult(sendResult, err)
     removed := s.removeInvalidTokens(sendResult.InvalidTokens)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{
@@ -919,6 +927,7 @@ func (s *Server) handleUserNotification(c *gin.Context) {
 
     tokens := s.userDeviceTokens(id)
     sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, req.Body)
+    s.recordPushResult(sendResult, sendErr)
     removed := s.removeInvalidTokens(sendResult.InvalidTokens)
     if sendErr != nil {
         c.JSON(http.StatusInternalServerError, gin.H{
@@ -1071,6 +1080,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
             pushText := renderCommandText(cmd.PushText, user.Username)
             tokens := s.allDeviceTokens()
             sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
+            s.recordPushResult(sendResult, sendErr)
             invalidRemoved = s.removeInvalidTokens(sendResult.InvalidTokens)
         }
         if cmd.PostChat {
@@ -1105,6 +1115,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
             pushText := renderCommandText(defaultIfBlank(cmd.PushText, "{user} hat eine Nachricht gesendet."), user.Username)
             tokens := s.allDeviceTokens()
             sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
+            s.recordPushResult(sendResult, sendErr)
             invalidRemoved = s.removeInvalidTokens(sendResult.InvalidTokens)
         }
         if cmd.PostChat {
@@ -1434,6 +1445,13 @@ func (s *Server) removeInvalidTokens(tokens []string) int64 {
         return 0
     }
     return tx.RowsAffected
+}
+
+func (s *Server) recordPushResult(result notify.SendResult, err error) {
+    if s.Monitor == nil {
+        return
+    }
+    s.Monitor.RecordPush(result.Sent, result.Failed, len(result.InvalidTokens), err != nil)
 }
 
 func defaultColor(v string) string {

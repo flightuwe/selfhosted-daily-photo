@@ -10,6 +10,7 @@ import {
   getCalendar,
   getChat,
   getChatCommands,
+  getSystemHealth,
   getSettings,
   getStats,
   listUsers,
@@ -29,9 +30,10 @@ import {
   type CalendarItem,
   type FeedItem,
   type Settings,
+  type SystemHealth,
 } from "./api";
 
-type Tab = "dashboard" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "settings";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "settings";
 
 const DEFAULT_SETTINGS: Settings = {
   promptWindowStartHour: 8,
@@ -93,6 +95,7 @@ export function App() {
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [chatDraft, setChatDraft] = useState("");
+  const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
   const [chatCommands, setChatCommands] = useState<ChatCommand[]>([]);
   const [editingCommandId, setEditingCommandId] = useState<number | null>(null);
   const [commandDraft, setCommandDraft] = useState<CommandDraft>(emptyCommandDraft);
@@ -138,7 +141,18 @@ export function App() {
     if (activeTab === "commands") {
       void loadCommands(token);
     }
+    if (activeTab === "system") {
+      void loadSystemHealth(token);
+    }
   }, [token, activeTab, feedDay]);
+
+  useEffect(() => {
+    if (!token || activeTab !== "system") return;
+    const id = window.setInterval(() => {
+      void loadSystemHealth(token);
+    }, 10000);
+    return () => window.clearInterval(id);
+  }, [token, activeTab]);
 
   async function loadAdminData(authToken: string) {
     try {
@@ -181,6 +195,15 @@ export function App() {
     try {
       const items = await getChatCommands(authToken);
       setChatCommands(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function loadSystemHealth(authToken: string) {
+    try {
+      const status = await getSystemHealth(authToken);
+      setSystemHealth(status);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -235,6 +258,7 @@ export function App() {
     if (activeTab === "chat") await loadChat(token);
     if (activeTab === "calendar") await loadCalendar(token);
     if (activeTab === "commands") await loadCommands(token);
+    if (activeTab === "system") await loadSystemHealth(token);
   }
 
   function commandPayloadFromDraft(d: CommandDraft) {
@@ -514,6 +538,7 @@ export function App() {
 
         <div className="tabs">
           <button className={activeTab === "dashboard" ? "tab active" : "tab"} onClick={() => setActiveTab("dashboard")}>Dashboard</button>
+          <button className={activeTab === "system" ? "tab active" : "tab"} onClick={() => setActiveTab("system")}>System Health</button>
           <button className={activeTab === "events" ? "tab active" : "tab"} onClick={() => setActiveTab("events")}>Events & Notifications</button>
           <button className={activeTab === "commands" ? "tab active" : "tab"} onClick={() => setActiveTab("commands")}>Chat-Commands</button>
           <button className={activeTab === "users" ? "tab active" : "tab"} onClick={() => setActiveTab("users")}>Benutzerverwaltung</button>
@@ -529,6 +554,80 @@ export function App() {
             <CardStat title="Geräte" value={stats.devices} />
             <CardStat title="Fotos" value={stats.photos} />
             <CardStat title="Prompt-Events" value={stats.prompts} />
+          </div>
+        )}
+
+        {activeTab === "system" && (
+          <div className="stack">
+            <div className="row">
+              <h2>System Health</h2>
+              <button onClick={() => loadSystemHealth(token)}>Aktualisieren</button>
+            </div>
+            {!systemHealth && <p>Keine Daten geladen.</p>}
+            {systemHealth && (
+              <>
+                <article className="settings-current">
+                  <div className="settings-grid">
+                    <p><strong>Gesamtstatus:</strong> {systemHealth.ok ? "OK" : "DEGRADED"}</p>
+                    <p><strong>Version:</strong> {systemHealth.version}</p>
+                    <p><strong>Push Provider:</strong> {systemHealth.provider}</p>
+                    <p><strong>Zeitpunkt:</strong> {formatDateTime(systemHealth.time)}</p>
+                    <p><strong>Upload-Speicher:</strong> {formatBytes(systemHealth.uploadSizeBytes || 0)}</p>
+                    <p><strong>Uptime:</strong> {formatDuration(systemHealth.metrics?.uptimeSec || 0)}</p>
+                  </div>
+                </article>
+
+                <h3>Komponenten</h3>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Komponente</th>
+                      <th>Status</th>
+                      <th>Details</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {systemHealth.components.map((c) => (
+                      <tr key={c.name}>
+                        <td>{c.name}</td>
+                        <td>{c.ok ? "OK" : "FEHLER"}</td>
+                        <td>{c.message}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                <h3>API-Metriken</h3>
+                <div className="grid4">
+                  <CardStat title="Requests gesamt" value={Number(systemHealth.metrics?.requestsTotal || 0)} />
+                  <CardStat title="Fehler gesamt" value={Number(systemHealth.metrics?.errorsTotal || 0)} />
+                  <CardStat title="4xx" value={Number(systemHealth.metrics?.errors4xx || 0)} />
+                  <CardStat title="5xx" value={Number(systemHealth.metrics?.errors5xx || 0)} />
+                </div>
+                <div className="grid4">
+                  <CardStat title="Error-Rate %" value={Number(systemHealth.metrics?.errorRatePercent || 0)} />
+                  <CardStat title="P95 ms" value={Number(systemHealth.metrics?.p95LatencyMs || 0)} />
+                  <CardStat title="Recent Req" value={Number(systemHealth.metrics?.recentRequestsCnt || 0)} />
+                  <CardStat title="Push Sent" value={Number(systemHealth.metrics?.push?.sent || 0)} />
+                </div>
+                <div className="grid4">
+                  <CardStat title="Push Failed" value={Number(systemHealth.metrics?.push?.failed || 0)} />
+                  <CardStat title="Push Invalid" value={Number(systemHealth.metrics?.push?.invalidTokens || 0)} />
+                  <CardStat title="Push Errors" value={Number(systemHealth.metrics?.push?.errors || 0)} />
+                </div>
+
+                <h3>Letzter Moment</h3>
+                <article className="settings-current">
+                  <div className="settings-grid">
+                    <p><strong>Tag:</strong> {systemHealth.latestPrompt?.day || "-"}</p>
+                    <p><strong>Trigger:</strong> {systemHealth.latestPrompt?.triggeredAt ? formatDateTime(systemHealth.latestPrompt.triggeredAt) : "-"}</p>
+                    <p><strong>Upload bis:</strong> {systemHealth.latestPrompt?.uploadUntil ? formatDateTime(systemHealth.latestPrompt.uploadUntil) : "-"}</p>
+                    <p><strong>Quelle:</strong> {systemHealth.latestPrompt?.triggerSource || "-"}</p>
+                    <p><strong>Angefordert von:</strong> {systemHealth.latestPrompt?.requestedByUser || "-"}</p>
+                  </div>
+                </article>
+              </>
+            )}
           </div>
         )}
 
@@ -1006,6 +1105,28 @@ function formatDateTime(iso: string) {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx++;
+  }
+  return `${value.toFixed(idx === 0 ? 0 : 2)} ${units[idx]}`;
+}
+
+function formatDuration(sec: number) {
+  const s = Math.max(0, Math.floor(sec));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
 }
 
 function CardStat({ title, value }: { title: string; value: number }) {
