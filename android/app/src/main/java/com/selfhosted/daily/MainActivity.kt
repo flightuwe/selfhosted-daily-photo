@@ -71,6 +71,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -166,6 +167,8 @@ data class FeedItem(
     val isLate: Boolean = false,
     val photo: PromptPhoto,
     val user: User,
+    val reactions: List<ReactionCount> = emptyList(),
+    val comments: List<PhotoCommentItem> = emptyList(),
     val triggerSource: String? = null,
     val requestedByUser: String? = null
 )
@@ -1500,7 +1503,26 @@ fun AppScreen(vm: MainVm) {
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    ZoomableViewerImage(url = viewerUrls[viewerIndex])
+                    Box(
+                        modifier = Modifier.pointerInput(viewerUrls, viewerIndex) {
+                            var dragX = 0f
+                            detectHorizontalDragGestures(
+                                onHorizontalDrag = { _, amount ->
+                                    dragX += amount
+                                },
+                                onDragEnd = {
+                                    if (dragX > 80f && viewerIndex > 0) {
+                                        viewerIndex -= 1
+                                    } else if (dragX < -80f && viewerIndex < viewerUrls.lastIndex) {
+                                        viewerIndex += 1
+                                    }
+                                    dragX = 0f
+                                }
+                            )
+                        }
+                    ) {
+                        ZoomableViewerImage(url = viewerUrls[viewerIndex])
+                    }
                     Text("Unter diesem Bild kannst du reagieren oder kommentieren.")
                     if (viewerPhotoId != null) {
                         val interactions = state.photoInteractions
@@ -2127,6 +2149,22 @@ fun FeedTab(
                             if (item.photo.promptOnly) {
                                 momentReasonLine(item.triggerSource, item.requestedByUser)?.let { reason ->
                                     Text(reason, color = Color(0xFF1F5FBF))
+                                }
+                            }
+                            if (item.reactions.isNotEmpty()) {
+                                Text(
+                                    item.reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
+                                    color = Color(0xFF37474F)
+                                )
+                            }
+                            if (item.comments.isNotEmpty()) {
+                                item.comments.take(2).forEach { comment ->
+                                    Text(
+                                        "${comment.user.username}: ${comment.body}",
+                                        color = Color(0xFF455A64),
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
                             }
                             if (!item.photo.promptOnly) {

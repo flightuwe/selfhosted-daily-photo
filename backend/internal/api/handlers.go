@@ -706,30 +706,42 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
     var prompt models.DailyPrompt
     _ = s.DB.Where("day = ?", day).First(&prompt).Error
 
-    var photos []models.Photo
-    if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-        return
-    }
+	var photos []models.Photo
+	if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
 
-    out := make([]gin.H, 0, len(photos))
-    for _, p := range photos {
-        isLate := false
-        if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
+	photoIDs := make([]uint, 0, len(photos))
+	for _, p := range photos {
+		photoIDs = append(photoIDs, p.ID)
+	}
+	reactionByPhoto, commentByPhoto, err := s.feedInteractionPreview(photoIDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "interaction query failed"})
+		return
+	}
+
+	out := make([]gin.H, 0, len(photos))
+	for _, p := range photos {
+		isLate := false
+		if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
             isLate = true
         }
         out = append(out, gin.H{
             "isLate": isLate,
             "photo":  s.photoJSON(p),
-            "user": gin.H{
-                "id":       p.User.ID,
-                "username": p.User.Username,
-                "favoriteColor": defaultColor(p.User.FavoriteColor),
-            },
-            "triggerSource":   prompt.TriggerSource,
-            "requestedByUser": prompt.RequestedBy,
-        })
-    }
+			"user": gin.H{
+				"id":       p.User.ID,
+				"username": p.User.Username,
+				"favoriteColor": defaultColor(p.User.FavoriteColor),
+			},
+			"reactions":      reactionByPhoto[p.ID],
+			"comments":       commentByPhoto[p.ID],
+			"triggerSource":   prompt.TriggerSource,
+			"requestedByUser": prompt.RequestedBy,
+		})
+	}
 
     recap, _ := s.monthlyRecapForDay(day, adminUser.ID)
 
@@ -1954,12 +1966,67 @@ type photoReactionCountRow struct {
 	Count int64
 }
 
+type photoReactionPreviewRow struct {
+	PhotoID uint
+	Emoji   string
+	Count   int64
+}
+
 func (s *Server) loadPhotoForInteraction(photoID uint) (models.Photo, error) {
 	var photo models.Photo
 	if err := s.DB.First(&photo, photoID).Error; err != nil {
 		return models.Photo{}, err
 	}
 	return photo, nil
+}
+
+func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[uint][]gin.H, error) {
+	reactionByPhoto := make(map[uint][]gin.H)
+	commentByPhoto := make(map[uint][]gin.H)
+	if len(photoIDs) == 0 {
+		return reactionByPhoto, commentByPhoto, nil
+	}
+
+	var reactionRows []photoReactionPreviewRow
+	if err := s.DB.Model(&models.PhotoReaction{}).
+		Select("photo_id as photo_id, emoji as emoji, COUNT(*) as count").
+		Where("photo_id IN ?", photoIDs).
+		Group("photo_id, emoji").
+		Order("count desc, emoji asc").
+		Scan(&reactionRows).Error; err != nil {
+		return nil, nil, err
+	}
+	for _, row := range reactionRows {
+		reactionByPhoto[row.PhotoID] = append(reactionByPhoto[row.PhotoID], gin.H{
+			"emoji": row.Emoji,
+			"count": row.Count,
+		})
+	}
+
+	var comments []models.PhotoComment
+	if err := s.DB.Preload("User").
+		Where("photo_id IN ?", photoIDs).
+		Order("created_at desc").
+		Find(&comments).Error; err != nil {
+		return nil, nil, err
+	}
+	for _, item := range comments {
+		if len(commentByPhoto[item.PhotoID]) >= 2 {
+			continue
+		}
+		commentByPhoto[item.PhotoID] = append(commentByPhoto[item.PhotoID], gin.H{
+			"id":        item.ID,
+			"body":      item.Body,
+			"createdAt": item.CreatedAt,
+			"user": gin.H{
+				"id":            item.User.ID,
+				"username":      item.User.Username,
+				"favoriteColor": defaultColor(item.User.FavoriteColor),
+			},
+		})
+	}
+
+	return reactionByPhoto, commentByPhoto, nil
 }
 
 func (s *Server) ensurePhotoVisibleToUser(userID uint, photo models.Photo) (bool, string) {
