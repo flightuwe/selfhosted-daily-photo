@@ -65,6 +65,8 @@ func (s *Server) Router() *gin.Engine {
             protected.GET("/me/photos", s.handleMyPhotos)
             protected.POST("/devices", s.handleDevice)
             protected.GET("/prompt/current", s.handleCurrentPrompt)
+            protected.GET("/moment/special/status", s.handleSpecialMomentStatus)
+            protected.POST("/moment/special/request", s.handleSpecialMomentRequest)
             protected.POST("/uploads", s.handleUpload)
             protected.POST("/uploads/dual", s.handleDualUpload)
             protected.GET("/feed", s.handleFeed)
@@ -280,6 +282,73 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
         "ownPhoto":        ownPhoto,
         "triggerSource":   prompt.TriggerSource,
         "requestedByUser": prompt.RequestedBy,
+    })
+}
+
+func (s *Server) handleSpecialMomentStatus(c *gin.Context) {
+    user, _ := userFromContext(c)
+    status, err := s.specialMomentStatus(user.ID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "status query failed"})
+        return
+    }
+    c.JSON(http.StatusOK, status)
+}
+
+func (s *Server) handleSpecialMomentRequest(c *gin.Context) {
+    user, _ := userFromContext(c)
+    now := time.Now().In(s.Location)
+
+    status, err := s.specialMomentStatus(user.ID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "status query failed"})
+        return
+    }
+    canRequest, _ := status["canRequest"].(bool)
+    if !canRequest {
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error":  "sondermoment already requested this week",
+            "status": status,
+        })
+        return
+    }
+
+    prompt, settings, err := s.Prompt.TriggerNowWithSource("special_request", &user)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "special trigger failed"})
+        return
+    }
+
+    reqRow := models.SpecialMomentRequest{
+        UserID:      user.ID,
+        RequestedAt: now,
+    }
+    if err := s.DB.Create(&reqRow).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save special request failed"})
+        return
+    }
+
+    pushBody := fmt.Sprintf("Sondermoment von %s angefordert! Du hast %d Minuten Zeit.", user.Username, settings.UploadWindowMinutes)
+    tokens := s.allDeviceTokens()
+    sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, pushBody)
+    s.recordPushResult(sendResult, sendErr)
+    removed := s.removeInvalidTokens(sendResult.InvalidTokens)
+
+    nextStatus, _ := s.specialMomentStatus(user.ID)
+    c.JSON(http.StatusOK, gin.H{
+        "ok":            true,
+        "prompt":        prompt,
+        "status":        nextStatus,
+        "provider":      s.Notifier.Name(),
+        "sentTo":        sendResult.Sent,
+        "failed":        sendResult.Failed,
+        "invalidRemoved": removed,
+        "notificationErr": func() string {
+            if sendErr != nil {
+                return sendErr.Error()
+            }
+            return ""
+        }(),
     })
 }
 
@@ -1462,6 +1531,38 @@ func (s *Server) recordPushResult(result notify.SendResult, err error) {
         return
     }
     s.Monitor.RecordPush(result.Sent, result.Failed, len(result.InvalidTokens), err != nil)
+}
+
+func (s *Server) specialMomentStatus(userID uint) (gin.H, error) {
+    var latest models.SpecialMomentRequest
+    err := s.DB.Where("user_id = ?", userID).Order("requested_at desc").First(&latest).Error
+    if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+        return nil, err
+    }
+    now := time.Now().In(s.Location)
+    if errors.Is(err, gorm.ErrRecordNotFound) || latest.ID == 0 {
+        return gin.H{
+            "canRequest":       true,
+            "requestedThisWeek": false,
+            "remainingSeconds": 0,
+            "nextAllowedAt":    nil,
+            "lastRequestedAt":  nil,
+        }, nil
+    }
+
+    nextAllowed := latest.RequestedAt.In(s.Location).Add(7 * 24 * time.Hour)
+    remaining := int64(nextAllowed.Sub(now).Seconds())
+    if remaining < 0 {
+        remaining = 0
+    }
+    canRequest := remaining == 0
+    return gin.H{
+        "canRequest":        canRequest,
+        "requestedThisWeek": !canRequest,
+        "remainingSeconds":  remaining,
+        "nextAllowedAt":     nextAllowed,
+        "lastRequestedAt":   latest.RequestedAt,
+    }, nil
 }
 
 func defaultColor(v string) string {

@@ -167,6 +167,13 @@ data class DayListResponse(val items: List<String>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
 data class ChatItem(val id: Long, val body: String, val createdAt: String, val user: User)
 data class ChatResponse(val items: List<ChatItem>)
+data class SpecialMomentStatus(
+    val canRequest: Boolean,
+    val requestedThisWeek: Boolean,
+    val remainingSeconds: Long,
+    val nextAllowedAt: String? = null,
+    val lastRequestedAt: String? = null
+)
 data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
 data class HealthResponse(val ok: Boolean, val version: String = "unknown", val provider: String = "unknown")
 
@@ -188,6 +195,12 @@ interface Api {
 
     @GET("prompt/current")
     suspend fun prompt(@Header("Authorization") token: String): PromptResponse
+
+    @GET("moment/special/status")
+    suspend fun specialMomentStatus(@Header("Authorization") token: String): SpecialMomentStatus
+
+    @POST("moment/special/request")
+    suspend fun requestSpecialMoment(@Header("Authorization") token: String)
 
     @GET("feed")
     suspend fun feed(@Header("Authorization") token: String, @Query("day") day: String): FeedResponse
@@ -304,6 +317,8 @@ class AppRepo(private val api: Api, private val context: Context) {
         api.updateProfile("Bearer ${token()}", ProfileUpdateRequest(username, favoriteColor)).user
 
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
+    suspend fun specialMomentStatus(): SpecialMomentStatus = api.specialMomentStatus("Bearer ${token()}")
+    suspend fun requestSpecialMoment() { api.requestSpecialMoment("Bearer ${token()}") }
 
     suspend fun feedByDay(day: String): FeedResponse = api.feed("Bearer ${token()}", day)
     suspend fun feedDays(): List<String> = api.feedDays("Bearer ${token()}").items
@@ -521,6 +536,7 @@ data class UiState(
     val serverVersion: String = "unbekannt",
     val pushProvider: String = "unknown",
     val showPromptDialog: Boolean = false,
+    val specialMomentStatus: SpecialMomentStatus? = null,
     val updateInfo: UpdateInfo? = null,
     val darkMode: Boolean = false,
     val uploadQuality: Int = 82,
@@ -530,6 +546,7 @@ data class UiState(
 data class DashboardData(
     val me: User,
     val prompt: PromptResponse,
+    val special: SpecialMomentStatus,
     val photos: List<PromptPhoto>,
     val chat: List<ChatItem>,
     val feedDays: List<String>
@@ -618,13 +635,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.syncDeviceTokenIfNeeded()
             val me = repo.me()
             val prompt = repo.prompt()
+            val special = repo.specialMomentStatus()
             val photos = repo.myPhotos()
             val chat = repo.listChat()
             val feedDays = repo.feedDays()
-            DashboardData(me, prompt, photos, chat, feedDays)
+            DashboardData(me, prompt, special, photos, chat, feedDays)
         }.onSuccess { payload ->
             val me = payload.me
             val prompt = payload.prompt
+            val special = payload.special
             val photos = payload.photos
             val chat = payload.chat
             val calendarDays = payload.feedDays
@@ -642,6 +661,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             state = state.copy(
                 user = me,
                 prompt = prompt,
+                specialMomentStatus = special,
                 photos = photos,
                 chat = chat,
                 chatHasOtherMessages = true,
@@ -840,6 +860,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
+    suspend fun requestSpecialMoment() {
+        state = state.copy(loading = true)
+        runCatching { repo.requestSpecialMoment() }
+            .onSuccess {
+                state = state.copy(loading = false, message = "Sondermoment ausgelost")
+                refreshAll()
+            }
+            .onFailure { state = state.copy(loading = false, message = apiError(it, "Sondermoment anfordern fehlgeschlagen")) }
+    }
+
     fun dismissPromptDialog() {
         state = state.copy(showPromptDialog = false)
     }
@@ -947,6 +977,7 @@ fun AppScreen(vm: MainVm) {
     var chatInput by remember { mutableStateOf("") }
     var viewerUrls by remember { mutableStateOf<List<String>>(emptyList()) }
     var viewerIndex by remember { mutableStateOf(0) }
+    var showSpecialMomentConfirm by remember { mutableStateOf(false) }
     var requestFrontCapture by remember { mutableStateOf(false) }
     var cameraUploading by remember { mutableStateOf(false) }
     var cameraUploadPercent by remember { mutableStateOf(0) }
@@ -1072,6 +1103,23 @@ fun AppScreen(vm: MainVm) {
         )
     }
 
+    if (showSpecialMomentConfirm) {
+        AlertDialog(
+            onDismissRequest = { showSpecialMomentConfirm = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    showSpecialMomentConfirm = false
+                    scope.launch { vm.requestSpecialMoment() }
+                }) { Text("Ja, anfordern") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSpecialMomentConfirm = false }) { Text("Abbrechen") }
+            },
+            title = { Text("Sondermoment anfordern") },
+            text = { Text("Jeder Nutzer kann nur einmal pro Woche einen Sondermoment anfordern. Fortfahren?") }
+        )
+    }
+
     state.updateInfo?.let { update ->
         AlertDialog(
             onDismissRequest = { vm.dismissUpdateDialog() },
@@ -1170,10 +1218,12 @@ fun AppScreen(vm: MainVm) {
             when (state.activeTab) {
                 AppTab.CAMERA -> CameraTab(
                     prompt = state.prompt,
+                    specialMomentStatus = state.specialMomentStatus,
                     backPreviewUri = backPreviewUri,
                     frontPreviewUri = frontPreviewUri,
                     onCapturePrompt = { startDualCapture(true) },
                     onCaptureExtra = { startDualCapture(false) },
+                    onRequestSpecialMoment = { showSpecialMomentConfirm = true },
                     onReset = {
                         backPreviewUri = null
                         frontPreviewUri = null
@@ -1347,10 +1397,12 @@ fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: S
 @Composable
 fun CameraTab(
     prompt: PromptResponse?,
+    specialMomentStatus: SpecialMomentStatus?,
     backPreviewUri: Uri?,
     frontPreviewUri: Uri?,
     onCapturePrompt: () -> Unit,
     onCaptureExtra: () -> Unit,
+    onRequestSpecialMoment: () -> Unit,
     onReset: () -> Unit,
     onRetryUpload: () -> Unit,
     onGoFeed: () -> Unit,
@@ -1362,6 +1414,13 @@ fun CameraTab(
 ) {
     val hasPosted = prompt?.hasPosted == true
     val canUpload = prompt?.canUpload == true
+    val canSpecial = specialMomentStatus?.canRequest == true
+    val specialLabel = if (canSpecial) {
+        "Sondermoment anfordern"
+    } else {
+        val rem = specialMomentStatus?.remainingSeconds ?: 0L
+        "Sondermoment schon angefordert, naechster Sondermoment in ${formatRemaining(rem)}"
+    }
 
     Column(
         modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -1390,6 +1449,11 @@ fun CameraTab(
             }
             Button(onClick = onGoFeed, modifier = Modifier.fillMaxWidth()) { Text("Heutige Beitraege ansehen") }
             Button(onClick = onCaptureExtra, modifier = Modifier.fillMaxWidth()) { Text("Weitere Bilder hinzufuegen") }
+            Button(
+                onClick = onRequestSpecialMoment,
+                enabled = canSpecial,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(specialLabel) }
         } else {
             Text("Heute sind zwei Fotos noetig: Rueckkamera und Frontkamera.")
             if (canUpload) {
@@ -1400,6 +1464,11 @@ fun CameraTab(
 
             if (backPreviewUri == null) {
                 Button(onClick = onCapturePrompt, modifier = Modifier.fillMaxWidth()) { Text("Tagesmoment aufnehmen") }
+                Button(
+                    onClick = onRequestSpecialMoment,
+                    enabled = canSpecial,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(specialLabel) }
             } else {
                 Text("Rueckkamera aufgenommen")
                 AsyncImage(
@@ -1550,9 +1619,9 @@ fun FeedTab(
                                 Text(formatDayLabel(row.day), fontWeight = FontWeight.Bold)
                                 Text(row.day, color = Color.Gray)
                             }
-                            if (row.meta?.triggerSource == "chat_command" && !row.meta.requestedByUser.isNullOrBlank()) {
+                            if ((row.meta?.triggerSource == "chat_command" || row.meta?.triggerSource == "special_request") && !row.meta.requestedByUser.isNullOrBlank()) {
                                 Text(
-                                    "Community-Moment von ${row.meta.requestedByUser}",
+                                    "Sondermoment von ${row.meta.requestedByUser}",
                                     color = Color(0xFF1F5FBF),
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -1632,8 +1701,8 @@ fun CalendarTab(days: List<String>, promptMetaByDay: Map<String, PromptMeta>, se
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(formatDayLabel(day), fontWeight = if (selectedDay) FontWeight.Bold else FontWeight.Normal)
                     Text(day, color = Color.Gray)
-                    if (meta?.triggerSource == "chat_command" && !meta.requestedByUser.isNullOrBlank()) {
-                        Text("Moment von ${meta.requestedByUser}", color = Color(0xFF1F5FBF))
+                    if ((meta?.triggerSource == "chat_command" || meta?.triggerSource == "special_request") && !meta.requestedByUser.isNullOrBlank()) {
+                        Text("Sondermoment von ${meta.requestedByUser}", color = Color(0xFF1F5FBF))
                     }
                     if (selectedDay) {
                         Text("Ausgewaehlt", color = Color(0xFF1F5FBF))
@@ -1905,6 +1974,13 @@ private fun createdAtDay(value: String): String {
     return value
 }
 
+private fun formatRemaining(seconds: Long): String {
+    val sec = seconds.coerceAtLeast(0L)
+    val days = sec / 86400
+    val hours = (sec % 86400) / 3600
+    return "${days}d ${hours}h"
+}
+
 private fun normalizeHexColor(input: String): String {
     val raw = input.trim().ifBlank { "#1F5FBF" }
     val withHash = if (raw.startsWith("#")) raw else "#$raw"
@@ -1936,6 +2012,10 @@ private fun apiError(t: Throwable, fallback: String): String {
             409 -> when {
                 raw.contains("username exists") -> "Benutzername ist bereits vergeben."
                 else -> "Du hast heute bereits gepostet"
+            }
+            429 -> when {
+                raw.contains("sondermoment") -> "Sondermoment diese Woche bereits angefordert."
+                else -> "Zu viele Anfragen. Bitte spaeter erneut versuchen."
             }
             else -> fallback
         }

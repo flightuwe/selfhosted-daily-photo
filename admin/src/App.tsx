@@ -856,8 +856,8 @@ export function App() {
                     <strong>{item.user.username}</strong>
                     {item.isLate && <span className="late">Spaet</span>}
                   </div>
-                  {item.triggerSource === "chat_command" && item.requestedByUser && (
-                    <p className="small"><strong>Community-Moment:</strong> von {item.requestedByUser} per Chat-Command angefordert</p>
+                  {(item.triggerSource === "chat_command" || item.triggerSource === "special_request") && item.requestedByUser && (
+                    <p className="small"><strong>Sondermoment:</strong> von {item.requestedByUser} angefordert</p>
                   )}
                   <div className="photo-grid">
                     <a href={item.photo.url} target="_blank" rel="noreferrer">
@@ -939,8 +939,8 @@ export function App() {
                     <td>{item.triggeredAt ? "Ausgeloest" : "Geplant"}</td>
                     <td>{item.source === "manual" ? "Manuell" : "Auto"}</td>
                     <td>
-                      {item.triggerSource === "chat_command" && item.requestedByUser
-                        ? `Chat (${item.requestedByUser})`
+                      {(item.triggerSource === "chat_command" || item.triggerSource === "special_request") && item.requestedByUser
+                        ? `Sondermoment (${item.requestedByUser})`
                         : item.triggerSource === "admin_manual"
                           ? "Admin"
                           : item.triggerSource === "admin_reset"

@@ -94,3 +94,11 @@ type ChatCommand struct {
     CreatedAt      time.Time `json:"createdAt"`
     UpdatedAt      time.Time `json:"updatedAt"`
 }
+
+type SpecialMomentRequest struct {
+    ID          uint      `gorm:"primaryKey" json:"id"`
+    UserID      uint      `gorm:"index;not null" json:"userId"`
+    User        User      `json:"user"`
+    RequestedAt time.Time `gorm:"index;not null" json:"requestedAt"`
+    CreatedAt   time.Time `json:"createdAt"`
+}
