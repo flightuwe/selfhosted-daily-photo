@@ -819,6 +819,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure { state = state.copy(loading = false, message = apiError(it, "Update-Pruefung fehlgeschlagen")) }
     }
 
+    suspend fun checkConnection() {
+        state = state.copy(loading = true)
+        runCatching { repo.health() }
+            .onSuccess { health ->
+                state = state.copy(
+                    loading = false,
+                    serverConnected = health.ok,
+                    serverVersion = health.version,
+                    pushProvider = health.provider,
+                    message = if (health.ok) "Verbindung erfolgreich geprueft" else "Server nicht erreichbar"
+                )
+            }
+            .onFailure {
+                state = state.copy(
+                    loading = false,
+                    serverConnected = false,
+                    message = apiError(it, "Verbindung pruefen fehlgeschlagen")
+                )
+            }
+    }
+
     fun dismissPromptDialog() {
         state = state.copy(showPromptDialog = false)
     }
@@ -1278,6 +1299,7 @@ fun AppScreen(vm: MainVm) {
                         }
                     },
                     onCheckUpdate = { scope.launch { vm.checkForUpdate() } },
+                    onCheckConnection = { scope.launch { vm.checkConnection() } },
                     onLogout = { vm.logout() },
                     onOpenViewer = { urls ->
                         viewerUrls = urls
@@ -1706,6 +1728,7 @@ fun ProfileTab(
     onNewPasswordChange: (String) -> Unit,
     onChangePassword: () -> Unit,
     onCheckUpdate: () -> Unit,
+    onCheckConnection: () -> Unit,
     onLogout: () -> Unit,
     onOpenViewer: (List<String>) -> Unit
 ) {
@@ -1778,6 +1801,8 @@ fun ProfileTab(
                     Text("Server-Version: $serverVersion")
                     Text("Push-Provider: $pushProvider")
                     Text("API: $apiBaseUrl")
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
                 }
             }
         }
