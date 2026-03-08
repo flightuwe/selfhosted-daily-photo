@@ -28,4 +28,4 @@ jobs:
         with:
           context: ${{ matrix.context }}
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/selfhosted-bereal-${{ matrix.name }}:latest
+          tags: ghcr.io/${{ github.repository_owner }}/daily-${{ matrix.name }}:latest

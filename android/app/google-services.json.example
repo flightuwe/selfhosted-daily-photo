@@ -1,4 +1,3 @@
 {
-  "note": "Put your real Firebase google-services.json here for local builds. In GitHub Actions use secret ANDROID_GOOGLE_SERVICES_JSON_BASE64."
+  "note": "Put your real Firebase google-services.json for package com.selfhosted.daily here for local builds. In GitHub Actions use secret ANDROID_GOOGLE_SERVICES_JSON_BASE64."
 }
-

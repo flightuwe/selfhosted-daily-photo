@@ -1,4 +1,4 @@
-# Selfhosted Daily Photo (BeReal-like)
+# Daily
 
 Monorepo mit:
 - `backend/` Go API (JWT, Prompt-Fenster, Uploads, Feed, Admin-Endpoints)
@@ -26,8 +26,8 @@ Monorepo mit:
 
 1. In GitHub muessen die Workflows `ci` und `publish-server-images` erfolgreich sein.
 2. Die GHCR Images muessen vorhanden sein:
-   - `ghcr.io/flightuwe/selfhosted-bereal-backend:latest`
-   - `ghcr.io/flightuwe/selfhosted-bereal-admin:latest`
+   - `ghcr.io/flightuwe/daily-backend:latest`
+   - `ghcr.io/flightuwe/daily-admin:latest`
 3. Wenn dein Repo/Package privat ist: in Portainer unter `Registries` eine GitHub Container Registry mit Personal Access Token hinterlegen.
 
 ### Stack in Portainer anlegen
@@ -51,6 +51,7 @@ Monorepo mit:
 ## Android App
 
 - API Basis-URL in `android/app/build.gradle.kts` bei `API_BASE_URL` auf deine Domain setzen, z. B. `https://photos.example.com/api/`.
+- Android Paketname: `com.selfhosted.daily`
 - Fuer FCM muss `android/app/google-services.json` vorhanden sein (lokal) oder in CI als Secret gesetzt werden.
 - Build lokal:
   - `gradle -p android :app:assembleRelease`
@@ -102,6 +103,7 @@ Danach liegt `app-release.apk` in GitHub Releases.
 ## FCM Push aktivieren
 
 1. Firebase Projekt anlegen und Cloud Messaging aktivieren.
+   - Android App in Firebase mit Paketname `com.selfhosted.daily`
 2. Service Account JSON laden und auf Synology ablegen:
    - `/volume1/docker/selfhosted-daily-photo/secrets/firebase-service-account.json`
 3. Im Backend setzen:

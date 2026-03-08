@@ -195,7 +195,7 @@ export function App() {
     return (
       <main className="page">
         <section className="panel">
-          <h1>Selfhosted BeReal Admin</h1>
+          <h1>Daily Admin</h1>
           <form onSubmit={onLogin} className="stack">
             <label>
               Benutzername

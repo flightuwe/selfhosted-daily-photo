@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "selfhosted-bereal"
+rootProject.name = "daily"
 include(":app")

@@ -1,4 +1,4 @@
-package com.selfhosted.bereal
+package com.selfhosted.daily
 
 import android.Manifest
 import android.content.Context
@@ -548,7 +548,7 @@ fun AppScreen(vm: MainVm) {
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically)
         ) {
-            Text("Selfhosted Daily Moment", style = MaterialTheme.typography.headlineSmall)
+            Text("Daily", style = MaterialTheme.typography.headlineSmall)
             OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Username") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Passwort") }, modifier = Modifier.fillMaxWidth())
             Button(onClick = { scope.launch { vm.login(username, password) } }, modifier = Modifier.fillMaxWidth()) { Text("Einloggen") }
@@ -644,7 +644,7 @@ fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: S
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Selfhosted Daily Moment", style = MaterialTheme.typography.headlineSmall)
+        Text("Daily", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
         Text(if (serverConnected) "Server verbunden" else "Server wird geprüft ...")
         Text("Server-Version: $serverVersion")

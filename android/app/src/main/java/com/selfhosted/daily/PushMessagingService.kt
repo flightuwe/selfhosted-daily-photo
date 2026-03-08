@@ -1,4 +1,4 @@
-package com.selfhosted.bereal
+package com.selfhosted.daily
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -64,4 +64,3 @@ class PushMessagingService : FirebaseMessagingService() {
         private const val CHANNEL_ID = "daily_prompt"
     }
 }
-

@@ -8,6 +8,7 @@ android/local.properties
 android/app/build/
 android/build/
 android/app/google-services.json
+google-services.json
 
 # Go
 backend/data/

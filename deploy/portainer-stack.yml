@@ -10,7 +10,7 @@ x-debug:
 
 services:
   backend:
-    image: ghcr.io/flightuwe/selfhosted-bereal-backend:latest
+    image: ghcr.io/flightuwe/daily-backend:latest
     container_name: shp-backend
     user: "0:0"
     restart: unless-stopped
@@ -39,7 +39,7 @@ services:
       - shp-net
 
   admin:
-    image: ghcr.io/flightuwe/selfhosted-bereal-admin:latest
+    image: ghcr.io/flightuwe/daily-admin:latest
     container_name: shp-admin
     restart: unless-stopped
     security_opt:
