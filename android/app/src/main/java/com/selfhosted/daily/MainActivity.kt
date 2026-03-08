@@ -1,6 +1,8 @@
 ﻿package com.selfhosted.daily
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -119,12 +121,18 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
+enum class AuthMode { LOGIN, REGISTER }
 
 data class User(val id: Long, val username: String, val isAdmin: Boolean, val favoriteColor: String = "#1F5FBF")
 data class MeResponse(val user: User)
 data class ProfileUpdateRequest(val username: String, val favoriteColor: String)
 data class AuthResponse(val token: String, val user: User)
 data class LoginRequest(val username: String, val password: String)
+data class InviteCodeRequest(val inviteCode: String)
+data class InviteRegisterRequest(val inviteCode: String, val username: String, val password: String)
+data class InviteOwner(val id: Long, val username: String, val favoriteColor: String = "#1F5FBF")
+data class InvitePreviewResponse(val inviteCode: String, val inviter: InviteOwner)
+data class InviteCodeResponse(val inviteCode: String)
 data class DeviceTokenRequest(val token: String)
 data class PasswordChangeRequest(val currentPassword: String, val newPassword: String)
 data class ChatMessageRequest(val body: String)
@@ -217,8 +225,20 @@ interface Api {
     @POST("auth/login")
     suspend fun login(@Body body: LoginRequest): AuthResponse
 
+    @POST("auth/register/preview")
+    suspend fun previewInvite(@Body body: InviteCodeRequest): InvitePreviewResponse
+
+    @POST("auth/register/confirm")
+    suspend fun registerWithInvite(@Body body: InviteRegisterRequest): AuthResponse
+
     @GET("me")
     suspend fun me(@Header("Authorization") token: String): MeResponse
+
+    @GET("me/invite")
+    suspend fun myInviteCode(@Header("Authorization") token: String): InviteCodeResponse
+
+    @POST("me/invite/roll")
+    suspend fun rollInviteCode(@Header("Authorization") token: String): InviteCodeResponse
 
     @PUT("me/profile")
     suspend fun updateProfile(
@@ -359,8 +379,19 @@ class AppRepo(private val api: Api, private val context: Context) {
         return res.user
     }
 
+    suspend fun previewInvite(inviteCode: String): InvitePreviewResponse =
+        api.previewInvite(InviteCodeRequest(inviteCode.trim()))
+
+    suspend fun registerWithInvite(inviteCode: String, username: String, password: String): User {
+        val res = api.registerWithInvite(InviteRegisterRequest(inviteCode.trim(), username, password))
+        saveToken(res.token)
+        return res.user
+    }
+
     suspend fun health(): HealthResponse = api.health()
     suspend fun me(): User = api.me("Bearer ${token()}").user
+    suspend fun myInviteCode(): String = api.myInviteCode("Bearer ${token()}").inviteCode
+    suspend fun rollMyInviteCode(): String = api.rollInviteCode("Bearer ${token()}").inviteCode
     suspend fun updateProfile(username: String, favoriteColor: String): User =
         api.updateProfile("Bearer ${token()}", ProfileUpdateRequest(username, favoriteColor)).user
 
@@ -567,6 +598,8 @@ private class ProgressRequestBody(
 data class UiState(
     val token: String = "",
     val user: User? = null,
+    val myInviteCode: String = "",
+    val invitePreview: InvitePreviewResponse? = null,
     val prompt: PromptResponse? = null,
     val feed: List<FeedItem> = emptyList(),
     val feedDays: List<String> = emptyList(),
@@ -602,6 +635,7 @@ data class UiState(
 
 data class DashboardData(
     val me: User,
+    val inviteCode: String,
     val prompt: PromptResponse,
     val rules: PromptRulesResponse,
     val special: SpecialMomentStatus,
@@ -648,12 +682,48 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(loading = true, message = "")
         try {
             val user = repo.login(username, password)
-            state = state.copy(user = user, token = repo.token(), loading = false)
+            state = state.copy(user = user, token = repo.token(), loading = false, invitePreview = null)
             runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
             refreshAll()
         } catch (t: Throwable) {
             state = state.copy(loading = false, message = apiError(t, "Login fehlgeschlagen"))
         }
+    }
+
+    suspend fun previewInvite(inviteCode: String) {
+        state = state.copy(loading = true, message = "")
+        runCatching { repo.previewInvite(inviteCode) }
+            .onSuccess {
+                state = state.copy(loading = false, invitePreview = it, message = "Code gueltig: @${it.inviter.username}")
+            }
+            .onFailure {
+                state = state.copy(loading = false, invitePreview = null, message = apiError(it, "Invite-Code ungueltig"))
+            }
+    }
+
+    fun clearInvitePreview() {
+        state = state.copy(invitePreview = null)
+    }
+
+    suspend fun registerWithInvite(inviteCode: String, username: String, password: String) {
+        state = state.copy(loading = true, message = "")
+        runCatching { repo.registerWithInvite(inviteCode, username, password) }
+            .onSuccess { user ->
+                state = state.copy(user = user, token = repo.token(), loading = false, invitePreview = null)
+                runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
+                refreshAll()
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Registrierung fehlgeschlagen"))
+            }
+    }
+
+    suspend fun rollInviteCode() {
+        if (repo.token().isBlank()) return
+        state = state.copy(loading = true, message = "")
+        runCatching { repo.rollMyInviteCode() }
+            .onSuccess { state = state.copy(loading = false, myInviteCode = it, message = "Invite-Code erneuert") }
+            .onFailure { state = state.copy(loading = false, message = apiError(it, "Invite-Code erneuern fehlgeschlagen")) }
     }
 
     fun logout() {
@@ -665,7 +735,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             pushProvider = state.pushProvider,
             darkMode = state.darkMode,
             uploadQuality = state.uploadQuality,
-            autoUpdateEnabled = repo.autoUpdateEnabled()
+            autoUpdateEnabled = repo.autoUpdateEnabled(),
+            invitePreview = null
         )
     }
 
@@ -696,15 +767,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching {
             repo.syncDeviceTokenIfNeeded()
             val me = repo.me()
+            val inviteCode = repo.myInviteCode()
             val prompt = repo.prompt()
             val rules = repo.promptRules()
             val special = repo.specialMomentStatus()
             val photos = repo.myPhotos()
             val chat = repo.listChat()
             val feedDays = repo.feedDays()
-            DashboardData(me, prompt, rules, special, photos, chat, feedDays)
+            DashboardData(me, inviteCode, prompt, rules, special, photos, chat, feedDays)
         }.onSuccess { payload ->
             val me = payload.me
+            val inviteCode = payload.inviteCode
             val prompt = payload.prompt
             val rules = payload.rules
             val special = payload.special
@@ -724,6 +797,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
             state = state.copy(
                 user = me,
+                myInviteCode = inviteCode,
                 prompt = prompt,
                 promptRules = rules,
                 specialMomentStatus = special,
@@ -1059,6 +1133,9 @@ fun AppScreen(vm: MainVm) {
 
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var authMode by remember { mutableStateOf(AuthMode.LOGIN) }
+    var inviteCodeInput by remember { mutableStateOf("") }
+    var inviteConfirmed by remember { mutableStateOf(false) }
 
     var captureUri by remember { mutableStateOf<Uri?>(null) }
     var captureTarget by remember { mutableStateOf<String?>(null) }
@@ -1180,6 +1257,13 @@ fun AppScreen(vm: MainVm) {
         val u = state.user ?: return@LaunchedEffect
         profileUsername = u.username
         profileColor = normalizeHexColor(u.favoriteColor)
+    }
+
+    LaunchedEffect(inviteCodeInput) {
+        if (state.invitePreview != null && normalizeInviteCodeLocal(inviteCodeInput) != state.invitePreview.inviteCode) {
+            inviteConfirmed = false
+            vm.clearInvitePreview()
+        }
     }
 
     if (state.showPromptDialog) {
@@ -1313,9 +1397,62 @@ fun AppScreen(vm: MainVm) {
             verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically)
         ) {
             Text("Daily", style = MaterialTheme.typography.headlineSmall)
-            OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Username") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Passwort") }, modifier = Modifier.fillMaxWidth())
-            Button(onClick = { scope.launch { vm.login(username, password) } }, modifier = Modifier.fillMaxWidth()) { Text("Einloggen") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = {
+                        authMode = AuthMode.LOGIN
+                        inviteConfirmed = false
+                        vm.clearInvitePreview()
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Anmelden") }
+                Button(
+                    onClick = { authMode = AuthMode.REGISTER },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Registrieren") }
+            }
+
+            if (authMode == AuthMode.LOGIN) {
+                OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Username") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Passwort") }, modifier = Modifier.fillMaxWidth())
+                Button(onClick = { scope.launch { vm.login(username, password) } }, modifier = Modifier.fillMaxWidth()) { Text("Einloggen") }
+            } else {
+                OutlinedTextField(
+                    value = inviteCodeInput,
+                    onValueChange = { inviteCodeInput = it.uppercase() },
+                    label = { Text("Invite-Code") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Button(
+                    onClick = { scope.launch { vm.previewInvite(inviteCodeInput) } },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Code pruefen") }
+
+                state.invitePreview?.let { preview ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Code von @${preview.inviter.username}", color = parseUserColor(preview.inviter.favoriteColor))
+                            Button(
+                                onClick = { inviteConfirmed = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("Code bestaetigen") }
+                        }
+                    }
+                }
+
+                if (inviteConfirmed) {
+                    OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Neuer Benutzername") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Passwort") }, modifier = Modifier.fillMaxWidth())
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                vm.registerWithInvite(inviteCodeInput, username, password)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Registrierung abschliessen") }
+                }
+            }
             if (state.message.isNotBlank()) Text(state.message, color = Color.Red)
         }
         return
@@ -1450,6 +1587,7 @@ fun AppScreen(vm: MainVm) {
 
                 AppTab.PROFILE -> ProfileTab(
                     username = state.user?.username ?: "",
+                    inviteCode = state.myInviteCode,
                     streakDays = computePostingStreak(state.photos),
                     promptRules = state.promptRules,
                     photos = state.photos,
@@ -1490,6 +1628,24 @@ fun AppScreen(vm: MainVm) {
                     onShowChangelog = { scope.launch { vm.showChangelogDialog() } },
                     onShowHelp = { vm.showHelpDialog() },
                     onCheckConnection = { scope.launch { vm.checkConnection() } },
+                    onCopyInviteCode = {
+                        val code = state.myInviteCode.trim()
+                        if (code.isNotBlank()) {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Daily Invite", code))
+                        }
+                    },
+                    onRollInviteCode = { scope.launch { vm.rollInviteCode() } },
+                    onShareInviteCode = {
+                        val code = state.myInviteCode.trim()
+                        if (code.isNotBlank()) {
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, "Mein Daily Invite-Code: $code")
+                            }
+                            context.startActivity(Intent.createChooser(send, "Invite-Code teilen"))
+                        }
+                    },
                     onLogout = { vm.logout() },
                     onOpenViewer = { urls ->
                         viewerUrls = urls
@@ -1958,6 +2114,7 @@ fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onS
 @Composable
 fun ProfileTab(
     username: String,
+    inviteCode: String,
     streakDays: Int,
     promptRules: PromptRulesResponse?,
     photos: List<PromptPhoto>,
@@ -1986,6 +2143,9 @@ fun ProfileTab(
     onShowChangelog: () -> Unit,
     onShowHelp: () -> Unit,
     onCheckConnection: () -> Unit,
+    onCopyInviteCode: () -> Unit,
+    onRollInviteCode: () -> Unit,
+    onShareInviteCode: () -> Unit,
     onLogout: () -> Unit,
     onOpenViewer: (List<String>) -> Unit
 ) {
@@ -2021,6 +2181,19 @@ fun ProfileTab(
             ) {
                 Text("Auto-Update-Suche (10 Min)")
                 Switch(checked = autoUpdateEnabled, onCheckedChange = onAutoUpdateEnabledChange)
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Invite-Code", style = MaterialTheme.typography.titleMedium)
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(inviteCode.ifBlank { "wird geladen ..." }, fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(onClick = onCopyInviteCode, modifier = Modifier.weight(1f)) { Text("Kopieren") }
+                        Button(onClick = onRollInviteCode, modifier = Modifier.weight(1f)) { Text("Erneuern") }
+                        Button(onClick = onShareInviteCode, modifier = Modifier.weight(1f)) { Text("Teilen") }
+                    }
+                    Text("Jeder Code ist einmal gueltig. Nach Nutzung wird automatisch ein neuer Code erzeugt.")
+                }
             }
         }
 
@@ -2241,6 +2414,14 @@ private fun normalizeHexColor(input: String): String {
     return if (isHex) withHash.uppercase() else "#1F5FBF"
 }
 
+private fun normalizeInviteCodeLocal(input: String): String {
+    return input
+        .trim()
+        .uppercase()
+        .replace("-", "")
+        .replace(" ", "")
+}
+
 private fun parseUserColor(input: String): Color {
     val hex = normalizeHexColor(input).removePrefix("#")
     val value = hex.toLongOrNull(16) ?: 0x1F5FBF
@@ -2256,6 +2437,10 @@ private fun apiError(t: Throwable, fallback: String): String {
         return when (t.code()) {
             400 -> "Ungueltige Eingabe"
             401 -> "Login fehlgeschlagen"
+            404 -> when {
+                raw.contains("invite code not found") -> "Invite-Code nicht gefunden oder bereits benutzt."
+                else -> fallback
+            }
             403 -> when {
                 raw.contains("prompt inactive") -> "Heute ist kein aktiver Moment. Bitte im Admin-Panel Event ausloesen."
                 raw.contains("upload window closed") -> "Upload-Zeitfenster ist geschlossen."

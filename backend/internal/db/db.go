@@ -23,6 +23,7 @@ func Connect(path string) (*gorm.DB, error) {
 
     if err := database.AutoMigrate(
         &models.User{},
+        &models.InviteCode{},
         &models.DeviceToken{},
         &models.AppSettings{},
         &models.DailyPrompt{},

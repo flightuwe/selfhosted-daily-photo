@@ -11,6 +11,18 @@ type User struct {
     CreatedAt    time.Time `json:"createdAt"`
 }
 
+type InviteCode struct {
+    ID        uint       `gorm:"primaryKey" json:"id"`
+    UserID    uint       `gorm:"index;not null" json:"userId"`
+    User      User       `json:"user"`
+    Code      string     `gorm:"uniqueIndex;size:24;not null" json:"code"`
+    UsedByID  *uint      `gorm:"index" json:"usedById"`
+    UsedAt    *time.Time `json:"usedAt"`
+    Active    bool       `gorm:"default:true;index" json:"active"`
+    CreatedAt time.Time  `json:"createdAt"`
+    UpdatedAt time.Time  `json:"updatedAt"`
+}
+
 type DeviceToken struct {
     ID        uint      `gorm:"primaryKey"`
     UserID    uint      `gorm:"index;not null"`

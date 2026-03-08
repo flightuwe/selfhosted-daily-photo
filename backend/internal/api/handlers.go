@@ -1,6 +1,7 @@
 package api
 
 import (
+    "crypto/rand"
     "errors"
     "fmt"
     "mime/multipart"
@@ -55,12 +56,16 @@ func (s *Server) Router() *gin.Engine {
         api.GET("/health/ready", s.handleReadyHealth)
         api.GET("/metrics", s.handleMetrics)
         api.POST("/auth/register", s.handleRegister)
+        api.POST("/auth/register/preview", s.handleInvitePreview)
+        api.POST("/auth/register/confirm", s.handleInviteRegister)
         api.POST("/auth/login", s.handleLogin)
 
         protected := api.Group("")
         protected.Use(s.requireAuth)
         {
             protected.GET("/me", s.handleMe)
+            protected.GET("/me/invite", s.handleMyInvite)
+            protected.POST("/me/invite/roll", s.handleRollMyInvite)
             protected.PUT("/me/profile", s.handleUpdateProfile)
             protected.PUT("/me/password", s.handleChangePassword)
             protected.GET("/me/photos", s.handleMyPhotos)
@@ -113,10 +118,65 @@ type authRequest struct {
     Password string `json:"password" binding:"required,min=6,max=128"`
 }
 
+type invitePreviewRequest struct {
+    InviteCode string `json:"inviteCode" binding:"required,min=6,max=32"`
+}
+
+type inviteRegisterRequest struct {
+    InviteCode string `json:"inviteCode" binding:"required,min=6,max=32"`
+    Username   string `json:"username" binding:"required,min=3,max=64"`
+    Password   string `json:"password" binding:"required,min=6,max=128"`
+}
+
 func (s *Server) handleRegister(c *gin.Context) {
-    var req authRequest
+    c.JSON(http.StatusBadRequest, gin.H{
+        "error": "invite registration required",
+        "hint":  "use /api/auth/register/preview and /api/auth/register/confirm",
+    })
+}
+
+func (s *Server) handleInvitePreview(c *gin.Context) {
+    var req invitePreviewRequest
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+    code := normalizeInviteCode(req.InviteCode)
+    if code == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid invite code"})
+        return
+    }
+
+    invite, inviter, err := s.findActiveInviteWithUser(code)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "invite code not found"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "inviteCode": invite.Code,
+        "inviter": gin.H{
+            "id":            inviter.ID,
+            "username":      inviter.Username,
+            "favoriteColor": defaultColor(inviter.FavoriteColor),
+        },
+    })
+}
+
+func (s *Server) handleInviteRegister(c *gin.Context) {
+    var req inviteRegisterRequest
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+    code := normalizeInviteCode(req.InviteCode)
+    if code == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid invite code"})
+        return
+    }
+    username := strings.ToLower(strings.TrimSpace(req.Username))
+    if len(username) < 3 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "username too short"})
         return
     }
 
@@ -126,14 +186,65 @@ func (s *Server) handleRegister(c *gin.Context) {
         return
     }
 
-    user := models.User{Username: strings.ToLower(req.Username), PasswordHash: hash}
-    if err := s.DB.Create(&user).Error; err != nil {
-        c.JSON(http.StatusConflict, gin.H{"error": "username exists"})
+    var user models.User
+    var inviter models.User
+    txErr := s.DB.Transaction(func(tx *gorm.DB) error {
+        invite, loadedInviter, findErr := s.findActiveInviteWithUserTx(tx, code)
+        if findErr != nil {
+            return findErr
+        }
+        inviter = loadedInviter
+
+        user = models.User{
+            Username:     username,
+            PasswordHash: hash,
+            FavoriteColor: "#1F5FBF",
+        }
+        if err := tx.Create(&user).Error; err != nil {
+            return err
+        }
+
+        now := time.Now().In(s.Location)
+        res := tx.Model(&models.InviteCode{}).
+            Where("id = ? AND active = ? AND used_by_id IS NULL", invite.ID, true).
+            Updates(map[string]any{
+                "active":     false,
+                "used_by_id": user.ID,
+                "used_at":    now,
+            })
+        if res.Error != nil {
+            return res.Error
+        }
+        if res.RowsAffected == 0 {
+            return gorm.ErrRecordNotFound
+        }
+
+        _, err = s.createInviteCodeTx(tx, invite.UserID)
+        return err
+    })
+    if txErr != nil {
+        if errors.Is(txErr, gorm.ErrRecordNotFound) {
+            c.JSON(http.StatusNotFound, gin.H{"error": "invite code not found"})
+            return
+        }
+        if strings.Contains(strings.ToLower(txErr.Error()), "unique") {
+            c.JSON(http.StatusConflict, gin.H{"error": "username exists"})
+            return
+        }
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "register failed"})
         return
     }
 
     token, _ := s.Auth.Sign(user.ID, user.Username, user.IsAdmin)
-    c.JSON(http.StatusCreated, gin.H{"token": token, "user": user})
+    c.JSON(http.StatusCreated, gin.H{
+        "token": token,
+        "user": user,
+        "inviter": gin.H{
+            "id":            inviter.ID,
+            "username":      inviter.Username,
+            "favoriteColor": defaultColor(inviter.FavoriteColor),
+        },
+    })
 }
 
 func (s *Server) handleLogin(c *gin.Context) {
@@ -164,6 +275,35 @@ func (s *Server) handleMe(c *gin.Context) {
         user.FavoriteColor = "#1F5FBF"
     }
     c.JSON(http.StatusOK, gin.H{"user": user})
+}
+
+func (s *Server) handleMyInvite(c *gin.Context) {
+    user, _ := userFromContext(c)
+    invite, err := s.ensureActiveInviteCode(user.ID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "invite load failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{
+        "inviteCode": invite.Code,
+    })
+}
+
+func (s *Server) handleRollMyInvite(c *gin.Context) {
+    user, _ := userFromContext(c)
+    var invite models.InviteCode
+    err := s.DB.Transaction(func(tx *gorm.DB) error {
+        var txErr error
+        invite, txErr = s.createInviteCodeTx(tx, user.ID)
+        return txErr
+    })
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "invite roll failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{
+        "inviteCode": invite.Code,
+    })
 }
 
 func (s *Server) handleUpdateProfile(c *gin.Context) {
@@ -1734,6 +1874,99 @@ func (s *Server) specialMomentStatus(userID uint) (gin.H, error) {
         "nextAllowedAt":     nextAllowed,
         "lastRequestedAt":   latest.RequestedAt,
     }, nil
+}
+
+func normalizeInviteCode(raw string) string {
+    cleaned := strings.ToUpper(strings.TrimSpace(raw))
+    cleaned = strings.ReplaceAll(cleaned, "-", "")
+    cleaned = strings.ReplaceAll(cleaned, " ", "")
+    return cleaned
+}
+
+func generateInviteCode() (string, error) {
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    const size = 10
+    buf := make([]byte, size)
+    if _, err := rand.Read(buf); err != nil {
+        return "", err
+    }
+    out := make([]byte, size)
+    for i, b := range buf {
+        out[i] = alphabet[int(b)%len(alphabet)]
+    }
+    return string(out), nil
+}
+
+func (s *Server) findActiveInviteWithUser(code string) (models.InviteCode, models.User, error) {
+    return s.findActiveInviteWithUserTx(s.DB, code)
+}
+
+func (s *Server) findActiveInviteWithUserTx(tx *gorm.DB, code string) (models.InviteCode, models.User, error) {
+    var invite models.InviteCode
+    err := tx.Where("code = ? AND active = ? AND used_by_id IS NULL", code, true).First(&invite).Error
+    if err != nil {
+        return models.InviteCode{}, models.User{}, err
+    }
+    var inviter models.User
+    if err := tx.First(&inviter, invite.UserID).Error; err != nil {
+        return models.InviteCode{}, models.User{}, err
+    }
+    return invite, inviter, nil
+}
+
+func (s *Server) ensureActiveInviteCode(userID uint) (models.InviteCode, error) {
+    var invite models.InviteCode
+    err := s.DB.Where("user_id = ? AND active = ? AND used_by_id IS NULL", userID, true).
+        Order("created_at desc").First(&invite).Error
+    if err == nil {
+        return invite, nil
+    }
+    if !errors.Is(err, gorm.ErrRecordNotFound) {
+        return models.InviteCode{}, err
+    }
+
+    txErr := s.DB.Transaction(func(tx *gorm.DB) error {
+        var txCreateErr error
+        invite, txCreateErr = s.createInviteCodeTx(tx, userID)
+        return txCreateErr
+    })
+    if txErr != nil {
+        return models.InviteCode{}, txErr
+    }
+    return invite, nil
+}
+
+func (s *Server) createInviteCodeTx(tx *gorm.DB, userID uint) (models.InviteCode, error) {
+    if err := tx.Model(&models.InviteCode{}).
+        Where("user_id = ? AND active = ? AND used_by_id IS NULL", userID, true).
+        Update("active", false).Error; err != nil {
+        return models.InviteCode{}, err
+    }
+
+    var lastErr error
+    for i := 0; i < 8; i++ {
+        code, err := generateInviteCode()
+        if err != nil {
+            return models.InviteCode{}, err
+        }
+        invite := models.InviteCode{
+            UserID: userID,
+            Code:   code,
+            Active: true,
+        }
+        if err := tx.Create(&invite).Error; err != nil {
+            lastErr = err
+            if strings.Contains(strings.ToLower(err.Error()), "unique") {
+                continue
+            }
+            return models.InviteCode{}, err
+        }
+        return invite, nil
+    }
+    if lastErr == nil {
+        lastErr = errors.New("invite code generation failed")
+    }
+    return models.InviteCode{}, lastErr
 }
 
 func defaultColor(v string) string {
