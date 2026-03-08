@@ -21,34 +21,79 @@ func (s *DailyPromptService) Start(enabled bool, onTrigger func(models.DailyProm
     }
 
     go func() {
-        randSrc := rand.New(rand.NewSource(time.Now().UnixNano()))
-        for {
-            wait := s.waitDuration(randSrc)
-            time.Sleep(wait)
+        ticker := time.NewTicker(30 * time.Second)
+        defer ticker.Stop()
 
-            prompt, settings, err := s.TriggerNow()
-            if err != nil {
-                log.Printf("daily trigger failed: %v", err)
-                continue
-            }
-
-            if onTrigger != nil {
-                onTrigger(prompt, settings)
-            }
+        s.tick(onTrigger)
+        for range ticker.C {
+            s.tick(onTrigger)
         }
     }()
 }
 
-func (s *DailyPromptService) waitDuration(r *rand.Rand) time.Duration {
+func (s *DailyPromptService) tick(onTrigger func(models.DailyPrompt, models.AppSettings)) {
     now := time.Now().In(s.Location)
-    var settings models.AppSettings
-    if err := s.DB.First(&settings).Error; err != nil {
-        return time.Hour
+    day := now.Format("2006-01-02")
+
+    var existing models.DailyPrompt
+    if err := s.DB.Where("day = ?", day).First(&existing).Error; err == nil && existing.TriggeredAt != nil {
+        return
     }
 
-    target := time.Date(now.Year(), now.Month(), now.Day(), settings.PromptWindowStartHour, 0, 0, 0, s.Location)
-    if now.Hour() >= settings.PromptWindowEndHour {
-        target = target.Add(24 * time.Hour)
+    plan, err := s.EnsurePlanForDay(day)
+    if err != nil {
+        log.Printf("ensure plan failed: %v", err)
+        return
+    }
+    if now.Before(plan.PlannedAt.In(s.Location)) {
+        return
+    }
+
+    prompt, settings, err := s.TriggerNow()
+    if err != nil {
+        log.Printf("daily trigger failed: %v", err)
+        return
+    }
+    if onTrigger != nil {
+        onTrigger(prompt, settings)
+    }
+}
+
+func (s *DailyPromptService) EnsurePlans(days int) ([]models.PromptPlan, error) {
+    if days < 1 {
+        days = 1
+    }
+    if days > 30 {
+        days = 30
+    }
+
+    out := make([]models.PromptPlan, 0, days)
+    now := time.Now().In(s.Location)
+    for i := 0; i < days; i++ {
+        day := now.AddDate(0, 0, i).Format("2006-01-02")
+        plan, err := s.EnsurePlanForDay(day)
+        if err != nil {
+            return nil, err
+        }
+        out = append(out, plan)
+    }
+    return out, nil
+}
+
+func (s *DailyPromptService) EnsurePlanForDay(day string) (models.PromptPlan, error) {
+    var plan models.PromptPlan
+    if err := s.DB.Where("day = ?", day).First(&plan).Error; err == nil {
+        return plan, nil
+    }
+
+    var settings models.AppSettings
+    if err := s.DB.First(&settings).Error; err != nil {
+        return models.PromptPlan{}, err
+    }
+
+    dayDate, err := time.ParseInLocation("2006-01-02", day, s.Location)
+    if err != nil {
+        return models.PromptPlan{}, err
     }
 
     spanHours := settings.PromptWindowEndHour - settings.PromptWindowStartHour
@@ -56,12 +101,35 @@ func (s *DailyPromptService) waitDuration(r *rand.Rand) time.Duration {
         spanHours = 1
     }
 
-    target = target.Add(time.Duration(r.Intn(spanHours*60)) * time.Minute)
-    if target.Before(now) {
-        target = target.Add(24 * time.Hour)
+    r := rand.New(rand.NewSource(time.Now().UnixNano()))
+    start := time.Date(dayDate.Year(), dayDate.Month(), dayDate.Day(), settings.PromptWindowStartHour, 0, 0, 0, s.Location)
+    planned := start.Add(time.Duration(r.Intn(spanHours*60)) * time.Minute)
+    if day == time.Now().In(s.Location).Format("2006-01-02") && planned.Before(time.Now().In(s.Location)) {
+        planned = time.Now().In(s.Location).Add(1 * time.Minute)
     }
 
-    return target.Sub(now)
+    plan = models.PromptPlan{
+        Day:       day,
+        PlannedAt: planned,
+        IsManual:  false,
+    }
+    if err := s.DB.Create(&plan).Error; err != nil {
+        return models.PromptPlan{}, err
+    }
+    return plan, nil
+}
+
+func (s *DailyPromptService) SetPlanForDay(day string, plannedAt time.Time, manual bool) (models.PromptPlan, error) {
+    plan, err := s.EnsurePlanForDay(day)
+    if err != nil {
+        return models.PromptPlan{}, err
+    }
+    plan.PlannedAt = plannedAt.In(s.Location)
+    plan.IsManual = manual
+    if err := s.DB.Save(&plan).Error; err != nil {
+        return models.PromptPlan{}, err
+    }
+    return plan, nil
 }
 
 func (s *DailyPromptService) TriggerNow() (models.DailyPrompt, models.AppSettings, error) {

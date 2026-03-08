@@ -50,6 +50,15 @@ export type ChatItem = {
   user: { id: number; username: string };
 };
 
+export type CalendarItem = {
+  day: string;
+  plannedAt: string;
+  isManual: boolean;
+  source: "auto" | "manual";
+  triggeredAt?: string | null;
+  uploadUntil?: string | null;
+};
+
 const apiBase = import.meta.env.VITE_API_BASE || "/api";
 
 async function parse<T>(res: Response): Promise<T> {
@@ -178,4 +187,24 @@ export async function getChat(token: string): Promise<ChatItem[]> {
   });
   const data = await parse<{ items: ChatItem[] }>(res);
   return data.items;
+}
+
+export async function getCalendar(token: string, days = 7): Promise<CalendarItem[]> {
+  const res = await fetch(`${apiBase}/admin/calendar?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: CalendarItem[] }>(res);
+  return data.items;
+}
+
+export async function updateCalendarDay(token: string, day: string, plannedAt: string): Promise<CalendarItem> {
+  const res = await fetch(`${apiBase}/admin/calendar/${encodeURIComponent(day)}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ plannedAt }),
+  });
+  return parse<CalendarItem>(res);
 }

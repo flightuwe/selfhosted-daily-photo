@@ -4,6 +4,7 @@ import {
   createUser,
   deleteUser,
   getAdminFeed,
+  getCalendar,
   getChat,
   getSettings,
   getStats,
@@ -11,16 +12,18 @@ import {
   login,
   resetTodayPrompt,
   triggerPrompt,
+  updateCalendarDay,
   updateSettings,
   updateUser,
   type AdminStats,
   type AdminUser,
   type ChatItem,
+  type CalendarItem,
   type FeedItem,
   type Settings,
 } from "./api";
 
-type Tab = "dashboard" | "events" | "users" | "feed" | "chat" | "settings";
+type Tab = "dashboard" | "events" | "users" | "feed" | "chat" | "calendar" | "settings";
 
 const emptySettings: Settings = {
   promptWindowStartHour: 8,
@@ -46,6 +49,8 @@ export function App() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
+  const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
+  const [calendarDrafts, setCalendarDrafts] = useState<Record<string, string>>({});
   const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [message, setMessage] = useState("");
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
@@ -72,6 +77,9 @@ export function App() {
     }
     if (activeTab === "chat") {
       void loadChat(token);
+    }
+    if (activeTab === "calendar") {
+      void loadCalendar(token);
     }
   }, [token, activeTab, feedDay]);
 
@@ -105,11 +113,43 @@ export function App() {
     }
   }
 
+  async function loadCalendar(authToken: string) {
+    try {
+      const items = await getCalendar(authToken, 7);
+      setCalendarItems(items);
+      setCalendarDrafts(
+        items.reduce<Record<string, string>>((acc, item) => {
+          acc[item.day] = toInputDateTime(item.plannedAt);
+          return acc;
+        }, {})
+      );
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function refreshAll() {
     if (!token) return;
     await loadAdminData(token);
     if (activeTab === "feed") await loadFeed(token, feedDay);
     if (activeTab === "chat") await loadChat(token);
+    if (activeTab === "calendar") await loadCalendar(token);
+  }
+
+  async function onSaveCalendarDay(day: string) {
+    const value = calendarDrafts[day];
+    if (!value) {
+      setMessage("Zeit fehlt");
+      return;
+    }
+    setMessage("");
+    try {
+      await updateCalendarDay(token, day, value);
+      setMessage(`Kalender fuer ${day} gespeichert`);
+      await loadCalendar(token);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
   }
 
   async function onLogin(e: React.FormEvent) {
@@ -280,6 +320,7 @@ export function App() {
           <button className={activeTab === "users" ? "tab active" : "tab"} onClick={() => setActiveTab("users")}>Benutzerverwaltung</button>
           <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => setActiveTab("feed")}>Feed</button>
           <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => setActiveTab("chat")}>Chat</button>
+          <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => setActiveTab("calendar")}>Kalender</button>
           <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => setActiveTab("settings")}>Einstellungen</button>
         </div>
 
@@ -430,6 +471,45 @@ export function App() {
           </div>
         )}
 
+        {activeTab === "calendar" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Naechste 7 Tage</h2>
+              <button onClick={() => loadCalendar(token)}>Aktualisieren</button>
+            </div>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Tag</th>
+                  <th>Geplant</th>
+                  <th>Status</th>
+                  <th>Quelle</th>
+                  <th>Aktion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {calendarItems.map((item) => (
+                  <tr key={item.day}>
+                    <td>{new Date(`${item.day}T00:00:00`).toLocaleDateString()}</td>
+                    <td>
+                      <input
+                        type="datetime-local"
+                        value={calendarDrafts[item.day] || ""}
+                        onChange={(e) => setCalendarDrafts((prev) => ({ ...prev, [item.day]: e.target.value }))}
+                      />
+                    </td>
+                    <td>{item.triggeredAt ? "Ausgeloest" : "Geplant"}</td>
+                    <td>{item.source === "manual" ? "Manuell" : "Auto"}</td>
+                    <td>
+                      <button onClick={() => onSaveCalendarDay(item.day)}>Speichern</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
         {activeTab === "settings" && (
           <form onSubmit={onSaveSettings} className="stack">
             <label>
@@ -486,6 +566,12 @@ export function App() {
       </section>
     </main>
   );
+}
+
+function toInputDateTime(iso: string) {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function CardStat({ title, value }: { title: string; value: number }) {

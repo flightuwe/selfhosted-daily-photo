@@ -38,6 +38,15 @@ type DailyPrompt struct {
     UpdatedAt      time.Time
 }
 
+type PromptPlan struct {
+    ID        uint      `gorm:"primaryKey"`
+    Day       string    `gorm:"uniqueIndex;size:10;not null"`
+    PlannedAt time.Time `gorm:"not null"`
+    IsManual  bool      `gorm:"default:false"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+}
+
 type Photo struct {
     ID         uint      `gorm:"primaryKey" json:"id"`
     UserID     uint      `gorm:"index;not null" json:"userId"`

@@ -25,6 +25,7 @@ func Connect(path string) (*gorm.DB, error) {
         &models.DeviceToken{},
         &models.AppSettings{},
         &models.DailyPrompt{},
+        &models.PromptPlan{},
         &models.Photo{},
         &models.ChatMessage{},
     ); err != nil {

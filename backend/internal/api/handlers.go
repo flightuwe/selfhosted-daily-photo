@@ -72,6 +72,8 @@ func (s *Server) Router() *gin.Engine {
             admin.PUT("/settings", s.handleUpdateSettings)
             admin.GET("/stats", s.handleAdminStats)
             admin.GET("/feed", s.handleAdminFeed)
+            admin.GET("/calendar", s.handleAdminCalendar)
+            admin.PUT("/calendar/:day", s.handleAdminCalendarDay)
 
             admin.POST("/prompt/trigger", s.handleTriggerPrompt)
             admin.POST("/prompt/reset-today", s.handleAdminResetToday)
@@ -298,6 +300,104 @@ func (s *Server) handleUpload(c *gin.Context) {
     }
 
     c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
+}
+
+func (s *Server) handleAdminCalendar(c *gin.Context) {
+    days := 7
+    if raw := c.Query("days"); raw != "" {
+        if n, err := strconv.Atoi(raw); err == nil {
+            days = n
+        }
+    }
+
+    plans, err := s.Prompt.EnsurePlans(days)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "calendar query failed"})
+        return
+    }
+
+    dayList := make([]string, 0, len(plans))
+    for _, p := range plans {
+        dayList = append(dayList, p.Day)
+    }
+
+    var prompts []models.DailyPrompt
+    _ = s.DB.Where("day IN ?", dayList).Find(&prompts).Error
+    promptByDay := make(map[string]models.DailyPrompt, len(prompts))
+    for _, p := range prompts {
+        promptByDay[p.Day] = p
+    }
+
+    out := make([]gin.H, 0, len(plans))
+    for _, p := range plans {
+        row := gin.H{
+            "day":       p.Day,
+            "plannedAt": p.PlannedAt,
+            "isManual":  p.IsManual,
+            "source":    "auto",
+        }
+        if p.IsManual {
+            row["source"] = "manual"
+        }
+        if prompt, ok := promptByDay[p.Day]; ok {
+            row["triggeredAt"] = prompt.TriggeredAt
+            row["uploadUntil"] = prompt.UploadUntil
+        }
+        out = append(out, row)
+    }
+
+    c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) handleAdminCalendarDay(c *gin.Context) {
+    day := c.Param("day")
+    if _, err := time.ParseInLocation("2006-01-02", day, s.Location); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid day format"})
+        return
+    }
+
+    var req struct {
+        PlannedAt string `json:"plannedAt" binding:"required"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+
+    var planned time.Time
+    var err error
+    if len(req.PlannedAt) == len("2006-01-02T15:04") {
+        planned, err = time.ParseInLocation("2006-01-02T15:04", req.PlannedAt, s.Location)
+    } else {
+        planned, err = time.Parse(time.RFC3339, req.PlannedAt)
+        planned = planned.In(s.Location)
+    }
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid plannedAt format"})
+        return
+    }
+    if planned.Format("2006-01-02") != day {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "plannedAt day mismatch"})
+        return
+    }
+
+    plan, err := s.Prompt.SetPlanForDay(day, planned, true)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save plan failed"})
+        return
+    }
+
+    var prompt models.DailyPrompt
+    _ = s.DB.Where("day = ?", day).First(&prompt).Error
+
+    c.JSON(http.StatusOK, gin.H{
+        "day":        plan.Day,
+        "plannedAt":  plan.PlannedAt,
+        "isManual":   plan.IsManual,
+        "source":     "manual",
+        "triggeredAt": prompt.TriggeredAt,
+        "uploadUntil": prompt.UploadUntil,
+    })
 }
 
 func (s *Server) handleAdminFeed(c *gin.Context) {
