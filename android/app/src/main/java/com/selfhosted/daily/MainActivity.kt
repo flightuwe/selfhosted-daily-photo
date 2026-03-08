@@ -1450,7 +1450,8 @@ fun AppScreen(vm: MainVm) {
         if (state.token.isBlank()) return@LaunchedEffect
         while (true) {
             vm.refreshAll()
-            delay(20_000)
+            val hasRunningUpload = state.uploadQueue.any { it.status == UploadQueueStatus.RUNNING }
+            delay(if (hasRunningUpload) 1_500 else 20_000)
         }
     }
 
@@ -2137,6 +2138,14 @@ fun CameraTab(
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         val kindLabel = if (item.isPrompt) "Tagesmoment" else "Extra"
                         Text("$kindLabel - ${queueStatusLabel(item.status)}", fontWeight = FontWeight.SemiBold)
+                        if (item.status == UploadQueueStatus.RUNNING) {
+                            val p = item.progressPercent.coerceIn(0, 100)
+                            Text("Fortschritt: $p%")
+                            LinearProgressIndicator(
+                                progress = p / 100f,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                         Text("Versuche: ${item.attempts}")
                         if (item.lastError.isNotBlank()) {
                             Text(item.lastError, color = Color(0xFF8B0000), maxLines = 2, overflow = TextOverflow.Ellipsis)
