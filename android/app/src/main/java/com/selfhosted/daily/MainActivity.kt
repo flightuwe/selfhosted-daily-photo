@@ -2240,6 +2240,9 @@ fun FeedTab(
     onLoadNewer: () -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
+    val primaryTextColor = MaterialTheme.colorScheme.onSurface
+    val secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+
     val rows = remember(days, byDay, monthRecapByDay, promptMetaByDay) {
         buildList {
             for (day in days) {
@@ -2311,7 +2314,7 @@ fun FeedTab(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(formatDayLabel(row.day), fontWeight = FontWeight.Bold)
-                                Text(row.day, color = Color.Gray)
+                                Text(row.day, color = secondaryTextColor)
                             }
                             momentReasonLine(row.meta?.triggerSource, row.meta?.requestedByUser)?.let { reason ->
                                 Text(
@@ -2341,24 +2344,6 @@ fun FeedTab(
                                     Text(reason, color = Color(0xFF1F5FBF))
                                 }
                             }
-                            val reactions = item.reactions.orEmpty()
-                            val comments = item.comments.orEmpty()
-                            if (reactions.isNotEmpty()) {
-                                Text(
-                                    reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
-                                    color = Color(0xFF37474F)
-                                )
-                            }
-                            if (comments.isNotEmpty()) {
-                                comments.take(2).forEach { comment ->
-                                    Text(
-                                        "${comment.user.username}: ${comment.body}",
-                                        color = Color(0xFF455A64),
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
                             if (!item.photo.promptOnly) {
                                 Text("Extra", color = Color(0xFF1F5FBF))
                             }
@@ -2375,8 +2360,31 @@ fun FeedTab(
                                     )
                                 }
                             }
+                            val reactions = item.reactions.orEmpty()
+                            val comments = item.comments.orEmpty()
+                            if (reactions.isNotEmpty()) {
+                                Text(
+                                    reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
+                                    color = primaryTextColor
+                                )
+                            }
+                            if (comments.isNotEmpty()) {
+                                comments.take(2).forEach { comment ->
+                                    Text(
+                                        "${comment.user.username}: ${comment.body}",
+                                        color = secondaryTextColor,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                             if (!item.photo.caption.isNullOrBlank()) {
-                                Text(item.photo.caption, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    item.photo.caption,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = secondaryTextColor
+                                )
                             }
                         }
                     }
@@ -2446,7 +2454,7 @@ fun CalendarTab(
             Card(modifier = Modifier.clickable { onSelect(day) }) {
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(formatDayLabel(day), fontWeight = if (selectedDay) FontWeight.Bold else FontWeight.Normal)
-                    Text(day, color = Color.Gray)
+                    Text(day, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     momentReasonLine(meta?.triggerSource, meta?.requestedByUser)?.let { reason ->
                         Text(reason, color = Color(0xFF1F5FBF))
                     }
