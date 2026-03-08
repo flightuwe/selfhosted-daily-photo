@@ -1265,9 +1265,9 @@ fun AppScreen(vm: MainVm) {
     Scaffold(
         bottomBar = {
             NavigationBar {
-                NavigationBarItem(selected = state.activeTab == AppTab.CAMERA, onClick = { vm.setTab(AppTab.CAMERA) }, label = { Text("Kamera") }, icon = { Text("C") })
-                NavigationBarItem(selected = state.activeTab == AppTab.FEED, onClick = { vm.setTab(AppTab.FEED) }, label = { Text("Feed") }, icon = { Text("F") })
-                NavigationBarItem(selected = state.activeTab == AppTab.CALENDAR, onClick = { vm.setTab(AppTab.CALENDAR) }, label = { Text("Kalender") }, icon = { Text("D") })
+                NavigationBarItem(selected = state.activeTab == AppTab.CAMERA, onClick = { vm.setTab(AppTab.CAMERA) }, label = { Text("Kamera") }, icon = { Text("U") })
+                NavigationBarItem(selected = state.activeTab == AppTab.FEED, onClick = { vm.setTab(AppTab.FEED) }, label = { Text("Feed") }, icon = { Text("T") })
+                NavigationBarItem(selected = state.activeTab == AppTab.CALENDAR, onClick = { vm.setTab(AppTab.CALENDAR) }, label = { Text("Kalender") }, icon = { Text("G") })
                 NavigationBarItem(
                     selected = state.activeTab == AppTab.CHAT,
                     onClick = { vm.setTab(AppTab.CHAT) },
@@ -1279,7 +1279,7 @@ fun AppScreen(vm: MainVm) {
                         )
                     }
                 )
-                NavigationBarItem(selected = state.activeTab == AppTab.PROFILE, onClick = { vm.setTab(AppTab.PROFILE) }, label = { Text("Profil") }, icon = { Text("P") })
+                NavigationBarItem(selected = state.activeTab == AppTab.PROFILE, onClick = { vm.setTab(AppTab.PROFILE) }, label = { Text("Profil") }, icon = { Text("M") })
             }
         }
     ) { innerPadding ->
@@ -1596,7 +1596,7 @@ fun CameraTab(
 @Composable
 fun ChatTabIcon(showIndicator: Boolean, unread: Boolean) {
     Box(modifier = Modifier.size(20.dp)) {
-        Text("M", modifier = Modifier.align(Alignment.Center))
+        Text("D", modifier = Modifier.align(Alignment.Center))
         if (showIndicator) {
             Box(
                 modifier = Modifier
