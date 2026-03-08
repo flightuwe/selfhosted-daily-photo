@@ -48,6 +48,12 @@ func ensureDefaultSettings(database *gorm.DB) error {
         return nil
     }
 
-    s := models.AppSettings{}
+    s := models.AppSettings{
+        PromptWindowStartHour:  8,
+        PromptWindowEndHour:    20,
+        UploadWindowMinutes:    10,
+        PromptNotificationText: "Zeit fuer dein Daily Foto",
+        MaxUploadBytes:         0,
+    }
     return database.Create(&s).Error
 }

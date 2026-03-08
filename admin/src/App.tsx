@@ -27,13 +27,14 @@ import {
 
 type Tab = "dashboard" | "events" | "users" | "feed" | "chat" | "calendar" | "settings";
 
-const emptySettings: Settings = {
+const DEFAULT_SETTINGS: Settings = {
   promptWindowStartHour: 8,
-  promptWindowEndHour: 22,
-  uploadWindowMinutes: 5,
+  promptWindowEndHour: 20,
+  uploadWindowMinutes: 10,
   promptNotificationText: "Zeit fuer dein Daily Foto",
-  maxUploadBytes: 10 * 1024 * 1024,
+  maxUploadBytes: 0,
 };
+const emptySettings: Settings = { ...DEFAULT_SETTINGS };
 
 const emptyStats: AdminStats = {
   users: 0,
@@ -66,8 +67,14 @@ export function App() {
   const [broadcastBody, setBroadcastBody] = useState("Server-Test: Bitte App öffnen und Daily Foto posten.");
   const [updateNoticeVersion, setUpdateNoticeVersion] = useState("0.2.12");
   const [targetUserId, setTargetUserId] = useState<number>(0);
+  const [targetUserSearch, setTargetUserSearch] = useState("");
 
   const isLoggedIn = useMemo(() => token.length > 0, [token]);
+  const filteredTargetUsers = useMemo(() => {
+    const q = targetUserSearch.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter((u) => u.username.toLowerCase().includes(q));
+  }, [users, targetUserSearch]);
 
   useEffect(() => {
     if (!token) return;
@@ -191,6 +198,18 @@ export function App() {
       setSettings(next);
       setSavedSettings(next);
       setMessage("Settings gespeichert");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onApplyDefaultSettings() {
+    setMessage("");
+    try {
+      const next = await updateSettings(token, DEFAULT_SETTINGS);
+      setSettings(next);
+      setSavedSettings(next);
+      setMessage("Standard-Einstellungen wurden gesetzt.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -381,9 +400,14 @@ export function App() {
 
             <label>
               Push nur an einzelnen Benutzer
+              <input
+                placeholder="Benutzer suchen..."
+                value={targetUserSearch}
+                onChange={(e) => setTargetUserSearch(e.target.value)}
+              />
               <select value={targetUserId || ""} onChange={(e) => setTargetUserId(Number(e.target.value || 0))}>
                 <option value="">Benutzer wählen</option>
-                {users.map((u) => (
+                {filteredTargetUsers.map((u) => (
                   <option key={u.id} value={u.id}>{u.username} ({u.deviceCount} Geräte)</option>
                 ))}
               </select>
@@ -566,7 +590,7 @@ export function App() {
               <div className="settings-grid">
                 <p><strong>Prompt-Fenster:</strong> {savedSettings.promptWindowStartHour}:00 - {savedSettings.promptWindowEndHour}:00</p>
                 <p><strong>Upload-Fenster:</strong> {savedSettings.uploadWindowMinutes} Minuten</p>
-                <p><strong>Max Upload:</strong> {Math.round(savedSettings.maxUploadBytes / (1024 * 1024))} MB</p>
+                <p><strong>Max Upload:</strong> {savedSettings.maxUploadBytes <= 0 ? "Unbegrenzt" : `${Math.round(savedSettings.maxUploadBytes / (1024 * 1024))} MB`}</p>
                 <p><strong>Notification-Text:</strong> {savedSettings.promptNotificationText}</p>
               </div>
             </article>
@@ -614,12 +638,23 @@ export function App() {
                 Max Upload Bytes
                 <input
                   type="number"
-                  min={1000000}
+                  min={0}
                   value={settings.maxUploadBytes}
                   onChange={(e) => setSettings({ ...settings, maxUploadBytes: Number(e.target.value) })}
                 />
               </label>
-              <button type="submit">Settings speichern</button>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={settings.maxUploadBytes <= 0}
+                  onChange={(e) => setSettings({ ...settings, maxUploadBytes: e.target.checked ? 0 : 10 * 1024 * 1024 })}
+                />
+                Unbegrenzte Upload-Groesse
+              </label>
+              <div className="row">
+                <button type="button" onClick={onApplyDefaultSettings}>Standardwerte setzen (8-20, 10 Min, unbegrenzt)</button>
+                <button type="submit">Settings speichern</button>
+              </div>
             </form>
           </div>
         )}

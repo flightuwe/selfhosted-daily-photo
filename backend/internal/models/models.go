@@ -20,10 +20,10 @@ type DeviceToken struct {
 type AppSettings struct {
     ID                     uint      `gorm:"primaryKey"`
     PromptWindowStartHour  int       `gorm:"default:8"`
-    PromptWindowEndHour    int       `gorm:"default:22"`
-    UploadWindowMinutes    int       `gorm:"default:5"`
+    PromptWindowEndHour    int       `gorm:"default:20"`
+    UploadWindowMinutes    int       `gorm:"default:10"`
     PromptNotificationText string    `gorm:"size:255;default:'Zeit fuer dein Daily Foto'"`
-    MaxUploadBytes         int64     `gorm:"default:10485760"`
+    MaxUploadBytes         int64     `gorm:"default:0"`
     CreatedAt              time.Time
     UpdatedAt              time.Time
 }
