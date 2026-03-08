@@ -323,6 +323,12 @@ class AppRepo(private val api: Api, private val context: Context) {
         prefs.edit().putBoolean("dark_mode", enabled).apply()
     }
 
+    fun isOledMode(): Boolean = prefs.getBoolean("oled_mode", false)
+
+    fun setOledMode(enabled: Boolean) {
+        prefs.edit().putBoolean("oled_mode", enabled).apply()
+    }
+
     fun uploadQuality(): Int = prefs.getInt("upload_quality", 82).coerceIn(45, 95)
 
     fun setUploadQuality(value: Int) {
@@ -629,6 +635,7 @@ data class UiState(
     val specialMomentStatus: SpecialMomentStatus? = null,
     val updateInfo: UpdateInfo? = null,
     val darkMode: Boolean = false,
+    val oledMode: Boolean = false,
     val uploadQuality: Int = 82,
     val autoUpdateEnabled: Boolean = false
 )
@@ -649,6 +656,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         UiState(
             token = repo.token(),
             darkMode = repo.isDarkMode(),
+            oledMode = repo.isOledMode(),
             uploadQuality = repo.uploadQuality(),
             autoUpdateEnabled = repo.autoUpdateEnabled()
         )
@@ -734,6 +742,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverVersion = state.serverVersion,
             pushProvider = state.pushProvider,
             darkMode = state.darkMode,
+            oledMode = state.oledMode,
             uploadQuality = state.uploadQuality,
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             invitePreview = null
@@ -1050,7 +1059,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun setDarkMode(enabled: Boolean) {
         repo.setDarkMode(enabled)
-        state = state.copy(darkMode = enabled)
+        if (!enabled && state.oledMode) {
+            repo.setOledMode(false)
+        }
+        state = state.copy(darkMode = repo.isDarkMode(), oledMode = repo.isOledMode())
+    }
+
+    fun setOledMode(enabled: Boolean) {
+        repo.setOledMode(enabled)
+        if (enabled && !repo.isDarkMode()) {
+            repo.setDarkMode(true)
+        }
+        state = state.copy(darkMode = repo.isDarkMode(), oledMode = repo.isOledMode())
     }
 
     fun setUploadQuality(value: Int) {
@@ -1117,7 +1137,12 @@ class MainActivity : ComponentActivity() {
         setContent {
             val vm: MainVm = viewModel(factory = MainVmFactory(AppRepo(api, this)))
             val useDark = vm.state.darkMode
-            MaterialTheme(colorScheme = if (useDark) darkColorScheme() else lightColorScheme()) {
+            val useOled = vm.state.oledMode
+            val oledColorScheme = darkColorScheme(
+                background = Color.Black,
+                surface = Color.Black
+            )
+            MaterialTheme(colorScheme = if (useDark) (if (useOled) oledColorScheme else darkColorScheme()) else lightColorScheme()) {
                 AppScreen(vm)
             }
         }
@@ -1592,6 +1617,7 @@ fun AppScreen(vm: MainVm) {
                     promptRules = state.promptRules,
                     photos = state.photos,
                     darkMode = state.darkMode,
+                    oledMode = state.oledMode,
                     currentPassword = pwCurrent,
                     newPassword = pwNext,
                     editableUsername = profileUsername,
@@ -1604,6 +1630,7 @@ fun AppScreen(vm: MainVm) {
                     uploadQuality = state.uploadQuality,
                     autoUpdateEnabled = state.autoUpdateEnabled,
                     onDarkModeChange = { vm.setDarkMode(it) },
+                    onOledModeChange = { vm.setOledMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onEditableUsernameChange = { profileUsername = it },
@@ -2126,6 +2153,7 @@ fun ProfileTab(
     promptRules: PromptRulesResponse?,
     photos: List<PromptPhoto>,
     darkMode: Boolean,
+    oledMode: Boolean,
     currentPassword: String,
     newPassword: String,
     editableUsername: String,
@@ -2138,6 +2166,7 @@ fun ProfileTab(
     uploadQuality: Int,
     autoUpdateEnabled: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
+    onOledModeChange: (Boolean) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onEditableUsernameChange: (String) -> Unit,
@@ -2180,6 +2209,14 @@ fun ProfileTab(
             ) {
                 Text("Dark Mode")
                 Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("OLED Schwarz")
+                Switch(checked = oledMode, onCheckedChange = onOledModeChange)
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
