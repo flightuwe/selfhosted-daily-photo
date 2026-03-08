@@ -115,7 +115,9 @@ import java.time.format.DateTimeFormatter
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 
-data class User(val id: Long, val username: String, val isAdmin: Boolean)
+data class User(val id: Long, val username: String, val isAdmin: Boolean, val favoriteColor: String = "#1F5FBF")
+data class MeResponse(val user: User)
+data class ProfileUpdateRequest(val username: String, val favoriteColor: String)
 data class AuthResponse(val token: String, val user: User)
 data class LoginRequest(val username: String, val password: String)
 data class DeviceTokenRequest(val token: String)
@@ -156,6 +158,15 @@ interface Api {
 
     @POST("auth/login")
     suspend fun login(@Body body: LoginRequest): AuthResponse
+
+    @GET("me")
+    suspend fun me(@Header("Authorization") token: String): MeResponse
+
+    @PUT("me/profile")
+    suspend fun updateProfile(
+        @Header("Authorization") token: String,
+        @Body body: ProfileUpdateRequest
+    ): MeResponse
 
     @GET("prompt/current")
     suspend fun prompt(@Header("Authorization") token: String): PromptResponse
@@ -255,6 +266,9 @@ class AppRepo(private val api: Api, private val context: Context) {
     }
 
     suspend fun health(): HealthResponse = api.health()
+    suspend fun me(): User = api.me("Bearer ${token()}").user
+    suspend fun updateProfile(username: String, favoriteColor: String): User =
+        api.updateProfile("Bearer ${token()}", ProfileUpdateRequest(username, favoriteColor)).user
 
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
 
@@ -503,6 +517,7 @@ data class UiState(
 )
 
 data class DashboardData(
+    val me: User,
     val prompt: PromptResponse,
     val photos: List<PromptPhoto>,
     val chat: List<ChatItem>,
@@ -575,12 +590,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(loading = true)
         runCatching {
             repo.syncDeviceTokenIfNeeded()
+            val me = repo.me()
             val prompt = repo.prompt()
             val photos = repo.myPhotos()
             val chat = repo.listChat()
             val feedDays = repo.feedDays()
-            DashboardData(prompt, photos, chat, feedDays)
+            DashboardData(me, prompt, photos, chat, feedDays)
         }.onSuccess { payload ->
+            val me = payload.me
             val prompt = payload.prompt
             val photos = payload.photos
             val chat = payload.chat
@@ -590,6 +607,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             if (shouldPopup) repo.setSeenPromptMarker(marker)
 
             state = state.copy(
+                user = me,
                 prompt = prompt,
                 photos = photos,
                 chat = chat,
@@ -756,6 +774,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setUploadQuality(value)
         state = state.copy(uploadQuality = repo.uploadQuality())
     }
+
+    suspend fun updateProfile(username: String, favoriteColor: String) {
+        state = state.copy(loading = true)
+        runCatching { repo.updateProfile(username, favoriteColor) }
+            .onSuccess { user ->
+                state = state.copy(user = user, loading = false, message = "Profil aktualisiert")
+                refreshAll()
+            }
+            .onFailure { state = state.copy(loading = false, message = apiError(it, "Profil speichern fehlgeschlagen")) }
+    }
 }
 
 class MainVmFactory(private val repo: AppRepo) : ViewModelProvider.Factory {
@@ -803,6 +831,8 @@ fun AppScreen(vm: MainVm) {
 
     var pwCurrent by remember { mutableStateOf("") }
     var pwNext by remember { mutableStateOf("") }
+    var profileUsername by remember { mutableStateOf("") }
+    var profileColor by remember { mutableStateOf("#1F5FBF") }
     var chatInput by remember { mutableStateOf("") }
     var viewerUrls by remember { mutableStateOf<List<String>>(emptyList()) }
     var viewerIndex by remember { mutableStateOf(0) }
@@ -906,6 +936,12 @@ fun AppScreen(vm: MainVm) {
             vm.refreshAll()
             delay(20_000)
         }
+    }
+
+    LaunchedEffect(state.user?.id, state.user?.username, state.user?.favoriteColor) {
+        val u = state.user ?: return@LaunchedEffect
+        profileUsername = u.username
+        profileColor = normalizeHexColor(u.favoriteColor)
     }
 
     if (state.showPromptDialog) {
@@ -1109,6 +1145,8 @@ fun AppScreen(vm: MainVm) {
                     darkMode = state.darkMode,
                     currentPassword = pwCurrent,
                     newPassword = pwNext,
+                    editableUsername = profileUsername,
+                    editableColor = profileColor,
                     appVersion = BuildConfig.VERSION_NAME,
                     serverVersion = state.serverVersion,
                     pushProvider = state.pushProvider,
@@ -1117,6 +1155,13 @@ fun AppScreen(vm: MainVm) {
                     uploadQuality = state.uploadQuality,
                     onDarkModeChange = { vm.setDarkMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
+                    onEditableUsernameChange = { profileUsername = it },
+                    onEditableColorChange = { profileColor = it },
+                    onSaveProfile = {
+                        if (profileUsername.trim().length >= 3) {
+                            scope.launch { vm.updateProfile(profileUsername, profileColor) }
+                        }
+                    },
                     onCurrentPasswordChange = { pwCurrent = it },
                     onNewPasswordChange = { pwNext = it },
                     onChangePassword = {
@@ -1366,7 +1411,11 @@ fun FeedTab(
                     val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
                     Card {
                         Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(item.user.username, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                item.user.username,
+                                fontWeight = FontWeight.SemiBold,
+                                color = parseUserColor(item.user.favoriteColor)
+                            )
                             if (item.isLate) {
                                 Text("Spaeter gepostet", color = Color(0xFF8B0000))
                             }
@@ -1471,7 +1520,11 @@ fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onS
                         val item = row.item
                         Card {
                             Column(modifier = Modifier.padding(10.dp)) {
-                                Text(item.user.username, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    item.user.username,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = parseUserColor(item.user.favoriteColor)
+                                )
                                 Text(item.body)
                             }
                         }
@@ -1498,6 +1551,8 @@ fun ProfileTab(
     darkMode: Boolean,
     currentPassword: String,
     newPassword: String,
+    editableUsername: String,
+    editableColor: String,
     appVersion: String,
     serverVersion: String,
     pushProvider: String,
@@ -1506,6 +1561,9 @@ fun ProfileTab(
     uploadQuality: Int,
     onDarkModeChange: (Boolean) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
+    onEditableUsernameChange: (String) -> Unit,
+    onEditableColorChange: (String) -> Unit,
+    onSaveProfile: () -> Unit,
     onCurrentPasswordChange: (String) -> Unit,
     onNewPasswordChange: (String) -> Unit,
     onChangePassword: () -> Unit,
@@ -1530,6 +1588,39 @@ fun ProfileTab(
                 Text("Dark Mode")
                 Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
             }
+        }
+
+        item {
+            Text("Profil", style = MaterialTheme.typography.titleMedium)
+            OutlinedTextField(
+                value = editableUsername,
+                onValueChange = onEditableUsernameChange,
+                label = { Text("Benutzername") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = editableColor,
+                onValueChange = onEditableColorChange,
+                label = { Text("Lieblingsfarbe (#RRGGBB)") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                listOf("#1F5FBF", "#D32F2F", "#2E7D32", "#8E24AA", "#F57C00", "#455A64").forEach { hex ->
+                    val selected = normalizeHexColor(editableColor) == hex
+                    Button(
+                        onClick = { onEditableColorChange(hex) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(if (selected) "✓" else " ")
+                    }
+                }
+            }
+            Text(
+                text = "Vorschau Name",
+                color = parseUserColor(editableColor),
+                fontWeight = FontWeight.Bold
+            )
+            Button(onClick = onSaveProfile, modifier = Modifier.fillMaxWidth()) { Text("Profil speichern") }
         }
 
         item {
@@ -1643,6 +1734,22 @@ private fun createdAtDay(value: String): String {
     return value
 }
 
+private fun normalizeHexColor(input: String): String {
+    val raw = input.trim().ifBlank { "#1F5FBF" }
+    val withHash = if (raw.startsWith("#")) raw else "#$raw"
+    val isHex = withHash.length == 7 && withHash.substring(1).all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+    return if (isHex) withHash.uppercase() else "#1F5FBF"
+}
+
+private fun parseUserColor(input: String): Color {
+    val hex = normalizeHexColor(input).removePrefix("#")
+    val value = hex.toLongOrNull(16) ?: 0x1F5FBF
+    val r = ((value shr 16) and 0xFF).toInt()
+    val g = ((value shr 8) and 0xFF).toInt()
+    val b = (value and 0xFF).toInt()
+    return Color(r, g, b)
+}
+
 private fun apiError(t: Throwable, fallback: String): String {
     if (t is HttpException) {
         val raw = runCatching { t.response()?.errorBody()?.string().orEmpty() }.getOrDefault("").lowercase()
@@ -1655,7 +1762,10 @@ private fun apiError(t: Throwable, fallback: String): String {
                 raw.contains("poste zuerst dein tagesmoment") -> "Poste zuerst dein Tagesmoment."
                 else -> "Aktion nicht erlaubt"
             }
-            409 -> "Du hast heute bereits gepostet"
+            409 -> when {
+                raw.contains("username exists") -> "Benutzername ist bereits vergeben."
+                else -> "Du hast heute bereits gepostet"
+            }
             else -> fallback
         }
     }

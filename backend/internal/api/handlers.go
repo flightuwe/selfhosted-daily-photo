@@ -6,6 +6,7 @@ import (
     "mime/multipart"
     "net/http"
     "path/filepath"
+    "regexp"
     "strconv"
     "strings"
     "time"
@@ -54,6 +55,7 @@ func (s *Server) Router() *gin.Engine {
         protected.Use(s.requireAuth)
         {
             protected.GET("/me", s.handleMe)
+            protected.PUT("/me/profile", s.handleUpdateProfile)
             protected.PUT("/me/password", s.handleChangePassword)
             protected.GET("/me/photos", s.handleMyPhotos)
             protected.POST("/devices", s.handleDevice)
@@ -144,7 +146,53 @@ func (s *Server) handleLogin(c *gin.Context) {
 
 func (s *Server) handleMe(c *gin.Context) {
     user, _ := userFromContext(c)
+    if user.FavoriteColor == "" {
+        user.FavoriteColor = "#1F5FBF"
+    }
     c.JSON(http.StatusOK, gin.H{"user": user})
+}
+
+func (s *Server) handleUpdateProfile(c *gin.Context) {
+    user, _ := userFromContext(c)
+    var req struct {
+        Username      string `json:"username" binding:"required,min=3,max=64"`
+        FavoriteColor string `json:"favoriteColor"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+    username := strings.ToLower(strings.TrimSpace(req.Username))
+    if len(username) < 3 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "username too short"})
+        return
+    }
+    color, ok := normalizeColor(req.FavoriteColor)
+    if !ok {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid favoriteColor"})
+        return
+    }
+
+    var existing models.User
+    if err := s.DB.Where("username = ? AND id <> ?", username, user.ID).First(&existing).Error; err == nil {
+        c.JSON(http.StatusConflict, gin.H{"error": "username exists"})
+        return
+    }
+
+    if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]any{
+        "username":       username,
+        "favorite_color": color,
+    }).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+        return
+    }
+
+    var updated models.User
+    if err := s.DB.First(&updated, user.ID).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"user": updated})
 }
 
 func (s *Server) handleChangePassword(c *gin.Context) {
@@ -435,6 +483,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
             "user": gin.H{
                 "id":       p.User.ID,
                 "username": p.User.Username,
+                "favoriteColor": defaultColor(p.User.FavoriteColor),
             },
         })
     }
@@ -485,6 +534,7 @@ func (s *Server) handleFeed(c *gin.Context) {
             "user": gin.H{
                 "id":       p.User.ID,
                 "username": p.User.Username,
+                "favoriteColor": defaultColor(p.User.FavoriteColor),
             },
         })
     }
@@ -866,6 +916,7 @@ func (s *Server) handleChatList(c *gin.Context) {
             "user": gin.H{
                 "id":       m.User.ID,
                 "username": m.User.Username,
+                "favoriteColor": defaultColor(m.User.FavoriteColor),
             },
         })
     }
@@ -913,6 +964,7 @@ func (s *Server) handleChatCreate(c *gin.Context) {
         "user": gin.H{
             "id":       user.ID,
             "username": user.Username,
+            "favoriteColor": defaultColor(user.FavoriteColor),
         },
     })
 }
@@ -1112,4 +1164,27 @@ func (s *Server) removeInvalidTokens(tokens []string) int64 {
         return 0
     }
     return tx.RowsAffected
+}
+
+func defaultColor(v string) string {
+    if c, ok := normalizeColor(v); ok {
+        return c
+    }
+    return "#1F5FBF"
+}
+
+var colorRe = regexp.MustCompile(`^#?[0-9a-fA-F]{6}$`)
+
+func normalizeColor(v string) (string, bool) {
+    x := strings.TrimSpace(v)
+    if x == "" {
+        return "#1F5FBF", true
+    }
+    if !colorRe.MatchString(x) {
+        return "", false
+    }
+    if !strings.HasPrefix(x, "#") {
+        x = "#" + x
+    }
+    return strings.ToUpper(x), true
 }

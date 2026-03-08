@@ -7,6 +7,7 @@ type User struct {
     Username     string    `gorm:"uniqueIndex;size:64;not null" json:"username"`
     PasswordHash string    `gorm:"not null" json:"-"`
     IsAdmin      bool      `gorm:"default:false" json:"isAdmin"`
+    FavoriteColor string   `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
     CreatedAt    time.Time `json:"createdAt"`
 }
 
