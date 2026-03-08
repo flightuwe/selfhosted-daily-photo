@@ -76,8 +76,12 @@ jobs:
         run: |
           if [ "${{ steps.build.outcome }}" != "success" ]; then
             msg=$(awk '/\* What went wrong:/{flag=1;next}/\* Try:/{flag=0}flag' android-build.log | head -n 40 | tr '\n' ' ')
+            kmsg=$(grep -E '^e: ' android-build.log | head -n 25 | tr '\n' ' ')
             if [ -z "$msg" ]; then
               msg=$(grep -E "Execution failed for task|Could not resolve|SDK location not found|Plugin \[id:" android-build.log | head -n 10 | tr '\n' ' ')
+            fi
+            if [ -n "$kmsg" ]; then
+              msg="$msg KotlinErrors: $kmsg"
             fi
             if [ -z "$msg" ]; then
               msg=$(tail -n 40 android-build.log | tr '\n' ' ')
