@@ -728,16 +728,24 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 		if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
             isLate = true
         }
-        out = append(out, gin.H{
-            "isLate": isLate,
-            "photo":  s.photoJSON(p),
+        reactions := reactionByPhoto[p.ID]
+        if reactions == nil {
+            reactions = []gin.H{}
+        }
+        comments := commentByPhoto[p.ID]
+        if comments == nil {
+            comments = []gin.H{}
+        }
+		out = append(out, gin.H{
+			"isLate": isLate,
+			"photo":  s.photoJSON(p),
 			"user": gin.H{
 				"id":       p.User.ID,
 				"username": p.User.Username,
 				"favoriteColor": defaultColor(p.User.FavoriteColor),
 			},
-			"reactions":      reactionByPhoto[p.ID],
-			"comments":       commentByPhoto[p.ID],
+			"reactions":      reactions,
+			"comments":       comments,
 			"triggerSource":   prompt.TriggerSource,
 			"requestedByUser": prompt.RequestedBy,
 		})
@@ -781,30 +789,50 @@ func (s *Server) handleFeed(c *gin.Context) {
     var prompt models.DailyPrompt
     _ = s.DB.Where("day = ?", day).First(&prompt).Error
 
-    var photos []models.Photo
-    if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-        return
-    }
+	var photos []models.Photo
+	if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
 
-    out := make([]gin.H, 0, len(photos))
-    for _, p := range photos {
-        isLate := false
-        if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
-            isLate = true
-        }
-        out = append(out, gin.H{
-            "isLate":     isLate,
-            "photo":      s.photoJSON(p),
-            "user": gin.H{
-                "id":       p.User.ID,
-                "username": p.User.Username,
-                "favoriteColor": defaultColor(p.User.FavoriteColor),
-            },
-            "triggerSource":   prompt.TriggerSource,
-            "requestedByUser": prompt.RequestedBy,
-        })
-    }
+	photoIDs := make([]uint, 0, len(photos))
+	for _, p := range photos {
+		photoIDs = append(photoIDs, p.ID)
+	}
+	reactionByPhoto, commentByPhoto, err := s.feedInteractionPreview(photoIDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "interaction query failed"})
+		return
+	}
+
+	out := make([]gin.H, 0, len(photos))
+	for _, p := range photos {
+		isLate := false
+		if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
+			isLate = true
+		}
+		reactions := reactionByPhoto[p.ID]
+		if reactions == nil {
+			reactions = []gin.H{}
+		}
+		comments := commentByPhoto[p.ID]
+		if comments == nil {
+			comments = []gin.H{}
+		}
+		out = append(out, gin.H{
+			"isLate":     isLate,
+			"photo":      s.photoJSON(p),
+			"user": gin.H{
+				"id":       p.User.ID,
+				"username": p.User.Username,
+				"favoriteColor": defaultColor(p.User.FavoriteColor),
+			},
+			"reactions":      reactions,
+			"comments":       comments,
+			"triggerSource":   prompt.TriggerSource,
+			"requestedByUser": prompt.RequestedBy,
+		})
+	}
 
     recap, _ := s.monthlyRecapForDay(day, user.ID)
 

@@ -175,8 +175,8 @@ data class FeedItem(
     val isLate: Boolean = false,
     val photo: PromptPhoto,
     val user: User,
-    val reactions: List<ReactionCount> = emptyList(),
-    val comments: List<PhotoCommentItem> = emptyList(),
+    val reactions: List<ReactionCount>? = null,
+    val comments: List<PhotoCommentItem>? = null,
     val triggerSource: String? = null,
     val requestedByUser: String? = null
 )
@@ -2293,14 +2293,16 @@ fun FeedTab(
                                     Text(reason, color = Color(0xFF1F5FBF))
                                 }
                             }
-                            if (item.reactions.isNotEmpty()) {
+                            val reactions = item.reactions.orEmpty()
+                            val comments = item.comments.orEmpty()
+                            if (reactions.isNotEmpty()) {
                                 Text(
-                                    item.reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
+                                    reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
                                     color = Color(0xFF37474F)
                                 )
                             }
-                            if (item.comments.isNotEmpty()) {
-                                item.comments.take(2).forEach { comment ->
+                            if (comments.isNotEmpty()) {
+                                comments.take(2).forEach { comment ->
                                     Text(
                                         "${comment.user.username}: ${comment.body}",
                                         color = Color(0xFF455A64),
