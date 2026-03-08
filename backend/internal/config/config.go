@@ -3,6 +3,7 @@ package config
 import (
     "os"
     "strconv"
+    "strings"
     "time"
 )
 
@@ -41,18 +42,13 @@ func getEnv(key, fallback string) string {
 }
 
 func splitCSV(v string) []string {
-    out := []string{}
-    start := 0
-    for i := 0; i < len(v); i++ {
-        if v[i] == ',' {
-            if start < i {
-                out = append(out, v[start:i])
-            }
-            start = i + 1
+    parts := strings.Split(v, ",")
+    out := make([]string, 0, len(parts))
+    for _, p := range parts {
+        p = strings.TrimSpace(p)
+        if p != "" {
+            out = append(out, p)
         }
-    }
-    if start < len(v) {
-        out = append(out, v[start:])
     }
     if len(out) == 0 {
         return []string{"*"}
