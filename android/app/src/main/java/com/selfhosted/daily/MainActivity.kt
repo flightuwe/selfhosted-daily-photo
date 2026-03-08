@@ -331,6 +331,18 @@ class AppRepo(private val api: Api, private val context: Context) {
         prefs.edit().putLong("chat_seen_other_ms", value.coerceAtLeast(0L)).apply()
     }
 
+    fun lastSeenChangelogVersion(): String = prefs.getString("last_seen_changelog_version", "") ?: ""
+
+    fun shouldShowChangelog(currentVersion: String): Boolean {
+        if (currentVersion.isBlank()) return false
+        return lastSeenChangelogVersion() != currentVersion
+    }
+
+    fun markChangelogSeen(currentVersion: String) {
+        if (currentVersion.isBlank()) return
+        prefs.edit().putString("last_seen_changelog_version", currentVersion).apply()
+    }
+
     suspend fun login(username: String, password: String): User {
         val res = api.login(LoginRequest(username, password))
         saveToken(res.token)
@@ -563,6 +575,7 @@ data class UiState(
     val serverVersion: String = "unbekannt",
     val pushProvider: String = "unknown",
     val showPromptDialog: Boolean = false,
+    val showChangelogDialog: Boolean = false,
     val specialMomentStatus: SpecialMomentStatus? = null,
     val updateInfo: UpdateInfo? = null,
     val darkMode: Boolean = false,
@@ -605,6 +618,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverConnected = health?.ok == true,
             serverVersion = health?.version ?: "nicht erreichbar",
             pushProvider = health?.provider ?: "unknown",
+            showChangelogDialog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
     }
@@ -914,6 +928,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(updateInfo = null)
     }
 
+    fun showChangelogDialog() {
+        state = state.copy(showChangelogDialog = true)
+    }
+
+    fun dismissChangelogDialog() {
+        repo.markChangelogSeen(BuildConfig.VERSION_NAME)
+        state = state.copy(showChangelogDialog = false)
+    }
+
     fun setDarkMode(enabled: Boolean) {
         repo.setDarkMode(enabled)
         state = state.copy(darkMode = enabled)
@@ -1174,6 +1197,28 @@ fun AppScreen(vm: MainVm) {
         )
     }
 
+    if (state.showChangelogDialog) {
+        val lines = changelogLinesForVersion(BuildConfig.VERSION_NAME)
+        AlertDialog(
+            onDismissRequest = { vm.dismissChangelogDialog() },
+            confirmButton = {
+                TextButton(onClick = { vm.dismissChangelogDialog() }) { Text("Schliessen") }
+            },
+            title = { Text("Changelog ${BuildConfig.VERSION_NAME}") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    lines.forEach { line -> Text("- $line") }
+                }
+            }
+        )
+    }
+
     if (viewerUrls.isNotEmpty()) {
         AlertDialog(
             onDismissRequest = {
@@ -1381,6 +1426,7 @@ fun AppScreen(vm: MainVm) {
                         }
                     },
                     onCheckUpdate = { scope.launch { vm.checkForUpdate() } },
+                    onShowChangelog = { vm.showChangelogDialog() },
                     onCheckConnection = { scope.launch { vm.checkConnection() } },
                     onLogout = { vm.logout() },
                     onOpenViewer = { urls ->
@@ -1865,6 +1911,7 @@ fun ProfileTab(
     onNewPasswordChange: (String) -> Unit,
     onChangePassword: () -> Unit,
     onCheckUpdate: () -> Unit,
+    onShowChangelog: () -> Unit,
     onCheckConnection: () -> Unit,
     onLogout: () -> Unit,
     onOpenViewer: (List<String>) -> Unit
@@ -1878,6 +1925,7 @@ fun ProfileTab(
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onCheckUpdate) { Text("Update pruefen") }
+                Button(onClick = onShowChangelog) { Text("Changelog") }
                 Button(onClick = onLogout) { Text("Abmelden") }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -2116,6 +2164,23 @@ private fun createTempImageUri(context: Context): Uri {
     val dir = File(context.cacheDir, "camera").apply { mkdirs() }
     val file = File.createTempFile("moment_", ".jpg", dir)
     return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}
+
+private fun changelogLinesForVersion(version: String): List<String> {
+    return when (version) {
+        "0.3.17" -> listOf(
+            "Monatliche Rueckblicke in Feed und Kalender",
+            "Admin-Dashboard mit Tage aktiv, Bilder gesamt und Speicher gesamt",
+            "Sondermoment-Limit pro Nutzer auf 1x pro Woche",
+            "Streak-Anzeige im Profil (taegliche Serien)",
+            "Zoom in der Bild-Vollansicht (Pinch + Drag + Doppeltipp-Reset)"
+        )
+        else -> listOf(
+            "Stabilitaets- und UI-Verbesserungen",
+            "Optimierungen fuer Feed, Kalender, Chat und Upload-Flow",
+            "Bitte pruefe die Release-Notes auf GitHub fuer alle Details"
+        )
+    }
 }
 
 @Composable
