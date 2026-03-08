@@ -29,6 +29,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -67,6 +68,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -2519,6 +2521,38 @@ fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onS
 }
 
 @Composable
+private fun CollapsibleSection(
+    title: String,
+    subtitle: String? = null,
+    initiallyExpanded: Boolean = false,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    var expanded by rememberSaveable(title) { mutableStateOf(initiallyExpanded) }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    if (!subtitle.isNullOrBlank()) {
+                        Text(subtitle, color = Color.Gray, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                Text(if (expanded) "▾" else "▸", style = MaterialTheme.typography.titleMedium)
+            }
+            if (expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+            }
+        }
+    }
+}
+
+@Composable
 fun ProfileTab(
     username: String,
     inviteCode: String,
@@ -2578,182 +2612,210 @@ fun ProfileTab(
             Row(modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onLogout) { Text("Abmelden") }
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        }
+
+        item {
+            CollapsibleSection(
+                title = "Anzeige & Benachrichtigungen",
+                subtitle = "Design, Chat-Push, Auto-Update",
+                initiallyExpanded = true
             ) {
-                Text("Dark Mode")
-                Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("OLED Schwarz")
-                Switch(checked = oledMode, onCheckedChange = onOledModeChange)
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Auto-Update-Suche (10 Min)")
-                Switch(checked = autoUpdateEnabled, onCheckedChange = onAutoUpdateEnabledChange)
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Chat Push bei neuen Nachrichten")
-                Switch(checked = chatPushEnabled, onCheckedChange = onChatPushEnabledChange)
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text("Invite-Code", style = MaterialTheme.typography.titleMedium)
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(inviteCode.ifBlank { "wird geladen ..." }, fontWeight = FontWeight.SemiBold)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Button(onClick = onRollInviteCode, modifier = Modifier.weight(1f)) { Text("Erneuern") }
-                        Button(onClick = onShareInviteCode, modifier = Modifier.weight(1f)) { Text("Teilen") }
-                    }
-                    Text("Jeder Code ist einmal gueltig. Nach Nutzung wird automatisch ein neuer Code erzeugt.")
-                }
-            }
-        }
-
-        item {
-            Text("Profil", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(
-                value = editableUsername,
-                onValueChange = onEditableUsernameChange,
-                label = { Text("Benutzername") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Aktuelle Lieblingsfarbe: ${normalizeHexColor(editableColor)}")
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(28.dp)
-                            .background(parseUserColor(editableColor))
-                    ) {}
-                    Button(onClick = { showColorPicker = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Lieblingsfarbe waehlen")
-                    }
-                }
-            }
-            Text(
-                text = "Vorschau Name",
-                color = parseUserColor(editableColor),
-                fontWeight = FontWeight.Bold
-            )
-            Button(onClick = onSaveProfile, modifier = Modifier.fillMaxWidth()) { Text("Profil speichern") }
-        }
-
-        item {
-            Text("App & Verbindung", style = MaterialTheme.typography.titleMedium)
-            Card {
-                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Status: ${if (serverConnected) "Verbunden" else "Nicht verbunden"}")
-                    Text("App-Version: $appVersion")
-                    Text("Server-Version: $serverVersion")
-                    Text("Push-Provider: $pushProvider")
-                    Text("API: $apiBaseUrl")
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
-                }
-            }
-        }
-
-        item {
-            Text("Moment-Bedingungen", style = MaterialTheme.typography.titleMedium)
-            Card {
-                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (promptRules == null) {
-                        Text("Bedingungen werden geladen ...")
-                    } else {
-                        Text("Prompt-Fenster: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
-                        Text("Upload-Fenster: ${promptRules.uploadWindowMinutes} Minuten")
-                        Text("Max Upload: ${if (promptRules.maxUploadBytes <= 0) "Unbegrenzt" else formatBytes(promptRules.maxUploadBytes.toDouble())}")
-                        Text("Zeitzone: ${promptRules.timezone}")
-                    }
-                }
-            }
-        }
-
-        item {
-            Text("Upload-Komprimierung", style = MaterialTheme.typography.titleMedium)
-            Card {
-                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("JPEG-Qualitaet: $uploadQuality%")
-                    Slider(
-                        value = uploadQuality.toFloat(),
-                        onValueChange = { onUploadQualityChange(it.toInt()) },
-                        valueRange = 45f..95f
-                    )
-                    Text("Weniger Qualitaet = kleiner und schnellerer Upload")
-                }
-            }
-        }
-
-        item {
-            Text("Passwort aendern", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(
-                value = currentPassword,
-                onValueChange = onCurrentPasswordChange,
-                label = { Text("Aktuelles Passwort") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            OutlinedTextField(
-                value = newPassword,
-                onValueChange = onNewPasswordChange,
-                label = { Text("Neues Passwort") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Button(onClick = onChangePassword, modifier = Modifier.fillMaxWidth()) { Text("Passwort speichern") }
-        }
-
-        item {
-            Text("Vergangene Beitraege", style = MaterialTheme.typography.titleMedium)
-            Spacer(modifier = Modifier.height(6.dp))
-        }
-
-        item {
-            if (photos.isEmpty()) {
-                Text("Noch keine Beitraege")
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    userScrollEnabled = false,
-                    modifier = Modifier.height((((photos.size / 3) + 2) * 96).dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    items(photos) { photo ->
-                        val urls = listOfNotNull(photo.url, photo.secondUrl)
-                        Column {
-                            AsyncImage(
-                                model = photo.url,
-                                contentDescription = "${photo.day}",
-                                modifier = Modifier
-                                    .size(96.dp)
-                                    .background(Color.LightGray)
-                                    .clickable { onOpenViewer(urls, photo.id) },
-                                contentScale = ContentScale.Crop
-                            )
-                            if (photo.secondUrl != null) {
-                                Text("2 Bilder", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Dark Mode")
+                    Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("OLED Schwarz")
+                    Switch(checked = oledMode, onCheckedChange = onOledModeChange)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Auto-Update-Suche (10 Min)")
+                    Switch(checked = autoUpdateEnabled, onCheckedChange = onAutoUpdateEnabledChange)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Chat Push bei neuen Nachrichten")
+                    Switch(checked = chatPushEnabled, onCheckedChange = onChatPushEnabledChange)
+                }
+            }
+        }
+
+        item {
+            CollapsibleSection(
+                title = "Invite-Code",
+                subtitle = "Code teilen oder erneuern",
+                initiallyExpanded = false
+            ) {
+                Text(inviteCode.ifBlank { "wird geladen ..." }, fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = onRollInviteCode, modifier = Modifier.weight(1f)) { Text("Erneuern") }
+                    Button(onClick = onShareInviteCode, modifier = Modifier.weight(1f)) { Text("Teilen") }
+                }
+                Text("Jeder Code ist einmal gueltig. Nach Nutzung wird automatisch ein neuer Code erzeugt.")
+            }
+        }
+
+        item {
+            CollapsibleSection(
+                title = "Profil & Konto",
+                subtitle = "Benutzername, Farbe und Passwort",
+                initiallyExpanded = false
+            ) {
+                OutlinedTextField(
+                    value = editableUsername,
+                    onValueChange = onEditableUsernameChange,
+                    label = { Text("Benutzername") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Aktuelle Lieblingsfarbe: ${normalizeHexColor(editableColor)}")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(28.dp)
+                                .background(parseUserColor(editableColor))
+                        ) {}
+                        Button(onClick = { showColorPicker = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Lieblingsfarbe waehlen")
+                        }
+                    }
+                }
+                Text(
+                    text = "Vorschau Name",
+                    color = parseUserColor(editableColor),
+                    fontWeight = FontWeight.Bold
+                )
+                Button(onClick = onSaveProfile, modifier = Modifier.fillMaxWidth()) { Text("Profil speichern") }
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = currentPassword,
+                    onValueChange = onCurrentPasswordChange,
+                    label = { Text("Aktuelles Passwort") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = newPassword,
+                    onValueChange = onNewPasswordChange,
+                    label = { Text("Neues Passwort") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Button(onClick = onChangePassword, modifier = Modifier.fillMaxWidth()) { Text("Passwort speichern") }
+            }
+        }
+
+        item {
+            CollapsibleSection(
+                title = "App & Verbindung",
+                subtitle = "Versionen und Serverstatus",
+                initiallyExpanded = true
+            ) {
+                Card {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Status: ${if (serverConnected) "Verbunden" else "Nicht verbunden"}")
+                        Text("App-Version: $appVersion")
+                        Text("Server-Version: $serverVersion")
+                        Text("Push-Provider: $pushProvider")
+                        Text("API: $apiBaseUrl")
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
+                    }
+                }
+            }
+        }
+
+        item {
+            CollapsibleSection(
+                title = "Moment-Bedingungen",
+                subtitle = "Aktuelle Regeln vom Server",
+                initiallyExpanded = false
+            ) {
+                Card {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (promptRules == null) {
+                            Text("Bedingungen werden geladen ...")
+                        } else {
+                            Text("Prompt-Fenster: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
+                            Text("Upload-Fenster: ${promptRules.uploadWindowMinutes} Minuten")
+                            Text("Max Upload: ${if (promptRules.maxUploadBytes <= 0) "Unbegrenzt" else formatBytes(promptRules.maxUploadBytes.toDouble())}")
+                            Text("Zeitzone: ${promptRules.timezone}")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            CollapsibleSection(
+                title = "Upload-Komprimierung",
+                subtitle = "Qualitaet vs. Geschwindigkeit",
+                initiallyExpanded = false
+            ) {
+                Card {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("JPEG-Qualitaet: $uploadQuality%")
+                        Slider(
+                            value = uploadQuality.toFloat(),
+                            onValueChange = { onUploadQualityChange(it.toInt()) },
+                            valueRange = 45f..95f
+                        )
+                        Text("Weniger Qualitaet = kleiner und schnellerer Upload")
+                    }
+                }
+            }
+        }
+
+        item {
+            CollapsibleSection(
+                title = "Vergangene Beitraege",
+                subtitle = "Deine Galerie",
+                initiallyExpanded = false
+            ) {
+                if (photos.isEmpty()) {
+                    Text("Noch keine Beitraege")
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(3),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        userScrollEnabled = false,
+                        modifier = Modifier.height((((photos.size / 3) + 2) * 96).dp)
+                    ) {
+                        items(photos) { photo ->
+                            val urls = listOfNotNull(photo.url, photo.secondUrl)
+                            Column {
+                                AsyncImage(
+                                    model = photo.url,
+                                    contentDescription = "${photo.day}",
+                                    modifier = Modifier
+                                        .size(96.dp)
+                                        .background(Color.LightGray)
+                                        .clickable { onOpenViewer(urls, photo.id) },
+                                    contentScale = ContentScale.Crop
+                                )
+                                if (photo.secondUrl != null) {
+                                    Text("2 Bilder", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                if (!photo.promptOnly) {
+                                    Text("Extra", color = Color(0xFF1F5FBF), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                Text(photo.day, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            if (!photo.promptOnly) {
-                                Text("Extra", color = Color(0xFF1F5FBF), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            Text(photo.day, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
