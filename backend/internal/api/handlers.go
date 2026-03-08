@@ -5,6 +5,7 @@ import (
     "fmt"
     "net/http"
     "path/filepath"
+    "strconv"
     "strings"
     "time"
 
@@ -33,7 +34,7 @@ func (s *Server) Router() *gin.Engine {
     r := gin.Default()
     r.Use(cors.New(cors.Config{
         AllowOrigins:     s.Config.AllowedOrigins,
-        AllowMethods:     []string{"GET", "POST", "PUT"},
+        AllowMethods:     []string{"GET", "POST", "PUT", "DELETE"},
         AllowHeaders:     []string{"Authorization", "Content-Type"},
         ExposeHeaders:    []string{"Content-Length"},
         AllowCredentials: true,
@@ -63,8 +64,15 @@ func (s *Server) Router() *gin.Engine {
         {
             admin.GET("/settings", s.handleGetSettings)
             admin.PUT("/settings", s.handleUpdateSettings)
+            admin.GET("/stats", s.handleAdminStats)
+
             admin.POST("/prompt/trigger", s.handleTriggerPrompt)
+            admin.POST("/notifications/broadcast", s.handleBroadcastNotification)
+
+            admin.GET("/users", s.handleAdminListUsers)
             admin.POST("/users", s.handleAdminCreateUser)
+            admin.PUT("/users/:id", s.handleAdminUpdateUser)
+            admin.DELETE("/users/:id", s.handleAdminDeleteUser)
         }
     }
 
@@ -156,10 +164,10 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 
     canUpload := prompt.UploadUntil != nil && now.Before(*prompt.UploadUntil)
     c.JSON(http.StatusOK, gin.H{
-        "day":       day,
-        "triggered": prompt.TriggeredAt,
+        "day":         day,
+        "triggered":   prompt.TriggeredAt,
         "uploadUntil": prompt.UploadUntil,
-        "canUpload": canUpload,
+        "canUpload":   canUpload,
     })
 }
 
@@ -331,15 +339,10 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
         return
     }
 
-    tokens := []string{}
-    var rows []models.DeviceToken
-    _ = s.DB.Find(&rows).Error
-    for _, t := range rows {
-        tokens = append(tokens, t.Token)
-    }
+    tokens := s.allDeviceTokens()
     _ = s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
 
-    c.JSON(http.StatusOK, gin.H{"prompt": prompt, "settings": settings})
+    c.JSON(http.StatusOK, gin.H{"prompt": prompt, "settings": settings, "devices": len(tokens)})
 }
 
 func (s *Server) handleAdminCreateUser(c *gin.Context) {
@@ -349,7 +352,7 @@ func (s *Server) handleAdminCreateUser(c *gin.Context) {
         IsAdmin  bool   `json:"isAdmin"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload: username>=3, password>=6"})
         return
     }
 
@@ -365,5 +368,175 @@ func (s *Server) handleAdminCreateUser(c *gin.Context) {
         return
     }
 
-    c.JSON(http.StatusCreated, user)
+    c.JSON(http.StatusCreated, toAdminUser(user, 0, 0))
+}
+
+func (s *Server) handleAdminListUsers(c *gin.Context) {
+    var users []models.User
+    if err := s.DB.Order("created_at desc").Find(&users).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+
+    out := make([]gin.H, 0, len(users))
+    for _, u := range users {
+        var photoCount int64
+        var tokenCount int64
+        _ = s.DB.Model(&models.Photo{}).Where("user_id = ?", u.ID).Count(&photoCount).Error
+        _ = s.DB.Model(&models.DeviceToken{}).Where("user_id = ?", u.ID).Count(&tokenCount).Error
+        out = append(out, toAdminUser(u, photoCount, tokenCount))
+    }
+
+    c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) handleAdminUpdateUser(c *gin.Context) {
+    id, err := parseUintParam(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+        return
+    }
+
+    var req struct {
+        Password *string `json:"password"`
+        IsAdmin  *bool   `json:"isAdmin"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+
+    var user models.User
+    if err := s.DB.First(&user, id).Error; err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+        return
+    }
+
+    if req.Password != nil {
+        if len(strings.TrimSpace(*req.Password)) < 6 {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 6 chars"})
+            return
+        }
+        hash, err := auth.HashPassword(*req.Password)
+        if err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "hash failed"})
+            return
+        }
+        user.PasswordHash = hash
+    }
+
+    if req.IsAdmin != nil {
+        user.IsAdmin = *req.IsAdmin
+    }
+
+    if err := s.DB.Save(&user).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+        return
+    }
+
+    var photoCount int64
+    var tokenCount int64
+    _ = s.DB.Model(&models.Photo{}).Where("user_id = ?", user.ID).Count(&photoCount).Error
+    _ = s.DB.Model(&models.DeviceToken{}).Where("user_id = ?", user.ID).Count(&tokenCount).Error
+
+    c.JSON(http.StatusOK, toAdminUser(user, photoCount, tokenCount))
+}
+
+func (s *Server) handleAdminDeleteUser(c *gin.Context) {
+    id, err := parseUintParam(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+        return
+    }
+
+    adminUser, _ := userFromContext(c)
+    if adminUser.ID == id {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete current admin"})
+        return
+    }
+
+    var user models.User
+    if err := s.DB.First(&user, id).Error; err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+        return
+    }
+
+    _ = s.DB.Where("user_id = ?", id).Delete(&models.DeviceToken{}).Error
+    _ = s.DB.Where("user_id = ?", id).Delete(&models.Photo{}).Error
+    if err := s.DB.Delete(&user).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) handleAdminStats(c *gin.Context) {
+    var users int64
+    var photos int64
+    var devices int64
+    var prompts int64
+
+    _ = s.DB.Model(&models.User{}).Count(&users).Error
+    _ = s.DB.Model(&models.Photo{}).Count(&photos).Error
+    _ = s.DB.Model(&models.DeviceToken{}).Count(&devices).Error
+    _ = s.DB.Model(&models.DailyPrompt{}).Count(&prompts).Error
+
+    c.JSON(http.StatusOK, gin.H{
+        "users":   users,
+        "photos":  photos,
+        "devices": devices,
+        "prompts": prompts,
+    })
+}
+
+func (s *Server) handleBroadcastNotification(c *gin.Context) {
+    var req struct {
+        Body string `json:"body" binding:"required,min=3,max=255"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+
+    tokens := s.allDeviceTokens()
+    if err := s.Notifier.SendDailyPrompt(tokens, req.Body); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "broadcast failed"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "ok":      true,
+        "sentTo":  len(tokens),
+        "provider": "noop_until_fcm_is_configured",
+    })
+}
+
+func (s *Server) allDeviceTokens() []string {
+    var rows []models.DeviceToken
+    _ = s.DB.Find(&rows).Error
+    tokens := make([]string, 0, len(rows))
+    for _, t := range rows {
+        tokens = append(tokens, t.Token)
+    }
+    return tokens
+}
+
+func parseUintParam(v string) (uint, error) {
+    n, err := strconv.ParseUint(v, 10, 32)
+    if err != nil {
+        return 0, err
+    }
+    return uint(n), nil
+}
+
+func toAdminUser(u models.User, photoCount, tokenCount int64) gin.H {
+    return gin.H{
+        "id":          u.ID,
+        "username":    u.Username,
+        "isAdmin":     u.IsAdmin,
+        "createdAt":   u.CreatedAt,
+        "photoCount":  photoCount,
+        "deviceCount": tokenCount,
+    }
 }
