@@ -17,8 +17,13 @@ import (
     "gorm.io/gorm"
 )
 
+var buildVersion = "dev"
+
 func main() {
     cfg := config.Load()
+    if (cfg.AppVersion == "" || strings.EqualFold(cfg.AppVersion, "dev")) && buildVersion != "" && !strings.EqualFold(buildVersion, "dev") {
+        cfg.AppVersion = buildVersion
+    }
 
     location, err := time.LoadLocation(cfg.Timezone)
     if err != nil {
