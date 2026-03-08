@@ -141,12 +141,44 @@ export type SystemHealth = {
 
 const apiBase = import.meta.env.VITE_API_BASE || "/api";
 
+const settingsDefaults: Settings = {
+  promptWindowStartHour: 8,
+  promptWindowEndHour: 20,
+  uploadWindowMinutes: 10,
+  promptNotificationText: "Zeit fuer dein Daily Foto",
+  maxUploadBytes: 0,
+  chatCommandEnabled: false,
+  chatCommandValue: "-moment",
+  chatCommandTrigger: true,
+  chatCommandSendPush: true,
+  chatCommandPushText: "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
+  chatCommandEchoChat: true,
+  chatCommandEchoText: "Moment wurde von {user} angefordert.",
+};
+
 async function parse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: "Request failed" }));
     throw new Error(body.error || "Request failed");
   }
   return res.json();
+}
+
+function normalizeSettings(raw: any): Settings {
+  return {
+    promptWindowStartHour: Number(raw?.promptWindowStartHour ?? raw?.PromptWindowStartHour ?? settingsDefaults.promptWindowStartHour),
+    promptWindowEndHour: Number(raw?.promptWindowEndHour ?? raw?.PromptWindowEndHour ?? settingsDefaults.promptWindowEndHour),
+    uploadWindowMinutes: Number(raw?.uploadWindowMinutes ?? raw?.UploadWindowMinutes ?? settingsDefaults.uploadWindowMinutes),
+    promptNotificationText: String(raw?.promptNotificationText ?? raw?.PromptNotificationText ?? settingsDefaults.promptNotificationText),
+    maxUploadBytes: Number(raw?.maxUploadBytes ?? raw?.MaxUploadBytes ?? settingsDefaults.maxUploadBytes),
+    chatCommandEnabled: Boolean(raw?.chatCommandEnabled ?? raw?.ChatCommandEnabled ?? settingsDefaults.chatCommandEnabled),
+    chatCommandValue: String(raw?.chatCommandValue ?? raw?.ChatCommandValue ?? settingsDefaults.chatCommandValue),
+    chatCommandTrigger: Boolean(raw?.chatCommandTrigger ?? raw?.ChatCommandTrigger ?? settingsDefaults.chatCommandTrigger),
+    chatCommandSendPush: Boolean(raw?.chatCommandSendPush ?? raw?.ChatCommandSendPush ?? settingsDefaults.chatCommandSendPush),
+    chatCommandPushText: String(raw?.chatCommandPushText ?? raw?.ChatCommandPushText ?? settingsDefaults.chatCommandPushText),
+    chatCommandEchoChat: Boolean(raw?.chatCommandEchoChat ?? raw?.ChatCommandEchoChat ?? settingsDefaults.chatCommandEchoChat),
+    chatCommandEchoText: String(raw?.chatCommandEchoText ?? raw?.ChatCommandEchoText ?? settingsDefaults.chatCommandEchoText),
+  };
 }
 
 export async function login(username: string, password: string): Promise<AuthResponse> {
@@ -162,7 +194,8 @@ export async function getSettings(token: string): Promise<Settings> {
   const res = await fetch(`${apiBase}/admin/settings`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  return parse<Settings>(res);
+  const data = await parse<any>(res);
+  return normalizeSettings(data);
 }
 
 export async function updateSettings(token: string, settings: Settings): Promise<Settings> {
@@ -174,7 +207,8 @@ export async function updateSettings(token: string, settings: Settings): Promise
     },
     body: JSON.stringify(settings),
   });
-  return parse<Settings>(res);
+  const data = await parse<any>(res);
+  return normalizeSettings(data);
 }
 
 export async function getStats(token: string): Promise<AdminStats> {

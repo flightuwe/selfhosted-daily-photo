@@ -19,21 +19,21 @@ type DeviceToken struct {
 }
 
 type AppSettings struct {
-    ID                     uint      `gorm:"primaryKey"`
-    PromptWindowStartHour  int       `gorm:"default:8"`
-    PromptWindowEndHour    int       `gorm:"default:20"`
-    UploadWindowMinutes    int       `gorm:"default:10"`
-    PromptNotificationText string    `gorm:"size:255;default:'Zeit fuer dein Daily Foto'"`
-    MaxUploadBytes         int64     `gorm:"default:0"`
-    ChatCommandEnabled     bool      `gorm:"default:false"`
-    ChatCommandValue       string    `gorm:"size:64;default:'-moment'"`
-    ChatCommandTrigger     bool      `gorm:"default:true"`
-    ChatCommandSendPush    bool      `gorm:"default:true"`
-    ChatCommandPushText    string    `gorm:"size:255;default:'{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.'"`
-    ChatCommandEchoChat    bool      `gorm:"default:true"`
-    ChatCommandEchoText    string    `gorm:"size:255;default:'Moment wurde von {user} angefordert.'"`
-    CreatedAt              time.Time
-    UpdatedAt              time.Time
+    ID                     uint      `gorm:"primaryKey" json:"id"`
+    PromptWindowStartHour  int       `gorm:"default:8" json:"promptWindowStartHour"`
+    PromptWindowEndHour    int       `gorm:"default:20" json:"promptWindowEndHour"`
+    UploadWindowMinutes    int       `gorm:"default:10" json:"uploadWindowMinutes"`
+    PromptNotificationText string    `gorm:"size:255;default:'Zeit fuer dein Daily Foto'" json:"promptNotificationText"`
+    MaxUploadBytes         int64     `gorm:"default:0" json:"maxUploadBytes"`
+    ChatCommandEnabled     bool      `gorm:"default:false" json:"chatCommandEnabled"`
+    ChatCommandValue       string    `gorm:"size:64;default:'-moment'" json:"chatCommandValue"`
+    ChatCommandTrigger     bool      `gorm:"default:true" json:"chatCommandTrigger"`
+    ChatCommandSendPush    bool      `gorm:"default:true" json:"chatCommandSendPush"`
+    ChatCommandPushText    string    `gorm:"size:255;default:'{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.'" json:"chatCommandPushText"`
+    ChatCommandEchoChat    bool      `gorm:"default:true" json:"chatCommandEchoChat"`
+    ChatCommandEchoText    string    `gorm:"size:255;default:'Moment wurde von {user} angefordert.'" json:"chatCommandEchoText"`
+    CreatedAt              time.Time `json:"createdAt"`
+    UpdatedAt              time.Time `json:"updatedAt"`
 }
 
 type DailyPrompt struct {
