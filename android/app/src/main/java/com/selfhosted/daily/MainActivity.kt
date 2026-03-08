@@ -113,6 +113,8 @@ import java.io.FileOutputStream
 import java.util.UUID
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
@@ -528,7 +530,7 @@ data class UiState(
     val feedFocusDay: String? = null,
     val feedPaging: Boolean = false,
     val feedTodayLocked: Boolean = false,
-    val chatHasOtherMessages: Boolean = false,
+    val chatHasOtherMessages: Boolean = true,
     val chatHasUnreadMessages: Boolean = false,
     val photos: List<PromptPhoto> = emptyList(),
     val chat: List<ChatItem> = emptyList(),
@@ -613,7 +615,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             state = state.copy(
                 activeTab = tab,
-                chatHasOtherMessages = latestOther > 0L,
+                chatHasOtherMessages = true,
                 chatHasUnreadMessages = false
             )
             return
@@ -659,7 +661,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 prompt = prompt,
                 photos = photos,
                 chat = chat,
-                chatHasOtherMessages = latestOtherChat > 0L,
+                chatHasOtherMessages = true,
                 chatHasUnreadMessages = hasUnreadChat,
                 calendarDays = calendarDays,
                 loading = false,
@@ -874,7 +876,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun parseChatMillis(value: String): Long {
-        return runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrDefault(0L)
+        val raw = value.trim()
+        if (raw.isBlank()) return 0L
+        runCatching { return OffsetDateTime.parse(raw).toInstant().toEpochMilli() }
+        runCatching { return LocalDateTime.parse(raw).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli() }
+        runCatching {
+            val normalized = raw.replace(" ", "T")
+            return LocalDateTime.parse(normalized).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        }
+        return 0L
     }
 }
 
@@ -1133,7 +1143,7 @@ fun AppScreen(vm: MainVm) {
                     label = { Text("Chat") },
                     icon = {
                         ChatTabIcon(
-                            showIndicator = state.chatHasOtherMessages,
+                            showIndicator = true,
                             unread = state.chatHasUnreadMessages
                         )
                     }
