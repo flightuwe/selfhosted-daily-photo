@@ -66,6 +66,7 @@ func (s *Server) Router() *gin.Engine {
             protected.GET("/me/photos", s.handleMyPhotos)
             protected.POST("/devices", s.handleDevice)
             protected.GET("/prompt/current", s.handleCurrentPrompt)
+            protected.GET("/prompt/rules", s.handlePromptRules)
             protected.GET("/moment/special/status", s.handleSpecialMomentStatus)
             protected.POST("/moment/special/request", s.handleSpecialMomentRequest)
             protected.POST("/uploads", s.handleUpload)
@@ -283,6 +284,22 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
         "ownPhoto":        ownPhoto,
         "triggerSource":   prompt.TriggerSource,
         "requestedByUser": prompt.RequestedBy,
+    })
+}
+
+func (s *Server) handlePromptRules(c *gin.Context) {
+    var settings models.AppSettings
+    if err := s.DB.First(&settings).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+        return
+    }
+    settings = normalizeSettings(settings)
+    c.JSON(http.StatusOK, gin.H{
+        "promptWindowStartHour": settings.PromptWindowStartHour,
+        "promptWindowEndHour":   settings.PromptWindowEndHour,
+        "uploadWindowMinutes":   settings.UploadWindowMinutes,
+        "maxUploadBytes":        settings.MaxUploadBytes,
+        "timezone":              s.Config.Timezone,
     })
 }
 

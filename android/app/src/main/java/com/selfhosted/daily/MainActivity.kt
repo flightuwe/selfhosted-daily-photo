@@ -202,6 +202,13 @@ data class SpecialMomentStatus(
 )
 data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
 data class HealthResponse(val ok: Boolean, val version: String = "unknown", val provider: String = "unknown")
+data class PromptRulesResponse(
+    val promptWindowStartHour: Int,
+    val promptWindowEndHour: Int,
+    val uploadWindowMinutes: Int,
+    val maxUploadBytes: Long,
+    val timezone: String
+)
 
 interface Api {
     @GET("health")
@@ -221,6 +228,9 @@ interface Api {
 
     @GET("prompt/current")
     suspend fun prompt(@Header("Authorization") token: String): PromptResponse
+
+    @GET("prompt/rules")
+    suspend fun promptRules(@Header("Authorization") token: String): PromptRulesResponse
 
     @GET("moment/special/status")
     suspend fun specialMomentStatus(@Header("Authorization") token: String): SpecialMomentStatus
@@ -355,6 +365,7 @@ class AppRepo(private val api: Api, private val context: Context) {
         api.updateProfile("Bearer ${token()}", ProfileUpdateRequest(username, favoriteColor)).user
 
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
+    suspend fun promptRules(): PromptRulesResponse = api.promptRules("Bearer ${token()}")
     suspend fun specialMomentStatus(): SpecialMomentStatus = api.specialMomentStatus("Bearer ${token()}")
     suspend fun requestSpecialMoment() { api.requestSpecialMoment("Bearer ${token()}") }
 
@@ -576,6 +587,7 @@ data class UiState(
     val pushProvider: String = "unknown",
     val showPromptDialog: Boolean = false,
     val showChangelogDialog: Boolean = false,
+    val promptRules: PromptRulesResponse? = null,
     val specialMomentStatus: SpecialMomentStatus? = null,
     val updateInfo: UpdateInfo? = null,
     val darkMode: Boolean = false,
@@ -586,6 +598,7 @@ data class UiState(
 data class DashboardData(
     val me: User,
     val prompt: PromptResponse,
+    val rules: PromptRulesResponse,
     val special: SpecialMomentStatus,
     val photos: List<PromptPhoto>,
     val chat: List<ChatItem>,
@@ -676,14 +689,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.syncDeviceTokenIfNeeded()
             val me = repo.me()
             val prompt = repo.prompt()
+            val rules = repo.promptRules()
             val special = repo.specialMomentStatus()
             val photos = repo.myPhotos()
             val chat = repo.listChat()
             val feedDays = repo.feedDays()
-            DashboardData(me, prompt, special, photos, chat, feedDays)
+            DashboardData(me, prompt, rules, special, photos, chat, feedDays)
         }.onSuccess { payload ->
             val me = payload.me
             val prompt = payload.prompt
+            val rules = payload.rules
             val special = payload.special
             val photos = payload.photos
             val chat = payload.chat
@@ -702,6 +717,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             state = state.copy(
                 user = me,
                 prompt = prompt,
+                promptRules = rules,
                 specialMomentStatus = special,
                 photos = photos,
                 chat = chat,
@@ -1292,6 +1308,7 @@ fun AppScreen(vm: MainVm) {
             when (state.activeTab) {
                 AppTab.CAMERA -> CameraTab(
                     prompt = state.prompt,
+                    promptRules = state.promptRules,
                     specialMomentStatus = state.specialMomentStatus,
                     backPreviewUri = backPreviewUri,
                     frontPreviewUri = frontPreviewUri,
@@ -1391,6 +1408,7 @@ fun AppScreen(vm: MainVm) {
                 AppTab.PROFILE -> ProfileTab(
                     username = state.user?.username ?: "",
                     streakDays = computePostingStreak(state.photos),
+                    promptRules = state.promptRules,
                     photos = state.photos,
                     darkMode = state.darkMode,
                     currentPassword = pwCurrent,
@@ -1475,6 +1493,7 @@ fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: S
 @Composable
 fun CameraTab(
     prompt: PromptResponse?,
+    promptRules: PromptRulesResponse?,
     specialMomentStatus: SpecialMomentStatus?,
     backPreviewUri: Uri?,
     frontPreviewUri: Uri?,
@@ -1506,6 +1525,14 @@ fun CameraTab(
     ) {
         Text("Heutiger Moment", style = MaterialTheme.typography.titleLarge)
         Text(prompt?.day ?: "-")
+        if (!prompt?.triggered.isNullOrBlank()) {
+            Text("Der heutige Moment war um ${formatMomentTime(prompt?.triggered)}.")
+        } else {
+            Text("Der heutige Moment ist noch nicht gekommen.")
+        }
+        if (promptRules != null) {
+            Text("Zeitfenster heute: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
+        }
 
         if (hasPosted) {
             Text("Du hast heute gepostet.", fontWeight = FontWeight.Bold)
@@ -1888,6 +1915,7 @@ fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onS
 fun ProfileTab(
     username: String,
     streakDays: Int,
+    promptRules: PromptRulesResponse?,
     photos: List<PromptPhoto>,
     darkMode: Boolean,
     currentPassword: String,
@@ -1996,6 +2024,22 @@ fun ProfileTab(
         }
 
         item {
+            Text("Moment-Bedingungen", style = MaterialTheme.typography.titleMedium)
+            Card {
+                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (promptRules == null) {
+                        Text("Bedingungen werden geladen ...")
+                    } else {
+                        Text("Prompt-Fenster: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
+                        Text("Upload-Fenster: ${promptRules.uploadWindowMinutes} Minuten")
+                        Text("Max Upload: ${if (promptRules.maxUploadBytes <= 0) "Unbegrenzt" else formatBytes(promptRules.maxUploadBytes.toDouble())}")
+                        Text("Zeitzone: ${promptRules.timezone}")
+                    }
+                }
+            }
+        }
+
+        item {
             Text("Upload-Komprimierung", style = MaterialTheme.typography.titleMedium)
             Card {
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2098,6 +2142,29 @@ private fun formatRemaining(seconds: Long): String {
     val days = sec / 86400
     val hours = (sec % 86400) / 3600
     return "${days}d ${hours}h"
+}
+
+private fun formatMomentTime(raw: String?): String {
+    if (raw.isNullOrBlank()) return "-"
+    return runCatching {
+        val dt = OffsetDateTime.parse(raw)
+        dt.toLocalTime().format(DateTimeFormatter.ofPattern("HH:mm"))
+    }.getOrElse {
+        raw.take(16).replace('T', ' ')
+    }
+}
+
+private fun formatBytes(bytes: Double): String {
+    if (!bytes.isFinite() || bytes <= 0.0) return "0 B"
+    val units = listOf("B", "KB", "MB", "GB", "TB")
+    var value = bytes
+    var idx = 0
+    while (value >= 1024.0 && idx < units.lastIndex) {
+        value /= 1024.0
+        idx++
+    }
+    val shown = if (idx == 0) "%.0f".format(value) else "%.2f".format(value)
+    return "$shown ${units[idx]}"
 }
 
 private fun computePostingStreak(photos: List<PromptPhoto>): Int {
