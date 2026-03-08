@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color as AndroidColor
 import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
@@ -2459,6 +2460,9 @@ fun ProfileTab(
     onLogout: () -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
+    var showColorPicker by remember { mutableStateOf(false) }
+    var pickerHsv by remember(editableColor) { mutableStateOf(hexToHsv(normalizeHexColor(editableColor))) }
+
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2522,20 +2526,17 @@ fun ProfileTab(
                 label = { Text("Benutzername") },
                 modifier = Modifier.fillMaxWidth()
             )
-            OutlinedTextField(
-                value = editableColor,
-                onValueChange = onEditableColorChange,
-                label = { Text("Lieblingsfarbe (#RRGGBB)") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                listOf("#1F5FBF", "#D32F2F", "#2E7D32", "#8E24AA", "#F57C00", "#455A64").forEach { hex ->
-                    val selected = normalizeHexColor(editableColor) == hex
-                    Button(
-                        onClick = { onEditableColorChange(hex) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(if (selected) "✓" else " ")
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Aktuelle Lieblingsfarbe: ${normalizeHexColor(editableColor)}")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(28.dp)
+                            .background(parseUserColor(editableColor))
+                    ) {}
+                    Button(onClick = { showColorPicker = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Lieblingsfarbe waehlen")
                     }
                 }
             }
@@ -2652,6 +2653,54 @@ fun ProfileTab(
             }
         }
     }
+
+    if (showColorPicker) {
+        AlertDialog(
+            onDismissRequest = { showColorPicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onEditableColorChange(hsvToHex(pickerHsv[0], pickerHsv[1], pickerHsv[2]))
+                        showColorPicker = false
+                    }
+                ) { Text("Uebernehmen") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showColorPicker = false }) { Text("Abbrechen") }
+            },
+            title = { Text("Lieblingsfarbe waehlen") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    val previewHex = hsvToHex(pickerHsv[0], pickerHsv[1], pickerHsv[2])
+                    Text(previewHex, fontWeight = FontWeight.SemiBold)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(34.dp)
+                            .background(parseUserColor(previewHex))
+                    ) {}
+                    Text("Farbton")
+                    Slider(
+                        value = pickerHsv[0],
+                        onValueChange = { pickerHsv = floatArrayOf(it, pickerHsv[1], pickerHsv[2]) },
+                        valueRange = 0f..360f
+                    )
+                    Text("Saettigung")
+                    Slider(
+                        value = pickerHsv[1],
+                        onValueChange = { pickerHsv = floatArrayOf(pickerHsv[0], it, pickerHsv[2]) },
+                        valueRange = 0f..1f
+                    )
+                    Text("Helligkeit")
+                    Slider(
+                        value = pickerHsv[2],
+                        onValueChange = { pickerHsv = floatArrayOf(pickerHsv[0], pickerHsv[1], it) },
+                        valueRange = 0f..1f
+                    )
+                }
+            }
+        )
+    }
 }
 
 private fun formatDayLabel(day: String): String {
@@ -2767,6 +2816,19 @@ private fun parseUserColor(input: String): Color {
     val g = ((value shr 8) and 0xFF).toInt()
     val b = (value and 0xFF).toInt()
     return Color(r, g, b)
+}
+
+private fun hexToHsv(hex: String): FloatArray {
+    val c = normalizeHexColor(hex)
+    val parsed = runCatching { AndroidColor.parseColor(c) }.getOrDefault(AndroidColor.parseColor("#1F5FBF"))
+    val hsv = floatArrayOf(0f, 0f, 0f)
+    AndroidColor.colorToHSV(parsed, hsv)
+    return hsv
+}
+
+private fun hsvToHex(h: Float, s: Float, v: Float): String {
+    val colorInt = AndroidColor.HSVToColor(floatArrayOf(h.coerceIn(0f, 360f), s.coerceIn(0f, 1f), v.coerceIn(0f, 1f)))
+    return String.format("#%06X", 0xFFFFFF and colorInt)
 }
 
 private fun apiError(t: Throwable, fallback: String): String {
