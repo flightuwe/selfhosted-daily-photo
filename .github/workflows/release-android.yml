@@ -28,12 +28,24 @@ jobs:
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           ls -la "$ANDROID_SDK_ROOT" || true
       - name: Build release APK (capture log)
+        id: build
+        continue-on-error: true
         run: |
           set -o pipefail
           gradle -p android :app:assembleRelease --stacktrace 2>&1 | tee android-build.log
       - name: Show generated APK files
         if: always()
         run: ls -la android/app/build/outputs/apk/release || true
+      - name: Emit compact build error
+        if: always()
+        run: |
+          if [ "${{ steps.build.outcome }}" != "success" ]; then
+            msg=$(grep -E "Execution failed for task|Could not resolve|FAILURE: Build failed|e: file:" android-build.log | head -n 6 | tr '\n' ' ')
+            if [ -z "$msg" ]; then
+              msg=$(tail -n 20 android-build.log | tr '\n' ' ')
+            fi
+            echo "::error title=Android build summary::$msg"
+          fi
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -41,11 +53,15 @@ jobs:
           name: android-build-log
           path: android-build.log
       - name: Upload APK artifact
+        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
           path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+      - name: Fail job if build failed
+        if: steps.build.outcome != 'success'
+        run: exit 1
 
   github-release:
     needs: build-apk
