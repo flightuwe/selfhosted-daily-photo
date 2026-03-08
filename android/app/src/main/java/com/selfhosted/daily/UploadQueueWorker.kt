@@ -333,11 +333,11 @@ class UploadQueueWorker(
             }
         }
 
-        val backBody = ProgressRequestBody(backFile.asRequestBody("image/*".toMediaTypeOrNull())) { sent, _ ->
+        val backBody = QueueProgressRequestBody(backFile.asRequestBody("image/*".toMediaTypeOrNull())) { sent, _ ->
             backSent = sent
             pushProgressIfNeeded()
         }
-        val frontBody = ProgressRequestBody(frontFile.asRequestBody("image/*".toMediaTypeOrNull())) { sent, _ ->
+        val frontBody = QueueProgressRequestBody(frontFile.asRequestBody("image/*".toMediaTypeOrNull())) { sent, _ ->
             frontSent = sent
             pushProgressIfNeeded()
         }
@@ -359,7 +359,7 @@ class UploadQueueWorker(
     }
 }
 
-private class ProgressRequestBody(
+private class QueueProgressRequestBody(
     private val delegate: RequestBody,
     private val onProgress: (sentBytes: Long, totalBytes: Long) -> Unit
 ) : RequestBody() {
