@@ -563,7 +563,10 @@ fun AppScreen(vm: MainVm) {
             when (target) {
                 "back" -> {
                     backPreviewUri = shotUri
-                    openCameraFor("front")
+                    val uri = createTempImageUri(context)
+                    captureTarget = "front"
+                    captureUri = uri
+                    cameraLauncher.launch(uri)
                 }
                 "front" -> {
                     frontPreviewUri = shotUri
