@@ -47,7 +47,13 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.build.outcome }}" != "success" ]; then
-            msg=$(tail -n 80 android-build.log | tr '\n' ' ')
+            msg=$(awk '/\* What went wrong:/{flag=1;next}/\* Try:/{flag=0}flag' android-build.log | head -n 40 | tr '\n' ' ')
+            if [ -z "$msg" ]; then
+              msg=$(grep -E "Execution failed for task|Could not resolve|SDK location not found|Plugin \[id:" android-build.log | head -n 10 | tr '\n' ' ')
+            fi
+            if [ -z "$msg" ]; then
+              msg=$(tail -n 40 android-build.log | tr '\n' ' ')
+            fi
             echo "::error title=Android build summary::$msg"
           fi
       - name: Upload build log
