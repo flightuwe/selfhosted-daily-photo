@@ -1925,7 +1925,7 @@ fun ProfileTab(
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onCheckUpdate) { Text("Update pruefen") }
-                Button(onClick = onShowChangelog) { Text("Changelog") }
+                Button(onClick = onShowChangelog) { Text("!") }
                 Button(onClick = onLogout) { Text("Abmelden") }
             }
             Spacer(modifier = Modifier.height(8.dp))
