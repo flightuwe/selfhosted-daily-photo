@@ -4,6 +4,7 @@ services:
   backend:
     image: ghcr.io/flightuwe/selfhosted-bereal-backend:latest
     container_name: shp-backend
+    user: "0:0"
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
