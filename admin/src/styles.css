@@ -221,6 +221,27 @@ button.danger {
   color: #9a2323;
 }
 
+.settings-current {
+  border: 1px solid #d6def8;
+  border-radius: 10px;
+  padding: 0.85rem;
+  background: #f8faff;
+}
+
+.settings-current h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.settings-grid p {
+  margin: 0;
+}
+
 @media (max-width: 900px) {
   .grid4 {
     grid-template-columns: repeat(2, minmax(120px, 1fr));

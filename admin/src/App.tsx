@@ -46,6 +46,7 @@ export function App() {
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [settings, setSettings] = useState<Settings>(emptySettings);
+  const [savedSettings, setSavedSettings] = useState<Settings>(emptySettings);
   const [stats, setStats] = useState<AdminStats>(emptyStats);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
@@ -88,6 +89,7 @@ export function App() {
     try {
       const [s, st, u] = await Promise.all([getSettings(authToken), getStats(authToken), listUsers(authToken)]);
       setSettings(s);
+      setSavedSettings(s);
       setStats(st);
       setUsers(u);
     } catch (err) {
@@ -185,6 +187,7 @@ export function App() {
     try {
       const next = await updateSettings(token, settings);
       setSettings(next);
+      setSavedSettings(next);
       setMessage("Settings gespeichert");
     } catch (err) {
       setMessage((err as Error).message);
@@ -527,55 +530,68 @@ export function App() {
         )}
 
         {activeTab === "settings" && (
-          <form onSubmit={onSaveSettings} className="stack">
-            <label>
-              Prompt Start-Stunde (0-23)
-              <input
-                type="number"
-                min={0}
-                max={23}
-                value={settings.promptWindowStartHour}
-                onChange={(e) => setSettings({ ...settings, promptWindowStartHour: Number(e.target.value) })}
-              />
-            </label>
-            <label>
-              Prompt Ende-Stunde (1-24)
-              <input
-                type="number"
-                min={1}
-                max={24}
-                value={settings.promptWindowEndHour}
-                onChange={(e) => setSettings({ ...settings, promptWindowEndHour: Number(e.target.value) })}
-              />
-            </label>
-            <label>
-              Upload-Fenster Minuten
-              <input
-                type="number"
-                min={1}
-                max={60}
-                value={settings.uploadWindowMinutes}
-                onChange={(e) => setSettings({ ...settings, uploadWindowMinutes: Number(e.target.value) })}
-              />
-            </label>
-            <label>
-              Prompt Notification Text
-              <input
-                value={settings.promptNotificationText}
-                onChange={(e) => setSettings({ ...settings, promptNotificationText: e.target.value })}
-              />
-            </label>
-            <label>
-              Max Upload Bytes
-              <input
-                type="number"
-                min={1000000}
-                value={settings.maxUploadBytes}
-                onChange={(e) => setSettings({ ...settings, maxUploadBytes: Number(e.target.value) })}
-              />
-            </label>
-            <button type="submit">Settings speichern</button>
-          </form>
+          <div className="stack">
+            <article className="settings-current">
+              <h2>Aktuell gueltige Einstellungen</h2>
+              <div className="settings-grid">
+                <p><strong>Prompt-Fenster:</strong> {savedSettings.promptWindowStartHour}:00 - {savedSettings.promptWindowEndHour}:00</p>
+                <p><strong>Upload-Fenster:</strong> {savedSettings.uploadWindowMinutes} Minuten</p>
+                <p><strong>Max Upload:</strong> {Math.round(savedSettings.maxUploadBytes / (1024 * 1024))} MB</p>
+                <p><strong>Notification-Text:</strong> {savedSettings.promptNotificationText}</p>
+              </div>
+            </article>
+
+            <form onSubmit={onSaveSettings} className="stack">
+              <h2>Einstellungen bearbeiten</h2>
+              <label>
+                Prompt Start-Stunde (0-23)
+                <input
+                  type="number"
+                  min={0}
+                  max={23}
+                  value={settings.promptWindowStartHour}
+                  onChange={(e) => setSettings({ ...settings, promptWindowStartHour: Number(e.target.value) })}
+                />
+              </label>
+              <label>
+                Prompt Ende-Stunde (1-24)
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={settings.promptWindowEndHour}
+                  onChange={(e) => setSettings({ ...settings, promptWindowEndHour: Number(e.target.value) })}
+                />
+              </label>
+              <label>
+                Upload-Fenster Minuten
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={settings.uploadWindowMinutes}
+                  onChange={(e) => setSettings({ ...settings, uploadWindowMinutes: Number(e.target.value) })}
+                />
+              </label>
+              <label>
+                Prompt Notification Text
+                <input
+                  value={settings.promptNotificationText}
+                  onChange={(e) => setSettings({ ...settings, promptNotificationText: e.target.value })}
+                />
+              </label>
+              <label>
+                Max Upload Bytes
+                <input
+                  type="number"
+                  min={1000000}
+                  value={settings.maxUploadBytes}
+                  onChange={(e) => setSettings({ ...settings, maxUploadBytes: Number(e.target.value) })}
+                />
+              </label>
+              <button type="submit">Settings speichern</button>
+            </form>
+          </div>
         )}
 
         {message && <p className="message">{message}</p>}
