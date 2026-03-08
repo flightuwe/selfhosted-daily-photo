@@ -130,6 +130,7 @@ data class FeedItem(
     val user: User
 )
 data class FeedResponse(val items: List<FeedItem>)
+data class DayListResponse(val items: List<String>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
 data class ChatItem(val id: Long, val body: String, val createdAt: String, val user: User)
 data class ChatResponse(val items: List<ChatItem>)
@@ -148,6 +149,9 @@ interface Api {
 
     @GET("feed")
     suspend fun feed(@Header("Authorization") token: String, @Query("day") day: String): FeedResponse
+
+    @GET("feed/days")
+    suspend fun feedDays(@Header("Authorization") token: String): DayListResponse
 
     @GET("me/photos")
     suspend fun myPhotos(@Header("Authorization") token: String): MyPhotoResponse
@@ -231,6 +235,7 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
 
     suspend fun feedByDay(day: String): List<FeedItem> = api.feed("Bearer ${token()}", day).items
+    suspend fun feedDays(): List<String> = api.feedDays("Bearer ${token()}").items
 
     suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
 
@@ -351,6 +356,7 @@ data class UiState(
     val feed: List<FeedItem> = emptyList(),
     val feedDays: List<String> = emptyList(),
     val feedByDay: Map<String, List<FeedItem>> = emptyMap(),
+    val calendarDays: List<String> = emptyList(),
     val feedFocusDay: String? = null,
     val feedPaging: Boolean = false,
     val feedTodayLocked: Boolean = false,
@@ -371,7 +377,8 @@ data class UiState(
 data class DashboardData(
     val prompt: PromptResponse,
     val photos: List<PromptPhoto>,
-    val chat: List<ChatItem>
+    val chat: List<ChatItem>,
+    val feedDays: List<String>
 )
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
@@ -425,7 +432,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun jumpToDay(day: String) {
         loadFeedWindow(day, around = 5)
-        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day)
+        state = state.copy(activeTab = AppTab.FEED)
     }
 
     suspend fun refreshAll() {
@@ -436,11 +443,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val prompt = repo.prompt()
             val photos = repo.myPhotos()
             val chat = repo.listChat()
-            DashboardData(prompt, photos, chat)
+            val feedDays = repo.feedDays()
+            DashboardData(prompt, photos, chat, feedDays)
         }.onSuccess { payload ->
             val prompt = payload.prompt
             val photos = payload.photos
             val chat = payload.chat
+            val calendarDays = payload.feedDays
             val marker = "${prompt.day}:${prompt.triggered ?: ""}"
             val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && !prompt.hasPosted && marker != repo.seenPromptMarker()
             if (shouldPopup) repo.setSeenPromptMarker(marker)
@@ -449,76 +458,93 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 prompt = prompt,
                 photos = photos,
                 chat = chat,
+                calendarDays = calendarDays,
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
             )
-            if (state.feedDays.isEmpty()) {
-                loadFeedWindow(prompt.day, around = 3)
-            }
+            val focus = state.feedFocusDay
+            val anchor = if (focus != null && calendarDays.contains(focus)) focus else prompt.day
+            loadFeedWindow(anchor, around = 3)
         }.onFailure {
             state = state.copy(loading = false, message = apiError(it, "Laden fehlgeschlagen"))
         }
     }
 
     suspend fun loadOlderFeedDays(count: Int = 3) {
-        if (state.feedPaging) return
-        val base = state.feedDays.lastOrNull() ?: (state.prompt?.day ?: return)
+        if (state.feedPaging || state.calendarDays.isEmpty()) return
+        val base = state.feedDays.lastOrNull() ?: return
+        val all = state.calendarDays
+        val idx = all.indexOf(base)
+        if (idx < 0) return
+        val newDays = all.drop(idx + 1).take(count)
+        if (newDays.isEmpty()) return
         state = state.copy(feedPaging = true)
-        val newDays = mutableListOf<String>()
         val newMap = state.feedByDay.toMutableMap()
-        for (i in 1..count) {
-            val day = shiftDay(base, -i)
-            if (newMap.containsKey(day)) continue
-            newMap[day] = fetchDaySafe(day)
-            newDays.add(day)
+        for (day in newDays) {
+            if (!newMap.containsKey(day)) {
+                newMap[day] = fetchDaySafe(day)
+            }
         }
         state = state.copy(feedDays = state.feedDays + newDays, feedByDay = newMap, feedPaging = false)
     }
 
     suspend fun loadNewerFeedDays(count: Int = 3) {
-        if (state.feedPaging) return
-        val base = state.feedDays.firstOrNull() ?: (state.prompt?.day ?: return)
-        val today = state.prompt?.day ?: LocalDate.now().toString()
+        if (state.feedPaging || state.calendarDays.isEmpty()) return
+        val base = state.feedDays.firstOrNull() ?: return
+        val all = state.calendarDays
+        val idx = all.indexOf(base)
+        if (idx <= 0) return
+        val start = maxOf(0, idx - count)
+        val prependDays = all.subList(start, idx)
+        if (prependDays.isEmpty()) return
         state = state.copy(feedPaging = true)
-        val prependDays = mutableListOf<String>()
         val newMap = state.feedByDay.toMutableMap()
-        for (i in 1..count) {
-            val day = shiftDay(base, i)
-            if (day > today) break
-            if (newMap.containsKey(day)) continue
-            newMap[day] = fetchDaySafe(day)
-            prependDays.add(day)
+        for (day in prependDays) {
+            if (!newMap.containsKey(day)) {
+                newMap[day] = fetchDaySafe(day)
+            }
         }
-        state = state.copy(feedDays = prependDays.reversed() + state.feedDays, feedByDay = newMap, feedPaging = false)
+        state = state.copy(feedDays = prependDays + state.feedDays, feedByDay = newMap, feedPaging = false)
     }
 
     private suspend fun loadFeedWindow(anchorDay: String, around: Int) {
-        val today = state.prompt?.day ?: LocalDate.now().toString()
-        val days = mutableListOf<String>()
-        for (offset in around downTo 1) {
-            val newer = shiftDay(anchorDay, offset)
-            if (newer <= today) days.add(newer)
+        val fetchedDays = if (state.calendarDays.isEmpty()) {
+            runCatching { repo.feedDays() }.getOrDefault(emptyList())
+        } else {
+            state.calendarDays
         }
-        days.add(anchorDay)
-        for (offset in 1..around) {
-            days.add(shiftDay(anchorDay, -offset))
+        if (state.calendarDays.isEmpty() && fetchedDays.isNotEmpty()) {
+            state = state.copy(calendarDays = fetchedDays)
         }
+        val allDays = if (state.calendarDays.isNotEmpty()) state.calendarDays else fetchedDays
+        if (allDays.isEmpty()) {
+            state = state.copy(
+                feedDays = emptyList(),
+                feedByDay = emptyMap(),
+                feed = emptyList(),
+                feedTodayLocked = state.prompt?.hasPosted == false,
+                feedFocusDay = state.prompt?.day
+            )
+            return
+        }
+        val target = if (allDays.contains(anchorDay)) anchorDay else allDays.first()
+        val idx = allDays.indexOf(target)
+        val start = maxOf(0, idx - around)
+        val end = minOf(allDays.lastIndex, idx + around)
+        val days = allDays.subList(start, end + 1)
         val map = mutableMapOf<String, List<FeedItem>>()
-        var todayLocked = false
         for (day in days.distinct()) {
-            val items = fetchDaySafe(day)
-            if (day == today && items.isEmpty() && state.prompt?.hasPosted == false) {
-                todayLocked = true
-            }
-            map[day] = items
+            map[day] = fetchDaySafe(day)
         }
+        val today = state.prompt?.day ?: LocalDate.now().toString()
+        val todayLocked = state.prompt?.hasPosted == false
         state = state.copy(
             feedDays = days.distinct(),
             feedByDay = map,
             feed = map[today] ?: emptyList(),
             feedTodayLocked = todayLocked,
-            feedFocusDay = anchorDay
+            feedFocusDay = target
         )
     }
 
@@ -528,11 +554,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         } catch (e: HttpException) {
             if (e.code() == 403) emptyList() else throw e
         }
-    }
-
-    private fun shiftDay(day: String, delta: Int): String {
-        val d = LocalDate.parse(day).plusDays(delta.toLong())
-        return d.toString()
     }
 
     suspend fun uploadDual(back: Uri, front: Uri, asPrompt: Boolean): Boolean {
@@ -629,6 +650,7 @@ fun AppScreen(vm: MainVm) {
 
     var captureUri by remember { mutableStateOf<Uri?>(null) }
     var captureTarget by remember { mutableStateOf<String?>(null) }
+    var captureAsPrompt by remember { mutableStateOf(true) }
     var backPreviewUri by remember { mutableStateOf<Uri?>(null) }
     var frontPreviewUri by remember { mutableStateOf<Uri?>(null) }
 
@@ -656,14 +678,14 @@ fun AppScreen(vm: MainVm) {
                     val front = shotUri
                     if (back != null && front != null && !cameraUploading) {
                         cameraUploading = true
-                        val canPrompt = state.prompt?.canUpload == true && state.prompt.hasPosted.not()
+                        val asPrompt = captureAsPrompt
                         scope.launch {
-                            val ok = vm.uploadDual(back, front, canPrompt)
+                            val ok = vm.uploadDual(back, front, asPrompt)
                             cameraUploading = false
                             if (ok) {
                                 backPreviewUri = null
                                 frontPreviewUri = null
-                                vm.setTab(AppTab.FEED)
+                                if (asPrompt) vm.setTab(AppTab.FEED)
                             }
                         }
                     }
@@ -682,6 +704,11 @@ fun AppScreen(vm: MainVm) {
         captureTarget = target
         captureUri = uri
         cameraLauncher.launch(uri)
+    }
+
+    fun startDualCapture(asPrompt: Boolean) {
+        captureAsPrompt = asPrompt
+        openCameraFor("back")
     }
 
     LaunchedEffect(requestFrontCapture) {
@@ -724,7 +751,7 @@ fun AppScreen(vm: MainVm) {
             confirmButton = {
                 TextButton(onClick = {
                     vm.dismissPromptDialog()
-                    openCameraFor("back")
+                    startDualCapture(true)
                 }) { Text("Kamera oeffnen") }
             },
             dismissButton = {
@@ -825,7 +852,8 @@ fun AppScreen(vm: MainVm) {
                     prompt = state.prompt,
                     backPreviewUri = backPreviewUri,
                     frontPreviewUri = frontPreviewUri,
-                    onCaptureBack = { openCameraFor("back") },
+                    onCapturePrompt = { startDualCapture(true) },
+                    onCaptureExtra = { startDualCapture(false) },
                     onReset = {
                         backPreviewUri = null
                         frontPreviewUri = null
@@ -857,6 +885,7 @@ fun AppScreen(vm: MainVm) {
                 )
 
                 AppTab.CALENDAR -> CalendarTab(
+                    days = state.calendarDays,
                     selected = state.feedFocusDay ?: state.prompt?.day.orEmpty(),
                     onSelect = { day ->
                         scope.launch { vm.jumpToDay(day) }
@@ -940,7 +969,8 @@ fun CameraTab(
     prompt: PromptResponse?,
     backPreviewUri: Uri?,
     frontPreviewUri: Uri?,
-    onCaptureBack: () -> Unit,
+    onCapturePrompt: () -> Unit,
+    onCaptureExtra: () -> Unit,
     onReset: () -> Unit,
     onGoFeed: () -> Unit,
     uploading: Boolean,
@@ -975,6 +1005,7 @@ fun CameraTab(
                 }
             }
             Button(onClick = onGoFeed, modifier = Modifier.fillMaxWidth()) { Text("Heutige Beitraege ansehen") }
+            Button(onClick = onCaptureExtra, modifier = Modifier.fillMaxWidth()) { Text("Weitere Bilder hinzufuegen") }
         } else {
             Text("Heute sind zwei Fotos noetig: Rueckkamera und Frontkamera.")
             if (canUpload) {
@@ -984,7 +1015,7 @@ fun CameraTab(
             }
 
             if (backPreviewUri == null) {
-                Button(onClick = onCaptureBack, modifier = Modifier.fillMaxWidth()) { Text("Rueckkamera aufnehmen") }
+                Button(onClick = onCapturePrompt, modifier = Modifier.fillMaxWidth()) { Text("Tagesmoment aufnehmen") }
             } else {
                 Text("Rueckkamera aufgenommen")
                 AsyncImage(
@@ -1010,9 +1041,9 @@ fun CameraTab(
                         contentScale = ContentScale.Crop
                     )
                     if (uploading) {
-                        Text("Upload laeuft ...")
+                        Text("Upload laeuft im Hintergrund ...")
                     } else {
-                        Text("Upload wurde automatisch gestartet.")
+                        Text("Upload automatisch abgeschlossen.")
                     }
                     Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
                 }
@@ -1116,6 +1147,9 @@ fun FeedTab(
                             if (item.isLate) {
                                 Text("Spaeter gepostet", color = Color(0xFF8B0000))
                             }
+                            if (!item.photo.promptOnly) {
+                                Text("Extra", color = Color(0xFF1F5FBF))
+                            }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                 urls.forEach { url ->
                                     AsyncImage(
@@ -1152,10 +1186,12 @@ private sealed class FeedRow {
 }
 
 @Composable
-fun CalendarTab(selected: String, onSelect: (String) -> Unit) {
-    val today = LocalDate.now()
-    val days = remember {
-        (0..120).map { today.minusDays(it.toLong()).toString() }
+fun CalendarTab(days: List<String>, selected: String, onSelect: (String) -> Unit) {
+    if (days.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Keine Tage mit Bildern vorhanden")
+        }
+        return
     }
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
@@ -1180,16 +1216,42 @@ fun CalendarTab(selected: String, onSelect: (String) -> Unit) {
 
 @Composable
 fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onSend: () -> Unit) {
+    val rows = remember(items) {
+        buildList<ChatRow> {
+            var lastDay = ""
+            for (item in items) {
+                val day = createdAtDay(item.createdAt)
+                if (day != lastDay) {
+                    add(ChatRow.DayHeader(day))
+                    lastDay = day
+                }
+                add(ChatRow.MessageItem(item))
+            }
+        }
+    }
     Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Chat", style = MaterialTheme.typography.titleLarge)
         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(items.size) { idx ->
-                val item = items[idx]
-                Card {
-                    Column(modifier = Modifier.padding(10.dp)) {
-                        Text(item.user.username, fontWeight = FontWeight.SemiBold)
-                        Text(item.body)
-                        Text(item.createdAt, color = Color.Gray)
+            items(rows.size) { idx ->
+                when (val row = rows[idx]) {
+                    is ChatRow.DayHeader -> {
+                        Card {
+                            Text(
+                                formatDayLabel(row.day),
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                textAlign = TextAlign.Center,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                    is ChatRow.MessageItem -> {
+                        val item = row.item
+                        Card {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(item.user.username, fontWeight = FontWeight.SemiBold)
+                                Text(item.body)
+                            }
+                        }
                     }
                 }
             }
@@ -1289,6 +1351,9 @@ fun ProfileTab(
                             if (photo.secondUrl != null) {
                                 Text("2 Bilder", maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
+                            if (!photo.promptOnly) {
+                                Text("Extra", color = Color(0xFF1F5FBF), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                             Text(photo.day, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
@@ -1305,6 +1370,19 @@ private fun formatDayLabel(day: String): String {
     } catch (_: Throwable) {
         day
     }
+}
+
+private sealed class ChatRow {
+    data class DayHeader(val day: String) : ChatRow()
+    data class MessageItem(val item: ChatItem) : ChatRow()
+}
+
+private fun createdAtDay(value: String): String {
+    if (value.length >= 10) {
+        val prefix = value.substring(0, 10)
+        if (prefix[4] == '-' && prefix[7] == '-') return prefix
+    }
+    return value
 }
 
 private fun apiError(t: Throwable, fallback: String): String {

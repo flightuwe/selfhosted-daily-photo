@@ -61,6 +61,7 @@ func (s *Server) Router() *gin.Engine {
             protected.POST("/uploads", s.handleUpload)
             protected.POST("/uploads/dual", s.handleDualUpload)
             protected.GET("/feed", s.handleFeed)
+            protected.GET("/feed/days", s.handleFeedDays)
             protected.GET("/chat", s.handleChatList)
             protected.POST("/chat", s.handleChatCreate)
         }
@@ -206,7 +207,7 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
     var ownPhoto gin.H
     if hasPosted {
         var p models.Photo
-        if err := s.DB.Where("user_id = ? AND day = ?", user.ID, day).Order("created_at desc").First(&p).Error; err == nil {
+        if err := s.DB.Where("user_id = ? AND day = ? AND prompt_only = ?", user.ID, day, true).Order("created_at desc").First(&p).Error; err == nil {
             ownPhoto = s.photoJSON(p)
         }
     }
@@ -257,12 +258,12 @@ func (s *Server) handleUpload(c *gin.Context) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
         return
     }
-    if hasPosted {
-        c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
-        return
-    }
 
     if kind == "prompt" {
+        if hasPosted {
+            c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+            return
+        }
         var prompt models.DailyPrompt
         if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
             c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
@@ -270,6 +271,11 @@ func (s *Server) handleUpload(c *gin.Context) {
         }
         if prompt.UploadUntil == nil || now.After(*prompt.UploadUntil) {
             c.JSON(http.StatusForbidden, gin.H{"error": "upload window closed"})
+            return
+        }
+    } else {
+        if !hasPosted {
+            c.JSON(http.StatusForbidden, gin.H{"error": "poste zuerst dein Tagesmoment"})
             return
         }
     }
@@ -759,6 +765,22 @@ func (s *Server) handleChatList(c *gin.Context) {
     c.JSON(http.StatusOK, gin.H{"items": out})
 }
 
+func (s *Server) handleFeedDays(c *gin.Context) {
+    type row struct {
+        Day string
+    }
+    var rows []row
+    if err := s.DB.Model(&models.Photo{}).Select("DISTINCT day").Order("day desc").Limit(365).Scan(&rows).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    days := make([]string, 0, len(rows))
+    for _, r := range rows {
+        days = append(days, r.Day)
+    }
+    c.JSON(http.StatusOK, gin.H{"items": days})
+}
+
 func (s *Server) handleChatCreate(c *gin.Context) {
     user, _ := userFromContext(c)
     var req struct {
@@ -829,12 +851,12 @@ func (s *Server) handleDualUpload(c *gin.Context) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
         return
     }
-    if hasPosted {
-        c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
-        return
-    }
 
     if kind == "prompt" {
+        if hasPosted {
+            c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+            return
+        }
         var prompt models.DailyPrompt
         if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
             c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
@@ -842,6 +864,11 @@ func (s *Server) handleDualUpload(c *gin.Context) {
         }
         if prompt.UploadUntil == nil || now.After(*prompt.UploadUntil) {
             c.JSON(http.StatusForbidden, gin.H{"error": "upload window closed"})
+            return
+        }
+    } else {
+        if !hasPosted {
+            c.JSON(http.StatusForbidden, gin.H{"error": "poste zuerst dein Tagesmoment"})
             return
         }
     }
@@ -953,7 +980,7 @@ func toAdminUser(u models.User, photoCount, tokenCount int64) gin.H {
 
 func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {
     var count int64
-    if err := s.DB.Model(&models.Photo{}).Where("user_id = ? AND day = ?", userID, day).Count(&count).Error; err != nil {
+    if err := s.DB.Model(&models.Photo{}).Where("user_id = ? AND day = ? AND prompt_only = ?", userID, day, true).Count(&count).Error; err != nil {
         return false, err
     }
     return count > 0, nil
