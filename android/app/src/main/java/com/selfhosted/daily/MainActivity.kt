@@ -80,15 +80,12 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.google.firebase.messaging.FirebaseMessaging
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -96,7 +93,6 @@ import okio.Buffer
 import okio.BufferedSink
 import okio.ForwardingSink
 import okio.buffer
-import org.json.JSONObject
 import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -240,7 +236,6 @@ interface Api {
 
 class AppRepo(private val api: Api, private val context: Context) {
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
-    private val http = OkHttpClient()
     private val maxUploadDimensionPx = 1600
 
     fun token(): String = prefs.getString("token", "") ?: ""
@@ -279,6 +274,16 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun setSeenPromptMarker(marker: String) {
         prefs.edit().putString("seen_prompt_marker", marker).apply()
+    }
+
+    fun autoUpdateEnabled(): Boolean = prefs.getBoolean("auto_update_enabled", false)
+
+    fun setAutoUpdateEnabled(enabled: Boolean) {
+        UpdateCheckScheduler.setEnabled(context, enabled)
+    }
+
+    fun syncAutoUpdateScheduler() {
+        UpdateCheckScheduler.syncFromPrefs(context)
     }
 
     fun lastSeenOtherChatMillis(): Long = prefs.getLong("chat_seen_other_ms", 0L)
@@ -382,34 +387,8 @@ class AppRepo(private val api: Api, private val context: Context) {
         onProgress(totalBytes, totalBytes)
     }
 
-    suspend fun checkForUpdate(currentVersion: String): UpdateInfo? = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url("https://api.github.com/repos/flightuwe/selfhosted-daily-photo/releases/latest")
-            .header("Accept", "application/vnd.github+json")
-            .build()
-
-        http.newCall(req).execute().use { response ->
-            if (!response.isSuccessful) return@withContext null
-            val body = response.body?.string() ?: return@withContext null
-            val json = JSONObject(body)
-
-            val tag = json.optString("tag_name").removePrefix("v")
-            val releaseUrl = json.optString("html_url")
-            val assets = json.optJSONArray("assets")
-            var apkUrl: String? = null
-            if (assets != null) {
-                for (i in 0 until assets.length()) {
-                    val item = assets.getJSONObject(i)
-                    if (item.optString("name").endsWith(".apk")) {
-                        apkUrl = item.optString("browser_download_url")
-                        break
-                    }
-                }
-            }
-
-            if (isVersionNewer(tag, currentVersion)) UpdateInfo(tag, releaseUrl, apkUrl) else null
-        }
-    }
+    suspend fun checkForUpdate(currentVersion: String): UpdateInfo? =
+        UpdateReleaseChecker.checkForUpdate(currentVersion)
 
     private fun copyUriToTemp(uri: Uri): File {
         val resolver = context.contentResolver
@@ -479,7 +458,7 @@ class AppRepo(private val api: Api, private val context: Context) {
     }
 }
 
-private fun isVersionNewer(latest: String, current: String): Boolean {
+fun isVersionNewer(latest: String, current: String): Boolean {
     fun parse(v: String): List<Int> = v.split(".").mapNotNull { it.trim().toIntOrNull() }
     val a = parse(latest)
     val b = parse(current)
@@ -544,7 +523,8 @@ data class UiState(
     val showPromptDialog: Boolean = false,
     val updateInfo: UpdateInfo? = null,
     val darkMode: Boolean = false,
-    val uploadQuality: Int = 82
+    val uploadQuality: Int = 82,
+    val autoUpdateEnabled: Boolean = false
 )
 
 data class DashboardData(
@@ -560,7 +540,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         UiState(
             token = repo.token(),
             darkMode = repo.isDarkMode(),
-            uploadQuality = repo.uploadQuality()
+            uploadQuality = repo.uploadQuality(),
+            autoUpdateEnabled = repo.autoUpdateEnabled()
         )
     )
         private set
@@ -568,6 +549,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun bootstrap() {
         if (state.startupDone) return
         state = state.copy(startupDone = false)
+        repo.syncAutoUpdateScheduler()
         val started = System.currentTimeMillis()
         val health = runCatching { repo.health() }.getOrNull()
         val elapsed = System.currentTimeMillis() - started
@@ -603,7 +585,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverVersion = state.serverVersion,
             pushProvider = state.pushProvider,
             darkMode = state.darkMode,
-            uploadQuality = state.uploadQuality
+            uploadQuality = state.uploadQuality,
+            autoUpdateEnabled = repo.autoUpdateEnabled()
         )
     }
 
@@ -852,6 +835,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun setUploadQuality(value: Int) {
         repo.setUploadQuality(value)
         state = state.copy(uploadQuality = repo.uploadQuality())
+    }
+
+    fun setAutoUpdateEnabled(enabled: Boolean) {
+        repo.setAutoUpdateEnabled(enabled)
+        state = state.copy(autoUpdateEnabled = repo.autoUpdateEnabled())
     }
 
     suspend fun updateProfile(username: String, favoriteColor: String) {
@@ -1267,8 +1255,10 @@ fun AppScreen(vm: MainVm) {
                     apiBaseUrl = BuildConfig.API_BASE_URL,
                     serverConnected = state.serverConnected,
                     uploadQuality = state.uploadQuality,
+                    autoUpdateEnabled = state.autoUpdateEnabled,
                     onDarkModeChange = { vm.setDarkMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
+                    onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onEditableUsernameChange = { profileUsername = it },
                     onEditableColorChange = { profileColor = it },
                     onSaveProfile = {
@@ -1705,8 +1695,10 @@ fun ProfileTab(
     apiBaseUrl: String,
     serverConnected: Boolean,
     uploadQuality: Int,
+    autoUpdateEnabled: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
+    onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onEditableUsernameChange: (String) -> Unit,
     onEditableColorChange: (String) -> Unit,
     onSaveProfile: () -> Unit,
@@ -1733,6 +1725,14 @@ fun ProfileTab(
             ) {
                 Text("Dark Mode")
                 Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Auto-Update-Suche (10 Min)")
+                Switch(checked = autoUpdateEnabled, onCheckedChange = onAutoUpdateEnabledChange)
             }
         }
 

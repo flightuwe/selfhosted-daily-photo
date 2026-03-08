@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import kotlin.random.Random
@@ -23,7 +24,7 @@ class PushMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        ensureChannel()
+        ensurePromptChannel(this)
         val title = message.notification?.title ?: "Daily Moment"
         val body = message.notification?.body ?: message.data["body"] ?: "Zeit fuer deinen taeglichen Moment."
 
@@ -37,7 +38,7 @@ class PushMessagingService : FirebaseMessagingService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, CHANNEL_PROMPT_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentTitle(title)
             .setContentText(body)
@@ -49,20 +50,63 @@ class PushMessagingService : FirebaseMessagingService() {
         NotificationManagerCompat.from(this).notify(Random.nextInt(), notification)
     }
 
-    private fun ensureChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Daily Prompt",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "Benachrichtigungen fuer taegliche Foto-Prompts"
-        }
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(channel)
-    }
-
     companion object {
-        private const val CHANNEL_ID = "daily_prompt"
+        private const val CHANNEL_PROMPT_ID = "daily_prompt"
+        private const val CHANNEL_UPDATE_ID = "daily_updates"
+
+        fun showLocalUpdateNotification(context: Context, update: UpdateInfo) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+            ensureUpdateChannel(context)
+
+            val target = update.apkUrl ?: update.releaseUrl
+            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(target))
+            val pending = PendingIntent.getActivity(
+                context,
+                2001,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(context, CHANNEL_UPDATE_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle("Daily Update verfuegbar")
+                .setContentText("Neue Version ${update.latestVersion} gefunden.")
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setAutoCancel(true)
+                .setContentIntent(pending)
+                .build()
+
+            NotificationManagerCompat.from(context).notify(2001, notification)
+        }
+
+        private fun ensurePromptChannel(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            val channel = NotificationChannel(
+                CHANNEL_PROMPT_ID,
+                "Daily Prompt",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Benachrichtigungen fuer taegliche Foto-Prompts"
+            }
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+
+        private fun ensureUpdateChannel(context: Context) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            val channel = NotificationChannel(
+                CHANNEL_UPDATE_ID,
+                "Daily Updates",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Benachrichtigungen fuer neue App-Versionen"
+            }
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
     }
 }
