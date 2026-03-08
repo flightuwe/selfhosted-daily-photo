@@ -1,7 +1,5 @@
 :root {
   font-family: "Segoe UI", sans-serif;
-  color: #1f1f1f;
-  background: radial-gradient(circle at top left, #f7f9ff, #eef2ff 40%, #eef8f4);
 }
 
 * {
@@ -13,19 +11,67 @@ body {
 }
 
 .page {
+  --text: #1f1f1f;
+  --page-bg: radial-gradient(circle at top left, #f7f9ff, #eef2ff 40%, #eef8f4);
+  --panel-bg: #ffffff;
+  --panel-border: #d6def8;
+  --panel-shadow: 0 10px 30px rgba(26, 41, 88, 0.08);
+  --input-border: #c6cde8;
+  --input-bg: #ffffff;
+  --tab-bg: #e5ebff;
+  --tab-fg: #1c2b73;
+  --stat-bg: #f8faff;
+  --stat-border: #d6def8;
+  --table-border: #e0e6f8;
+  --photo-border: #d9def1;
+  --chat-item-border: #d6def8;
+  --chat-item-bg: #f8faff;
+  --chat-clean-border: #e2e8ff;
+  --chat-clean-bg: linear-gradient(180deg, #ffffff, #f7f9ff);
+  --small-fg: #4e5778;
+  --message-bg: #f2f6ff;
+  --settings-bg: #f8faff;
+  --settings-border: #d6def8;
+
   min-height: 100vh;
   display: grid;
   place-items: center;
   padding: 2rem;
+  color: var(--text);
+  background: var(--page-bg);
+}
+
+.page.theme-dark {
+  --text: #e8ecff;
+  --page-bg: radial-gradient(circle at top left, #0f1324, #151b31 45%, #11241f);
+  --panel-bg: #171d33;
+  --panel-border: #2d375e;
+  --panel-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+  --input-border: #3b4a78;
+  --input-bg: #10172c;
+  --tab-bg: #263157;
+  --tab-fg: #c8d4ff;
+  --stat-bg: #1a2240;
+  --stat-border: #2f3b66;
+  --table-border: #2a355f;
+  --photo-border: #34406a;
+  --chat-item-border: #33406d;
+  --chat-item-bg: #1a2342;
+  --chat-clean-border: #33406d;
+  --chat-clean-bg: linear-gradient(180deg, #1f2749, #17203d);
+  --small-fg: #aab6de;
+  --message-bg: #24315a;
+  --settings-bg: #1a2240;
+  --settings-border: #2f3b66;
 }
 
 .panel {
   width: min(760px, 100%);
-  background: #ffffff;
-  border: 1px solid #d6def8;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
   border-radius: 16px;
   padding: 1.25rem;
-  box-shadow: 0 10px 30px rgba(26, 41, 88, 0.08);
+  box-shadow: var(--panel-shadow);
 }
 
 .panel.wide {
@@ -53,7 +99,9 @@ label {
 
 input,
 select {
-  border: 1px solid #c6cde8;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text);
   border-radius: 8px;
   padding: 0.55rem 0.7rem;
 }
@@ -83,7 +131,7 @@ button.danger {
 .message {
   margin: 0;
   padding: 0.6rem 0.7rem;
-  background: #f2f6ff;
+  background: var(--message-bg);
   border-radius: 8px;
 }
 
@@ -95,8 +143,8 @@ button.danger {
 }
 
 .tab {
-  background: #e5ebff;
-  color: #1c2b73;
+  background: var(--tab-bg);
+  color: var(--tab-fg);
 }
 
 .tab.active {
@@ -111,10 +159,10 @@ button.danger {
 }
 
 .stat {
-  border: 1px solid #d6def8;
+  border: 1px solid var(--stat-border);
   border-radius: 10px;
   padding: 0.75rem;
-  background: #f8faff;
+  background: var(--stat-bg);
 }
 
 .stat h3 {
@@ -135,7 +183,7 @@ button.danger {
 
 .table th,
 .table td {
-  border-bottom: 1px solid #e0e6f8;
+  border-bottom: 1px solid var(--table-border);
   padding: 0.55rem;
   text-align: left;
   vertical-align: middle;
@@ -148,10 +196,10 @@ button.danger {
 }
 
 .feed-card {
-  border: 1px solid #d6def8;
+  border: 1px solid var(--stat-border);
   border-radius: 10px;
   padding: 0.7rem;
-  background: #f8faff;
+  background: var(--stat-bg);
 }
 
 .photo-grid {
@@ -166,7 +214,7 @@ button.danger {
   height: 160px;
   object-fit: cover;
   border-radius: 8px;
-  border: 1px solid #d9def1;
+  border: 1px solid var(--photo-border);
 }
 
 .chat-list {
@@ -178,15 +226,15 @@ button.danger {
 }
 
 .chat-item {
-  border: 1px solid #d6def8;
+  border: 1px solid var(--chat-item-border);
   border-radius: 10px;
   padding: 0.65rem 0.75rem;
-  background: #f8faff;
+  background: var(--chat-item-bg);
 }
 
 .chat-item.clean {
-  border: 1px solid #e2e8ff;
-  background: linear-gradient(180deg, #ffffff, #f7f9ff);
+  border: 1px solid var(--chat-clean-border);
+  background: var(--chat-clean-bg);
 }
 
 .chat-head {
@@ -213,7 +261,7 @@ button.danger {
 .small {
   margin: 0;
   font-size: 0.82rem;
-  color: #4e5778;
+  color: var(--small-fg);
 }
 
 .late {
@@ -222,10 +270,10 @@ button.danger {
 }
 
 .settings-current {
-  border: 1px solid #d6def8;
+  border: 1px solid var(--settings-border);
   border-radius: 10px;
   padding: 0.85rem;
-  background: #f8faff;
+  background: var(--settings-bg);
 }
 
 .settings-current h2 {

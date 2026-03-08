@@ -90,6 +90,7 @@ const emptyCommandDraft: CommandDraft = {
 
 export function App() {
   const [token, setToken] = useState<string>(() => localStorage.getItem("admin-token") || "");
+  const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem("admin-dark-mode") === "1");
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [settings, setSettings] = useState<Settings>(emptySettings);
@@ -158,6 +159,10 @@ export function App() {
     }, 10000);
     return () => window.clearInterval(id);
   }, [token, activeTab]);
+
+  useEffect(() => {
+    localStorage.setItem("admin-dark-mode", darkMode ? "1" : "0");
+  }, [darkMode]);
 
   async function loadAdminData(authToken: string) {
     try {
@@ -511,9 +516,14 @@ export function App() {
 
   if (!isLoggedIn) {
     return (
-      <main className="page">
+      <main className={`page ${darkMode ? "theme-dark" : ""}`}>
         <section className="panel">
-          <h1>Daily Admin</h1>
+          <div className="row">
+            <h1>Daily Admin</h1>
+            <button type="button" onClick={() => setDarkMode((v) => !v)}>
+              {darkMode ? "Light" : "Dark"}
+            </button>
+          </div>
           <form onSubmit={onLogin} className="stack">
             <label>
               Benutzername
@@ -532,11 +542,12 @@ export function App() {
   }
 
   return (
-    <main className="page">
+    <main className={`page ${darkMode ? "theme-dark" : ""}`}>
       <section className="panel wide">
         <div className="row">
           <h1>Admin Panel</h1>
           <div className="row">
+            <button onClick={() => setDarkMode((v) => !v)}>{darkMode ? "Light" : "Dark"}</button>
             <button onClick={refreshAll}>Reload</button>
             <button onClick={logout}>Logout</button>
           </div>
