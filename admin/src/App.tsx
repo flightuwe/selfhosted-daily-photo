@@ -462,7 +462,7 @@ export function App() {
                 <article key={msg.id} className="chat-item">
                   <div className="row">
                     <strong>{msg.user.username}</strong>
-                    <span className="small">{new Date(msg.createdAt).toLocaleString()}</span>
+                    <span className="small">{formatDateTime(msg.createdAt)}</span>
                   </div>
                   <p>{msg.body}</p>
                 </article>
@@ -572,6 +572,12 @@ function toInputDateTime(iso: string) {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatDateTime(iso: string) {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function CardStat({ title, value }: { title: string; value: number }) {
