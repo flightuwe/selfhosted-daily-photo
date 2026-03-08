@@ -9,7 +9,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -o /out/server ./cmd/server
 
 FROM alpine:3.21
 WORKDIR /app
-RUN adduser -D app
+RUN apk add --no-cache tzdata && adduser -D app
 COPY --from=builder /out/server /app/server
 USER app
 EXPOSE 8080
