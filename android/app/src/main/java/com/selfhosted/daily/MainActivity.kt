@@ -454,6 +454,9 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun checkForUpdate(currentVersion: String): UpdateInfo? =
         UpdateReleaseChecker.checkForUpdate(currentVersion)
 
+    suspend fun changelogLines(currentVersion: String): List<String> =
+        UpdateReleaseChecker.changelogLinesForVersion(currentVersion)
+
     private fun copyUriToTemp(uri: Uri): File {
         val resolver = context.contentResolver
         val originalName = resolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -587,6 +590,7 @@ data class UiState(
     val pushProvider: String = "unknown",
     val showPromptDialog: Boolean = false,
     val showChangelogDialog: Boolean = false,
+    val changelogLines: List<String> = emptyList(),
     val showHelpDialog: Boolean = false,
     val promptRules: PromptRulesResponse? = null,
     val specialMomentStatus: SpecialMomentStatus? = null,
@@ -627,12 +631,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (elapsed < 900) {
             delay(900 - elapsed)
         }
+        val changelogLines = runCatching { repo.changelogLines(BuildConfig.VERSION_NAME) }
+            .getOrDefault(emptyList())
         state = state.copy(
             startupDone = true,
             serverConnected = health?.ok == true,
             serverVersion = health?.version ?: "nicht erreichbar",
             pushProvider = health?.provider ?: "unknown",
             showChangelogDialog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME),
+            changelogLines = changelogLines,
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
     }
@@ -945,8 +952,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(updateInfo = null)
     }
 
-    fun showChangelogDialog() {
-        state = state.copy(showChangelogDialog = true)
+    suspend fun showChangelogDialog() {
+        val lines = runCatching { repo.changelogLines(BuildConfig.VERSION_NAME) }
+            .getOrDefault(emptyList())
+        state = state.copy(
+            showChangelogDialog = true,
+            changelogLines = if (lines.isNotEmpty()) lines else state.changelogLines
+        )
     }
 
     fun dismissChangelogDialog() {
@@ -1223,7 +1235,7 @@ fun AppScreen(vm: MainVm) {
     }
 
     if (state.showChangelogDialog) {
-        val lines = changelogLinesForVersion(BuildConfig.VERSION_NAME)
+        val lines = if (state.changelogLines.isNotEmpty()) state.changelogLines else fallbackChangelogLines()
         AlertDialog(
             onDismissRequest = { vm.dismissChangelogDialog() },
             confirmButton = {
@@ -1475,7 +1487,7 @@ fun AppScreen(vm: MainVm) {
                         }
                     },
                     onCheckUpdate = { scope.launch { vm.checkForUpdate() } },
-                    onShowChangelog = { vm.showChangelogDialog() },
+                    onShowChangelog = { scope.launch { vm.showChangelogDialog() } },
                     onShowHelp = { vm.showHelpDialog() },
                     onCheckConnection = { scope.launch { vm.checkConnection() } },
                     onLogout = { vm.logout() },
@@ -2267,21 +2279,11 @@ private fun createTempImageUri(context: Context): Uri {
     return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 }
 
-private fun changelogLinesForVersion(version: String): List<String> {
-    return when (version) {
-        "0.3.17" -> listOf(
-            "Monatliche Rueckblicke in Feed und Kalender",
-            "Admin-Dashboard mit Tage aktiv, Bilder gesamt und Speicher gesamt",
-            "Sondermoment-Limit pro Nutzer auf 1x pro Woche",
-            "Streak-Anzeige im Profil (taegliche Serien)",
-            "Zoom in der Bild-Vollansicht (Pinch + Drag + Doppeltipp-Reset)"
-        )
-        else -> listOf(
-            "Stabilitaets- und UI-Verbesserungen",
-            "Optimierungen fuer Feed, Kalender, Chat und Upload-Flow",
-            "Bitte pruefe die Release-Notes auf GitHub fuer alle Details"
-        )
-    }
+private fun fallbackChangelogLines(): List<String> {
+    return listOf(
+        "Release-Infos konnten nicht von GitHub geladen werden.",
+        "Bitte pruefe spaeter erneut oder oeffne die Release-Seite im Browser."
+    )
 }
 
 private fun helpLines(): List<String> = listOf(
