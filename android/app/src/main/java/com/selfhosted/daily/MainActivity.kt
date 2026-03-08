@@ -587,6 +587,7 @@ data class UiState(
     val pushProvider: String = "unknown",
     val showPromptDialog: Boolean = false,
     val showChangelogDialog: Boolean = false,
+    val showHelpDialog: Boolean = false,
     val promptRules: PromptRulesResponse? = null,
     val specialMomentStatus: SpecialMomentStatus? = null,
     val updateInfo: UpdateInfo? = null,
@@ -953,6 +954,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(showChangelogDialog = false)
     }
 
+    fun showHelpDialog() {
+        state = state.copy(showHelpDialog = true)
+    }
+
+    fun dismissHelpDialog() {
+        state = state.copy(showHelpDialog = false)
+    }
+
     fun setDarkMode(enabled: Boolean) {
         repo.setDarkMode(enabled)
         state = state.copy(darkMode = enabled)
@@ -1235,6 +1244,28 @@ fun AppScreen(vm: MainVm) {
         )
     }
 
+    if (state.showHelpDialog) {
+        val lines = helpLines()
+        AlertDialog(
+            onDismissRequest = { vm.dismissHelpDialog() },
+            confirmButton = {
+                TextButton(onClick = { vm.dismissHelpDialog() }) { Text("Schliessen") }
+            },
+            title = { Text("Hilfe") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    lines.forEach { line -> Text(line) }
+                }
+            }
+        )
+    }
+
     if (viewerUrls.isNotEmpty()) {
         AlertDialog(
             onDismissRequest = {
@@ -1445,6 +1476,7 @@ fun AppScreen(vm: MainVm) {
                     },
                     onCheckUpdate = { scope.launch { vm.checkForUpdate() } },
                     onShowChangelog = { vm.showChangelogDialog() },
+                    onShowHelp = { vm.showHelpDialog() },
                     onCheckConnection = { scope.launch { vm.checkConnection() } },
                     onLogout = { vm.logout() },
                     onOpenViewer = { urls ->
@@ -1940,6 +1972,7 @@ fun ProfileTab(
     onChangePassword: () -> Unit,
     onCheckUpdate: () -> Unit,
     onShowChangelog: () -> Unit,
+    onShowHelp: () -> Unit,
     onCheckConnection: () -> Unit,
     onLogout: () -> Unit,
     onOpenViewer: (List<String>) -> Unit
@@ -1954,6 +1987,7 @@ fun ProfileTab(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onCheckUpdate) { Text("Update pruefen") }
                 Button(onClick = onShowChangelog) { Text("!") }
+                Button(onClick = onShowHelp) { Text("Hilfe") }
                 Button(onClick = onLogout) { Text("Abmelden") }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -2249,6 +2283,46 @@ private fun changelogLinesForVersion(version: String): List<String> {
         )
     }
 }
+
+private fun helpLines(): List<String> = listOf(
+    "Willkommen bei Daily. Ziel ist ein kurzer gemeinsamer Moment pro Tag.",
+    "",
+    "Wichtige Grundregeln",
+    "- Pro Nutzer ist genau ein Tagesmoment pro Tag erlaubt.",
+    "- Der Feed des aktuellen Tages ist gesperrt, bis du dein Tagesmoment gepostet hast.",
+    "- Extra-Bilder sind zusaetzlich moeglich und als Extra markiert.",
+    "- Bei verpasstem Zeitfenster kannst du weiterhin posten, aber ggf. als spaet markiert.",
+    "",
+    "Reiter: Kamera",
+    "- Hier startest du den Tagesmoment mit Rueck- und Frontkamera.",
+    "- Der Upload startet nach der Aufnahme automatisch im Hintergrund.",
+    "- Du kannst zusaetzliche Bilder aufnehmen.",
+    "- Sondermoment kann je Nutzer nur 1x pro Woche angefordert werden.",
+    "",
+    "Reiter: Feed",
+    "- Zeigt Beitraege nach Tagen getrennt.",
+    "- Jeder Tag hat einen klaren Header, damit der Verlauf uebersichtlich bleibt.",
+    "- Monatsrueckblicke erscheinen am Monatsende als eigener Block.",
+    "",
+    "Reiter: Kalender",
+    "- Zeigt nur Tage, an denen es Beitraege gibt.",
+    "- Beim Auswaehlen springst du im Feed zu diesem Tag.",
+    "",
+    "Reiter: Chat",
+    "- Gruppenchat fuer kurze Nachrichten.",
+    "- Ein Punkt am Reiter zeigt ungelesene Nachrichten von anderen Nutzern an.",
+    "- Je nach Server-Konfiguration koennen Chat-Commands aktiv sein.",
+    "",
+    "Reiter: Profil",
+    "- Zeigt Account, Streak, alte Beitraege und Verbindungsstatus.",
+    "- Hier kannst du Benutzername, Farbe, Passwort und App-Optionen aendern.",
+    "- Unter Moment-Bedingungen siehst du die aktuell gueltigen Regeln vom Server.",
+    "",
+    "Update und Verbindung",
+    "- Update pruefen sucht nach neuer App-Version.",
+    "- Verbindung pruefen aktualisiert Server-Version und Provider.",
+    "- Das Symbol ! oeffnet den Changelog der aktuellen App-Version."
+)
 
 @Composable
 private fun ZoomableViewerImage(url: String) {
