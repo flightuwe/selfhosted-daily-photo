@@ -38,8 +38,11 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -189,6 +192,12 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun clearToken() {
         prefs.edit().remove("token").apply()
+    }
+
+    fun isDarkMode(): Boolean = prefs.getBoolean("dark_mode", false)
+
+    fun setDarkMode(enabled: Boolean) {
+        prefs.edit().putBoolean("dark_mode", enabled).apply()
     }
 
     private fun lastSyncedDeviceToken(): String = prefs.getString("last_synced_device_token", "") ?: ""
@@ -352,7 +361,8 @@ data class UiState(
     val serverVersion: String = "unbekannt",
     val pushProvider: String = "unknown",
     val showPromptDialog: Boolean = false,
-    val updateInfo: UpdateInfo? = null
+    val updateInfo: UpdateInfo? = null,
+    val darkMode: Boolean = false
 )
 
 data class DashboardData(
@@ -363,7 +373,7 @@ data class DashboardData(
 )
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
-    var state by mutableStateOf(UiState(token = repo.token()))
+    var state by mutableStateOf(UiState(token = repo.token(), darkMode = repo.isDarkMode()))
         private set
 
     suspend fun bootstrap() {
@@ -402,7 +412,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             startupDone = true,
             serverConnected = state.serverConnected,
             serverVersion = state.serverVersion,
-            pushProvider = state.pushProvider
+            pushProvider = state.pushProvider,
+            darkMode = state.darkMode
         )
     }
 
@@ -490,6 +501,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun dismissUpdateDialog() {
         state = state.copy(updateInfo = null)
     }
+
+    fun setDarkMode(enabled: Boolean) {
+        repo.setDarkMode(enabled)
+        state = state.copy(darkMode = enabled)
+    }
 }
 
 class MainVmFactory(private val repo: AppRepo) : ViewModelProvider.Factory {
@@ -510,8 +526,9 @@ class MainActivity : ComponentActivity() {
             .create(Api::class.java)
 
         setContent {
-            MaterialTheme {
-                val vm: MainVm = viewModel(factory = MainVmFactory(AppRepo(api, this)))
+            val vm: MainVm = viewModel(factory = MainVmFactory(AppRepo(api, this)))
+            val useDark = vm.state.darkMode
+            MaterialTheme(colorScheme = if (useDark) darkColorScheme() else lightColorScheme()) {
                 AppScreen(vm)
             }
         }
@@ -753,8 +770,10 @@ fun AppScreen(vm: MainVm) {
                 AppTab.PROFILE -> ProfileTab(
                     username = state.user?.username ?: "",
                     photos = state.photos,
+                    darkMode = state.darkMode,
                     currentPassword = pwCurrent,
                     newPassword = pwNext,
+                    onDarkModeChange = { vm.setDarkMode(it) },
                     onCurrentPasswordChange = { pwCurrent = it },
                     onNewPasswordChange = { pwNext = it },
                     onChangePassword = {
@@ -979,8 +998,10 @@ fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onS
 fun ProfileTab(
     username: String,
     photos: List<PromptPhoto>,
+    darkMode: Boolean,
     currentPassword: String,
     newPassword: String,
+    onDarkModeChange: (Boolean) -> Unit,
     onCurrentPasswordChange: (String) -> Unit,
     onNewPasswordChange: (String) -> Unit,
     onChangePassword: () -> Unit,
@@ -995,6 +1016,15 @@ fun ProfileTab(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onCheckUpdate) { Text("Update pruefen") }
                 Button(onClick = onLogout) { Text("Abmelden") }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Dark Mode")
+                Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
             }
         }
 
