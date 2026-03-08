@@ -1,8 +1,6 @@
 ﻿package com.selfhosted.daily
 
 import android.Manifest
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -1889,20 +1887,22 @@ fun AppScreen(vm: MainVm) {
                     onShowChangelog = { scope.launch { vm.showChangelogDialog() } },
                     onShowHelp = { vm.showHelpDialog() },
                     onCheckConnection = { scope.launch { vm.checkConnection() } },
-                    onCopyInviteCode = {
-                        val code = state.myInviteCode.trim()
-                        if (code.isNotBlank()) {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("Daily Invite", code))
-                        }
-                    },
                     onRollInviteCode = { scope.launch { vm.rollInviteCode() } },
                     onShareInviteCode = {
                         val code = state.myInviteCode.trim()
                         if (code.isNotBlank()) {
+                            val inviter = state.user?.username?.ifBlank { "ein Mitglied" } ?: "ein Mitglied"
+                            val apkUrl = "https://github.com/flightuwe/selfhosted-daily-photo/releases/latest/download/app-release.apk"
+                            val shortGuide = "1) APK installieren  2) App oeffnen -> Registrieren  3) Invite-Code eingeben"
+                            val text = buildString {
+                                appendLine("Daily Invite von @$inviter")
+                                appendLine("Invite-Code: $code")
+                                appendLine(shortGuide)
+                                append("Neueste APK: $apkUrl")
+                            }
                             val send = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, "Mein Daily Invite-Code: $code")
+                                putExtra(Intent.EXTRA_TEXT, text)
                             }
                             context.startActivity(Intent.createChooser(send, "Invite-Code teilen"))
                         }
@@ -2454,7 +2454,6 @@ fun ProfileTab(
     onShowChangelog: () -> Unit,
     onShowHelp: () -> Unit,
     onCheckConnection: () -> Unit,
-    onCopyInviteCode: () -> Unit,
     onRollInviteCode: () -> Unit,
     onShareInviteCode: () -> Unit,
     onLogout: () -> Unit,
@@ -2507,7 +2506,6 @@ fun ProfileTab(
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(inviteCode.ifBlank { "wird geladen ..." }, fontWeight = FontWeight.SemiBold)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Button(onClick = onCopyInviteCode, modifier = Modifier.weight(1f)) { Text("Kopieren") }
                         Button(onClick = onRollInviteCode, modifier = Modifier.weight(1f)) { Text("Erneuern") }
                         Button(onClick = onShareInviteCode, modifier = Modifier.weight(1f)) { Text("Teilen") }
                     }
