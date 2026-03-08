@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -71,6 +72,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.navigation:navigation-compose:2.7.7")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation(platform("com.google.firebase:firebase-bom:33.12.0"))
+    implementation("com.google.firebase:firebase-messaging-ktx")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")

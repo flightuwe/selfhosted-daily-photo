@@ -51,6 +51,7 @@ Monorepo mit:
 ## Android App
 
 - API Basis-URL in `android/app/build.gradle.kts` bei `API_BASE_URL` auf deine Domain setzen, z. B. `https://photos.example.com/api/`.
+- Fuer FCM muss `android/app/google-services.json` vorhanden sein (lokal) oder in CI als Secret gesetzt werden.
 - Build lokal:
   - `gradle -p android :app:assembleRelease`
 
@@ -94,13 +95,22 @@ Danach liegt `app-release.apk` in GitHub Releases.
 - `PUT /api/admin/settings`
 - `POST /api/admin/prompt/trigger`
 - `POST /api/admin/users`
+- `POST /api/devices` (FCM Device-Token registrieren)
+- `PUT /api/me/password`
+- `GET /api/me/photos`
 
-## Naechste sinnvolle Schritte
+## FCM Push aktivieren
 
-1. FCM-Provider implementieren (`notify` Paket) fuer echte Push-Zustellung.
-2. Kamera-Flow in Android (Front/Back Capture im Prompt-Moment).
-3. Rollen/Rechte erweitern und Audit-Log im Admin-Panel.
-4. Optionaler Wechsel von SQLite auf Postgres fuer groessere Nutzerzahl.
+1. Firebase Projekt anlegen und Cloud Messaging aktivieren.
+2. Service Account JSON laden und auf Synology ablegen:
+   - `/volume1/docker/selfhosted-daily-photo/secrets/firebase-service-account.json`
+3. Im Backend setzen:
+   - `FCM_ENABLED=true`
+   - `FCM_PROJECT_ID=<dein-project-id>`
+   - `FCM_SERVICE_ACCOUNT_FILE=/app/secrets/firebase-service-account.json`
+4. Android `google-services.json` nutzen:
+   - lokal nach `android/app/google-services.json`
+   - in GitHub Secret `ANDROID_GOOGLE_SERVICES_JSON_BASE64`
 
 ## Konkrete Synology Werte
 
@@ -111,6 +121,7 @@ Fuer Portainer Stack (`deploy/portainer-stack.yml`) setze mindestens:
 - `JWT_SECRET=<langes-zufaelliges-secret>`
 - `BOOTSTRAP_ADMIN_PASSWORD=<starkes-passwort>`
 - Host-Pfad fuer Daten: `/volume1/docker/selfhosted-daily-photo/backend-data`
+- Host-Pfad fuer FCM Secret: `/volume1/docker/selfhosted-daily-photo/secrets/firebase-service-account.json`
 
 Danach in Synology Reverse Proxy:
 - Quelle: `https://photos.<deine-domain>`
@@ -149,6 +160,7 @@ In GitHub unter `Settings -> Secrets and variables -> Actions` folgende Reposito
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEYSTORE_PASSWORD`
 - `ANDROID_KEY_PASSWORD`
+- `ANDROID_GOOGLE_SERVICES_JSON_BASE64` (Base64 von `google-services.json`)
 
 PowerShell zum Base64-Erzeugen:
 

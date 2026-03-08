@@ -28,8 +28,12 @@ services:
       - SCHEDULER_ENABLED=true
       - BOOTSTRAP_ADMIN_USER=admin
       - BOOTSTRAP_ADMIN_PASSWORD=HIER_STARKES_ADMIN_PASSWORT_EINTRAGEN
+      - FCM_ENABLED=true
+      - FCM_PROJECT_ID=HIER_DEIN_FIREBASE_PROJECT_ID
+      - FCM_SERVICE_ACCOUNT_FILE=/app/secrets/firebase-service-account.json
     volumes:
       - /volume1/docker/selfhosted-daily-photo/backend-data:/app/data:rw
+      - /volume1/docker/selfhosted-daily-photo/secrets:/app/secrets:ro
     networks:
       - shp-net
 

@@ -590,8 +590,7 @@ func (s *Server) handleBroadcastNotification(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"ok":      true,
 		"sentTo":  len(tokens),
-		"hint":    "Hinweis: echte Push-Zustellung funktioniert erst mit aktivem FCM-Provider.",
-		"provider": "noop_until_fcm_is_configured",
+		"provider": s.Notifier.Name(),
 	})
 }
 

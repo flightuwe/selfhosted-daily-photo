@@ -1,8 +1,11 @@
 package com.selfhosted.bereal
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
@@ -54,13 +57,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
@@ -88,6 +94,7 @@ enum class AppTab { CAMERA, FEED, PROFILE }
 data class User(val id: Long, val username: String, val isAdmin: Boolean)
 data class AuthResponse(val token: String, val user: User)
 data class LoginRequest(val username: String, val password: String)
+data class DeviceTokenRequest(val token: String)
 data class PasswordChangeRequest(val currentPassword: String, val newPassword: String)
 data class PromptPhoto(val id: Long, val day: String, val promptOnly: Boolean, val caption: String?, val url: String, val createdAt: String)
 data class PromptResponse(
@@ -129,6 +136,12 @@ interface Api {
         @Body body: PasswordChangeRequest
     )
 
+    @POST("devices")
+    suspend fun registerDevice(
+        @Header("Authorization") token: String,
+        @Body body: DeviceTokenRequest
+    )
+
     @Multipart
     @POST("uploads")
     suspend fun upload(
@@ -150,6 +163,12 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun clearToken() {
         prefs.edit().remove("token").apply()
+    }
+
+    private fun lastSyncedDeviceToken(): String = prefs.getString("last_synced_device_token", "") ?: ""
+
+    private fun setLastSyncedDeviceToken(token: String) {
+        prefs.edit().putString("last_synced_device_token", token).apply()
     }
 
     fun seenPromptMarker(): String = prefs.getString("seen_prompt_marker", "") ?: ""
@@ -182,6 +201,19 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     suspend fun changePassword(currentPassword: String, newPassword: String) {
         api.changePassword("Bearer ${token()}", PasswordChangeRequest(currentPassword, newPassword))
+    }
+
+    suspend fun syncDeviceTokenIfNeeded() {
+        if (token().isBlank()) return
+        val pending = prefs.getString("pending_fcm_token", "") ?: ""
+        val fromFirebase = runCatching { FirebaseMessaging.getInstance().token.await() }.getOrNull().orEmpty()
+        val deviceToken = if (pending.isNotBlank()) pending else fromFirebase
+        if (deviceToken.isBlank()) return
+        if (deviceToken == lastSyncedDeviceToken()) return
+
+        api.registerDevice("Bearer ${token()}", DeviceTokenRequest(deviceToken))
+        setLastSyncedDeviceToken(deviceToken)
+        prefs.edit().remove("pending_fcm_token").apply()
     }
 
     suspend fun upload(uri: Uri, isPrompt: Boolean) {
@@ -273,12 +305,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun login(username: String, password: String) {
         state = state.copy(loading = true, message = "")
-        runCatching { repo.login(username, password) }
-            .onSuccess { user ->
-                state = state.copy(user = user, token = repo.token(), loading = false)
-                refreshAll()
-            }
-            .onFailure { state = state.copy(loading = false, message = apiError(it, "Login fehlgeschlagen")) }
+        try {
+            val user = repo.login(username, password)
+            state = state.copy(user = user, token = repo.token(), loading = false)
+            runCatching { repo.syncDeviceTokenIfNeeded() }
+            refreshAll()
+        } catch (t: Throwable) {
+            state = state.copy(loading = false, message = apiError(t, "Login fehlgeschlagen"))
+        }
     }
 
     fun logout() {
@@ -294,6 +328,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (repo.token().isBlank()) return
         state = state.copy(loading = true)
         runCatching {
+            repo.syncDeviceTokenIfNeeded()
             val prompt = repo.prompt()
             val feed = if (prompt.hasPosted) repo.feedToday() else emptyList()
             val photos = repo.myPhotos()
@@ -404,6 +439,17 @@ fun AppScreen(vm: MainVm) {
             previewUri = captureUri
         }
         captureUri = null
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {}
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     LaunchedEffect(state.token) {

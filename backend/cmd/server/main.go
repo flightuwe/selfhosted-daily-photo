@@ -37,7 +37,18 @@ func main() {
         log.Fatalf("storage: %v", err)
     }
 
-    notifier := notify.NewNoop()
+    notifier := notify.Sender(notify.NewNoop())
+    if cfg.FCMEnabled {
+        fcmSender, fcmErr := notify.NewFCMSender(cfg.FCMProjectID, cfg.FCMServiceAccountFile)
+        if fcmErr != nil {
+            log.Printf("FCM init failed, fallback to noop: %v", fcmErr)
+        } else {
+            notifier = fcmSender
+            log.Printf("notifications: provider=%s", notifier.Name())
+        }
+    } else {
+        log.Printf("notifications: provider=%s", notifier.Name())
+    }
     promptService := &scheduler.DailyPromptService{DB: database, Location: location}
     server := &api.Server{
         DB:       database,
