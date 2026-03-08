@@ -548,9 +548,31 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
     }
 
     tokens := s.allDeviceTokens()
-    _ = s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
+    sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
+    removed := s.removeInvalidTokens(sendResult.InvalidTokens)
+    if sendErr != nil {
+        c.JSON(http.StatusOK, gin.H{
+            "prompt":          prompt,
+            "settings":        settings,
+            "devices":         len(tokens),
+            "provider":        s.Notifier.Name(),
+            "sentTo":          sendResult.Sent,
+            "failed":          sendResult.Failed,
+            "invalidRemoved":  removed,
+            "notificationErr": sendErr.Error(),
+        })
+        return
+    }
 
-    c.JSON(http.StatusOK, gin.H{"prompt": prompt, "settings": settings, "devices": len(tokens)})
+    c.JSON(http.StatusOK, gin.H{
+        "prompt":         prompt,
+        "settings":       settings,
+        "devices":        len(tokens),
+        "provider":       s.Notifier.Name(),
+        "sentTo":         sendResult.Sent,
+        "failed":         sendResult.Failed,
+        "invalidRemoved": removed,
+    })
 }
 
 func (s *Server) handleAdminResetToday(c *gin.Context) {
@@ -747,14 +769,25 @@ func (s *Server) handleBroadcastNotification(c *gin.Context) {
     }
 
     tokens := s.allDeviceTokens()
-    if err := s.Notifier.SendDailyPrompt(tokens, req.Body); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "broadcast failed"})
+    sendResult, err := s.Notifier.SendDailyPrompt(tokens, req.Body)
+    removed := s.removeInvalidTokens(sendResult.InvalidTokens)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{
+            "error":          "broadcast failed",
+            "details":        err.Error(),
+            "provider":       s.Notifier.Name(),
+            "sentTo":         sendResult.Sent,
+            "failed":         sendResult.Failed,
+            "invalidRemoved": removed,
+        })
         return
     }
 
 	c.JSON(http.StatusOK, gin.H{
 		"ok":      true,
-		"sentTo":  len(tokens),
+		"sentTo":  sendResult.Sent,
+		"failed":  sendResult.Failed,
+		"invalidRemoved": removed,
 		"provider": s.Notifier.Name(),
 	})
 }
@@ -1008,4 +1041,15 @@ func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {
         return false, err
     }
     return count > 0, nil
+}
+
+func (s *Server) removeInvalidTokens(tokens []string) int64 {
+    if len(tokens) == 0 {
+        return 0
+    }
+    tx := s.DB.Where("token IN ?", tokens).Delete(&models.DeviceToken{})
+    if tx.Error != nil {
+        return 0
+    }
+    return tx.RowsAffected
 }

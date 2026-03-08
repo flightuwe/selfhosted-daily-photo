@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -50,14 +51,15 @@ func NewFCMSender(projectID, serviceAccountFile string) (*FCMSender, error) {
 
 func (s *FCMSender) Name() string { return "fcm" }
 
-func (s *FCMSender) SendDailyPrompt(tokens []string, body string) error {
+func (s *FCMSender) SendDailyPrompt(tokens []string, body string) (SendResult, error) {
+	result := SendResult{Requested: len(tokens)}
 	if len(tokens) == 0 {
-		return nil
+		return result, nil
 	}
 
 	accessToken, err := s.tokenSrc.Token()
 	if err != nil {
-		return fmt.Errorf("fcm token source: %w", err)
+		return result, fmt.Errorf("fcm token source: %w", err)
 	}
 
 	url := fmt.Sprintf("https://fcm.googleapis.com/v1/projects/%s/messages:send", s.projectID)
@@ -87,6 +89,7 @@ func (s *FCMSender) SendDailyPrompt(tokens []string, body string) error {
 
 		resp, err := s.client.Do(req)
 		if err != nil {
+			result.Failed++
 			if firstErr == nil {
 				firstErr = fmt.Errorf("fcm request failed: %w", err)
 			}
@@ -95,11 +98,20 @@ func (s *FCMSender) SendDailyPrompt(tokens []string, body string) error {
 		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if resp.StatusCode >= 300 {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("fcm response %d: %s", resp.StatusCode, string(respBody))
+			result.Failed++
+			raw := string(respBody)
+			if strings.Contains(raw, "UNREGISTERED") ||
+				strings.Contains(raw, "registration-token-not-registered") ||
+				strings.Contains(raw, "Requested entity was not found") ||
+				strings.Contains(raw, "invalid registration token") {
+				result.InvalidTokens = append(result.InvalidTokens, t)
 			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("fcm response %d: %s", resp.StatusCode, raw)
+			}
+			continue
 		}
+		result.Sent++
 	}
-	return firstErr
+	return result, firstErr
 }
-

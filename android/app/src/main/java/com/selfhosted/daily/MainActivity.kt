@@ -231,9 +231,13 @@ class AppRepo(private val api: Api, private val context: Context) {
     }
 
     private fun lastSyncedDeviceToken(): String = prefs.getString("last_synced_device_token", "") ?: ""
+    private fun lastSyncedDeviceTokenAt(): Long = prefs.getLong("last_synced_device_token_at", 0L)
 
     private fun setLastSyncedDeviceToken(token: String) {
-        prefs.edit().putString("last_synced_device_token", token).apply()
+        prefs.edit()
+            .putString("last_synced_device_token", token)
+            .putLong("last_synced_device_token_at", System.currentTimeMillis())
+            .apply()
     }
 
     fun seenPromptMarker(): String = prefs.getString("seen_prompt_marker", "") ?: ""
@@ -267,13 +271,15 @@ class AppRepo(private val api: Api, private val context: Context) {
         api.changePassword("Bearer ${token()}", PasswordChangeRequest(currentPassword, newPassword))
     }
 
-    suspend fun syncDeviceTokenIfNeeded() {
+    suspend fun syncDeviceTokenIfNeeded(force: Boolean = false) {
         if (token().isBlank()) return
         val pending = prefs.getString("pending_fcm_token", "") ?: ""
         val fromFirebase = runCatching { FirebaseMessaging.getInstance().token.await() }.getOrNull().orEmpty()
         val deviceToken = if (pending.isNotBlank()) pending else fromFirebase
         if (deviceToken.isBlank()) return
-        if (deviceToken == lastSyncedDeviceToken()) return
+        val sameToken = deviceToken == lastSyncedDeviceToken()
+        val recentSync = (System.currentTimeMillis() - lastSyncedDeviceTokenAt()) < 6 * 60 * 60 * 1000L
+        if (!force && sameToken && recentSync) return
 
         api.registerDevice("Bearer ${token()}", DeviceTokenRequest(deviceToken))
         setLastSyncedDeviceToken(deviceToken)
@@ -534,7 +540,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         try {
             val user = repo.login(username, password)
             state = state.copy(user = user, token = repo.token(), loading = false)
-            runCatching { repo.syncDeviceTokenIfNeeded() }
+            runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
             refreshAll()
         } catch (t: Throwable) {
             state = state.copy(loading = false, message = apiError(t, "Login fehlgeschlagen"))

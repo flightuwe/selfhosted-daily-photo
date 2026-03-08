@@ -70,8 +70,17 @@ func main() {
         for _, t := range rows {
             tokens = append(tokens, t.Token)
         }
-        if err := notifier.SendDailyPrompt(tokens, settings.PromptNotificationText); err != nil {
+        result, err := notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
+        if len(result.InvalidTokens) > 0 {
+            if dbErr := database.Where("token IN ?", result.InvalidTokens).Delete(&models.DeviceToken{}).Error; dbErr != nil {
+                log.Printf("failed to remove invalid tokens: %v", dbErr)
+            }
+        }
+        if err != nil {
             log.Printf("notify failed: %v", err)
+        }
+        if result.Failed > 0 || len(result.InvalidTokens) > 0 {
+            log.Printf("notify summary: requested=%d sent=%d failed=%d invalid_removed=%d", result.Requested, result.Sent, result.Failed, len(result.InvalidTokens))
         }
     })
 

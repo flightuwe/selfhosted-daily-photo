@@ -17,6 +17,8 @@ class PushMessagingService : FirebaseMessagingService() {
         getSharedPreferences("app", Context.MODE_PRIVATE)
             .edit()
             .putString("pending_fcm_token", token)
+            .remove("last_synced_device_token")
+            .remove("last_synced_device_token_at")
             .apply()
     }
 
