@@ -57,6 +57,9 @@ const emptyStats: AdminStats = {
   photos: 0,
   devices: 0,
   prompts: 0,
+  totalImages: 0,
+  runningDays: 0,
+  storageBytes: 0,
 };
 
 type CommandDraft = {
@@ -557,6 +560,9 @@ export function App() {
             <CardStat title="Geräte" value={stats.devices} />
             <CardStat title="Fotos" value={stats.photos} />
             <CardStat title="Prompt-Events" value={stats.prompts} />
+            <CardStat title="Tage aktiv" value={stats.runningDays} />
+            <CardStat title="Bilder gesamt" value={stats.totalImages} />
+            <CardStat title="Speicher gesamt" value={formatBytes(stats.storageBytes)} />
           </div>
         )}
 
@@ -1155,7 +1161,7 @@ function formatDuration(sec: number) {
   return `${m}m`;
 }
 
-function CardStat({ title, value }: { title: string; value: number }) {
+function CardStat({ title, value }: { title: string; value: number | string }) {
   return (
     <article className="stat">
       <h3>{title}</h3>

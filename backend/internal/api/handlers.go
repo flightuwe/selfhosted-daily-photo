@@ -5,6 +5,7 @@ import (
     "fmt"
     "mime/multipart"
     "net/http"
+    "os"
     "path/filepath"
     "regexp"
     "strconv"
@@ -933,17 +934,50 @@ func (s *Server) handleAdminStats(c *gin.Context) {
     var photos int64
     var devices int64
     var prompts int64
+    var totalImages int64
+    var runningDays int64
+    var storageBytes int64
 
     _ = s.DB.Model(&models.User{}).Count(&users).Error
     _ = s.DB.Model(&models.Photo{}).Count(&photos).Error
     _ = s.DB.Model(&models.DeviceToken{}).Count(&devices).Error
     _ = s.DB.Model(&models.DailyPrompt{}).Count(&prompts).Error
+    _ = s.DB.Raw("SELECT COALESCE(SUM(CASE WHEN second_path IS NOT NULL AND second_path <> '' THEN 2 ELSE 1 END),0) FROM photos").Scan(&totalImages).Error
+
+    var startedAt *time.Time
+    _ = s.DB.Raw(`
+SELECT MIN(created_at) FROM (
+    SELECT MIN(created_at) AS created_at FROM users
+    UNION ALL SELECT MIN(created_at) FROM photos
+    UNION ALL SELECT MIN(created_at) FROM daily_prompts
+    UNION ALL SELECT MIN(created_at) FROM app_settings
+) t
+WHERE created_at IS NOT NULL
+`).Scan(&startedAt).Error
+    if startedAt != nil && !startedAt.IsZero() {
+        d := int64(time.Now().In(s.Location).Sub(startedAt.In(s.Location)).Hours() / 24)
+        if d < 0 {
+            d = 0
+        }
+        runningDays = d + 1
+    }
+
+    _ = filepath.Walk(s.Config.UploadDir, func(_ string, info os.FileInfo, err error) error {
+        if err != nil || info == nil || info.IsDir() {
+            return nil
+        }
+        storageBytes += info.Size()
+        return nil
+    })
 
     c.JSON(http.StatusOK, gin.H{
-        "users":   users,
-        "photos":  photos,
-        "devices": devices,
-        "prompts": prompts,
+        "users":       users,
+        "photos":      photos,
+        "devices":     devices,
+        "prompts":     prompts,
+        "totalImages": totalImages,
+        "runningDays": runningDays,
+        "storageBytes": storageBytes,
     })
 }
 

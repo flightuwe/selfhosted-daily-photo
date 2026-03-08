@@ -23,6 +23,9 @@ export type AdminStats = {
   photos: number;
   devices: number;
   prompts: number;
+  totalImages: number;
+  runningDays: number;
+  storageBytes: number;
 };
 
 export type AdminUser = {
