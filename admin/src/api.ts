@@ -80,6 +80,14 @@ export async function triggerPrompt(token: string): Promise<void> {
   await parse(res);
 }
 
+export async function resetTodayPrompt(token: string): Promise<{ day: string; message: string }> {
+  const res = await fetch(`${apiBase}/admin/prompt/reset-today`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<{ day: string; message: string }>(res);
+}
+
 export async function broadcastNotification(token: string, body: string): Promise<{ sentTo: number; provider: string }> {
   const res = await fetch(`${apiBase}/admin/notifications/broadcast`, {
     method: "POST",

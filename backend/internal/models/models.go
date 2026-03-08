@@ -45,6 +45,15 @@ type Photo struct {
     Day        string    `gorm:"index;size:10;not null" json:"day"`
     PromptOnly bool      `gorm:"default:false" json:"promptOnly"`
     FilePath   string    `gorm:"size:255;not null" json:"filePath"`
+    SecondPath string    `gorm:"size:255" json:"secondPath"`
     Caption    string    `gorm:"size:255" json:"caption"`
     CreatedAt  time.Time `json:"createdAt"`
+}
+
+type ChatMessage struct {
+    ID        uint      `gorm:"primaryKey" json:"id"`
+    UserID    uint      `gorm:"index;not null" json:"userId"`
+    User      User      `json:"user"`
+    Body      string    `gorm:"size:500;not null" json:"body"`
+    CreatedAt time.Time `json:"createdAt"`
 }

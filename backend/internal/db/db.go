@@ -26,6 +26,7 @@ func Connect(path string) (*gorm.DB, error) {
         &models.AppSettings{},
         &models.DailyPrompt{},
         &models.Photo{},
+        &models.ChatMessage{},
     ); err != nil {
         return nil, fmt.Errorf("automigrate: %w", err)
     }

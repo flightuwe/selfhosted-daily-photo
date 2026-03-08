@@ -3,6 +3,7 @@ package api
 import (
     "errors"
     "fmt"
+    "mime/multipart"
     "net/http"
     "path/filepath"
     "strconv"
@@ -58,7 +59,10 @@ func (s *Server) Router() *gin.Engine {
             protected.POST("/devices", s.handleDevice)
             protected.GET("/prompt/current", s.handleCurrentPrompt)
             protected.POST("/uploads", s.handleUpload)
+            protected.POST("/uploads/dual", s.handleDualUpload)
             protected.GET("/feed", s.handleFeed)
+            protected.GET("/chat", s.handleChatList)
+            protected.POST("/chat", s.handleChatCreate)
         }
 
         admin := api.Group("/admin")
@@ -69,6 +73,7 @@ func (s *Server) Router() *gin.Engine {
             admin.GET("/stats", s.handleAdminStats)
 
             admin.POST("/prompt/trigger", s.handleTriggerPrompt)
+            admin.POST("/prompt/reset-today", s.handleAdminResetToday)
             admin.POST("/notifications/broadcast", s.handleBroadcastNotification)
 
             admin.GET("/users", s.handleAdminListUsers)
@@ -198,14 +203,7 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
     if hasPosted {
         var p models.Photo
         if err := s.DB.Where("user_id = ? AND day = ?", user.ID, day).Order("created_at desc").First(&p).Error; err == nil {
-            ownPhoto = gin.H{
-                "id":         p.ID,
-                "day":        p.Day,
-                "promptOnly": p.PromptOnly,
-                "caption":    p.Caption,
-                "createdAt":  p.CreatedAt,
-                "url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
-            }
+            ownPhoto = s.photoJSON(p)
         }
     }
 
@@ -298,16 +296,7 @@ func (s *Server) handleUpload(c *gin.Context) {
         return
     }
 
-    c.JSON(http.StatusCreated, gin.H{
-        "photo": gin.H{
-            "id":         photo.ID,
-            "day":        photo.Day,
-            "promptOnly": photo.PromptOnly,
-            "caption":    photo.Caption,
-            "url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, photo.FilePath),
-            "createdAt":  photo.CreatedAt,
-        },
-    })
+    c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
 }
 
 func (s *Server) handleFeed(c *gin.Context) {
@@ -348,13 +337,8 @@ func (s *Server) handleFeed(c *gin.Context) {
             isLate = true
         }
         out = append(out, gin.H{
-            "id":         p.ID,
-            "day":        p.Day,
-            "promptOnly": p.PromptOnly,
-            "caption":    p.Caption,
             "isLate":     isLate,
-            "createdAt":  p.CreatedAt,
-            "url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
+            "photo":      s.photoJSON(p),
             "user": gin.H{
                 "id":       p.User.ID,
                 "username": p.User.Username,
@@ -425,6 +409,21 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
     _ = s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
 
     c.JSON(http.StatusOK, gin.H{"prompt": prompt, "settings": settings, "devices": len(tokens)})
+}
+
+func (s *Server) handleAdminResetToday(c *gin.Context) {
+    day := time.Now().In(s.Location).Format("2006-01-02")
+
+    if err := s.DB.Where("day = ?", day).Delete(&models.Photo{}).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete photos failed"})
+        return
+    }
+    if err := s.DB.Where("day = ?", day).Delete(&models.DailyPrompt{}).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete prompt failed"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"ok": true, "day": day, "message": "heutiger Moment wurde zurückgesetzt"})
 }
 
 func (s *Server) handleAdminCreateUser(c *gin.Context) {
@@ -594,6 +593,142 @@ func (s *Server) handleBroadcastNotification(c *gin.Context) {
 	})
 }
 
+func (s *Server) handleChatList(c *gin.Context) {
+    var messages []models.ChatMessage
+    if err := s.DB.Preload("User").Order("created_at desc").Limit(100).Find(&messages).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    out := make([]gin.H, 0, len(messages))
+    for i := len(messages) - 1; i >= 0; i-- {
+        m := messages[i]
+        out = append(out, gin.H{
+            "id":        m.ID,
+            "body":      m.Body,
+            "createdAt": m.CreatedAt,
+            "user": gin.H{
+                "id":       m.User.ID,
+                "username": m.User.Username,
+            },
+        })
+    }
+    c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) handleChatCreate(c *gin.Context) {
+    user, _ := userFromContext(c)
+    var req struct {
+        Body string `json:"body" binding:"required,min=1,max=500"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+    msg := models.ChatMessage{UserID: user.ID, Body: strings.TrimSpace(req.Body)}
+    if msg.Body == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "message empty"})
+        return
+    }
+    if err := s.DB.Create(&msg).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+        return
+    }
+    c.JSON(http.StatusCreated, gin.H{
+        "id":        msg.ID,
+        "body":      msg.Body,
+        "createdAt": msg.CreatedAt,
+        "user": gin.H{
+            "id":       user.ID,
+            "username": user.Username,
+        },
+    })
+}
+
+func (s *Server) handleDualUpload(c *gin.Context) {
+    user, _ := userFromContext(c)
+
+    var settings models.AppSettings
+    if err := s.DB.First(&settings).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+        return
+    }
+
+    if settings.MaxUploadBytes > 0 {
+        c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, settings.MaxUploadBytes*2)
+    }
+
+    backHeader, err := c.FormFile("photo_back")
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "photo_back file required"})
+        return
+    }
+    frontHeader, err := c.FormFile("photo_front")
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "photo_front file required"})
+        return
+    }
+
+    kind := c.PostForm("kind")
+    if kind == "" {
+        kind = "prompt"
+    }
+    if kind != "prompt" && kind != "extra" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be prompt or extra"})
+        return
+    }
+
+    now := time.Now().In(s.Location)
+    day := now.Format("2006-01-02")
+
+    hasPosted, err := s.userHasPostedForDay(user.ID, day)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    if hasPosted {
+        c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+        return
+    }
+
+    if kind == "prompt" {
+        var prompt models.DailyPrompt
+        if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
+            c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
+            return
+        }
+        if prompt.UploadUntil == nil || now.After(*prompt.UploadUntil) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "upload window closed"})
+            return
+        }
+    }
+
+    backPath, err := s.saveUploadedFile(day, user.ID, backHeader)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save back failed"})
+        return
+    }
+    frontPath, err := s.saveUploadedFile(day, user.ID, frontHeader)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save front failed"})
+        return
+    }
+
+    photo := models.Photo{
+        UserID:     user.ID,
+        Day:        day,
+        PromptOnly: kind == "prompt",
+        FilePath:   backPath,
+        SecondPath: frontPath,
+        Caption:    c.PostForm("caption"),
+    }
+    if err := s.DB.Create(&photo).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
+        return
+    }
+
+    c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
+}
+
 func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"ok":       true,
@@ -613,16 +748,34 @@ func (s *Server) handleMyPhotos(c *gin.Context) {
 
     out := make([]gin.H, 0, len(photos))
     for _, p := range photos {
-        out = append(out, gin.H{
-            "id":         p.ID,
-            "day":        p.Day,
-            "promptOnly": p.PromptOnly,
-            "caption":    p.Caption,
-            "createdAt":  p.CreatedAt,
-            "url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
-        })
+        out = append(out, s.photoJSON(p))
     }
     c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) saveUploadedFile(day string, userID uint, header *multipart.FileHeader) (string, error) {
+    src, err := header.Open()
+    if err != nil {
+        return "", err
+    }
+    defer src.Close()
+    ext := strings.ToLower(filepath.Ext(header.Filename))
+    return s.Store.SavePhoto(day, userID, src, ext)
+}
+
+func (s *Server) photoJSON(p models.Photo) gin.H {
+    out := gin.H{
+        "id":         p.ID,
+        "day":        p.Day,
+        "promptOnly": p.PromptOnly,
+        "caption":    p.Caption,
+        "createdAt":  p.CreatedAt,
+        "url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
+    }
+    if p.SecondPath != "" {
+        out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
+    }
+    return out
 }
 
 func (s *Server) allDeviceTokens() []string {

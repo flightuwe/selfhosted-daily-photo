@@ -7,6 +7,7 @@ import {
   getStats,
   listUsers,
   login,
+  resetTodayPrompt,
   triggerPrompt,
   updateSettings,
   updateUser,
@@ -48,7 +49,7 @@ export function App() {
 
   const [resetPassword, setResetPassword] = useState<Record<number, string>>({});
   const [broadcastBody, setBroadcastBody] = useState("Server-Test: Bitte App öffnen und Daily Foto posten.");
-  const [updateNoticeVersion, setUpdateNoticeVersion] = useState("0.2.8");
+  const [updateNoticeVersion, setUpdateNoticeVersion] = useState("0.2.12");
 
   const isLoggedIn = useMemo(() => token.length > 0, [token]);
 
@@ -105,6 +106,18 @@ export function App() {
     try {
       await triggerPrompt(token);
       setMessage("Daily Event ausgelöst. Nutzer können Prompt-Fotos hochladen.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onResetToday() {
+    if (!confirm("Wirklich den heutigen Tag zurücksetzen? Alle heutigen Fotos werden gelöscht.")) return;
+    setMessage("");
+    try {
+      const res = await resetTodayPrompt(token);
+      setMessage(`${res.message} (${res.day})`);
+      await refreshAll();
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -243,6 +256,7 @@ export function App() {
         {activeTab === "events" && (
           <div className="stack">
             <button className="accent" onClick={onTriggerEvent}>Daily Event manuell auslösen</button>
+            <button className="danger" onClick={onResetToday}>Heutigen Tag zurücksetzen</button>
 
             <label>
               Custom Nachricht an alle Geräte

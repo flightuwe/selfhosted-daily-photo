@@ -1,4 +1,4 @@
-package com.selfhosted.daily
+﻿package com.selfhosted.daily
 
 import android.Manifest
 import android.content.Context
@@ -89,14 +89,23 @@ import retrofit2.http.Part
 import java.io.File
 import java.io.FileOutputStream
 
-enum class AppTab { CAMERA, FEED, PROFILE }
+enum class AppTab { CAMERA, FEED, CHAT, PROFILE }
 
 data class User(val id: Long, val username: String, val isAdmin: Boolean)
 data class AuthResponse(val token: String, val user: User)
 data class LoginRequest(val username: String, val password: String)
 data class DeviceTokenRequest(val token: String)
 data class PasswordChangeRequest(val currentPassword: String, val newPassword: String)
-data class PromptPhoto(val id: Long, val day: String, val promptOnly: Boolean, val caption: String?, val url: String, val createdAt: String)
+data class ChatMessageRequest(val body: String)
+data class PromptPhoto(
+    val id: Long,
+    val day: String,
+    val promptOnly: Boolean,
+    val caption: String?,
+    val url: String,
+    val secondUrl: String? = null,
+    val createdAt: String
+)
 data class PromptResponse(
     val day: String,
     val canUpload: Boolean,
@@ -105,16 +114,14 @@ data class PromptResponse(
     val ownPhoto: PromptPhoto? = null
 )
 data class FeedItem(
-    val id: Long,
-    val day: String,
-    val promptOnly: Boolean,
     val isLate: Boolean = false,
-    val caption: String?,
-    val url: String,
+    val photo: PromptPhoto,
     val user: User
 )
 data class FeedResponse(val items: List<FeedItem>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
+data class ChatItem(val id: Long, val body: String, val createdAt: String, val user: User)
+data class ChatResponse(val items: List<ChatItem>)
 data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
 data class HealthResponse(val ok: Boolean, val version: String = "unknown", val provider: String = "unknown")
 
@@ -153,6 +160,21 @@ interface Api {
         @Part photo: MultipartBody.Part,
         @Part("kind") kind: RequestBody
     )
+
+    @Multipart
+    @POST("uploads/dual")
+    suspend fun uploadDual(
+        @Header("Authorization") token: String,
+        @Part photoBack: MultipartBody.Part,
+        @Part photoFront: MultipartBody.Part,
+        @Part("kind") kind: RequestBody
+    )
+
+    @GET("chat")
+    suspend fun chat(@Header("Authorization") token: String): ChatResponse
+
+    @POST("chat")
+    suspend fun sendChat(@Header("Authorization") token: String, @Body body: ChatMessageRequest)
 }
 
 class AppRepo(private val api: Api, private val context: Context) {
@@ -205,6 +227,12 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
 
+    suspend fun listChat(): List<ChatItem> = api.chat("Bearer ${token()}").items
+
+    suspend fun sendChat(body: String) {
+        api.sendChat("Bearer ${token()}", ChatMessageRequest(body))
+    }
+
     suspend fun changePassword(currentPassword: String, newPassword: String) {
         api.changePassword("Bearer ${token()}", PasswordChangeRequest(currentPassword, newPassword))
     }
@@ -231,6 +259,23 @@ class AppRepo(private val api: Api, private val context: Context) {
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
         api.upload("Bearer ${token()}", part, kind)
+    }
+
+    suspend fun uploadDual(backUri: Uri, frontUri: Uri, isPrompt: Boolean) {
+        val backFile = copyUriToTemp(backUri)
+        val frontFile = copyUriToTemp(frontUri)
+        val backPart = MultipartBody.Part.createFormData(
+            "photo_back",
+            backFile.name,
+            backFile.asRequestBody("image/*".toMediaTypeOrNull())
+        )
+        val frontPart = MultipartBody.Part.createFormData(
+            "photo_front",
+            frontFile.name,
+            frontFile.asRequestBody("image/*".toMediaTypeOrNull())
+        )
+        val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
+        api.uploadDual("Bearer ${token()}", backPart, frontPart, kind)
     }
 
     suspend fun checkForUpdate(currentVersion: String): UpdateInfo? = withContext(Dispatchers.IO) {
@@ -298,6 +343,7 @@ data class UiState(
     val prompt: PromptResponse? = null,
     val feed: List<FeedItem> = emptyList(),
     val photos: List<PromptPhoto> = emptyList(),
+    val chat: List<ChatItem> = emptyList(),
     val loading: Boolean = false,
     val message: String = "",
     val activeTab: AppTab = AppTab.CAMERA,
@@ -307,6 +353,13 @@ data class UiState(
     val pushProvider: String = "unknown",
     val showPromptDialog: Boolean = false,
     val updateInfo: UpdateInfo? = null
+)
+
+data class DashboardData(
+    val prompt: PromptResponse,
+    val feed: List<FeedItem>,
+    val photos: List<PromptPhoto>,
+    val chat: List<ChatItem>
 )
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
@@ -365,8 +418,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val prompt = repo.prompt()
             val feed = if (prompt.hasPosted) repo.feedToday() else emptyList()
             val photos = repo.myPhotos()
-            Triple(prompt, feed, photos)
-        }.onSuccess { (prompt, feed, photos) ->
+            val chat = repo.listChat()
+            DashboardData(prompt, feed, photos, chat)
+        }.onSuccess { payload ->
+            val prompt = payload.prompt
+            val feed = payload.feed
+            val photos = payload.photos
+            val chat = payload.chat
             val marker = "${prompt.day}:${prompt.triggered ?: ""}"
             val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && !prompt.hasPosted && marker != repo.seenPromptMarker()
             if (shouldPopup) repo.setSeenPromptMarker(marker)
@@ -375,6 +433,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 prompt = prompt,
                 feed = feed,
                 photos = photos,
+                chat = chat,
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
@@ -384,16 +443,24 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
-    suspend fun upload(uri: Uri, asPrompt: Boolean) {
+    suspend fun uploadDual(back: Uri, front: Uri, asPrompt: Boolean) {
         state = state.copy(loading = true)
-        runCatching { repo.upload(uri, asPrompt) }
+        runCatching { repo.uploadDual(back, front, asPrompt) }
             .onSuccess {
-                state = state.copy(loading = false, message = "Foto gepostet")
+                state = state.copy(loading = false, message = "Fotos gepostet")
                 refreshAll()
             }
             .onFailure {
                 state = state.copy(loading = false, message = apiError(it, "Upload fehlgeschlagen"))
             }
+    }
+
+    suspend fun sendChat(body: String) {
+        val trimmed = body.trim()
+        if (trimmed.isBlank()) return
+        runCatching { repo.sendChat(trimmed) }
+            .onSuccess { refreshAll() }
+            .onFailure { state = state.copy(message = apiError(it, "Chat senden fehlgeschlagen")) }
     }
 
     suspend fun changePassword(current: String, next: String) {
@@ -462,20 +529,36 @@ fun AppScreen(vm: MainVm) {
     var password by remember { mutableStateOf("") }
 
     var captureUri by remember { mutableStateOf<Uri?>(null) }
-    var previewUri by remember { mutableStateOf<Uri?>(null) }
+    var captureTarget by remember { mutableStateOf<String?>(null) }
+    var backPreviewUri by remember { mutableStateOf<Uri?>(null) }
+    var frontPreviewUri by remember { mutableStateOf<Uri?>(null) }
 
     var pwCurrent by remember { mutableStateOf("") }
     var pwNext by remember { mutableStateOf("") }
+    var chatInput by remember { mutableStateOf("") }
+    var viewerUrls by remember { mutableStateOf<List<String>>(emptyList()) }
+    var viewerIndex by remember { mutableStateOf(0) }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         if (success) {
-            previewUri = captureUri
+            when (captureTarget) {
+                "back" -> backPreviewUri = captureUri
+                "front" -> frontPreviewUri = captureUri
+            }
         }
         captureUri = null
+        captureTarget = null
     }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {}
+
+    fun openCameraFor(target: String) {
+        val uri = createTempImageUri(context)
+        captureTarget = target
+        captureUri = uri
+        cameraLauncher.launch(uri)
+    }
 
     LaunchedEffect(Unit) {
         vm.bootstrap()
@@ -510,16 +593,14 @@ fun AppScreen(vm: MainVm) {
             confirmButton = {
                 TextButton(onClick = {
                     vm.dismissPromptDialog()
-                    val uri = createTempImageUri(context)
-                    captureUri = uri
-                    cameraLauncher.launch(uri)
+                    openCameraFor("back")
                 }) { Text("Kamera oeffnen") }
             },
             dismissButton = {
                 TextButton(onClick = { vm.dismissPromptDialog() }) { Text("Spaeter") }
             },
             title = { Text("Zeit fuer deinen taeglichen Moment") },
-            text = { Text("Nimm jetzt dein Foto auf.") }
+            text = { Text("Nimm jetzt Rueckkamera und Frontkamera auf.") }
         )
     }
 
@@ -538,6 +619,40 @@ fun AppScreen(vm: MainVm) {
             },
             title = { Text("Update verfuegbar") },
             text = { Text("Neue Version ${update.latestVersion}") }
+        )
+    }
+
+    if (viewerUrls.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = {
+                viewerUrls = emptyList()
+                viewerIndex = 0
+            },
+            confirmButton = {
+                if (viewerUrls.size > 1 && viewerIndex < viewerUrls.lastIndex) {
+                    TextButton(onClick = { viewerIndex += 1 }) { Text("Naechstes Bild") }
+                } else {
+                    TextButton(onClick = {
+                        viewerUrls = emptyList()
+                        viewerIndex = 0
+                    }) { Text("Schliessen") }
+                }
+            },
+            dismissButton = {
+                if (viewerUrls.size > 1 && viewerIndex > 0) {
+                    TextButton(onClick = { viewerIndex -= 1 }) { Text("Vorheriges Bild") }
+                }
+            },
+            text = {
+                AsyncImage(
+                    model = viewerUrls[viewerIndex],
+                    contentDescription = "Vollbild",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(420.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
         )
     }
 
@@ -562,6 +677,7 @@ fun AppScreen(vm: MainVm) {
             NavigationBar {
                 NavigationBarItem(selected = state.activeTab == AppTab.CAMERA, onClick = { vm.setTab(AppTab.CAMERA) }, label = { Text("Kamera") }, icon = { Text("C") })
                 NavigationBarItem(selected = state.activeTab == AppTab.FEED, onClick = { vm.setTab(AppTab.FEED) }, label = { Text("Feed") }, icon = { Text("F") })
+                NavigationBarItem(selected = state.activeTab == AppTab.CHAT, onClick = { vm.setTab(AppTab.CHAT) }, label = { Text("Chat") }, icon = { Text("M") })
                 NavigationBarItem(selected = state.activeTab == AppTab.PROFILE, onClick = { vm.setTab(AppTab.PROFILE) }, label = { Text("Profil") }, icon = { Text("P") })
             }
         }
@@ -575,33 +691,55 @@ fun AppScreen(vm: MainVm) {
             when (state.activeTab) {
                 AppTab.CAMERA -> CameraTab(
                     prompt = state.prompt,
-                    previewUri = previewUri,
-                    onOpenCamera = {
-                        val uri = createTempImageUri(context)
-                        captureUri = uri
-                        cameraLauncher.launch(uri)
-                    },
-                    onRetake = {
-                        val uri = createTempImageUri(context)
-                        captureUri = uri
-                        cameraLauncher.launch(uri)
+                    backPreviewUri = backPreviewUri,
+                    frontPreviewUri = frontPreviewUri,
+                    onCaptureBack = { openCameraFor("back") },
+                    onCaptureFront = { openCameraFor("front") },
+                    onReset = {
+                        backPreviewUri = null
+                        frontPreviewUri = null
                     },
                     onPost = {
-                        val uri = previewUri ?: return@CameraTab
+                        val back = backPreviewUri ?: return@CameraTab
+                        val front = frontPreviewUri ?: return@CameraTab
                         val canPrompt = state.prompt?.canUpload == true && state.prompt.hasPosted.not()
                         scope.launch {
-                            vm.upload(uri, canPrompt)
-                            previewUri = null
+                            vm.uploadDual(back, front, canPrompt)
+                            backPreviewUri = null
+                            frontPreviewUri = null
                             vm.setTab(AppTab.FEED)
                         }
                     },
-                    onGoFeed = { vm.setTab(AppTab.FEED) }
+                    onGoFeed = { vm.setTab(AppTab.FEED) },
+                    onOpenViewer = { urls ->
+                        viewerUrls = urls
+                        viewerIndex = 0
+                    }
                 )
 
                 AppTab.FEED -> FeedTab(
                     prompt = state.prompt,
                     items = state.feed,
-                    onTakePhoto = { vm.setTab(AppTab.CAMERA) }
+                    onTakePhoto = { vm.setTab(AppTab.CAMERA) },
+                    onOpenViewer = { urls ->
+                        viewerUrls = urls
+                        viewerIndex = 0
+                    }
+                )
+
+                AppTab.CHAT -> ChatTab(
+                    items = state.chat,
+                    input = chatInput,
+                    onInput = { chatInput = it },
+                    onSend = {
+                        val body = chatInput
+                        if (body.isNotBlank()) {
+                            scope.launch {
+                                vm.sendChat(body)
+                                chatInput = ""
+                            }
+                        }
+                    }
                 )
 
                 AppTab.PROFILE -> ProfileTab(
@@ -621,7 +759,11 @@ fun AppScreen(vm: MainVm) {
                         }
                     },
                     onCheckUpdate = { scope.launch { vm.checkForUpdate() } },
-                    onLogout = { vm.logout() }
+                    onLogout = { vm.logout() },
+                    onOpenViewer = { urls ->
+                        viewerUrls = urls
+                        viewerIndex = 0
+                    }
                 )
             }
 
@@ -646,7 +788,7 @@ fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: S
     ) {
         Text("Daily", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
-        Text(if (serverConnected) "Server verbunden" else "Server wird geprüft ...")
+        Text(if (serverConnected) "Server verbunden" else "Server wird geprueft ...")
         Text("Server-Version: $serverVersion")
         Text("Push-Provider: $pushProvider")
         Text("App-Version: $appVersion")
@@ -658,29 +800,15 @@ fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: S
 @Composable
 fun CameraTab(
     prompt: PromptResponse?,
-    previewUri: Uri?,
-    onOpenCamera: () -> Unit,
-    onRetake: () -> Unit,
+    backPreviewUri: Uri?,
+    frontPreviewUri: Uri?,
+    onCaptureBack: () -> Unit,
+    onCaptureFront: () -> Unit,
+    onReset: () -> Unit,
     onPost: () -> Unit,
-    onGoFeed: () -> Unit
+    onGoFeed: () -> Unit,
+    onOpenViewer: (List<String>) -> Unit
 ) {
-    if (previewUri != null) {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Vorschau", style = MaterialTheme.typography.titleLarge)
-            AsyncImage(
-                model = previewUri,
-                contentDescription = "Preview",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(320.dp),
-                contentScale = ContentScale.Crop
-            )
-            Button(onClick = onPost, modifier = Modifier.fillMaxWidth()) { Text("Beitrag posten") }
-            Button(onClick = onRetake, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
-        }
-        return
-    }
-
     val hasPosted = prompt?.hasPosted == true
     val canUpload = prompt?.canUpload == true
 
@@ -688,34 +816,73 @@ fun CameraTab(
         Text("Heutiger Moment", style = MaterialTheme.typography.titleLarge)
         Text(prompt?.day ?: "-")
 
-        if (!hasPosted) {
-            Text("Du hast heute noch nichts gepostet.")
-            if (canUpload) {
-                Text("Zeitfenster ist offen.")
-                Button(onClick = onOpenCamera, modifier = Modifier.fillMaxWidth()) { Text("Foto aufnehmen") }
-            } else {
-                Text("Du hast den heutigen Moment verpasst. Du kannst trotzdem posten.")
-                Button(onClick = onOpenCamera, modifier = Modifier.fillMaxWidth()) { Text("Trotzdem posten") }
-            }
-        } else {
+        if (hasPosted) {
             Text("Du hast heute gepostet.", fontWeight = FontWeight.Bold)
-            prompt?.ownPhoto?.url?.let {
-                AsyncImage(
-                    model = it,
-                    contentDescription = "Mein heutiges Foto",
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(260.dp),
-                    contentScale = ContentScale.Crop
-                )
+            val ownUrls = listOfNotNull(prompt?.ownPhoto?.url, prompt?.ownPhoto?.secondUrl)
+            if (ownUrls.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    ownUrls.forEach { url ->
+                        AsyncImage(
+                            model = url,
+                            contentDescription = "Mein heutiges Foto",
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(220.dp)
+                                .clickable { onOpenViewer(ownUrls) },
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                }
             }
             Button(onClick = onGoFeed, modifier = Modifier.fillMaxWidth()) { Text("Heutige Beitraege ansehen") }
+            return@Column
         }
+
+        Text("Heute sind zwei Fotos noetig: Rueckkamera und Frontkamera.")
+        if (canUpload) {
+            Text("Zeitfenster ist offen.")
+        } else {
+            Text("Du hast den heutigen Moment verpasst. Du kannst trotzdem posten.")
+        }
+
+        if (backPreviewUri == null) {
+            Button(onClick = onCaptureBack, modifier = Modifier.fillMaxWidth()) { Text("Rueckkamera aufnehmen") }
+            return@Column
+        }
+
+        Text("Rueckkamera aufgenommen")
+        AsyncImage(
+            model = backPreviewUri,
+            contentDescription = "Rueckkamera",
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp),
+            contentScale = ContentScale.Crop
+        )
+
+        if (frontPreviewUri == null) {
+            Button(onClick = onCaptureFront, modifier = Modifier.fillMaxWidth()) { Text("Frontkamera aufnehmen") }
+            Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Neu starten") }
+            return@Column
+        }
+
+        Text("Frontkamera aufgenommen")
+        AsyncImage(
+            model = frontPreviewUri,
+            contentDescription = "Frontkamera",
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp),
+            contentScale = ContentScale.Crop
+        )
+
+        Button(onClick = onPost, modifier = Modifier.fillMaxWidth()) { Text("Beitrag posten") }
+        Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
     }
 }
 
 @Composable
-fun FeedTab(prompt: PromptResponse?, items: List<FeedItem>, onTakePhoto: () -> Unit) {
+fun FeedTab(prompt: PromptResponse?, items: List<FeedItem>, onTakePhoto: () -> Unit, onOpenViewer: (List<String>) -> Unit) {
     val hasPosted = prompt?.hasPosted == true
 
     if (!hasPosted) {
@@ -743,33 +910,65 @@ fun FeedTab(prompt: PromptResponse?, items: List<FeedItem>, onTakePhoto: () -> U
     }
 
     LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
+        columns = GridCells.Fixed(1),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxSize()
     ) {
         items(items) { item ->
+            val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
             Card {
-                Column {
-                    AsyncImage(
-                        model = item.url,
-                        contentDescription = "${item.user.username} Foto",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(160.dp),
-                        contentScale = ContentScale.Crop
-                    )
-                    Column(modifier = Modifier.padding(8.dp)) {
-                        Text(item.user.username, fontWeight = FontWeight.SemiBold)
-                        if (item.isLate) {
-                            Text("Spaeter gepostet", color = Color(0xFF8B0000))
+                Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(item.user.username, fontWeight = FontWeight.SemiBold)
+                    if (item.isLate) {
+                        Text("Spaeter gepostet", color = Color(0xFF8B0000))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        urls.forEach { url ->
+                            AsyncImage(
+                                model = url,
+                                contentDescription = "${item.user.username} Foto",
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(180.dp)
+                                    .clickable { onOpenViewer(urls) },
+                                contentScale = ContentScale.Crop
+                            )
                         }
-                        if (!item.caption.isNullOrBlank()) {
-                            Text(item.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
+                    }
+                    if (!item.photo.caption.isNullOrBlank()) {
+                        Text(item.photo.caption, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onSend: () -> Unit) {
+    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Chat", style = MaterialTheme.typography.titleLarge)
+        LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(items.size) { idx ->
+                val item = items[idx]
+                Card {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(item.user.username, fontWeight = FontWeight.SemiBold)
+                        Text(item.body)
+                        Text(item.createdAt, color = Color.Gray)
+                    }
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = input,
+                onValueChange = onInput,
+                label = { Text("Nachricht") },
+                modifier = Modifier.weight(1f)
+            )
+            Button(onClick = onSend, modifier = Modifier.align(Alignment.CenterVertically)) { Text("Senden") }
         }
     }
 }
@@ -784,7 +983,8 @@ fun ProfileTab(
     onNewPasswordChange: (String) -> Unit,
     onChangePassword: () -> Unit,
     onCheckUpdate: () -> Unit,
-    onLogout: () -> Unit
+    onLogout: () -> Unit,
+    onOpenViewer: (List<String>) -> Unit
 ) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
         item {
@@ -831,6 +1031,7 @@ fun ProfileTab(
                     modifier = Modifier.height((((photos.size / 3) + 2) * 96).dp)
                 ) {
                     items(photos) { photo ->
+                        val urls = listOfNotNull(photo.url, photo.secondUrl)
                         Column {
                             AsyncImage(
                                 model = photo.url,
@@ -838,9 +1039,12 @@ fun ProfileTab(
                                 modifier = Modifier
                                     .size(96.dp)
                                     .background(Color.LightGray)
-                                    .clickable {},
+                                    .clickable { onOpenViewer(urls) },
                                 contentScale = ContentScale.Crop
                             )
+                            if (photo.secondUrl != null) {
+                                Text("2 Bilder", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                             Text(photo.day, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
@@ -853,6 +1057,7 @@ fun ProfileTab(
 private fun apiError(t: Throwable, fallback: String): String {
     if (t is HttpException) {
         return when (t.code()) {
+            400 -> "Ungueltige Eingabe"
             401 -> "Login fehlgeschlagen"
             403 -> "Aktion nicht erlaubt"
             409 -> "Du hast heute bereits gepostet"
@@ -867,5 +1072,4 @@ private fun createTempImageUri(context: Context): Uri {
     val file = File.createTempFile("moment_", ".jpg", dir)
     return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 }
-
 
