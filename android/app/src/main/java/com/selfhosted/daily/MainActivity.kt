@@ -2000,6 +2000,9 @@ fun ProfileTab(
                 Button(onClick = onCheckUpdate) { Text("Update pruefen") }
                 Button(onClick = onShowChangelog) { Text("!") }
                 Button(onClick = onShowHelp) { Text("Hilfe") }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onLogout) { Text("Abmelden") }
             }
             Spacer(modifier = Modifier.height(8.dp))
