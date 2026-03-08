@@ -71,6 +71,7 @@ func (s *Server) Router() *gin.Engine {
             admin.GET("/settings", s.handleGetSettings)
             admin.PUT("/settings", s.handleUpdateSettings)
             admin.GET("/stats", s.handleAdminStats)
+            admin.GET("/feed", s.handleAdminFeed)
 
             admin.POST("/prompt/trigger", s.handleTriggerPrompt)
             admin.POST("/prompt/reset-today", s.handleAdminResetToday)
@@ -297,6 +298,40 @@ func (s *Server) handleUpload(c *gin.Context) {
     }
 
     c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
+}
+
+func (s *Server) handleAdminFeed(c *gin.Context) {
+    day := c.Query("day")
+    if day == "" {
+        day = time.Now().In(s.Location).Format("2006-01-02")
+    }
+
+    var prompt models.DailyPrompt
+    _ = s.DB.Where("day = ?", day).First(&prompt).Error
+
+    var photos []models.Photo
+    if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+
+    out := make([]gin.H, 0, len(photos))
+    for _, p := range photos {
+        isLate := false
+        if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
+            isLate = true
+        }
+        out = append(out, gin.H{
+            "isLate": isLate,
+            "photo":  s.photoJSON(p),
+            "user": gin.H{
+                "id":       p.User.ID,
+                "username": p.User.Username,
+            },
+        })
+    }
+
+    c.JSON(http.StatusOK, gin.H{"items": out, "day": day})
 }
 
 func (s *Server) handleFeed(c *gin.Context) {

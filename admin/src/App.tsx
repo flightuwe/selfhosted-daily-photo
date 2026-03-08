@@ -3,6 +3,8 @@ import {
   broadcastNotification,
   createUser,
   deleteUser,
+  getAdminFeed,
+  getChat,
   getSettings,
   getStats,
   listUsers,
@@ -13,10 +15,12 @@ import {
   updateUser,
   type AdminStats,
   type AdminUser,
+  type ChatItem,
+  type FeedItem,
   type Settings,
 } from "./api";
 
-type Tab = "dashboard" | "events" | "users" | "settings";
+type Tab = "dashboard" | "events" | "users" | "feed" | "chat" | "settings";
 
 const emptySettings: Settings = {
   promptWindowStartHour: 8,
@@ -40,6 +44,9 @@ export function App() {
   const [settings, setSettings] = useState<Settings>(emptySettings);
   const [stats, setStats] = useState<AdminStats>(emptyStats);
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
+  const [chatItems, setChatItems] = useState<ChatItem[]>([]);
+  const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [message, setMessage] = useState("");
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
 
@@ -58,6 +65,16 @@ export function App() {
     void loadAdminData(token);
   }, [token]);
 
+  useEffect(() => {
+    if (!token) return;
+    if (activeTab === "feed") {
+      void loadFeed(token, feedDay);
+    }
+    if (activeTab === "chat") {
+      void loadChat(token);
+    }
+  }, [token, activeTab, feedDay]);
+
   async function loadAdminData(authToken: string) {
     try {
       const [s, st, u] = await Promise.all([getSettings(authToken), getStats(authToken), listUsers(authToken)]);
@@ -70,9 +87,29 @@ export function App() {
     }
   }
 
+  async function loadFeed(authToken: string, day?: string) {
+    try {
+      const items = await getAdminFeed(authToken, day);
+      setFeedItems(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function loadChat(authToken: string) {
+    try {
+      const items = await getChat(authToken);
+      setChatItems(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function refreshAll() {
     if (!token) return;
     await loadAdminData(token);
+    if (activeTab === "feed") await loadFeed(token, feedDay);
+    if (activeTab === "chat") await loadChat(token);
   }
 
   async function onLogin(e: React.FormEvent) {
@@ -241,6 +278,8 @@ export function App() {
           <button className={activeTab === "dashboard" ? "tab active" : "tab"} onClick={() => setActiveTab("dashboard")}>Dashboard</button>
           <button className={activeTab === "events" ? "tab active" : "tab"} onClick={() => setActiveTab("events")}>Events & Notifications</button>
           <button className={activeTab === "users" ? "tab active" : "tab"} onClick={() => setActiveTab("users")}>Benutzerverwaltung</button>
+          <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => setActiveTab("feed")}>Feed</button>
+          <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => setActiveTab("chat")}>Chat</button>
           <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => setActiveTab("settings")}>Einstellungen</button>
         </div>
 
@@ -333,6 +372,61 @@ export function App() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {activeTab === "feed" && (
+          <div className="stack">
+            <div className="row">
+              <label>
+                Tag
+                <input type="date" value={feedDay} onChange={(e) => setFeedDay(e.target.value)} />
+              </label>
+              <button onClick={() => loadFeed(token, feedDay)}>Feed laden</button>
+            </div>
+            {feedItems.length === 0 && <p>Keine Eintraege fuer diesen Tag.</p>}
+            <div className="feed-grid">
+              {feedItems.map((item) => (
+                <article key={`${item.user.id}-${item.photo.id}`} className="feed-card">
+                  <div className="row">
+                    <strong>{item.user.username}</strong>
+                    {item.isLate && <span className="late">Spaet</span>}
+                  </div>
+                  <div className="photo-grid">
+                    <a href={item.photo.url} target="_blank" rel="noreferrer">
+                      <img src={item.photo.url} alt={`${item.user.username} back`} />
+                    </a>
+                    {item.photo.secondUrl && (
+                      <a href={item.photo.secondUrl} target="_blank" rel="noreferrer">
+                        <img src={item.photo.secondUrl} alt={`${item.user.username} front`} />
+                      </a>
+                    )}
+                  </div>
+                  {item.photo.caption && <p className="small">{item.photo.caption}</p>}
+                </article>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "chat" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Chatverlauf</h2>
+              <button onClick={() => loadChat(token)}>Aktualisieren</button>
+            </div>
+            {chatItems.length === 0 && <p>Keine Chat-Nachrichten.</p>}
+            <div className="chat-list">
+              {chatItems.map((msg) => (
+                <article key={msg.id} className="chat-item">
+                  <div className="row">
+                    <strong>{msg.user.username}</strong>
+                    <span className="small">{new Date(msg.createdAt).toLocaleString()}</span>
+                  </div>
+                  <p>{msg.body}</p>
+                </article>
+              ))}
+            </div>
           </div>
         )}
 

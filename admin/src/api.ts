@@ -27,6 +27,29 @@ export type AdminUser = {
   deviceCount: number;
 };
 
+export type FeedPhoto = {
+  id: number;
+  day: string;
+  promptOnly: boolean;
+  caption?: string;
+  url: string;
+  secondUrl?: string;
+  createdAt: string;
+};
+
+export type FeedItem = {
+  isLate: boolean;
+  photo: FeedPhoto;
+  user: { id: number; username: string };
+};
+
+export type ChatItem = {
+  id: number;
+  body: string;
+  createdAt: string;
+  user: { id: number; username: string };
+};
+
 const apiBase = import.meta.env.VITE_API_BASE || "/api";
 
 async function parse<T>(res: Response): Promise<T> {
@@ -138,4 +161,21 @@ export async function deleteUser(token: string, id: number): Promise<void> {
     headers: { Authorization: `Bearer ${token}` },
   });
   await parse(res);
+}
+
+export async function getAdminFeed(token: string, day?: string): Promise<FeedItem[]> {
+  const qs = day ? `?day=${encodeURIComponent(day)}` : "";
+  const res = await fetch(`${apiBase}/admin/feed${qs}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: FeedItem[] }>(res);
+  return data.items;
+}
+
+export async function getChat(token: string): Promise<ChatItem[]> {
+  const res = await fetch(`${apiBase}/chat`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: ChatItem[] }>(res);
+  return data.items;
 }
