@@ -555,6 +555,7 @@ fun AppScreen(vm: MainVm) {
     var chatInput by remember { mutableStateOf("") }
     var viewerUrls by remember { mutableStateOf<List<String>>(emptyList()) }
     var viewerIndex by remember { mutableStateOf(0) }
+    var requestFrontCapture by remember { mutableStateOf(false) }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         val target = captureTarget
@@ -563,10 +564,7 @@ fun AppScreen(vm: MainVm) {
             when (target) {
                 "back" -> {
                     backPreviewUri = shotUri
-                    val uri = createTempImageUri(context)
-                    captureTarget = "front"
-                    captureUri = uri
-                    cameraLauncher.launch(uri)
+                    requestFrontCapture = true
                 }
                 "front" -> {
                     frontPreviewUri = shotUri
@@ -584,10 +582,8 @@ fun AppScreen(vm: MainVm) {
                 }
             }
         }
-        if (target != "back") {
-            captureUri = null
-            captureTarget = null
-        }
+        captureUri = null
+        captureTarget = null
     }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -598,6 +594,13 @@ fun AppScreen(vm: MainVm) {
         captureTarget = target
         captureUri = uri
         cameraLauncher.launch(uri)
+    }
+
+    LaunchedEffect(requestFrontCapture) {
+        if (requestFrontCapture) {
+            requestFrontCapture = false
+            openCameraFor("front")
+        }
     }
 
     LaunchedEffect(Unit) {
