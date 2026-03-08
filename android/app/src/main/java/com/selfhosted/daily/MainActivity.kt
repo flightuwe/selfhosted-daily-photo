@@ -1761,10 +1761,12 @@ fun CameraTab(
             ) { Text(specialLabel) }
         } else {
             Text("Heute sind zwei Fotos noetig: Rueckkamera und Frontkamera.")
-            if (canUpload) {
-                Text("Zeitfenster ist offen.")
+            if (prompt?.triggered.isNullOrBlank()) {
+                Text("Der Moment ist noch nicht gestartet. Du kannst trotzdem schon posten.")
+            } else if (canUpload) {
+                Text("Momentfenster gerade aktiv.")
             } else {
-                Text("Du hast den heutigen Moment verpasst. Du kannst trotzdem posten.")
+                Text("Momentfenster vorbei. Du kannst trotzdem spaet posten.")
             }
 
             if (backPreviewUri == null) {
@@ -1927,9 +1929,9 @@ fun FeedTab(
                                 Text(formatDayLabel(row.day), fontWeight = FontWeight.Bold)
                                 Text(row.day, color = Color.Gray)
                             }
-                            if ((row.meta?.triggerSource == "chat_command" || row.meta?.triggerSource == "special_request") && !row.meta.requestedByUser.isNullOrBlank()) {
+                            momentReasonLine(row.meta?.triggerSource, row.meta?.requestedByUser)?.let { reason ->
                                 Text(
-                                    "Sondermoment von ${row.meta.requestedByUser}",
+                                    reason,
                                     color = Color(0xFF1F5FBF),
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -1949,6 +1951,11 @@ fun FeedTab(
                             )
                             if (item.isLate) {
                                 Text("Spaeter gepostet", color = Color(0xFF8B0000))
+                            }
+                            if (item.photo.promptOnly) {
+                                momentReasonLine(item.triggerSource, item.requestedByUser)?.let { reason ->
+                                    Text(reason, color = Color(0xFF1F5FBF))
+                                }
                             }
                             if (!item.photo.promptOnly) {
                                 Text("Extra", color = Color(0xFF1F5FBF))
@@ -2038,8 +2045,8 @@ fun CalendarTab(
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(formatDayLabel(day), fontWeight = if (selectedDay) FontWeight.Bold else FontWeight.Normal)
                     Text(day, color = Color.Gray)
-                    if ((meta?.triggerSource == "chat_command" || meta?.triggerSource == "special_request") && !meta.requestedByUser.isNullOrBlank()) {
-                        Text("Sondermoment von ${meta.requestedByUser}", color = Color(0xFF1F5FBF))
+                    momentReasonLine(meta?.triggerSource, meta?.requestedByUser)?.let { reason ->
+                        Text(reason, color = Color(0xFF1F5FBF))
                     }
                     monthRecapByDay[day]?.let { recap ->
                         Text("Monatsrueckblick: ${recap.monthLabel}", color = Color(0xFF0A7A42), fontWeight = FontWeight.SemiBold)
@@ -2373,6 +2380,17 @@ private fun formatMomentTime(raw: String?): String {
         dt.toLocalTime().format(DateTimeFormatter.ofPattern("HH:mm"))
     }.getOrElse {
         raw.take(16).replace('T', ' ')
+    }
+}
+
+private fun momentReasonLine(triggerSource: String?, requestedByUser: String?): String? {
+    val src = triggerSource?.trim().orEmpty().lowercase()
+    return if (src == "special_request" || src == "chat_command") {
+        if (!requestedByUser.isNullOrBlank()) "⭐ Sondermoment von $requestedByUser" else "⭐ Sondermoment"
+    } else if (src.isNotBlank()) {
+        "⏳ Daily-Moment"
+    } else {
+        null
     }
 }
 

@@ -538,8 +538,7 @@ func (s *Server) handleUpload(c *gin.Context) {
         return
     }
 
-    now := time.Now().In(s.Location)
-    day := now.Format("2006-01-02")
+	day := time.Now().In(s.Location).Format("2006-01-02")
 
     hasPosted, err := s.userHasPostedForDay(user.ID, day)
     if err != nil {
@@ -547,25 +546,20 @@ func (s *Server) handleUpload(c *gin.Context) {
         return
     }
 
-    if kind == "prompt" {
-        if hasPosted {
-            c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
-            return
-        }
-        var prompt models.DailyPrompt
-        if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
-            c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
-            return
-        }
-        if prompt.UploadUntil == nil || now.After(*prompt.UploadUntil) {
-            c.JSON(http.StatusForbidden, gin.H{"error": "upload window closed"})
-            return
-        }
-    } else {
-        if !hasPosted {
-            c.JSON(http.StatusForbidden, gin.H{"error": "poste zuerst dein Tagesmoment"})
-            return
-        }
+	if kind == "prompt" {
+		if hasPosted {
+			c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+			return
+		}
+		if _, err := s.ensurePromptForPostingDay(day); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "prompt prepare failed"})
+			return
+		}
+	} else {
+		if !hasPosted {
+			c.JSON(http.StatusForbidden, gin.H{"error": "poste zuerst dein Tagesmoment"})
+			return
+		}
     }
 
     src, err := fileHeader.Open()
@@ -1569,25 +1563,20 @@ func (s *Server) handleDualUpload(c *gin.Context) {
         return
     }
 
-    if kind == "prompt" {
-        if hasPosted {
-            c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
-            return
-        }
-        var prompt models.DailyPrompt
-        if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
-            c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
-            return
-        }
-        if prompt.UploadUntil == nil || now.After(*prompt.UploadUntil) {
-            c.JSON(http.StatusForbidden, gin.H{"error": "upload window closed"})
-            return
-        }
-    } else {
-        if !hasPosted {
-            c.JSON(http.StatusForbidden, gin.H{"error": "poste zuerst dein Tagesmoment"})
-            return
-        }
+	if kind == "prompt" {
+		if hasPosted {
+			c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+			return
+		}
+		if _, err := s.ensurePromptForPostingDay(day); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "prompt prepare failed"})
+			return
+		}
+	} else {
+		if !hasPosted {
+			c.JSON(http.StatusForbidden, gin.H{"error": "poste zuerst dein Tagesmoment"})
+			return
+		}
     }
 
     backPath, err := s.saveUploadedFile(day, user.ID, backHeader)
@@ -1809,11 +1798,37 @@ func toAdminUser(u models.User, photoCount, tokenCount int64) gin.H {
 }
 
 func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {
-    var count int64
-    if err := s.DB.Model(&models.Photo{}).Where("user_id = ? AND day = ? AND prompt_only = ?", userID, day, true).Count(&count).Error; err != nil {
-        return false, err
-    }
-    return count > 0, nil
+	var count int64
+	if err := s.DB.Model(&models.Photo{}).Where("user_id = ? AND day = ? AND prompt_only = ?", userID, day, true).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *Server) ensurePromptForPostingDay(day string) (models.DailyPrompt, error) {
+	var prompt models.DailyPrompt
+	err := s.DB.Where("day = ?", day).First(&prompt).Error
+	if err == nil {
+		if strings.TrimSpace(prompt.TriggerSource) == "" {
+			prompt.TriggerSource = "daily_moment"
+			if saveErr := s.DB.Save(&prompt).Error; saveErr != nil {
+				return models.DailyPrompt{}, saveErr
+			}
+		}
+		return prompt, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.DailyPrompt{}, err
+	}
+
+	prompt = models.DailyPrompt{
+		Day:           day,
+		TriggerSource: "daily_moment",
+	}
+	if err := s.DB.Create(&prompt).Error; err != nil {
+		return models.DailyPrompt{}, err
+	}
+	return prompt, nil
 }
 
 func (s *Server) userDeviceTokens(userID uint) []string {
