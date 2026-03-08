@@ -1,6 +1,7 @@
 package com.selfhosted.bereal
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -36,20 +37,25 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
@@ -67,6 +73,7 @@ data class LoginRequest(val username: String, val password: String)
 data class PromptResponse(val day: String, val canUpload: Boolean, val triggered: String? = null)
 data class FeedItem(val id: Long, val day: String, val promptOnly: Boolean, val caption: String?, val url: String, val user: User)
 data class FeedResponse(val items: List<FeedItem>)
+data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
 
 interface Api {
     @POST("auth/login")
@@ -89,6 +96,7 @@ interface Api {
 
 class AppRepo(private val api: Api, private val context: Context) {
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
+    private val http = OkHttpClient()
 
     fun token(): String = prefs.getString("token", "") ?: ""
 
@@ -122,6 +130,40 @@ class AppRepo(private val api: Api, private val context: Context) {
         api.upload("Bearer ${token()}", part, kind)
     }
 
+    suspend fun checkForUpdate(currentVersion: String): UpdateInfo? = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url("https://api.github.com/repos/flightuwe/selfhosted-daily-photo/releases/latest")
+            .header("Accept", "application/vnd.github+json")
+            .build()
+
+        http.newCall(req).execute().use { response ->
+            if (!response.isSuccessful) return@withContext null
+            val body = response.body?.string() ?: return@withContext null
+            val json = JSONObject(body)
+
+            val tag = json.optString("tag_name").removePrefix("v")
+            val releaseUrl = json.optString("html_url")
+            val assets = json.optJSONArray("assets")
+            var apkUrl: String? = null
+            if (assets != null) {
+                for (i in 0 until assets.length()) {
+                    val item = assets.getJSONObject(i)
+                    val name = item.optString("name")
+                    if (name.endsWith(".apk")) {
+                        apkUrl = item.optString("browser_download_url")
+                        break
+                    }
+                }
+            }
+
+            if (isVersionNewer(tag, currentVersion)) {
+                UpdateInfo(tag, releaseUrl, apkUrl)
+            } else {
+                null
+            }
+        }
+    }
+
     private fun copyUriToTemp(uri: Uri): File {
         val resolver = context.contentResolver
         val filename = resolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -138,6 +180,23 @@ class AppRepo(private val api: Api, private val context: Context) {
     }
 }
 
+private fun isVersionNewer(latest: String, current: String): Boolean {
+    fun parse(v: String): List<Int> = v.split(".")
+        .map { it.trim() }
+        .mapNotNull { it.toIntOrNull() }
+
+    val a = parse(latest)
+    val b = parse(current)
+    val max = maxOf(a.size, b.size)
+    for (i in 0 until max) {
+        val av = a.getOrElse(i) { 0 }
+        val bv = b.getOrElse(i) { 0 }
+        if (av > bv) return true
+        if (av < bv) return false
+    }
+    return false
+}
+
 data class UiState(
     val token: String = "",
     val user: User? = null,
@@ -145,7 +204,8 @@ data class UiState(
     val feed: List<FeedItem> = emptyList(),
     val loading: Boolean = false,
     val message: String = "",
-    val showPromptDialog: Boolean = false
+    val showPromptDialog: Boolean = false,
+    val updateInfo: UpdateInfo? = null
 )
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
@@ -186,6 +246,19 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    suspend fun checkForUpdate() {
+        state = state.copy(loading = true)
+        runCatching { repo.checkForUpdate(BuildConfig.VERSION_NAME) }
+            .onSuccess { update ->
+                state = if (update != null) {
+                    state.copy(loading = false, updateInfo = update, message = "Neue Version ${update.latestVersion} gefunden")
+                } else {
+                    state.copy(loading = false, message = "Du nutzt bereits die neueste Version")
+                }
+            }
+            .onFailure { state = state.copy(loading = false, message = it.message ?: "Update-Pruefung fehlgeschlagen") }
+    }
+
     suspend fun upload(uri: Uri, prompt: Boolean) {
         state = state.copy(loading = true)
         runCatching { repo.upload(uri, prompt) }
@@ -198,6 +271,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun dismissPromptDialog() {
         state = state.copy(showPromptDialog = false)
+    }
+
+    fun dismissUpdateDialog() {
+        state = state.copy(updateInfo = null)
     }
 }
 
@@ -231,7 +308,7 @@ class MainActivity : ComponentActivity() {
 fun AppScreen(vm: MainVm) {
     val state = vm.state
     val scope = rememberCoroutineScope()
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
 
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -279,6 +356,24 @@ fun AppScreen(vm: MainVm) {
         )
     }
 
+    state.updateInfo?.let { update ->
+        AlertDialog(
+            onDismissRequest = { vm.dismissUpdateDialog() },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.dismissUpdateDialog()
+                    val target = update.apkUrl ?: update.releaseUrl
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
+                }) { Text("Download öffnen") }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.dismissUpdateDialog() }) { Text("Später") }
+            },
+            title = { Text("Update verfügbar") },
+            text = { Text("Neue Version ${update.latestVersion} ist verfügbar.") }
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -302,11 +397,13 @@ fun AppScreen(vm: MainVm) {
                 }) { Text("Kamera (Prompt)") }
                 Button(onClick = { galleryLauncher.launch("image/*") }) { Text("Bild waehlen") }
                 Button(onClick = { scope.launch { vm.refresh() } }) { Text("Refresh") }
+                Button(onClick = { scope.launch { vm.checkForUpdate() } }) { Text("Update prüfen") }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = asPrompt, onCheckedChange = { asPrompt = it })
                 Text("Als Prompt-Upload (Galerie)")
             }
+            Text("Version: ${BuildConfig.VERSION_NAME}")
             Text("Heute: ${state.prompt?.day ?: "-"} | Prompt Upload offen: ${state.prompt?.canUpload ?: false}")
             Spacer(modifier = Modifier.height(8.dp))
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
