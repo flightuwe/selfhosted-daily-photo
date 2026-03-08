@@ -9,6 +9,7 @@ on:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     env:
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       ANDROID_HOME: /usr/local/lib/android/sdk
@@ -67,7 +68,7 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          gradle -p android :app:assembleRelease --stacktrace 2>&1 | tee android-build.log
+          gradle -p android :app:assembleRelease --no-daemon --stacktrace --console=plain 2>&1 | tee android-build.log
       - name: Show generated APK files
         if: always()
         run: ls -la android/app/build/outputs/apk/release || true
