@@ -155,13 +155,34 @@ data class FeedItem(
     val triggerSource: String? = null,
     val requestedByUser: String? = null
 )
+data class MonthlyReliableUser(
+    val id: Long,
+    val username: String,
+    val favoriteColor: String = "#1F5FBF",
+    val count: Long
+)
+data class MonthlySpontaneousMoment(
+    val day: String,
+    val userId: Long,
+    val username: String,
+    val minutesAfterTrigger: Long,
+    val createdAt: String
+)
+data class MonthlyRecap(
+    val month: String,
+    val monthLabel: String,
+    val yourMoments: Long,
+    val mostReliableUser: MonthlyReliableUser? = null,
+    val topSpontaneous: List<MonthlySpontaneousMoment> = emptyList()
+)
 data class FeedResponse(
     val items: List<FeedItem>,
     val day: String? = null,
     val triggeredAt: String? = null,
     val uploadUntil: String? = null,
     val triggerSource: String? = null,
-    val requestedByUser: String? = null
+    val requestedByUser: String? = null,
+    val monthRecap: MonthlyRecap? = null
 )
 data class DayListResponse(val items: List<String>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
@@ -519,6 +540,7 @@ data class UiState(
     val feed: List<FeedItem> = emptyList(),
     val feedDays: List<String> = emptyList(),
     val feedByDay: Map<String, List<FeedItem>> = emptyMap(),
+    val monthRecapByDay: Map<String, MonthlyRecap> = emptyMap(),
     val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
     val calendarDays: List<String> = emptyList(),
     val feedFocusDay: String? = null,
@@ -690,14 +712,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(feedPaging = true)
         val newMap = state.feedByDay.toMutableMap()
         val newPromptMap = state.promptMetaByDay.toMutableMap()
+        val newRecapMap = state.monthRecapByDay.toMutableMap()
         for (day in newDays) {
             if (!newMap.containsKey(day)) {
                 val fetched = fetchDaySafe(day)
                 newMap[day] = fetched.items
                 newPromptMap[day] = fetched.meta
+                fetched.monthRecap?.let { newRecapMap[day] = it }
             }
         }
-        state = state.copy(feedDays = state.feedDays + newDays, feedByDay = newMap, promptMetaByDay = newPromptMap, feedPaging = false)
+        state = state.copy(feedDays = state.feedDays + newDays, feedByDay = newMap, monthRecapByDay = newRecapMap, promptMetaByDay = newPromptMap, feedPaging = false)
     }
 
     suspend fun loadNewerFeedDays(count: Int = 3) {
@@ -712,14 +736,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(feedPaging = true)
         val newMap = state.feedByDay.toMutableMap()
         val newPromptMap = state.promptMetaByDay.toMutableMap()
+        val newRecapMap = state.monthRecapByDay.toMutableMap()
         for (day in prependDays) {
             if (!newMap.containsKey(day)) {
                 val fetched = fetchDaySafe(day)
                 newMap[day] = fetched.items
                 newPromptMap[day] = fetched.meta
+                fetched.monthRecap?.let { newRecapMap[day] = it }
             }
         }
-        state = state.copy(feedDays = prependDays + state.feedDays, feedByDay = newMap, promptMetaByDay = newPromptMap, feedPaging = false)
+        state = state.copy(feedDays = prependDays + state.feedDays, feedByDay = newMap, monthRecapByDay = newRecapMap, promptMetaByDay = newPromptMap, feedPaging = false)
     }
 
     private suspend fun loadFeedWindow(anchorDay: String, around: Int) {
@@ -736,6 +762,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             state = state.copy(
                 feedDays = emptyList(),
                 feedByDay = emptyMap(),
+                monthRecapByDay = emptyMap(),
                 promptMetaByDay = emptyMap(),
                 feed = emptyList(),
                 feedTodayLocked = state.prompt?.hasPosted == false,
@@ -749,11 +776,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val end = minOf(allDays.lastIndex, idx + around)
         val days = allDays.subList(start, end + 1)
         val map = mutableMapOf<String, List<FeedItem>>()
+        val monthRecapMap = mutableMapOf<String, MonthlyRecap>()
         val promptMap = mutableMapOf<String, PromptMeta>()
         for (day in days.distinct()) {
             val fetched = fetchDaySafe(day)
             map[day] = fetched.items
             promptMap[day] = fetched.meta
+            fetched.monthRecap?.let { monthRecapMap[day] = it }
         }
         val today = state.prompt?.day ?: LocalDate.now().toString()
         val postedToday = state.prompt?.hasPosted == true
@@ -762,6 +791,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(
             feedDays = days.distinct(),
             feedByDay = map,
+            monthRecapByDay = monthRecapMap,
             promptMetaByDay = promptMap,
             feed = map[today] ?: emptyList(),
             feedTodayLocked = todayLocked,
@@ -769,7 +799,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         )
     }
 
-    private data class DayFetchResult(val items: List<FeedItem>, val meta: PromptMeta)
+    private data class DayFetchResult(val items: List<FeedItem>, val meta: PromptMeta, val monthRecap: MonthlyRecap? = null)
 
     private suspend fun fetchDaySafe(day: String): DayFetchResult {
         return try {
@@ -782,11 +812,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     uploadUntil = res.uploadUntil,
                     triggerSource = res.triggerSource,
                     requestedByUser = res.requestedByUser
-                )
+                ),
+                monthRecap = res.monthRecap
             )
         } catch (e: HttpException) {
             if (e.code() == 403) {
-                DayFetchResult(items = emptyList(), meta = PromptMeta(day = day))
+                DayFetchResult(items = emptyList(), meta = PromptMeta(day = day), monthRecap = null)
             } else {
                 throw e
             }
@@ -1274,6 +1305,7 @@ fun AppScreen(vm: MainVm) {
                     prompt = state.prompt,
                     days = state.feedDays,
                     byDay = state.feedByDay,
+                    monthRecapByDay = state.monthRecapByDay,
                     promptMetaByDay = state.promptMetaByDay,
                     focusDay = state.feedFocusDay,
                     listState = feedListState,
@@ -1290,6 +1322,7 @@ fun AppScreen(vm: MainVm) {
 
                 AppTab.CALENDAR -> CalendarTab(
                     days = state.calendarDays,
+                    monthRecapByDay = state.monthRecapByDay,
                     promptMetaByDay = state.promptMetaByDay,
                     selected = state.feedFocusDay ?: state.prompt?.day.orEmpty(),
                     onSelect = { day ->
@@ -1538,6 +1571,7 @@ fun FeedTab(
     prompt: PromptResponse?,
     days: List<String>,
     byDay: Map<String, List<FeedItem>>,
+    monthRecapByDay: Map<String, MonthlyRecap>,
     promptMetaByDay: Map<String, PromptMeta>,
     focusDay: String?,
     listState: LazyListState,
@@ -1548,11 +1582,12 @@ fun FeedTab(
     onLoadNewer: () -> Unit,
     onOpenViewer: (List<String>) -> Unit
 ) {
-    val rows = remember(days, byDay, promptMetaByDay) {
+    val rows = remember(days, byDay, monthRecapByDay, promptMetaByDay) {
         buildList {
             for (day in days) {
                 add(FeedRow.DayHeader(day, promptMetaByDay[day]))
                 byDay[day].orEmpty().forEach { add(FeedRow.PhotoItem(day, it)) }
+                monthRecapByDay[day]?.let { add(FeedRow.MonthRecapItem(day, it)) }
             }
         }
     }
@@ -1605,6 +1640,7 @@ fun FeedTab(
             when (it) {
                 is FeedRow.DayHeader -> "day-${it.day}"
                 is FeedRow.PhotoItem -> "photo-${it.item.photo.id}"
+                is FeedRow.MonthRecapItem -> "recap-${it.recap.month}"
             }
         }) { row ->
             when (row) {
@@ -1664,6 +1700,9 @@ fun FeedTab(
                         }
                     }
                 }
+                is FeedRow.MonthRecapItem -> {
+                    MonthlyRecapCard(row.recap)
+                }
             }
         }
 
@@ -1678,10 +1717,36 @@ fun FeedTab(
 private sealed class FeedRow {
     data class DayHeader(val day: String, val meta: PromptMeta?) : FeedRow()
     data class PhotoItem(val day: String, val item: FeedItem) : FeedRow()
+    data class MonthRecapItem(val day: String, val recap: MonthlyRecap) : FeedRow()
 }
 
 @Composable
-fun CalendarTab(days: List<String>, promptMetaByDay: Map<String, PromptMeta>, selected: String, onSelect: (String) -> Unit) {
+private fun MonthlyRecapCard(recap: MonthlyRecap) {
+    Card {
+        Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Monatsrueckblick ${recap.monthLabel}", fontWeight = FontWeight.Bold)
+            Text("Dein Monat in ${recap.yourMoments} Momenten")
+            recap.mostReliableUser?.let { reliable ->
+                Text("Am zuverlaessigsten: ${reliable.username} (${reliable.count} Tage)")
+            }
+            if (recap.topSpontaneous.isNotEmpty()) {
+                Text("Top 5 spontanste Momente")
+                recap.topSpontaneous.take(5).forEach { row ->
+                    Text("- ${formatDayLabel(row.day)}: ${row.username} nach ${row.minutesAfterTrigger} min")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CalendarTab(
+    days: List<String>,
+    monthRecapByDay: Map<String, MonthlyRecap>,
+    promptMetaByDay: Map<String, PromptMeta>,
+    selected: String,
+    onSelect: (String) -> Unit
+) {
     if (days.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("Keine Tage mit Bildern vorhanden")
@@ -1703,6 +1768,9 @@ fun CalendarTab(days: List<String>, promptMetaByDay: Map<String, PromptMeta>, se
                     Text(day, color = Color.Gray)
                     if ((meta?.triggerSource == "chat_command" || meta?.triggerSource == "special_request") && !meta.requestedByUser.isNullOrBlank()) {
                         Text("Sondermoment von ${meta.requestedByUser}", color = Color(0xFF1F5FBF))
+                    }
+                    monthRecapByDay[day]?.let { recap ->
+                        Text("Monatsrueckblick: ${recap.monthLabel}", color = Color(0xFF0A7A42), fontWeight = FontWeight.SemiBold)
                     }
                     if (selectedDay) {
                         Text("Ausgewaehlt", color = Color(0xFF1F5FBF))

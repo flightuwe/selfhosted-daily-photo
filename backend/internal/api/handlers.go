@@ -542,6 +542,7 @@ func (s *Server) handleAdminCalendarDay(c *gin.Context) {
 }
 
 func (s *Server) handleAdminFeed(c *gin.Context) {
+    adminUser, _ := userFromContext(c)
     day := c.Query("day")
     if day == "" {
         day = time.Now().In(s.Location).Format("2006-01-02")
@@ -575,6 +576,8 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
         })
     }
 
+    recap, _ := s.monthlyRecapForDay(day, adminUser.ID)
+
     c.JSON(http.StatusOK, gin.H{
         "items":           out,
         "day":             day,
@@ -582,6 +585,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
         "uploadUntil":     prompt.UploadUntil,
         "triggerSource":   prompt.TriggerSource,
         "requestedByUser": prompt.RequestedBy,
+        "monthRecap":      recap,
     })
 }
 
@@ -635,6 +639,8 @@ func (s *Server) handleFeed(c *gin.Context) {
         })
     }
 
+    recap, _ := s.monthlyRecapForDay(day, user.ID)
+
     c.JSON(http.StatusOK, gin.H{
         "items":           out,
         "day":             day,
@@ -642,6 +648,7 @@ func (s *Server) handleFeed(c *gin.Context) {
         "uploadUntil":     prompt.UploadUntil,
         "triggerSource":   prompt.TriggerSource,
         "requestedByUser": prompt.RequestedBy,
+        "monthRecap":      recap,
     })
 }
 
@@ -1441,6 +1448,119 @@ func (s *Server) handleMyPhotos(c *gin.Context) {
         out = append(out, s.photoJSON(p))
     }
     c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+type monthReliableRow struct {
+    UserID        uint
+    Username      string
+    FavoriteColor string
+    Count         int64
+}
+
+type spontaneousRow struct {
+    Day        string
+    UserID     uint
+    Username   string
+    CreatedAt  time.Time
+    DeltaSec   int64
+}
+
+func (s *Server) monthlyRecapForDay(day string, viewerUserID uint) (gin.H, error) {
+    dayTime, err := time.ParseInLocation("2006-01-02", day, s.Location)
+    if err != nil {
+        return nil, nil
+    }
+    monthStart := time.Date(dayTime.Year(), dayTime.Month(), 1, 0, 0, 0, 0, s.Location)
+    nextMonthStart := monthStart.AddDate(0, 1, 0)
+    if time.Now().In(s.Location).Before(nextMonthStart) {
+        return nil, nil
+    }
+
+    monthPrefix := dayTime.Format("2006-01")
+    var maxPhotoDay string
+    if err := s.DB.Model(&models.Photo{}).
+        Where("day LIKE ?", monthPrefix+"-%").
+        Select("MAX(day)").Scan(&maxPhotoDay).Error; err != nil {
+        return nil, err
+    }
+    if maxPhotoDay == "" || maxPhotoDay != day {
+        return nil, nil
+    }
+
+    monthEnd := nextMonthStart.Add(-time.Second)
+    startStr := monthStart.Format("2006-01-02")
+    endStr := monthEnd.Format("2006-01-02")
+
+    var yourMoments int64
+    if err := s.DB.Model(&models.Photo{}).
+        Where("user_id = ? AND prompt_only = ? AND day >= ? AND day <= ?", viewerUserID, true, startStr, endStr).
+        Count(&yourMoments).Error; err != nil {
+        return nil, err
+    }
+
+    var reliable monthReliableRow
+    _ = s.DB.Table("photos").
+        Select("photos.user_id as user_id, users.username as username, users.favorite_color as favorite_color, COUNT(*) as count").
+        Joins("JOIN users ON users.id = photos.user_id").
+        Where("photos.prompt_only = ? AND photos.day >= ? AND photos.day <= ?", true, startStr, endStr).
+        Group("photos.user_id, users.username, users.favorite_color").
+        Order("count DESC, users.username ASC").
+        Limit(1).
+        Scan(&reliable).Error
+
+    spontaneous := make([]spontaneousRow, 0, 5)
+    _ = s.DB.Table("photos").
+        Select("photos.day as day, photos.user_id as user_id, users.username as username, photos.created_at as created_at, CAST((julianday(photos.created_at)-julianday(daily_prompts.triggered_at))*86400 AS INTEGER) as delta_sec").
+        Joins("JOIN users ON users.id = photos.user_id").
+        Joins("JOIN daily_prompts ON daily_prompts.day = photos.day").
+        Where("photos.prompt_only = ? AND photos.day >= ? AND photos.day <= ? AND daily_prompts.triggered_at IS NOT NULL", true, startStr, endStr).
+        Order("delta_sec ASC, photos.created_at ASC").
+        Limit(5).
+        Scan(&spontaneous).Error
+
+    fastest := make([]gin.H, 0, len(spontaneous))
+    for _, row := range spontaneous {
+        minutes := row.DeltaSec / 60
+        if minutes < 0 {
+            minutes = 0
+        }
+        fastest = append(fastest, gin.H{
+            "day":                 row.Day,
+            "userId":              row.UserID,
+            "username":            row.Username,
+            "minutesAfterTrigger": minutes,
+            "createdAt":           row.CreatedAt,
+        })
+    }
+
+    monthLabel := germanMonthLabel(monthStart)
+    recap := gin.H{
+        "month":      monthPrefix,
+        "monthLabel": monthLabel,
+        "yourMoments": yourMoments,
+        "topSpontaneous": fastest,
+    }
+    if reliable.UserID != 0 {
+        recap["mostReliableUser"] = gin.H{
+            "id":            reliable.UserID,
+            "username":      reliable.Username,
+            "favoriteColor": defaultColor(reliable.FavoriteColor),
+            "count":         reliable.Count,
+        }
+    }
+    return recap, nil
+}
+
+func germanMonthLabel(t time.Time) string {
+    names := []string{
+        "Januar", "Februar", "Maerz", "April", "Mai", "Juni",
+        "Juli", "August", "September", "Oktober", "November", "Dezember",
+    }
+    idx := int(t.Month()) - 1
+    if idx < 0 || idx >= len(names) {
+        return t.Format("2006-01")
+    }
+    return fmt.Sprintf("%s %d", names[idx], t.Year())
 }
 
 func (s *Server) saveUploadedFile(day string, userID uint, header *multipart.FileHeader) (string, error) {

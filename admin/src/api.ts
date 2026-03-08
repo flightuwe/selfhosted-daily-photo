@@ -52,6 +52,19 @@ export type FeedItem = {
   user: { id: number; username: string };
 };
 
+export type MonthlyRecap = {
+  month: string;
+  monthLabel: string;
+  yourMoments: number;
+  mostReliableUser?: { id: number; username: string; favoriteColor?: string; count: number };
+  topSpontaneous: Array<{ day: string; userId: number; username: string; minutesAfterTrigger: number; createdAt: string }>;
+};
+
+export type AdminFeedResponse = {
+  items: FeedItem[];
+  monthRecap?: MonthlyRecap | null;
+};
+
 export type ChatItem = {
   id: number;
   body: string;
@@ -255,13 +268,12 @@ export async function deleteUser(token: string, id: number): Promise<void> {
   await parse(res);
 }
 
-export async function getAdminFeed(token: string, day?: string): Promise<FeedItem[]> {
+export async function getAdminFeed(token: string, day?: string): Promise<AdminFeedResponse> {
   const qs = day ? `?day=${encodeURIComponent(day)}` : "";
   const res = await fetch(`${apiBase}/admin/feed${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  const data = await parse<{ items: FeedItem[] }>(res);
-  return data.items;
+  return parse<AdminFeedResponse>(res);
 }
 
 export async function getChat(token: string): Promise<ChatItem[]> {

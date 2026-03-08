@@ -29,6 +29,7 @@ import {
   type ChatItem,
   type CalendarItem,
   type FeedItem,
+  type MonthlyRecap,
   type Settings,
   type SystemHealth,
 } from "./api";
@@ -93,6 +94,7 @@ export function App() {
   const [stats, setStats] = useState<AdminStats>(emptyStats);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
+  const [feedMonthRecap, setFeedMonthRecap] = useState<MonthlyRecap | null>(null);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [chatDraft, setChatDraft] = useState("");
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
@@ -175,8 +177,9 @@ export function App() {
 
   async function loadFeed(authToken: string, day?: string) {
     try {
-      const items = await getAdminFeed(authToken, day);
-      setFeedItems(items);
+      const data = await getAdminFeed(authToken, day);
+      setFeedItems(data.items || []);
+      setFeedMonthRecap(data.monthRecap || null);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -848,6 +851,29 @@ export function App() {
               </label>
               <button onClick={() => loadFeed(token, feedDay)}>Feed laden</button>
             </div>
+            {feedMonthRecap && (
+              <article className="settings-current">
+                <h3>Monatsrueckblick {feedMonthRecap.monthLabel}</h3>
+                <p>Dein Monat in {feedMonthRecap.yourMoments} Momenten</p>
+                {feedMonthRecap.mostReliableUser && (
+                  <p>
+                    <strong>Am zuverlaessigsten dabei:</strong> {feedMonthRecap.mostReliableUser.username} ({feedMonthRecap.mostReliableUser.count} Tage)
+                  </p>
+                )}
+                {feedMonthRecap.topSpontaneous.length > 0 && (
+                  <div>
+                    <strong>Top 5 spontanste Momente</strong>
+                    <ul>
+                      {feedMonthRecap.topSpontaneous.slice(0, 5).map((row) => (
+                        <li key={`${row.day}-${row.userId}-${row.createdAt}`}>
+                          {new Date(`${row.day}T00:00:00`).toLocaleDateString()}: {row.username} nach {row.minutesAfterTrigger} min
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </article>
+            )}
             {feedItems.length === 0 && <p>Keine Eintraege fuer diesen Tag.</p>}
             <div className="feed-grid">
               {feedItems.map((item) => (
