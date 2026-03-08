@@ -140,3 +140,20 @@ Wenn der `gateway`-Container mit `cat: can't open 'server'` abstuerzt, nutze die
 4. Stack mit `deploy/portainer-stack.yml` neu deployen.
 
 ## Optionaler Debug-Pfad (ein-/ausschaltbar)`r`n`r`nDebugging ist im Haupt-Stack enthalten (Service `dozzle`) und per Compose-Profil schaltbar.`r`n`r`nAktivieren in Portainer:`r`n1. Stack -> Editor -> Env Vars`r`n2. `COMPOSE_PROFILES=debug` setzen`r`n3. Stack updaten`r`n4. Log-UI: `http://<synology-ip>:13380``r`n`r`nDeaktivieren:`r`n1. `COMPOSE_PROFILES` entfernen oder leeren`r`n2. Stack updaten`r`n`r`nDetails: `deploy/DEBUGGING.md`
+
+### Android Signing (wichtig fuer installierbare APK)
+
+In GitHub unter `Settings -> Secrets and variables -> Actions` folgende Repository Secrets setzen:
+
+- `ANDROID_KEYSTORE_BASE64` (Base64 von deiner `.jks`/`.keystore` Datei)
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_PASSWORD`
+
+PowerShell zum Base64-Erzeugen:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\\path\\to\\release.keystore"))
+```
+
+Ohne diese Secrets bricht `release-android` absichtlich ab, damit keine unsigned APK mehr veroeffentlicht wird.

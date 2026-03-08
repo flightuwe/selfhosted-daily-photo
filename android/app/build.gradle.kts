@@ -18,6 +18,22 @@ android {
         buildConfigField("String", "API_BASE_URL", "\"https://daily.teacloud.synology.me/api/\"")
     }
 
+    val keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+    val keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+    val storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+    val keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+
+    signingConfigs {
+        if (!keystorePath.isNullOrBlank() && !keyAlias.isNullOrBlank() && !storePassword.isNullOrBlank() && !keyPassword.isNullOrBlank()) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = storePassword
+                keyAlias = keyAlias
+                keyPassword = keyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -25,6 +41,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 

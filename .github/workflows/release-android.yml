@@ -29,6 +29,29 @@ jobs:
             yes | sdkmanager --licenses >/dev/null || true
             sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
           fi
+      - name: Validate signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          [ -n "$ANDROID_KEYSTORE_BASE64" ] || (echo "::error::Missing secret ANDROID_KEYSTORE_BASE64" && exit 1)
+          [ -n "$ANDROID_KEY_ALIAS" ] || (echo "::error::Missing secret ANDROID_KEY_ALIAS" && exit 1)
+          [ -n "$ANDROID_KEYSTORE_PASSWORD" ] || (echo "::error::Missing secret ANDROID_KEYSTORE_PASSWORD" && exit 1)
+          [ -n "$ANDROID_KEY_PASSWORD" ] || (echo "::error::Missing secret ANDROID_KEY_PASSWORD" && exit 1)
+      - name: Decode keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/release.keystore
+          echo "ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/android/release.keystore" >> $GITHUB_ENV
+          echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> $GITHUB_ENV
+          echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> $GITHUB_ENV
+          echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> $GITHUB_ENV
       - name: Verify toolchain
         run: |
           java -version
