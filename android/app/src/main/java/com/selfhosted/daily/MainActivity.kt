@@ -835,49 +835,46 @@ fun CameraTab(
                 }
             }
             Button(onClick = onGoFeed, modifier = Modifier.fillMaxWidth()) { Text("Heutige Beitraege ansehen") }
-            return@Column
-        }
-
-        Text("Heute sind zwei Fotos noetig: Rueckkamera und Frontkamera.")
-        if (canUpload) {
-            Text("Zeitfenster ist offen.")
         } else {
-            Text("Du hast den heutigen Moment verpasst. Du kannst trotzdem posten.")
+            Text("Heute sind zwei Fotos noetig: Rueckkamera und Frontkamera.")
+            if (canUpload) {
+                Text("Zeitfenster ist offen.")
+            } else {
+                Text("Du hast den heutigen Moment verpasst. Du kannst trotzdem posten.")
+            }
+
+            if (backPreviewUri == null) {
+                Button(onClick = onCaptureBack, modifier = Modifier.fillMaxWidth()) { Text("Rueckkamera aufnehmen") }
+            } else {
+                Text("Rueckkamera aufgenommen")
+                AsyncImage(
+                    model = backPreviewUri,
+                    contentDescription = "Rueckkamera",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(220.dp),
+                    contentScale = ContentScale.Crop
+                )
+
+                if (frontPreviewUri == null) {
+                    Button(onClick = onCaptureFront, modifier = Modifier.fillMaxWidth()) { Text("Frontkamera aufnehmen") }
+                    Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Neu starten") }
+                } else {
+                    Text("Frontkamera aufgenommen")
+                    AsyncImage(
+                        model = frontPreviewUri,
+                        contentDescription = "Frontkamera",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp),
+                        contentScale = ContentScale.Crop
+                    )
+
+                    Button(onClick = onPost, modifier = Modifier.fillMaxWidth()) { Text("Beitrag posten") }
+                    Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
+                }
+            }
         }
-
-        if (backPreviewUri == null) {
-            Button(onClick = onCaptureBack, modifier = Modifier.fillMaxWidth()) { Text("Rueckkamera aufnehmen") }
-            return@Column
-        }
-
-        Text("Rueckkamera aufgenommen")
-        AsyncImage(
-            model = backPreviewUri,
-            contentDescription = "Rueckkamera",
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(220.dp),
-            contentScale = ContentScale.Crop
-        )
-
-        if (frontPreviewUri == null) {
-            Button(onClick = onCaptureFront, modifier = Modifier.fillMaxWidth()) { Text("Frontkamera aufnehmen") }
-            Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Neu starten") }
-            return@Column
-        }
-
-        Text("Frontkamera aufgenommen")
-        AsyncImage(
-            model = frontPreviewUri,
-            contentDescription = "Frontkamera",
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(220.dp),
-            contentScale = ContentScale.Crop
-        )
-
-        Button(onClick = onPost, modifier = Modifier.fillMaxWidth()) { Text("Beitrag posten") }
-        Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
     }
 }
 
