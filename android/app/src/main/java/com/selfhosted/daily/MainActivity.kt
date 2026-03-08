@@ -27,6 +27,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -51,6 +53,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -91,10 +94,13 @@ import retrofit2.http.Multipart
 import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Part
+import retrofit2.http.Query
 import java.io.File
 import java.io.FileOutputStream
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 
-enum class AppTab { CAMERA, FEED, CHAT, PROFILE }
+enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 
 data class User(val id: Long, val username: String, val isAdmin: Boolean)
 data class AuthResponse(val token: String, val user: User)
@@ -141,7 +147,7 @@ interface Api {
     suspend fun prompt(@Header("Authorization") token: String): PromptResponse
 
     @GET("feed")
-    suspend fun feed(@Header("Authorization") token: String): FeedResponse
+    suspend fun feed(@Header("Authorization") token: String, @Query("day") day: String): FeedResponse
 
     @GET("me/photos")
     suspend fun myPhotos(@Header("Authorization") token: String): MyPhotoResponse
@@ -224,17 +230,7 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
 
-    suspend fun feedToday(): List<FeedItem> {
-        return try {
-            api.feed("Bearer ${token()}").items
-        } catch (e: HttpException) {
-            if (e.code() == 403) {
-                emptyList()
-            } else {
-                throw e
-            }
-        }
-    }
+    suspend fun feedByDay(day: String): List<FeedItem> = api.feed("Bearer ${token()}", day).items
 
     suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
 
@@ -353,6 +349,11 @@ data class UiState(
     val user: User? = null,
     val prompt: PromptResponse? = null,
     val feed: List<FeedItem> = emptyList(),
+    val feedDays: List<String> = emptyList(),
+    val feedByDay: Map<String, List<FeedItem>> = emptyMap(),
+    val feedFocusDay: String? = null,
+    val feedPaging: Boolean = false,
+    val feedTodayLocked: Boolean = false,
     val photos: List<PromptPhoto> = emptyList(),
     val chat: List<ChatItem> = emptyList(),
     val loading: Boolean = false,
@@ -369,7 +370,6 @@ data class UiState(
 
 data class DashboardData(
     val prompt: PromptResponse,
-    val feed: List<FeedItem>,
     val photos: List<PromptPhoto>,
     val chat: List<ChatItem>
 )
@@ -423,19 +423,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(activeTab = tab)
     }
 
+    suspend fun jumpToDay(day: String) {
+        loadFeedWindow(day, around = 5)
+        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day)
+    }
+
     suspend fun refreshAll() {
         if (repo.token().isBlank()) return
         state = state.copy(loading = true)
         runCatching {
             repo.syncDeviceTokenIfNeeded()
             val prompt = repo.prompt()
-            val feed = if (prompt.hasPosted) repo.feedToday() else emptyList()
             val photos = repo.myPhotos()
             val chat = repo.listChat()
-            DashboardData(prompt, feed, photos, chat)
+            DashboardData(prompt, photos, chat)
         }.onSuccess { payload ->
             val prompt = payload.prompt
-            val feed = payload.feed
             val photos = payload.photos
             val chat = payload.chat
             val marker = "${prompt.day}:${prompt.triggered ?: ""}"
@@ -444,16 +447,92 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
             state = state.copy(
                 prompt = prompt,
-                feed = feed,
                 photos = photos,
                 chat = chat,
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
             )
+            if (state.feedDays.isEmpty()) {
+                loadFeedWindow(prompt.day, around = 3)
+            }
         }.onFailure {
             state = state.copy(loading = false, message = apiError(it, "Laden fehlgeschlagen"))
         }
+    }
+
+    suspend fun loadOlderFeedDays(count: Int = 3) {
+        if (state.feedPaging) return
+        val base = state.feedDays.lastOrNull() ?: (state.prompt?.day ?: return)
+        state = state.copy(feedPaging = true)
+        val newDays = mutableListOf<String>()
+        val newMap = state.feedByDay.toMutableMap()
+        for (i in 1..count) {
+            val day = shiftDay(base, -i)
+            if (newMap.containsKey(day)) continue
+            newMap[day] = fetchDaySafe(day)
+            newDays.add(day)
+        }
+        state = state.copy(feedDays = state.feedDays + newDays, feedByDay = newMap, feedPaging = false)
+    }
+
+    suspend fun loadNewerFeedDays(count: Int = 3) {
+        if (state.feedPaging) return
+        val base = state.feedDays.firstOrNull() ?: (state.prompt?.day ?: return)
+        val today = state.prompt?.day ?: LocalDate.now().toString()
+        state = state.copy(feedPaging = true)
+        val prependDays = mutableListOf<String>()
+        val newMap = state.feedByDay.toMutableMap()
+        for (i in 1..count) {
+            val day = shiftDay(base, i)
+            if (day > today) break
+            if (newMap.containsKey(day)) continue
+            newMap[day] = fetchDaySafe(day)
+            prependDays.add(day)
+        }
+        state = state.copy(feedDays = prependDays.reversed() + state.feedDays, feedByDay = newMap, feedPaging = false)
+    }
+
+    private suspend fun loadFeedWindow(anchorDay: String, around: Int) {
+        val today = state.prompt?.day ?: LocalDate.now().toString()
+        val days = mutableListOf<String>()
+        for (offset in around downTo 1) {
+            val newer = shiftDay(anchorDay, offset)
+            if (newer <= today) days.add(newer)
+        }
+        days.add(anchorDay)
+        for (offset in 1..around) {
+            days.add(shiftDay(anchorDay, -offset))
+        }
+        val map = mutableMapOf<String, List<FeedItem>>()
+        var todayLocked = false
+        for (day in days.distinct()) {
+            val items = fetchDaySafe(day)
+            if (day == today && items.isEmpty() && state.prompt?.hasPosted == false) {
+                todayLocked = true
+            }
+            map[day] = items
+        }
+        state = state.copy(
+            feedDays = days.distinct(),
+            feedByDay = map,
+            feed = map[today] ?: emptyList(),
+            feedTodayLocked = todayLocked,
+            feedFocusDay = anchorDay
+        )
+    }
+
+    private suspend fun fetchDaySafe(day: String): List<FeedItem> {
+        return try {
+            repo.feedByDay(day)
+        } catch (e: HttpException) {
+            if (e.code() == 403) emptyList() else throw e
+        }
+    }
+
+    private fun shiftDay(day: String, delta: Int): String {
+        val d = LocalDate.parse(day).plusDays(delta.toLong())
+        return d.toString()
     }
 
     suspend fun uploadDual(back: Uri, front: Uri, asPrompt: Boolean): Boolean {
@@ -560,6 +639,7 @@ fun AppScreen(vm: MainVm) {
     var viewerIndex by remember { mutableStateOf(0) }
     var requestFrontCapture by remember { mutableStateOf(false) }
     var cameraUploading by remember { mutableStateOf(false) }
+    val feedListState = remember { LazyListState() }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         val target = captureTarget
@@ -728,6 +808,7 @@ fun AppScreen(vm: MainVm) {
             NavigationBar {
                 NavigationBarItem(selected = state.activeTab == AppTab.CAMERA, onClick = { vm.setTab(AppTab.CAMERA) }, label = { Text("Kamera") }, icon = { Text("C") })
                 NavigationBarItem(selected = state.activeTab == AppTab.FEED, onClick = { vm.setTab(AppTab.FEED) }, label = { Text("Feed") }, icon = { Text("F") })
+                NavigationBarItem(selected = state.activeTab == AppTab.CALENDAR, onClick = { vm.setTab(AppTab.CALENDAR) }, label = { Text("Kalender") }, icon = { Text("D") })
                 NavigationBarItem(selected = state.activeTab == AppTab.CHAT, onClick = { vm.setTab(AppTab.CHAT) }, label = { Text("Chat") }, icon = { Text("M") })
                 NavigationBarItem(selected = state.activeTab == AppTab.PROFILE, onClick = { vm.setTab(AppTab.PROFILE) }, label = { Text("Profil") }, icon = { Text("P") })
             }
@@ -760,11 +841,25 @@ fun AppScreen(vm: MainVm) {
 
                 AppTab.FEED -> FeedTab(
                     prompt = state.prompt,
-                    items = state.feed,
+                    days = state.feedDays,
+                    byDay = state.feedByDay,
+                    focusDay = state.feedFocusDay,
+                    listState = feedListState,
+                    todayLocked = state.feedTodayLocked,
+                    paging = state.feedPaging,
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
+                    onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
+                    onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
                     onOpenViewer = { urls ->
                         viewerUrls = urls
                         viewerIndex = 0
+                    }
+                )
+
+                AppTab.CALENDAR -> CalendarTab(
+                    selected = state.feedFocusDay ?: state.prompt?.day.orEmpty(),
+                    onSelect = { day ->
+                        scope.launch { vm.jumpToDay(day) }
                     }
                 )
 
@@ -927,62 +1022,155 @@ fun CameraTab(
 }
 
 @Composable
-fun FeedTab(prompt: PromptResponse?, items: List<FeedItem>, onTakePhoto: () -> Unit, onOpenViewer: (List<String>) -> Unit) {
-    val hasPosted = prompt?.hasPosted == true
-
-    if (!hasPosted) {
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                "Poste zuerst dein Foto, um die Beitraege der anderen zu sehen",
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Button(onClick = onTakePhoto) { Text("Foto aufnehmen") }
+fun FeedTab(
+    prompt: PromptResponse?,
+    days: List<String>,
+    byDay: Map<String, List<FeedItem>>,
+    focusDay: String?,
+    listState: LazyListState,
+    todayLocked: Boolean,
+    paging: Boolean,
+    onTakePhoto: () -> Unit,
+    onLoadOlder: () -> Unit,
+    onLoadNewer: () -> Unit,
+    onOpenViewer: (List<String>) -> Unit
+) {
+    val rows = remember(days, byDay) {
+        buildList {
+            for (day in days) {
+                add(FeedRow.DayHeader(day))
+                byDay[day].orEmpty().forEach { add(FeedRow.PhotoItem(day, it)) }
+            }
         }
-        return
     }
 
-    if (items.isEmpty()) {
+    LaunchedEffect(focusDay, rows.size) {
+        val target = focusDay ?: return@LaunchedEffect
+        val idx = rows.indexOfFirst { it is FeedRow.DayHeader && it.day == target }
+        if (idx >= 0) {
+            listState.scrollToItem(idx)
+        }
+    }
+
+    LaunchedEffect(listState, rows.size, paging) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: -1
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            first to last
+        }.collect { (first, last) ->
+            if (rows.isEmpty() || paging) return@collect
+            if (first in 0..2) onLoadNewer()
+            if (last >= rows.lastIndex - 4) onLoadOlder()
+        }
+    }
+
+    if (rows.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Heute noch keine Beitraege")
+            Text("Noch keine Beitraege gefunden")
         }
         return
     }
 
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (todayLocked && prompt?.hasPosted == false) {
+            item("today-locked") {
+                Card {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Heutiger Feed ist gesperrt, bis du dein heutiges Foto postest.")
+                        Button(onClick = onTakePhoto) { Text("Foto aufnehmen") }
+                    }
+                }
+            }
+        }
+
+        items(rows, key = {
+            when (it) {
+                is FeedRow.DayHeader -> "day-${it.day}"
+                is FeedRow.PhotoItem -> "photo-${it.item.photo.id}"
+            }
+        }) { row ->
+            when (row) {
+                is FeedRow.DayHeader -> {
+                    Card {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(formatDayLabel(row.day), fontWeight = FontWeight.Bold)
+                            Text(row.day, color = Color.Gray)
+                        }
+                    }
+                }
+                is FeedRow.PhotoItem -> {
+                    val item = row.item
+                    val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
+                    Card {
+                        Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(item.user.username, fontWeight = FontWeight.SemiBold)
+                            if (item.isLate) {
+                                Text("Spaeter gepostet", color = Color(0xFF8B0000))
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                urls.forEach { url ->
+                                    AsyncImage(
+                                        model = url,
+                                        contentDescription = "${item.user.username} Foto",
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(180.dp)
+                                            .clickable { onOpenViewer(urls) },
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            }
+                            if (!item.photo.caption.isNullOrBlank()) {
+                                Text(item.photo.caption, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (paging) {
+            item("paging") {
+                Text("Lade weitere Tage ...", modifier = Modifier.padding(12.dp))
+            }
+        }
+    }
+}
+
+private sealed class FeedRow {
+    data class DayHeader(val day: String) : FeedRow()
+    data class PhotoItem(val day: String, val item: FeedItem) : FeedRow()
+}
+
+@Composable
+fun CalendarTab(selected: String, onSelect: (String) -> Unit) {
+    val today = LocalDate.now()
+    val days = remember {
+        (0..120).map { today.minusDays(it.toLong()).toString() }
+    }
     LazyVerticalGrid(
-        columns = GridCells.Fixed(1),
+        columns = GridCells.Fixed(2),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxSize()
     ) {
-        items(items) { item ->
-            val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
-            Card {
-                Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(item.user.username, fontWeight = FontWeight.SemiBold)
-                    if (item.isLate) {
-                        Text("Spaeter gepostet", color = Color(0xFF8B0000))
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        urls.forEach { url ->
-                            AsyncImage(
-                                model = url,
-                                contentDescription = "${item.user.username} Foto",
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(180.dp)
-                                    .clickable { onOpenViewer(urls) },
-                                contentScale = ContentScale.Crop
-                            )
-                        }
-                    }
-                    if (!item.photo.caption.isNullOrBlank()) {
-                        Text(item.photo.caption, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        items(days) { day ->
+            val selectedDay = day == selected
+            Card(modifier = Modifier.clickable { onSelect(day) }) {
+                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(formatDayLabel(day), fontWeight = if (selectedDay) FontWeight.Bold else FontWeight.Normal)
+                    Text(day, color = Color.Gray)
+                    if (selectedDay) {
+                        Text("Ausgewaehlt", color = Color(0xFF1F5FBF))
                     }
                 }
             }
@@ -1107,6 +1295,15 @@ fun ProfileTab(
                 }
             }
         }
+    }
+}
+
+private fun formatDayLabel(day: String): String {
+    return try {
+        val d = LocalDate.parse(day)
+        d.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"))
+    } catch (_: Throwable) {
+        day
     }
 }
 
