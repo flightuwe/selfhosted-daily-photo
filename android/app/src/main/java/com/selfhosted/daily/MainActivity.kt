@@ -540,14 +540,34 @@ fun AppScreen(vm: MainVm) {
     var viewerIndex by remember { mutableStateOf(0) }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val target = captureTarget
+        val shotUri = captureUri
         if (success) {
-            when (captureTarget) {
-                "back" -> backPreviewUri = captureUri
-                "front" -> frontPreviewUri = captureUri
+            when (target) {
+                "back" -> {
+                    backPreviewUri = shotUri
+                    openCameraFor("front")
+                }
+                "front" -> {
+                    frontPreviewUri = shotUri
+                    val back = backPreviewUri
+                    val front = shotUri
+                    if (back != null && front != null) {
+                        val canPrompt = state.prompt?.canUpload == true && state.prompt.hasPosted.not()
+                        scope.launch {
+                            vm.uploadDual(back, front, canPrompt)
+                            backPreviewUri = null
+                            frontPreviewUri = null
+                            vm.setTab(AppTab.FEED)
+                        }
+                    }
+                }
             }
         }
-        captureUri = null
-        captureTarget = null
+        if (target != "back") {
+            captureUri = null
+            captureTarget = null
+        }
     }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -694,21 +714,9 @@ fun AppScreen(vm: MainVm) {
                     backPreviewUri = backPreviewUri,
                     frontPreviewUri = frontPreviewUri,
                     onCaptureBack = { openCameraFor("back") },
-                    onCaptureFront = { openCameraFor("front") },
                     onReset = {
                         backPreviewUri = null
                         frontPreviewUri = null
-                    },
-                    onPost = {
-                        val back = backPreviewUri ?: return@CameraTab
-                        val front = frontPreviewUri ?: return@CameraTab
-                        val canPrompt = state.prompt?.canUpload == true && state.prompt.hasPosted.not()
-                        scope.launch {
-                            vm.uploadDual(back, front, canPrompt)
-                            backPreviewUri = null
-                            frontPreviewUri = null
-                            vm.setTab(AppTab.FEED)
-                        }
                     },
                     onGoFeed = { vm.setTab(AppTab.FEED) },
                     onOpenViewer = { urls ->
@@ -803,9 +811,7 @@ fun CameraTab(
     backPreviewUri: Uri?,
     frontPreviewUri: Uri?,
     onCaptureBack: () -> Unit,
-    onCaptureFront: () -> Unit,
     onReset: () -> Unit,
-    onPost: () -> Unit,
     onGoFeed: () -> Unit,
     onOpenViewer: (List<String>) -> Unit
 ) {
@@ -857,7 +863,7 @@ fun CameraTab(
                 )
 
                 if (frontPreviewUri == null) {
-                    Button(onClick = onCaptureFront, modifier = Modifier.fillMaxWidth()) { Text("Frontkamera aufnehmen") }
+                    Text("Jetzt wird Frontkamera geoeffnet und danach automatisch gepostet.")
                     Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Neu starten") }
                 } else {
                     Text("Frontkamera aufgenommen")
@@ -869,8 +875,7 @@ fun CameraTab(
                             .height(220.dp),
                         contentScale = ContentScale.Crop
                     )
-
-                    Button(onClick = onPost, modifier = Modifier.fillMaxWidth()) { Text("Beitrag posten") }
+                    Text("Upload laeuft ...")
                     Button(onClick = onReset, modifier = Modifier.fillMaxWidth()) { Text("Erneut aufnehmen") }
                 }
             }
