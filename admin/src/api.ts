@@ -132,6 +132,22 @@ export async function broadcastNotification(token: string, body: string): Promis
   return parse<{ sentTo: number; provider: string }>(res);
 }
 
+export async function notifyUser(
+  token: string,
+  userId: number,
+  body: string
+): Promise<{ sentTo: number; failed: number; provider: string; username: string; devices: number }> {
+  const res = await fetch(`${apiBase}/admin/notifications/user/${userId}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ body }),
+  });
+  return parse<{ sentTo: number; failed: number; provider: string; username: string; devices: number }>(res);
+}
+
 export async function listUsers(token: string): Promise<AdminUser[]> {
   const res = await fetch(`${apiBase}/admin/users`, {
     headers: { Authorization: `Bearer ${token}` },

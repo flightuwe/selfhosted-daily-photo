@@ -11,6 +11,7 @@ import {
   getStats,
   listUsers,
   login,
+  notifyUser,
   resetTodayPrompt,
   triggerPrompt,
   updateCalendarDay,
@@ -64,6 +65,7 @@ export function App() {
   const [resetPassword, setResetPassword] = useState<Record<number, string>>({});
   const [broadcastBody, setBroadcastBody] = useState("Server-Test: Bitte App öffnen und Daily Foto posten.");
   const [updateNoticeVersion, setUpdateNoticeVersion] = useState("0.2.12");
+  const [targetUserId, setTargetUserId] = useState<number>(0);
 
   const isLoggedIn = useMemo(() => token.length > 0, [token]);
 
@@ -226,6 +228,23 @@ export function App() {
     }
   }
 
+  async function onNotifySingleUser() {
+    if (!targetUserId) {
+      setMessage("Bitte einen Benutzer auswählen.");
+      return;
+    }
+    setMessage("");
+    try {
+      const result = await notifyUser(token, targetUserId, broadcastBody);
+      setMessage(
+        `Benachrichtigung an ${result.username}: sent=${result.sentTo}, failed=${result.failed}, devices=${result.devices}, provider=${result.provider}.`
+      );
+      await refreshAll();
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function onSendUpdateNotice() {
     const text = `Update verfügbar: Version ${updateNoticeVersion}. Bitte App aktualisieren.`;
     setBroadcastBody(text);
@@ -359,6 +378,17 @@ export function App() {
               <input value={broadcastBody} onChange={(e) => setBroadcastBody(e.target.value)} />
             </label>
             <button onClick={onBroadcast}>Benachrichtigung senden</button>
+
+            <label>
+              Push nur an einzelnen Benutzer
+              <select value={targetUserId || ""} onChange={(e) => setTargetUserId(Number(e.target.value || 0))}>
+                <option value="">Benutzer wählen</option>
+                {users.map((u) => (
+                  <option key={u.id} value={u.id}>{u.username} ({u.deviceCount} Geräte)</option>
+                ))}
+              </select>
+            </label>
+            <button onClick={onNotifySingleUser}>Nur diesen Benutzer benachrichtigen</button>
 
             <label>
               Update-Version für Hinweis

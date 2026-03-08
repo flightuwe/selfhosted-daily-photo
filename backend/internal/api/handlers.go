@@ -79,6 +79,7 @@ func (s *Server) Router() *gin.Engine {
             admin.POST("/prompt/trigger", s.handleTriggerPrompt)
             admin.POST("/prompt/reset-today", s.handleAdminResetToday)
             admin.POST("/notifications/broadcast", s.handleBroadcastNotification)
+            admin.POST("/notifications/user/:id", s.handleUserNotification)
             admin.POST("/chat/clear", s.handleAdminClearChat)
 
             admin.GET("/users", s.handleAdminListUsers)
@@ -792,6 +793,55 @@ func (s *Server) handleBroadcastNotification(c *gin.Context) {
 	})
 }
 
+func (s *Server) handleUserNotification(c *gin.Context) {
+    id, err := parseUintParam(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+        return
+    }
+    var req struct {
+        Body string `json:"body" binding:"required,min=3,max=255"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+
+    var user models.User
+    if err := s.DB.First(&user, id).Error; err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+        return
+    }
+
+    tokens := s.userDeviceTokens(id)
+    sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, req.Body)
+    removed := s.removeInvalidTokens(sendResult.InvalidTokens)
+    if sendErr != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{
+            "error":          "user broadcast failed",
+            "details":        sendErr.Error(),
+            "provider":       s.Notifier.Name(),
+            "userId":         id,
+            "username":       user.Username,
+            "sentTo":         sendResult.Sent,
+            "failed":         sendResult.Failed,
+            "invalidRemoved": removed,
+        })
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "ok":            true,
+        "provider":      s.Notifier.Name(),
+        "userId":        id,
+        "username":      user.Username,
+        "devices":       len(tokens),
+        "sentTo":        sendResult.Sent,
+        "failed":        sendResult.Failed,
+        "invalidRemoved": removed,
+    })
+}
+
 func (s *Server) handleAdminClearChat(c *gin.Context) {
     if err := s.DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.ChatMessage{}).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "chat clear failed"})
@@ -1041,6 +1091,16 @@ func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {
         return false, err
     }
     return count > 0, nil
+}
+
+func (s *Server) userDeviceTokens(userID uint) []string {
+    var rows []models.DeviceToken
+    _ = s.DB.Where("user_id = ?", userID).Find(&rows).Error
+    tokens := make([]string, 0, len(rows))
+    for _, t := range rows {
+        tokens = append(tokens, t.Token)
+    }
+    return tokens
 }
 
 func (s *Server) removeInvalidTokens(tokens []string) int64 {
