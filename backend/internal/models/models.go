@@ -25,6 +25,13 @@ type AppSettings struct {
     UploadWindowMinutes    int       `gorm:"default:10"`
     PromptNotificationText string    `gorm:"size:255;default:'Zeit fuer dein Daily Foto'"`
     MaxUploadBytes         int64     `gorm:"default:0"`
+    ChatCommandEnabled     bool      `gorm:"default:false"`
+    ChatCommandValue       string    `gorm:"size:64;default:'-moment'"`
+    ChatCommandTrigger     bool      `gorm:"default:true"`
+    ChatCommandSendPush    bool      `gorm:"default:true"`
+    ChatCommandPushText    string    `gorm:"size:255;default:'{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.'"`
+    ChatCommandEchoChat    bool      `gorm:"default:true"`
+    ChatCommandEchoText    string    `gorm:"size:255;default:'Moment wurde von {user} angefordert.'"`
     CreatedAt              time.Time
     UpdatedAt              time.Time
 }
@@ -34,6 +41,9 @@ type DailyPrompt struct {
     Day            string     `gorm:"uniqueIndex;size:10;not null"`
     TriggeredAt    *time.Time
     UploadUntil    *time.Time
+    TriggerSource  string     `gorm:"size:32;default:'scheduler'"`
+    RequestedByID  *uint
+    RequestedBy    string     `gorm:"size:64"`
     NotificationID string     `gorm:"size:64"`
     CreatedAt      time.Time
     UpdatedAt      time.Time

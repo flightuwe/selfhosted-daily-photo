@@ -262,12 +262,14 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
     }
 
     c.JSON(http.StatusOK, gin.H{
-        "day":         day,
-        "triggered":   prompt.TriggeredAt,
-        "uploadUntil": prompt.UploadUntil,
-        "canUpload":   canUpload,
-        "hasPosted":   hasPosted,
-        "ownPhoto":    ownPhoto,
+        "day":             day,
+        "triggered":       prompt.TriggeredAt,
+        "uploadUntil":     prompt.UploadUntil,
+        "canUpload":       canUpload,
+        "hasPosted":       hasPosted,
+        "ownPhoto":        ownPhoto,
+        "triggerSource":   prompt.TriggerSource,
+        "requestedByUser": prompt.RequestedBy,
     })
 }
 
@@ -398,6 +400,8 @@ func (s *Server) handleAdminCalendar(c *gin.Context) {
         if prompt, ok := promptByDay[p.Day]; ok {
             row["triggeredAt"] = prompt.TriggeredAt
             row["uploadUntil"] = prompt.UploadUntil
+            row["triggerSource"] = prompt.TriggerSource
+            row["requestedByUser"] = prompt.RequestedBy
         }
         out = append(out, row)
     }
@@ -453,6 +457,8 @@ func (s *Server) handleAdminCalendarDay(c *gin.Context) {
         "source":     "manual",
         "triggeredAt": prompt.TriggeredAt,
         "uploadUntil": prompt.UploadUntil,
+        "triggerSource": prompt.TriggerSource,
+        "requestedByUser": prompt.RequestedBy,
     })
 }
 
@@ -485,10 +491,19 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
                 "username": p.User.Username,
                 "favoriteColor": defaultColor(p.User.FavoriteColor),
             },
+            "triggerSource":   prompt.TriggerSource,
+            "requestedByUser": prompt.RequestedBy,
         })
     }
 
-    c.JSON(http.StatusOK, gin.H{"items": out, "day": day})
+    c.JSON(http.StatusOK, gin.H{
+        "items":           out,
+        "day":             day,
+        "triggeredAt":     prompt.TriggeredAt,
+        "uploadUntil":     prompt.UploadUntil,
+        "triggerSource":   prompt.TriggerSource,
+        "requestedByUser": prompt.RequestedBy,
+    })
 }
 
 func (s *Server) handleFeed(c *gin.Context) {
@@ -536,10 +551,19 @@ func (s *Server) handleFeed(c *gin.Context) {
                 "username": p.User.Username,
                 "favoriteColor": defaultColor(p.User.FavoriteColor),
             },
+            "triggerSource":   prompt.TriggerSource,
+            "requestedByUser": prompt.RequestedBy,
         })
     }
 
-    c.JSON(http.StatusOK, gin.H{"items": out})
+    c.JSON(http.StatusOK, gin.H{
+        "items":           out,
+        "day":             day,
+        "triggeredAt":     prompt.TriggeredAt,
+        "uploadUntil":     prompt.UploadUntil,
+        "triggerSource":   prompt.TriggerSource,
+        "requestedByUser": prompt.RequestedBy,
+    })
 }
 
 func (s *Server) handleGetSettings(c *gin.Context) {
@@ -548,6 +572,7 @@ func (s *Server) handleGetSettings(c *gin.Context) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
         return
     }
+    settings = normalizeSettings(settings)
     c.JSON(http.StatusOK, settings)
 }
 
@@ -557,6 +582,13 @@ type settingsRequest struct {
     UploadWindowMinutes    int    `json:"uploadWindowMinutes"`
     PromptNotificationText string `json:"promptNotificationText"`
     MaxUploadBytes         int64  `json:"maxUploadBytes"`
+    ChatCommandEnabled     bool   `json:"chatCommandEnabled"`
+    ChatCommandValue       string `json:"chatCommandValue"`
+    ChatCommandTrigger     bool   `json:"chatCommandTrigger"`
+    ChatCommandSendPush    bool   `json:"chatCommandSendPush"`
+    ChatCommandPushText    string `json:"chatCommandPushText"`
+    ChatCommandEchoChat    bool   `json:"chatCommandEchoChat"`
+    ChatCommandEchoText    string `json:"chatCommandEchoText"`
 }
 
 func (s *Server) handleUpdateSettings(c *gin.Context) {
@@ -577,11 +609,27 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
         return
     }
 
+    req.ChatCommandValue = strings.TrimSpace(req.ChatCommandValue)
+    req.ChatCommandPushText = strings.TrimSpace(req.ChatCommandPushText)
+    req.ChatCommandEchoText = strings.TrimSpace(req.ChatCommandEchoText)
+    if req.ChatCommandEnabled && req.ChatCommandValue == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "chat command is empty"})
+        return
+    }
+
     settings.PromptWindowStartHour = req.PromptWindowStartHour
     settings.PromptWindowEndHour = req.PromptWindowEndHour
     settings.UploadWindowMinutes = req.UploadWindowMinutes
     settings.PromptNotificationText = req.PromptNotificationText
     settings.MaxUploadBytes = req.MaxUploadBytes
+    settings.ChatCommandEnabled = req.ChatCommandEnabled
+    settings.ChatCommandValue = req.ChatCommandValue
+    settings.ChatCommandTrigger = req.ChatCommandTrigger
+    settings.ChatCommandSendPush = req.ChatCommandSendPush
+    settings.ChatCommandPushText = req.ChatCommandPushText
+    settings.ChatCommandEchoChat = req.ChatCommandEchoChat
+    settings.ChatCommandEchoText = req.ChatCommandEchoText
+    settings = normalizeSettings(settings)
 
     if err := s.DB.Save(&settings).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
@@ -592,7 +640,8 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 }
 
 func (s *Server) handleTriggerPrompt(c *gin.Context) {
-    prompt, settings, err := s.Prompt.TriggerNow()
+    adminUser, _ := userFromContext(c)
+    prompt, settings, err := s.Prompt.TriggerNowWithSource("admin_manual", &adminUser)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "trigger failed"})
         return
@@ -645,9 +694,10 @@ func (s *Server) handleAdminResetToday(c *gin.Context) {
             return err
         }
         prompt := models.DailyPrompt{
-            Day:         day,
-            TriggeredAt: &now,
-            UploadUntil: &uploadUntil,
+            Day:           day,
+            TriggeredAt:   &now,
+            UploadUntil:   &uploadUntil,
+            TriggerSource: "admin_reset",
         }
         return tx.Create(&prompt).Error
     })
@@ -948,11 +998,23 @@ func (s *Server) handleChatCreate(c *gin.Context) {
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
         return
     }
-    msg := models.ChatMessage{UserID: user.ID, Body: strings.TrimSpace(req.Body)}
-    if msg.Body == "" {
+    body := strings.TrimSpace(req.Body)
+    if body == "" {
         c.JSON(http.StatusBadRequest, gin.H{"error": "message empty"})
         return
     }
+
+    var settings models.AppSettings
+    if err := s.DB.First(&settings).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+        return
+    }
+    settings = normalizeSettings(settings)
+    if handled, err := s.tryHandleChatMomentCommand(c, user, body, settings); handled || err != nil {
+        return
+    }
+
+    msg := models.ChatMessage{UserID: user.ID, Body: body}
     if err := s.DB.Create(&msg).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
         return
@@ -967,6 +1029,71 @@ func (s *Server) handleChatCreate(c *gin.Context) {
             "favoriteColor": defaultColor(user.FavoriteColor),
         },
     })
+}
+
+func (s *Server) tryHandleChatMomentCommand(c *gin.Context, user models.User, body string, settings models.AppSettings) (bool, error) {
+    if !settings.ChatCommandEnabled {
+        return false, nil
+    }
+    if !isChatCommandMatch(body, settings.ChatCommandValue) {
+        return false, nil
+    }
+
+    var (
+        prompt        models.DailyPrompt
+        sendResult    notify.SendResult
+        sendErr       error
+        invalidRemove int64
+    )
+    if settings.ChatCommandTrigger {
+        var triggerErr error
+        prompt, _, triggerErr = s.Prompt.TriggerNowWithSource("chat_command", &user)
+        if triggerErr != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "command trigger failed"})
+            return true, triggerErr
+        }
+    }
+
+    pushText := strings.ReplaceAll(settings.ChatCommandPushText, "{user}", user.Username)
+    if settings.ChatCommandSendPush && settings.ChatCommandTrigger {
+        tokens := s.allDeviceTokens()
+        sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
+        invalidRemove = s.removeInvalidTokens(sendResult.InvalidTokens)
+    }
+
+    echoBody := strings.ReplaceAll(settings.ChatCommandEchoText, "{user}", user.Username)
+    createdMessage := models.ChatMessage{UserID: user.ID, Body: echoBody}
+    if settings.ChatCommandEchoChat {
+        if err := s.DB.Create(&createdMessage).Error; err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "command chat write failed"})
+            return true, err
+        }
+    } else {
+        createdMessage.Body = body
+    }
+
+    resp := gin.H{
+        "id":            createdMessage.ID,
+        "body":          createdMessage.Body,
+        "createdAt":     createdMessage.CreatedAt,
+        "user":          gin.H{"id": user.ID, "username": user.Username, "favoriteColor": defaultColor(user.FavoriteColor)},
+        "command":       true,
+        "commandValue":  settings.ChatCommandValue,
+        "triggerSource": "chat_command",
+        "requestedByUser": user.Username,
+        "provider":      s.Notifier.Name(),
+        "sentTo":        sendResult.Sent,
+        "failed":        sendResult.Failed,
+        "invalidRemoved": invalidRemove,
+    }
+    if settings.ChatCommandTrigger {
+        resp["prompt"] = prompt
+    }
+    if sendErr != nil {
+        resp["notificationErr"] = sendErr.Error()
+    }
+    c.JSON(http.StatusCreated, resp)
+    return true, nil
 }
 
 func (s *Server) handleDualUpload(c *gin.Context) {
@@ -1187,4 +1314,26 @@ func normalizeColor(v string) (string, bool) {
         x = "#" + x
     }
     return strings.ToUpper(x), true
+}
+
+func normalizeSettings(settings models.AppSettings) models.AppSettings {
+    if strings.TrimSpace(settings.ChatCommandValue) == "" {
+        settings.ChatCommandValue = "-moment"
+    }
+    if strings.TrimSpace(settings.ChatCommandPushText) == "" {
+        settings.ChatCommandPushText = "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten."
+    }
+    if strings.TrimSpace(settings.ChatCommandEchoText) == "" {
+        settings.ChatCommandEchoText = "Moment wurde von {user} angefordert."
+    }
+    if settings.UploadWindowMinutes <= 0 {
+        settings.UploadWindowMinutes = 10
+    }
+    return settings
+}
+
+func isChatCommandMatch(body string, command string) bool {
+    b := strings.ToLower(strings.TrimSpace(body))
+    c := strings.ToLower(strings.TrimSpace(command))
+    return b != "" && c != "" && b == c
 }

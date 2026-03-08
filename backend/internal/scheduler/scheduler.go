@@ -133,6 +133,10 @@ func (s *DailyPromptService) SetPlanForDay(day string, plannedAt time.Time, manu
 }
 
 func (s *DailyPromptService) TriggerNow() (models.DailyPrompt, models.AppSettings, error) {
+    return s.TriggerNowWithSource("scheduler", nil)
+}
+
+func (s *DailyPromptService) TriggerNowWithSource(source string, requestedBy *models.User) (models.DailyPrompt, models.AppSettings, error) {
     var settings models.AppSettings
     if err := s.DB.First(&settings).Error; err != nil {
         return models.DailyPrompt{}, settings, err
@@ -147,8 +151,19 @@ func (s *DailyPromptService) TriggerNow() (models.DailyPrompt, models.AppSetting
         return models.DailyPrompt{}, settings, err
     }
 
+    if source == "" {
+        source = "scheduler"
+    }
     prompt.TriggeredAt = &now
     prompt.UploadUntil = &until
+    prompt.TriggerSource = source
+    if requestedBy != nil {
+        prompt.RequestedByID = &requestedBy.ID
+        prompt.RequestedBy = requestedBy.Username
+    } else {
+        prompt.RequestedByID = nil
+        prompt.RequestedBy = ""
+    }
     if err := s.DB.Save(&prompt).Error; err != nil {
         return models.DailyPrompt{}, settings, err
     }

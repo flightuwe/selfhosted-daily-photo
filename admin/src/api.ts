@@ -9,6 +9,13 @@ export type Settings = {
   uploadWindowMinutes: number;
   promptNotificationText: string;
   maxUploadBytes: number;
+  chatCommandEnabled: boolean;
+  chatCommandValue: string;
+  chatCommandTrigger: boolean;
+  chatCommandSendPush: boolean;
+  chatCommandPushText: string;
+  chatCommandEchoChat: boolean;
+  chatCommandEchoText: string;
 };
 
 export type AdminStats = {
@@ -39,6 +46,8 @@ export type FeedPhoto = {
 
 export type FeedItem = {
   isLate: boolean;
+  triggerSource?: string;
+  requestedByUser?: string;
   photo: FeedPhoto;
   user: { id: number; username: string };
 };
@@ -57,6 +66,8 @@ export type CalendarItem = {
   source: "auto" | "manual";
   triggeredAt?: string | null;
   uploadUntil?: string | null;
+  triggerSource?: string;
+  requestedByUser?: string;
 };
 
 const apiBase = import.meta.env.VITE_API_BASE || "/api";

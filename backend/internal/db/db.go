@@ -54,6 +54,13 @@ func ensureDefaultSettings(database *gorm.DB) error {
         UploadWindowMinutes:    10,
         PromptNotificationText: "Zeit fuer dein Daily Foto",
         MaxUploadBytes:         0,
+        ChatCommandEnabled:     false,
+        ChatCommandValue:       "-moment",
+        ChatCommandTrigger:     true,
+        ChatCommandSendPush:    true,
+        ChatCommandPushText:    "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
+        ChatCommandEchoChat:    true,
+        ChatCommandEchoText:    "Moment wurde von {user} angefordert.",
     }
     return database.Create(&s).Error
 }

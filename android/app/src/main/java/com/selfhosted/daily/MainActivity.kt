@@ -137,14 +137,32 @@ data class PromptResponse(
     val canUpload: Boolean,
     val triggered: String? = null,
     val hasPosted: Boolean = false,
-    val ownPhoto: PromptPhoto? = null
+    val ownPhoto: PromptPhoto? = null,
+    val triggerSource: String? = null,
+    val requestedByUser: String? = null
+)
+data class PromptMeta(
+    val day: String = "",
+    val triggeredAt: String? = null,
+    val uploadUntil: String? = null,
+    val triggerSource: String? = null,
+    val requestedByUser: String? = null
 )
 data class FeedItem(
     val isLate: Boolean = false,
     val photo: PromptPhoto,
-    val user: User
+    val user: User,
+    val triggerSource: String? = null,
+    val requestedByUser: String? = null
 )
-data class FeedResponse(val items: List<FeedItem>)
+data class FeedResponse(
+    val items: List<FeedItem>,
+    val day: String? = null,
+    val triggeredAt: String? = null,
+    val uploadUntil: String? = null,
+    val triggerSource: String? = null,
+    val requestedByUser: String? = null
+)
 data class DayListResponse(val items: List<String>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
 data class ChatItem(val id: Long, val body: String, val createdAt: String, val user: User)
@@ -272,7 +290,7 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
 
-    suspend fun feedByDay(day: String): List<FeedItem> = api.feed("Bearer ${token()}", day).items
+    suspend fun feedByDay(day: String): FeedResponse = api.feed("Bearer ${token()}", day)
     suspend fun feedDays(): List<String> = api.feedDays("Bearer ${token()}").items
 
     suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
@@ -497,6 +515,7 @@ data class UiState(
     val feed: List<FeedItem> = emptyList(),
     val feedDays: List<String> = emptyList(),
     val feedByDay: Map<String, List<FeedItem>> = emptyMap(),
+    val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
     val calendarDays: List<String> = emptyList(),
     val feedFocusDay: String? = null,
     val feedPaging: Boolean = false,
@@ -634,12 +653,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (newDays.isEmpty()) return
         state = state.copy(feedPaging = true)
         val newMap = state.feedByDay.toMutableMap()
+        val newPromptMap = state.promptMetaByDay.toMutableMap()
         for (day in newDays) {
             if (!newMap.containsKey(day)) {
-                newMap[day] = fetchDaySafe(day)
+                val fetched = fetchDaySafe(day)
+                newMap[day] = fetched.items
+                newPromptMap[day] = fetched.meta
             }
         }
-        state = state.copy(feedDays = state.feedDays + newDays, feedByDay = newMap, feedPaging = false)
+        state = state.copy(feedDays = state.feedDays + newDays, feedByDay = newMap, promptMetaByDay = newPromptMap, feedPaging = false)
     }
 
     suspend fun loadNewerFeedDays(count: Int = 3) {
@@ -653,12 +675,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (prependDays.isEmpty()) return
         state = state.copy(feedPaging = true)
         val newMap = state.feedByDay.toMutableMap()
+        val newPromptMap = state.promptMetaByDay.toMutableMap()
         for (day in prependDays) {
             if (!newMap.containsKey(day)) {
-                newMap[day] = fetchDaySafe(day)
+                val fetched = fetchDaySafe(day)
+                newMap[day] = fetched.items
+                newPromptMap[day] = fetched.meta
             }
         }
-        state = state.copy(feedDays = prependDays + state.feedDays, feedByDay = newMap, feedPaging = false)
+        state = state.copy(feedDays = prependDays + state.feedDays, feedByDay = newMap, promptMetaByDay = newPromptMap, feedPaging = false)
     }
 
     private suspend fun loadFeedWindow(anchorDay: String, around: Int) {
@@ -675,6 +700,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             state = state.copy(
                 feedDays = emptyList(),
                 feedByDay = emptyMap(),
+                promptMetaByDay = emptyMap(),
                 feed = emptyList(),
                 feedTodayLocked = state.prompt?.hasPosted == false,
                 feedFocusDay = state.prompt?.day
@@ -687,8 +713,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val end = minOf(allDays.lastIndex, idx + around)
         val days = allDays.subList(start, end + 1)
         val map = mutableMapOf<String, List<FeedItem>>()
+        val promptMap = mutableMapOf<String, PromptMeta>()
         for (day in days.distinct()) {
-            map[day] = fetchDaySafe(day)
+            val fetched = fetchDaySafe(day)
+            map[day] = fetched.items
+            promptMap[day] = fetched.meta
         }
         val today = state.prompt?.day ?: LocalDate.now().toString()
         val postedToday = state.prompt?.hasPosted == true
@@ -697,17 +726,34 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(
             feedDays = days.distinct(),
             feedByDay = map,
+            promptMetaByDay = promptMap,
             feed = map[today] ?: emptyList(),
             feedTodayLocked = todayLocked,
             feedFocusDay = target
         )
     }
 
-    private suspend fun fetchDaySafe(day: String): List<FeedItem> {
+    private data class DayFetchResult(val items: List<FeedItem>, val meta: PromptMeta)
+
+    private suspend fun fetchDaySafe(day: String): DayFetchResult {
         return try {
-            repo.feedByDay(day)
+            val res = repo.feedByDay(day)
+            DayFetchResult(
+                items = res.items,
+                meta = PromptMeta(
+                    day = res.day ?: day,
+                    triggeredAt = res.triggeredAt,
+                    uploadUntil = res.uploadUntil,
+                    triggerSource = res.triggerSource,
+                    requestedByUser = res.requestedByUser
+                )
+            )
         } catch (e: HttpException) {
-            if (e.code() == 403) emptyList() else throw e
+            if (e.code() == 403) {
+                DayFetchResult(items = emptyList(), meta = PromptMeta(day = day))
+            } else {
+                throw e
+            }
         }
     }
 
@@ -1103,6 +1149,7 @@ fun AppScreen(vm: MainVm) {
                     prompt = state.prompt,
                     days = state.feedDays,
                     byDay = state.feedByDay,
+                    promptMetaByDay = state.promptMetaByDay,
                     focusDay = state.feedFocusDay,
                     listState = feedListState,
                     todayLocked = state.feedTodayLocked,
@@ -1118,6 +1165,7 @@ fun AppScreen(vm: MainVm) {
 
                 AppTab.CALENDAR -> CalendarTab(
                     days = state.calendarDays,
+                    promptMetaByDay = state.promptMetaByDay,
                     selected = state.feedFocusDay ?: state.prompt?.day.orEmpty(),
                     onSelect = { day ->
                         scope.launch { vm.jumpToDay(day) }
@@ -1325,6 +1373,7 @@ fun FeedTab(
     prompt: PromptResponse?,
     days: List<String>,
     byDay: Map<String, List<FeedItem>>,
+    promptMetaByDay: Map<String, PromptMeta>,
     focusDay: String?,
     listState: LazyListState,
     todayLocked: Boolean,
@@ -1334,10 +1383,10 @@ fun FeedTab(
     onLoadNewer: () -> Unit,
     onOpenViewer: (List<String>) -> Unit
 ) {
-    val rows = remember(days, byDay) {
+    val rows = remember(days, byDay, promptMetaByDay) {
         buildList {
             for (day in days) {
-                add(FeedRow.DayHeader(day))
+                add(FeedRow.DayHeader(day, promptMetaByDay[day]))
                 byDay[day].orEmpty().forEach { add(FeedRow.PhotoItem(day, it)) }
             }
         }
@@ -1396,13 +1445,22 @@ fun FeedTab(
             when (row) {
                 is FeedRow.DayHeader -> {
                     Card {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(formatDayLabel(row.day), fontWeight = FontWeight.Bold)
-                            Text(row.day, color = Color.Gray)
+                        Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(formatDayLabel(row.day), fontWeight = FontWeight.Bold)
+                                Text(row.day, color = Color.Gray)
+                            }
+                            if (row.meta?.triggerSource == "chat_command" && !row.meta.requestedByUser.isNullOrBlank()) {
+                                Text(
+                                    "Community-Moment von ${row.meta.requestedByUser}",
+                                    color = Color(0xFF1F5FBF),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                     }
                 }
@@ -1453,12 +1511,12 @@ fun FeedTab(
 }
 
 private sealed class FeedRow {
-    data class DayHeader(val day: String) : FeedRow()
+    data class DayHeader(val day: String, val meta: PromptMeta?) : FeedRow()
     data class PhotoItem(val day: String, val item: FeedItem) : FeedRow()
 }
 
 @Composable
-fun CalendarTab(days: List<String>, selected: String, onSelect: (String) -> Unit) {
+fun CalendarTab(days: List<String>, promptMetaByDay: Map<String, PromptMeta>, selected: String, onSelect: (String) -> Unit) {
     if (days.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("Keine Tage mit Bildern vorhanden")
@@ -1473,10 +1531,14 @@ fun CalendarTab(days: List<String>, selected: String, onSelect: (String) -> Unit
     ) {
         items(days) { day ->
             val selectedDay = day == selected
+            val meta = promptMetaByDay[day]
             Card(modifier = Modifier.clickable { onSelect(day) }) {
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(formatDayLabel(day), fontWeight = if (selectedDay) FontWeight.Bold else FontWeight.Normal)
                     Text(day, color = Color.Gray)
+                    if (meta?.triggerSource == "chat_command" && !meta.requestedByUser.isNullOrBlank()) {
+                        Text("Moment von ${meta.requestedByUser}", color = Color(0xFF1F5FBF))
+                    }
                     if (selectedDay) {
                         Text("Ausgewaehlt", color = Color(0xFF1F5FBF))
                     }
