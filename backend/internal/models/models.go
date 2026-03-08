@@ -8,6 +8,7 @@ type User struct {
     PasswordHash string    `gorm:"not null" json:"-"`
     IsAdmin      bool      `gorm:"default:false" json:"isAdmin"`
     FavoriteColor string   `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
+    ChatPushEnabled bool   `gorm:"default:false" json:"chatPushEnabled"`
     CreatedAt    time.Time `json:"createdAt"`
 }
 

@@ -133,9 +133,16 @@ import java.time.format.DateTimeFormatter
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 enum class AuthMode { LOGIN, REGISTER }
 
-data class User(val id: Long, val username: String, val isAdmin: Boolean, val favoriteColor: String = "#1F5FBF")
+data class User(
+    val id: Long,
+    val username: String,
+    val isAdmin: Boolean,
+    val favoriteColor: String = "#1F5FBF",
+    val chatPushEnabled: Boolean = false
+)
 data class MeResponse(val user: User)
 data class ProfileUpdateRequest(val username: String, val favoriteColor: String)
+data class PreferencesUpdateRequest(val chatPushEnabled: Boolean)
 data class AuthResponse(val token: String, val user: User)
 data class LoginRequest(val username: String, val password: String)
 data class InviteCodeRequest(val inviteCode: String)
@@ -266,6 +273,12 @@ interface Api {
     suspend fun updateProfile(
         @Header("Authorization") token: String,
         @Body body: ProfileUpdateRequest
+    ): MeResponse
+
+    @PUT("me/preferences")
+    suspend fun updatePreferences(
+        @Header("Authorization") token: String,
+        @Body body: PreferencesUpdateRequest
     ): MeResponse
 
     @GET("prompt/current")
@@ -455,6 +468,9 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun rollMyInviteCode(): String = api.rollInviteCode("Bearer ${token()}").inviteCode
     suspend fun updateProfile(username: String, favoriteColor: String): User =
         api.updateProfile("Bearer ${token()}", ProfileUpdateRequest(username, favoriteColor)).user
+
+    suspend fun updateChatPushEnabled(enabled: Boolean): User =
+        api.updatePreferences("Bearer ${token()}", PreferencesUpdateRequest(enabled)).user
 
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
     suspend fun promptRules(): PromptRulesResponse = api.promptRules("Bearer ${token()}")
@@ -1244,6 +1260,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure { state = state.copy(loading = false, message = apiError(it, "Profil speichern fehlgeschlagen")) }
     }
 
+    suspend fun setChatPushEnabled(enabled: Boolean) {
+        state = state.copy(loading = true)
+        runCatching { repo.updateChatPushEnabled(enabled) }
+            .onSuccess { user ->
+                state = state.copy(user = user, loading = false, message = "Chat-Push aktualisiert")
+            }
+            .onFailure { state = state.copy(loading = false, message = apiError(it, "Chat-Push speichern fehlgeschlagen")) }
+    }
+
     private fun latestOtherChatMillis(items: List<ChatItem>, meId: Long?): Long {
         if (meId == null) return 0L
         var latest = 0L
@@ -1869,10 +1894,12 @@ fun AppScreen(vm: MainVm) {
                     serverConnected = state.serverConnected,
                     uploadQuality = state.uploadQuality,
                     autoUpdateEnabled = state.autoUpdateEnabled,
+                    chatPushEnabled = state.user?.chatPushEnabled ?: false,
                     onDarkModeChange = { vm.setDarkMode(it) },
                     onOledModeChange = { vm.setOledMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
+                    onChatPushEnabledChange = { scope.launch { vm.setChatPushEnabled(it) } },
                     onEditableUsernameChange = { profileUsername = it },
                     onEditableColorChange = { profileColor = it },
                     onSaveProfile = {
@@ -2492,10 +2519,12 @@ fun ProfileTab(
     serverConnected: Boolean,
     uploadQuality: Int,
     autoUpdateEnabled: Boolean,
+    chatPushEnabled: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
     onOledModeChange: (Boolean) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
+    onChatPushEnabledChange: (Boolean) -> Unit,
     onEditableUsernameChange: (String) -> Unit,
     onEditableColorChange: (String) -> Unit,
     onSaveProfile: () -> Unit,
@@ -2554,6 +2583,14 @@ fun ProfileTab(
             ) {
                 Text("Auto-Update-Suche (10 Min)")
                 Switch(checked = autoUpdateEnabled, onCheckedChange = onAutoUpdateEnabledChange)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Chat Push bei neuen Nachrichten")
+                Switch(checked = chatPushEnabled, onCheckedChange = onChatPushEnabledChange)
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text("Invite-Code", style = MaterialTheme.typography.titleMedium)

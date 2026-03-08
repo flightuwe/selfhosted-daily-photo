@@ -67,6 +67,7 @@ func (s *Server) Router() *gin.Engine {
             protected.GET("/me/invite", s.handleMyInvite)
             protected.POST("/me/invite/roll", s.handleRollMyInvite)
             protected.PUT("/me/profile", s.handleUpdateProfile)
+            protected.PUT("/me/preferences", s.handleUpdatePreferences)
             protected.PUT("/me/password", s.handleChangePassword)
             protected.GET("/me/photos", s.handleMyPhotos)
             protected.POST("/devices", s.handleDevice)
@@ -344,6 +345,28 @@ func (s *Server) handleUpdateProfile(c *gin.Context) {
         return
     }
 
+    var updated models.User
+    if err := s.DB.First(&updated, user.ID).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"user": updated})
+}
+
+func (s *Server) handleUpdatePreferences(c *gin.Context) {
+    user, _ := userFromContext(c)
+    var req struct {
+        ChatPushEnabled bool `json:"chatPushEnabled"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+    if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).
+        Update("chat_push_enabled", req.ChatPushEnabled).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+        return
+    }
     var updated models.User
     if err := s.DB.First(&updated, user.ID).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -1340,6 +1363,13 @@ func (s *Server) handleChatCreate(c *gin.Context) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
         return
     }
+    pushText := fmt.Sprintf("Neue Chat-Nachricht von %s", user.Username)
+    tokens := s.chatNotificationTokens(user.ID)
+    if len(tokens) > 0 {
+        sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, pushText)
+        s.recordPushResult(sendResult, sendErr)
+        s.removeInvalidTokens(sendResult.InvalidTokens)
+    }
     c.JSON(http.StatusCreated, gin.H{
         "id":        msg.ID,
         "body":      msg.Body,
@@ -2160,6 +2190,20 @@ func (s *Server) ensurePromptForPostingDay(day string) (models.DailyPrompt, erro
 func (s *Server) userDeviceTokens(userID uint) []string {
     var rows []models.DeviceToken
     _ = s.DB.Where("user_id = ?", userID).Find(&rows).Error
+    tokens := make([]string, 0, len(rows))
+    for _, t := range rows {
+        tokens = append(tokens, t.Token)
+    }
+    return tokens
+}
+
+func (s *Server) chatNotificationTokens(senderID uint) []string {
+    var rows []models.DeviceToken
+    _ = s.DB.Table("device_tokens").
+        Select("device_tokens.token").
+        Joins("JOIN users ON users.id = device_tokens.user_id").
+        Where("users.id <> ? AND users.chat_push_enabled = ?", senderID, true).
+        Find(&rows).Error
     tokens := make([]string, 0, len(rows))
     for _, t := range rows {
         tokens = append(tokens, t.Token)
