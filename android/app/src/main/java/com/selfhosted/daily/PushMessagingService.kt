@@ -24,6 +24,16 @@ class PushMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        val prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
+        val masterEnabled = prefs.getBoolean("notifications_master_enabled", true)
+        if (!masterEnabled) return
+
+        val type = message.data["type"]?.trim()?.lowercase().orEmpty()
+        val chatEnabled = prefs.getBoolean("chat_push_enabled_local", false)
+        val feedEnabled = prefs.getBoolean("feed_post_push_enabled", false)
+        if ((type == "chat" || type == "chat_message") && !chatEnabled) return
+        if ((type == "feed_post" || type == "post" || type == "extra_post") && !feedEnabled) return
+
         ensurePromptChannel(this)
         val title = message.notification?.title ?: "Daily Moment"
         val body = message.notification?.body ?: message.data["body"] ?: "Zeit fuer deinen taeglichen Moment."

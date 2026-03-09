@@ -822,6 +822,8 @@ export function App() {
               <thead>
                 <tr>
                   <th>User</th>
+                  <th>Eingeladen von</th>
+                  <th>Registriert am</th>
                   <th>Rolle</th>
                   <th>Fotos</th>
                   <th>Geräte</th>
@@ -833,6 +835,8 @@ export function App() {
                 {users.map((u) => (
                   <tr key={u.id}>
                     <td>{u.username}</td>
+                    <td>{u.invitedBy || "Direkt angelegt"}</td>
+                    <td>{formatDateTime(u.createdAt)}</td>
                     <td>
                       <select value={u.isAdmin ? "admin" : "user"} onChange={(e) => onToggleAdmin(u, e.target.value === "admin")}>
                         <option value="user">User</option>
@@ -840,7 +844,16 @@ export function App() {
                       </select>
                     </td>
                     <td>{u.photoCount}</td>
-                    <td>{u.deviceCount}</td>
+                    <td>
+                      <div className="stack">
+                        <strong>{u.deviceCount}</strong>
+                        {u.deviceNames && u.deviceNames.length > 0 ? (
+                          <span className="small">{u.deviceNames.join(", ")}</span>
+                        ) : (
+                          <span className="small">Keine Geraetenamen gemeldet</span>
+                        )}
+                      </div>
+                    </td>
                     <td>
                       <div className="row">
                         <input

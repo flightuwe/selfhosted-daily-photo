@@ -28,6 +28,7 @@ type DeviceToken struct {
     ID        uint      `gorm:"primaryKey"`
     UserID    uint      `gorm:"index;not null"`
     Token     string    `gorm:"uniqueIndex;size:255;not null"`
+    DeviceName string   `gorm:"size:120"`
     CreatedAt time.Time
 }
 

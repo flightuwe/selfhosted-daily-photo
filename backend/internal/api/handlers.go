@@ -404,7 +404,8 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 }
 
 type deviceRequest struct {
-    Token string `json:"token" binding:"required,max=255"`
+    Token      string `json:"token" binding:"required,max=255"`
+    DeviceName string `json:"deviceName" binding:"max=120"`
 }
 
 func (s *Server) handleDevice(c *gin.Context) {
@@ -415,7 +416,11 @@ func (s *Server) handleDevice(c *gin.Context) {
         return
     }
 
-    d := models.DeviceToken{Token: req.Token, UserID: user.ID}
+    d := models.DeviceToken{
+        Token:      req.Token,
+        UserID:     user.ID,
+        DeviceName: strings.TrimSpace(req.DeviceName),
+    }
     _ = s.DB.Where("token = ?", req.Token).Assign(d).FirstOrCreate(&d).Error
     c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -1054,7 +1059,7 @@ func (s *Server) handleAdminCreateUser(c *gin.Context) {
         return
     }
 
-    c.JSON(http.StatusCreated, toAdminUser(user, 0, 0))
+    c.JSON(http.StatusCreated, toAdminUser(user, 0, 0, nil, 0, "", nil))
 }
 
 func (s *Server) handleAdminListUsers(c *gin.Context) {
@@ -1064,13 +1069,45 @@ func (s *Server) handleAdminListUsers(c *gin.Context) {
         return
     }
 
+    type inviteUsageRow struct {
+        UsedByID      uint
+        InvitedByID   uint
+        InvitedByName string
+        InvitedAt     *time.Time
+    }
+    inviteByUserID := make(map[uint]inviteUsageRow, len(users))
+    inviteRows := make([]inviteUsageRow, 0)
+    _ = s.DB.Table("invite_codes AS ic").
+        Select("ic.used_by_id AS used_by_id, ic.user_id AS invited_by_id, inviter.username AS invited_by_name, ic.used_at AS invited_at").
+        Joins("JOIN users AS inviter ON inviter.id = ic.user_id").
+        Where("ic.used_by_id IS NOT NULL").
+        Find(&inviteRows).Error
+    for _, row := range inviteRows {
+        inviteByUserID[row.UsedByID] = row
+    }
+
     out := make([]gin.H, 0, len(users))
     for _, u := range users {
         var photoCount int64
-        var tokenCount int64
+        var tokenRows []models.DeviceToken
         _ = s.DB.Model(&models.Photo{}).Where("user_id = ?", u.ID).Count(&photoCount).Error
-        _ = s.DB.Model(&models.DeviceToken{}).Where("user_id = ?", u.ID).Count(&tokenCount).Error
-        out = append(out, toAdminUser(u, photoCount, tokenCount))
+        _ = s.DB.Where("user_id = ?", u.ID).Find(&tokenRows).Error
+        tokenCount := int64(len(tokenRows))
+        deviceNames := make([]string, 0, len(tokenRows))
+        seenNames := make(map[string]struct{}, len(tokenRows))
+        for _, row := range tokenRows {
+            name := strings.TrimSpace(row.DeviceName)
+            if name == "" {
+                continue
+            }
+            if _, exists := seenNames[name]; exists {
+                continue
+            }
+            seenNames[name] = struct{}{}
+            deviceNames = append(deviceNames, name)
+        }
+        invite := inviteByUserID[u.ID]
+        out = append(out, toAdminUser(u, photoCount, tokenCount, deviceNames, invite.InvitedByID, invite.InvitedByName, invite.InvitedAt))
     }
 
     c.JSON(http.StatusOK, gin.H{"items": out})
@@ -1125,7 +1162,7 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
     _ = s.DB.Model(&models.Photo{}).Where("user_id = ?", user.ID).Count(&photoCount).Error
     _ = s.DB.Model(&models.DeviceToken{}).Where("user_id = ?", user.ID).Count(&tokenCount).Error
 
-    c.JSON(http.StatusOK, toAdminUser(user, photoCount, tokenCount))
+    c.JSON(http.StatusOK, toAdminUser(user, photoCount, tokenCount, nil, 0, "", nil))
 }
 
 func (s *Server) handleAdminDeleteUser(c *gin.Context) {
@@ -2046,15 +2083,24 @@ func parseUintParam(v string) (uint, error) {
     return uint(n), nil
 }
 
-func toAdminUser(u models.User, photoCount, tokenCount int64) gin.H {
-    return gin.H{
+func toAdminUser(u models.User, photoCount, tokenCount int64, deviceNames []string, invitedByID uint, invitedBy string, invitedAt *time.Time) gin.H {
+    out := gin.H{
         "id":          u.ID,
         "username":    u.Username,
         "isAdmin":     u.IsAdmin,
         "createdAt":   u.CreatedAt,
         "photoCount":  photoCount,
         "deviceCount": tokenCount,
+        "deviceNames": deviceNames,
     }
+    if invitedByID != 0 {
+        out["invitedById"] = invitedByID
+        out["invitedBy"] = invitedBy
+    }
+    if invitedAt != nil {
+        out["invitedAt"] = invitedAt
+    }
+    return out
 }
 
 func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {

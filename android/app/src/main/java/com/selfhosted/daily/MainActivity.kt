@@ -59,6 +59,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -76,6 +77,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -157,7 +159,7 @@ data class InviteRegisterRequest(val inviteCode: String, val username: String, v
 data class InviteOwner(val id: Long, val username: String, val favoriteColor: String = "#1F5FBF")
 data class InvitePreviewResponse(val inviteCode: String, val inviter: InviteOwner)
 data class InviteCodeResponse(val inviteCode: String)
-data class DeviceTokenRequest(val token: String)
+data class DeviceTokenRequest(val token: String, val deviceName: String = "")
 data class PasswordChangeRequest(val currentPassword: String, val newPassword: String)
 data class ChatMessageRequest(val body: String)
 data class PromptPhoto(
@@ -442,6 +444,24 @@ class AppRepo(private val api: Api, private val context: Context) {
         UpdateCheckScheduler.syncFromPrefs(context)
     }
 
+    fun notificationMasterEnabled(): Boolean = prefs.getBoolean("notifications_master_enabled", true)
+
+    fun setNotificationMasterEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("notifications_master_enabled", enabled).apply()
+    }
+
+    fun feedPostPushEnabled(): Boolean = prefs.getBoolean("feed_post_push_enabled", false)
+
+    fun setFeedPostPushEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("feed_post_push_enabled", enabled).apply()
+    }
+
+    fun chatPushLocalEnabled(): Boolean = prefs.getBoolean("chat_push_enabled_local", false)
+
+    fun setChatPushLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("chat_push_enabled_local", enabled).apply()
+    }
+
     fun lastSeenOtherChatMillis(): Long = prefs.getLong("chat_seen_other_ms", 0L)
 
     fun setLastSeenOtherChatMillis(value: Long) {
@@ -525,9 +545,21 @@ class AppRepo(private val api: Api, private val context: Context) {
         val recentSync = (System.currentTimeMillis() - lastSyncedDeviceTokenAt()) < 6 * 60 * 60 * 1000L
         if (!force && sameToken && recentSync) return
 
-        api.registerDevice("Bearer ${token()}", DeviceTokenRequest(deviceToken))
+        api.registerDevice("Bearer ${token()}", DeviceTokenRequest(deviceToken, currentDeviceName()))
         setLastSyncedDeviceToken(deviceToken)
         prefs.edit().remove("pending_fcm_token").apply()
+    }
+
+    private fun currentDeviceName(): String {
+        val brand = Build.MANUFACTURER?.trim().orEmpty()
+        val model = Build.MODEL?.trim().orEmpty()
+        val version = Build.VERSION.RELEASE?.trim().orEmpty()
+        val name = listOf(brand, model)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(" ")
+        if (name.isBlank()) return "Android-Geraet"
+        return if (version.isNotBlank()) "$name (Android $version)" else name
     }
 
     suspend fun upload(uri: Uri, isPrompt: Boolean) {
@@ -764,7 +796,9 @@ data class UiState(
     val darkMode: Boolean = false,
     val oledMode: Boolean = false,
     val uploadQuality: Int = 82,
-    val autoUpdateEnabled: Boolean = false
+    val autoUpdateEnabled: Boolean = false,
+    val notificationMasterEnabled: Boolean = true,
+    val feedPostPushEnabled: Boolean = false
 )
 
 data class DashboardData(
@@ -786,7 +820,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             darkMode = repo.isDarkMode(),
             oledMode = repo.isOledMode(),
             uploadQuality = repo.uploadQuality(),
-            autoUpdateEnabled = repo.autoUpdateEnabled()
+            autoUpdateEnabled = repo.autoUpdateEnabled(),
+            notificationMasterEnabled = repo.notificationMasterEnabled(),
+            feedPostPushEnabled = repo.feedPostPushEnabled()
         )
     )
         private set
@@ -812,6 +848,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             showChangelogDialog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME),
             changelogLines = changelogLines,
             uploadQueue = repo.uploadQueue(),
+            autoUpdateEnabled = repo.autoUpdateEnabled(),
+            notificationMasterEnabled = repo.notificationMasterEnabled(),
+            feedPostPushEnabled = repo.feedPostPushEnabled(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
     }
@@ -875,6 +914,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             oledMode = state.oledMode,
             uploadQuality = state.uploadQuality,
             autoUpdateEnabled = repo.autoUpdateEnabled(),
+            notificationMasterEnabled = repo.notificationMasterEnabled(),
+            feedPostPushEnabled = repo.feedPostPushEnabled(),
             invitePreview = null
         )
     }
@@ -936,6 +977,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val marker = "${prompt.day}:${prompt.triggered ?: ""}"
             val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && !prompt.hasPosted && marker != repo.seenPromptMarker()
             if (shouldPopup) repo.setSeenPromptMarker(marker)
+            repo.setChatPushLocalEnabled(me.chatPushEnabled)
+            val notificationMaster = repo.notificationMasterEnabled()
+            val feedPostPushEnabled = repo.feedPostPushEnabled()
+            val autoUpdateEnabled = repo.autoUpdateEnabled()
 
             state = state.copy(
                 user = me,
@@ -950,6 +995,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 calendarDays = calendarDays,
                 dayPhotoCounts = dayPhotoCounts,
                 uploadQueue = repo.uploadQueue(),
+                autoUpdateEnabled = autoUpdateEnabled,
+                feedPostPushEnabled = feedPostPushEnabled,
+                notificationMasterEnabled = notificationMaster && autoUpdateEnabled && feedPostPushEnabled && me.chatPushEnabled,
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
@@ -1290,7 +1338,28 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun setAutoUpdateEnabled(enabled: Boolean) {
         repo.setAutoUpdateEnabled(enabled)
-        state = state.copy(autoUpdateEnabled = repo.autoUpdateEnabled())
+        val auto = repo.autoUpdateEnabled()
+        val chat = state.user?.chatPushEnabled ?: repo.chatPushLocalEnabled()
+        val feed = repo.feedPostPushEnabled()
+        val master = auto && chat && feed
+        repo.setNotificationMasterEnabled(master)
+        state = state.copy(
+            autoUpdateEnabled = auto,
+            notificationMasterEnabled = master
+        )
+    }
+
+    fun setFeedPostPushEnabled(enabled: Boolean) {
+        repo.setFeedPostPushEnabled(enabled)
+        val auto = repo.autoUpdateEnabled()
+        val chat = state.user?.chatPushEnabled ?: repo.chatPushLocalEnabled()
+        val feed = repo.feedPostPushEnabled()
+        val master = auto && chat && feed
+        repo.setNotificationMasterEnabled(master)
+        state = state.copy(
+            feedPostPushEnabled = feed,
+            notificationMasterEnabled = master
+        )
     }
 
     suspend fun updateProfile(username: String, favoriteColor: String) {
@@ -1307,9 +1376,56 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(loading = true)
         runCatching { repo.updateChatPushEnabled(enabled) }
             .onSuccess { user ->
-                state = state.copy(user = user, loading = false, message = "Chat-Push aktualisiert")
+                repo.setChatPushLocalEnabled(user.chatPushEnabled)
+                val auto = repo.autoUpdateEnabled()
+                val feed = repo.feedPostPushEnabled()
+                val master = auto && user.chatPushEnabled && feed
+                repo.setNotificationMasterEnabled(master)
+                state = state.copy(
+                    user = user,
+                    loading = false,
+                    notificationMasterEnabled = master,
+                    message = "Chat-Push aktualisiert"
+                )
             }
             .onFailure { state = state.copy(loading = false, message = apiError(it, "Chat-Push speichern fehlgeschlagen")) }
+    }
+
+    suspend fun setNotificationMasterEnabled(enabled: Boolean) {
+        state = state.copy(loading = true)
+        repo.setNotificationMasterEnabled(enabled)
+        repo.setAutoUpdateEnabled(enabled)
+        repo.setFeedPostPushEnabled(enabled)
+        var nextUser = state.user
+        if (state.user != null) {
+            runCatching { repo.updateChatPushEnabled(enabled) }
+                .onSuccess {
+                    nextUser = it
+                    repo.setChatPushLocalEnabled(it.chatPushEnabled)
+                }
+                .onFailure {
+                    state = state.copy(message = apiError(it, "Master-Benachrichtigung teilweise fehlgeschlagen"))
+                }
+        } else {
+            repo.setChatPushLocalEnabled(enabled)
+        }
+        val auto = repo.autoUpdateEnabled()
+        val feed = repo.feedPostPushEnabled()
+        val chat = nextUser?.chatPushEnabled ?: repo.chatPushLocalEnabled()
+        val masterEffective = auto && feed && chat
+        repo.setNotificationMasterEnabled(masterEffective)
+        state = state.copy(
+            user = nextUser,
+            autoUpdateEnabled = auto,
+            feedPostPushEnabled = feed,
+            notificationMasterEnabled = masterEffective,
+            loading = false,
+            message = if (masterEffective == enabled) {
+                if (enabled) "Alle Benachrichtigungen aktiviert" else "Alle Benachrichtigungen deaktiviert"
+            } else {
+                "Benachrichtigungen teilweise aktualisiert"
+            }
+        )
     }
 
     private fun latestOtherChatMillis(items: List<ChatItem>, meId: Long?): Long {
@@ -1955,11 +2071,15 @@ fun AppScreen(vm: MainVm) {
                     serverConnected = state.serverConnected,
                     uploadQuality = state.uploadQuality,
                     autoUpdateEnabled = state.autoUpdateEnabled,
+                    notificationMasterEnabled = state.notificationMasterEnabled,
                     chatPushEnabled = state.user?.chatPushEnabled ?: false,
+                    feedPostPushEnabled = state.feedPostPushEnabled,
                     onThemeModeChange = { vm.setThemeMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onChatPushEnabledChange = { scope.launch { vm.setChatPushEnabled(it) } },
+                    onNotificationMasterEnabledChange = { scope.launch { vm.setNotificationMasterEnabled(it) } },
+                    onFeedPostPushEnabledChange = { vm.setFeedPostPushEnabled(it) },
                     onEditableUsernameChange = { profileUsername = it },
                     onEditableColorChange = { profileColor = it },
                     onSaveProfile = {
@@ -2200,7 +2320,11 @@ fun CameraTab(
             }
 
             if (backPreviewUri == null) {
-                Button(onClick = onCapturePrompt, modifier = Modifier.fillMaxWidth()) { Text("Tagesmoment aufnehmen") }
+                DailyMomentActionButton(
+                    onClick = onCapturePrompt,
+                    blink = canUpload,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 SpecialMomentActionButton(
                     text = specialLabel,
                     onClick = onRequestSpecialMoment,
@@ -2280,6 +2404,38 @@ fun CameraTab(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DailyMomentActionButton(
+    onClick: () -> Unit,
+    blink: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "daily-moment-blink")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1700, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "daily-moment-blink-phase"
+    )
+    val normal = MaterialTheme.colorScheme.primary
+    val redA = Color(0xFFD32F2F)
+    val redB = Color(0xFF8E1B1B)
+    val pulseColor = lerp(redA, redB, phase)
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (blink) pulseColor else normal,
+            contentColor = Color.White
+        )
+    ) {
+        Text("Daily-Moment posten")
     }
 }
 
@@ -2456,20 +2612,18 @@ fun FeedTab(
         }) { row ->
             when (row) {
                 is FeedRow.DayHeader -> {
-                    Card {
+                    val headerColor = weekdayRainbowColor(row.day)
+                    Card(colors = CardDefaults.cardColors(containerColor = headerColor)) {
                         Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(formatDayWithWeekday(row.day), fontWeight = FontWeight.Bold)
-                            }
-                            momentReasonLine(row.meta?.triggerSource, row.meta?.requestedByUser)?.let { reason ->
                                 Text(
-                                    reason,
-                                    color = Color(0xFF1F5FBF),
-                                    fontWeight = FontWeight.SemiBold
+                                    formatDayWithWeekday(row.day),
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.Black
                                 )
                             }
                         }
@@ -2485,13 +2639,14 @@ fun FeedTab(
                                 fontWeight = FontWeight.SemiBold,
                                 color = parseUserColor(item.user.favoriteColor)
                             )
-                            val timingLabel = postTimingLine(item)
-                            if (timingLabel != null) {
-                                Text(timingLabel, color = Color(0xFFB00020), fontWeight = FontWeight.SemiBold)
+                            if (item.isEarly || item.isLate) {
+                                Text(
+                                    "🕒 ${formatMomentTime(item.photo.createdAt)}",
+                                    color = secondaryTextColor,
+                                    fontWeight = FontWeight.SemiBold
+                                )
                             } else if (item.photo.promptOnly) {
-                                momentReasonLine(item.triggerSource, item.requestedByUser)?.let { reason ->
-                                    Text(reason, color = Color(0xFF1F5FBF))
-                                }
+                                Text("⏳ Daily-Moment", color = Color(0xFF1F5FBF))
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                 urls.forEach { url ->
@@ -2734,11 +2889,15 @@ fun ProfileTab(
     serverConnected: Boolean,
     uploadQuality: Int,
     autoUpdateEnabled: Boolean,
+    notificationMasterEnabled: Boolean,
     chatPushEnabled: Boolean,
+    feedPostPushEnabled: Boolean,
     onThemeModeChange: (Int) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onChatPushEnabledChange: (Boolean) -> Unit,
+    onNotificationMasterEnabledChange: (Boolean) -> Unit,
+    onFeedPostPushEnabledChange: (Boolean) -> Unit,
     onEditableUsernameChange: (String) -> Unit,
     onEditableColorChange: (String) -> Unit,
     onSaveProfile: () -> Unit,
@@ -2778,8 +2937,8 @@ fun ProfileTab(
 
         item {
             CollapsibleSection(
-                title = "Anzeige & Benachrichtigungen",
-                subtitle = "Design, Chat-Push, Auto-Update",
+                title = "Anzeige",
+                subtitle = "Design und Theme",
                 initiallyExpanded = true
             ) {
                 Text("Darstellung: ${themeModeLabel(themeSliderValue.toInt())}")
@@ -2804,6 +2963,63 @@ fun ProfileTab(
                     Text("Dark", color = if (themeSliderValue in 0.5f..1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("OLED", color = if (themeSliderValue > 1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+            }
+        }
+
+        item {
+            val transition = rememberInfiniteTransition(label = "notif-master-rainbow")
+            val hueShift by transition.animateFloat(
+                initialValue = 0f,
+                targetValue = 360f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 18000, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "notif-master-hue"
+            )
+            val rainbowBrush = Brush.horizontalGradient(
+                listOf(
+                    rainbowColor(hueShift + 0f),
+                    rainbowColor(hueShift + 70f),
+                    rainbowColor(hueShift + 140f),
+                    rainbowColor(hueShift + 210f)
+                )
+            )
+            CollapsibleSection(
+                title = "Benachrichtigungen",
+                subtitle = "Master + Update, Chat und Feed",
+                initiallyExpanded = true
+            ) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(rainbowBrush, shape = MaterialTheme.shapes.medium),
+                    colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Alle Benachrichtigungen",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Switch(
+                            checked = notificationMasterEnabled,
+                            onCheckedChange = onNotificationMasterEnabledChange,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0x66000000),
+                                uncheckedThumbColor = Color(0xFFE0E0E0),
+                                uncheckedTrackColor = Color(0x55808080)
+                            )
+                        )
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -2819,6 +3035,14 @@ fun ProfileTab(
                 ) {
                     Text("Chat Push bei neuen Nachrichten")
                     Switch(checked = chatPushEnabled, onCheckedChange = onChatPushEnabledChange)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Push bei Posts anderer Nutzer")
+                    Switch(checked = feedPostPushEnabled, onCheckedChange = onFeedPostPushEnabledChange)
                 }
             }
         }
@@ -3122,27 +3346,6 @@ private fun momentReasonLine(triggerSource: String?, requestedByUser: String?): 
     } else {
         null
     }
-}
-
-private fun postTimingLine(item: FeedItem): String? {
-    if (item.isEarly) {
-        val emoji = chooseTimingEmoji(item.photo.id, true)
-        return "$emoji Frueher gepostet"
-    }
-    if (item.isLate) {
-        val emoji = chooseTimingEmoji(item.photo.id, false)
-        return "$emoji Spaeter gepostet"
-    }
-    return null
-}
-
-private fun chooseTimingEmoji(photoId: Long, early: Boolean): String {
-    val earlySet = listOf("🌅", "🐣", "🚀", "✨", "⏰")
-    val lateSet = listOf("🌙", "🦉", "🐢", "⌛", "😅")
-    val pool = if (early) earlySet else lateSet
-    val seed = (photoId xor (if (early) 0x5F3759DFL else 0x27D4EB2FL)).toInt()
-    val idx = ((seed and Int.MAX_VALUE) % pool.size)
-    return pool[idx]
 }
 
 private fun queueStatusLabel(status: String): String {

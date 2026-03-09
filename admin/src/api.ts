@@ -33,8 +33,12 @@ export type AdminUser = {
   username: string;
   isAdmin: boolean;
   createdAt: string;
+  invitedById?: number;
+  invitedBy?: string;
+  invitedAt?: string;
   photoCount: number;
   deviceCount: number;
+  deviceNames?: string[];
 };
 
 export type FeedPhoto = {
