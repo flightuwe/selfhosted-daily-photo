@@ -86,8 +86,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
@@ -2112,6 +2115,7 @@ fun CameraTab(
     val hasPosted = prompt?.hasPosted == true
     val canUpload = prompt?.canUpload == true
     val canSpecial = specialMomentStatus?.canRequest == true
+    val dayLabel = formatDayLabel(prompt?.day ?: LocalDate.now().toString())
     val specialLabel = if (canSpecial) {
         "Sondermoment anfordern"
     } else {
@@ -2123,8 +2127,8 @@ fun CameraTab(
         modifier = Modifier.verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("Heutiger Moment", style = MaterialTheme.typography.titleLarge)
-        Text(prompt?.day ?: "-")
+        RainbowDailyTitle()
+        Text(dayLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (!prompt?.triggered.isNullOrBlank()) {
             Text("Der heutige Moment war um ${formatMomentTime(prompt?.triggered)}.")
         } else {
@@ -2251,6 +2255,37 @@ fun CameraTab(
             }
         }
     }
+}
+
+@Composable
+private fun RainbowDailyTitle() {
+    val transition = rememberInfiniteTransition(label = "daily-title-rainbow")
+    val hueShift by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 14000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "daily-title-hue"
+    )
+    val brush = Brush.linearGradient(
+        colors = listOf(
+            rainbowColor(hueShift + 0f),
+            rainbowColor(hueShift + 90f),
+            rainbowColor(hueShift + 180f),
+            rainbowColor(hueShift + 270f)
+        )
+    )
+    Text(
+        text = buildAnnotatedString {
+            withStyle(SpanStyle(brush = brush)) {
+                append("Daily")
+            }
+        },
+        style = MaterialTheme.typography.headlineMedium,
+        fontWeight = FontWeight.Bold
+    )
 }
 
 @Composable
