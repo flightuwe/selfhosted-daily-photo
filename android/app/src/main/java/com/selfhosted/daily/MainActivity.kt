@@ -224,6 +224,8 @@ data class FeedResponse(
     val monthRecap: MonthlyRecap? = null
 )
 data class DayListResponse(val items: List<String>)
+data class DayStatItem(val day: String, val count: Long)
+data class DayStatsResponse(val items: List<DayStatItem>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
 data class ChatItem(val id: Long, val body: String, val createdAt: String, val user: User)
 data class ChatResponse(val items: List<ChatItem>)
@@ -305,6 +307,9 @@ interface Api {
 
     @GET("feed/days")
     suspend fun feedDays(@Header("Authorization") token: String): DayListResponse
+
+    @GET("feed/day-stats")
+    suspend fun feedDayStats(@Header("Authorization") token: String): DayStatsResponse
 
     @GET("me/photos")
     suspend fun myPhotos(@Header("Authorization") token: String): MyPhotoResponse
@@ -486,6 +491,7 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     suspend fun feedByDay(day: String): FeedResponse = api.feed("Bearer ${token()}", day)
     suspend fun feedDays(): List<String> = api.feedDays("Bearer ${token()}").items
+    suspend fun feedDayStats(): List<DayStatItem> = api.feedDayStats("Bearer ${token()}").items
 
     suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
 
@@ -729,6 +735,7 @@ data class UiState(
     val monthRecapByDay: Map<String, MonthlyRecap> = emptyMap(),
     val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
     val calendarDays: List<String> = emptyList(),
+    val dayPhotoCounts: Map<String, Int> = emptyMap(),
     val feedFocusDay: String? = null,
     val feedPaging: Boolean = false,
     val feedTodayLocked: Boolean = false,
@@ -767,7 +774,8 @@ data class DashboardData(
     val special: SpecialMomentStatus,
     val photos: List<PromptPhoto>,
     val chat: List<ChatItem>,
-    val feedDays: List<String>
+    val feedDays: List<String>,
+    val dayStats: List<DayStatItem>
 )
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
@@ -904,7 +912,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photos = repo.myPhotos()
             val chat = repo.listChat()
             val feedDays = repo.feedDays()
-            DashboardData(me, inviteCode, prompt, rules, special, photos, chat, feedDays)
+            val dayStats = runCatching { repo.feedDayStats() }.getOrDefault(emptyList())
+            DashboardData(me, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats)
         }.onSuccess { payload ->
             val me = payload.me
             val inviteCode = payload.inviteCode
@@ -914,6 +923,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photos = payload.photos
             val chat = payload.chat
             val calendarDays = payload.feedDays
+            val dayPhotoCounts = payload.dayStats.associate { it.day to it.count.toInt() }
             val latestOtherChat = latestOtherChatMillis(chat, me.id)
             val seenChat = repo.lastSeenOtherChatMillis()
             var hasUnreadChat = latestOtherChat > seenChat
@@ -936,6 +946,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 chatHasOtherMessages = true,
                 chatHasUnreadMessages = hasUnreadChat,
                 calendarDays = calendarDays,
+                dayPhotoCounts = dayPhotoCounts,
                 uploadQueue = repo.uploadQueue(),
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
@@ -1900,6 +1911,7 @@ fun AppScreen(vm: MainVm) {
 
                 AppTab.CALENDAR -> CalendarTab(
                     days = state.calendarDays,
+                    dayPhotoCounts = state.dayPhotoCounts,
                     monthRecapByDay = state.monthRecapByDay,
                     promptMetaByDay = state.promptMetaByDay,
                     selected = state.feedFocusDay ?: state.prompt?.day.orEmpty(),
@@ -2563,6 +2575,7 @@ private fun MonthlyRecapCard(recap: MonthlyRecap) {
 @Composable
 fun CalendarTab(
     days: List<String>,
+    dayPhotoCounts: Map<String, Int>,
     monthRecapByDay: Map<String, MonthlyRecap>,
     promptMetaByDay: Map<String, PromptMeta>,
     selected: String,
@@ -2574,24 +2587,30 @@ fun CalendarTab(
         }
         return
     }
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    LazyColumn(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxSize()
     ) {
         items(days) { day ->
             val selectedDay = day == selected
             val meta = promptMetaByDay[day]
-            Card(modifier = Modifier.clickable { onSelect(day) }) {
-                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(formatDayLabel(day), fontWeight = if (selectedDay) FontWeight.Bold else FontWeight.Normal)
-                    Text(day, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val count = dayPhotoCounts[day] ?: 0
+            Card(modifier = Modifier.fillMaxWidth().clickable { onSelect(day) }) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        formatDayWithWeekday(day),
+                        fontWeight = if (selectedDay) FontWeight.Bold else FontWeight.Normal
+                    )
+                    Text("$count Bilder gepostet", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     momentReasonLine(meta?.triggerSource, meta?.requestedByUser)?.let { reason ->
                         Text(reason, color = Color(0xFF1F5FBF))
                     }
                     monthRecapByDay[day]?.let { recap ->
-                        Text("Monatsrueckblick: ${recap.monthLabel}", color = Color(0xFF0A7A42), fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Monatsrueckblick: ${recap.monthLabel}",
+                            color = Color(0xFF0A7A42),
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                     if (selectedDay) {
                         Text("Ausgewaehlt", color = Color(0xFF1F5FBF))

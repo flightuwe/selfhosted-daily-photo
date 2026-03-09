@@ -77,8 +77,9 @@ func (s *Server) Router() *gin.Engine {
             protected.POST("/moment/special/request", s.handleSpecialMomentRequest)
             protected.POST("/uploads", s.handleUpload)
             protected.POST("/uploads/dual", s.handleDualUpload)
-            protected.GET("/feed", s.handleFeed)
-            protected.GET("/feed/days", s.handleFeedDays)
+			protected.GET("/feed", s.handleFeed)
+			protected.GET("/feed/days", s.handleFeedDays)
+			protected.GET("/feed/day-stats", s.handleFeedDayStats)
 			protected.GET("/chat", s.handleChatList)
 			protected.POST("/chat", s.handleChatCreate)
 			protected.GET("/photos/:id/interactions", s.handlePhotoInteractions)
@@ -1347,6 +1348,41 @@ func (s *Server) handleFeedDays(c *gin.Context) {
         days = append(days, r.Day)
     }
     c.JSON(http.StatusOK, gin.H{"items": days})
+}
+
+func (s *Server) handleFeedDayStats(c *gin.Context) {
+    user, _ := userFromContext(c)
+    type row struct {
+        Day   string
+        Count int64
+    }
+    var rows []row
+    if err := s.DB.Model(&models.Photo{}).
+        Select("day, COUNT(*) as count").
+        Group("day").
+        Order("day desc").
+        Limit(365).
+        Scan(&rows).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    today := time.Now().In(s.Location).Format("2006-01-02")
+    hasPostedToday, err := s.userHasPostedForDay(user.ID, today)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    out := make([]gin.H, 0, len(rows))
+    for _, r := range rows {
+        if r.Day == today && !hasPostedToday {
+            continue
+        }
+        out = append(out, gin.H{
+            "day":   r.Day,
+            "count": r.Count,
+        })
+    }
+    c.JSON(http.StatusOK, gin.H{"items": out})
 }
 
 func (s *Server) handleChatCreate(c *gin.Context) {
