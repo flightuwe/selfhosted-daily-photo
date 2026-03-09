@@ -21,6 +21,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -3250,6 +3251,19 @@ fun ProfileTab(
     var pickerHsv by remember(editableColor) { mutableStateOf(hexToHsv(normalizeHexColor(editableColor))) }
     var themeSliderValue by remember(themeMode) { mutableStateOf(themeMode.toFloat()) }
     var deleteCandidate by remember { mutableStateOf<PromptPhoto?>(null) }
+    var updatePulseTick by remember { mutableStateOf(0) }
+    var updateChecked by remember { mutableStateOf(false) }
+    val updateButtonScale = remember { Animatable(1f) }
+
+    LaunchedEffect(updatePulseTick) {
+        if (updatePulseTick <= 0) return@LaunchedEffect
+        updateButtonScale.snapTo(1f)
+        updateButtonScale.animateTo(1.08f, animationSpec = tween(130))
+        updateButtonScale.animateTo(0.96f, animationSpec = tween(110))
+        updateButtonScale.animateTo(1f, animationSpec = tween(170))
+        delay(1400)
+        updateChecked = false
+    }
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
         item {
@@ -3259,7 +3273,17 @@ fun ProfileTab(
             }
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onCheckUpdate) { Text("Update pruefen") }
+                Button(
+                    onClick = {
+                        updatePulseTick += 1
+                        updateChecked = true
+                        onCheckUpdate()
+                    },
+                    modifier = Modifier.graphicsLayer {
+                        scaleX = updateButtonScale.value
+                        scaleY = updateButtonScale.value
+                    }
+                ) { Text(if (updateChecked) "Update geprueft" else "Update pruefen") }
                 Button(onClick = onShowChangelog) { Text("!") }
                 Button(onClick = onShowHelp) { Text("Hilfe") }
             }
