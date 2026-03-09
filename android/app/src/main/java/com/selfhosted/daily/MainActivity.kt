@@ -131,6 +131,7 @@ import java.time.OffsetDateTime
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 enum class AuthMode { LOGIN, REGISTER }
@@ -2385,8 +2386,7 @@ fun FeedTab(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(formatDayLabel(row.day), fontWeight = FontWeight.Bold)
-                                Text(row.day, color = secondaryTextColor)
+                                Text(formatDayWithWeekday(row.day), fontWeight = FontWeight.Bold)
                             }
                             momentReasonLine(row.meta?.triggerSource, row.meta?.requestedByUser)?.let { reason ->
                                 Text(
@@ -2953,6 +2953,15 @@ private fun formatDayLabel(day: String): String {
     return try {
         val d = LocalDate.parse(day)
         d.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"))
+    } catch (_: Throwable) {
+        day
+    }
+}
+
+private fun formatDayWithWeekday(day: String): String {
+    return try {
+        val d = LocalDate.parse(day)
+        d.format(DateTimeFormatter.ofPattern("EEEE, dd.MM.yyyy", Locale.GERMAN))
     } catch (_: Throwable) {
         day
     }
