@@ -181,6 +181,7 @@ data class PromptMeta(
     val requestedByUser: String? = null
 )
 data class FeedItem(
+    val isEarly: Boolean = false,
     val isLate: Boolean = false,
     val photo: PromptPhoto,
     val user: User,
@@ -2407,16 +2408,13 @@ fun FeedTab(
                                 fontWeight = FontWeight.SemiBold,
                                 color = parseUserColor(item.user.favoriteColor)
                             )
-                            if (item.isLate) {
-                                Text("Spaeter gepostet", color = Color(0xFF8B0000))
-                            }
-                            if (item.photo.promptOnly) {
+                            val timingLabel = postTimingLine(item)
+                            if (timingLabel != null) {
+                                Text(timingLabel, color = Color(0xFFB00020), fontWeight = FontWeight.SemiBold)
+                            } else if (item.photo.promptOnly) {
                                 momentReasonLine(item.triggerSource, item.requestedByUser)?.let { reason ->
                                     Text(reason, color = Color(0xFF1F5FBF))
                                 }
-                            }
-                            if (!item.photo.promptOnly) {
-                                Text("Extra", color = Color(0xFF1F5FBF))
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                 urls.forEach { url ->
@@ -2999,6 +2997,27 @@ private fun momentReasonLine(triggerSource: String?, requestedByUser: String?): 
     } else {
         null
     }
+}
+
+private fun postTimingLine(item: FeedItem): String? {
+    if (item.isEarly) {
+        val emoji = chooseTimingEmoji(item.photo.id, true)
+        return "$emoji Frueher gepostet"
+    }
+    if (item.isLate) {
+        val emoji = chooseTimingEmoji(item.photo.id, false)
+        return "$emoji Spaeter gepostet"
+    }
+    return null
+}
+
+private fun chooseTimingEmoji(photoId: Long, early: Boolean): String {
+    val earlySet = listOf("🌅", "🐣", "🚀", "✨", "⏰")
+    val lateSet = listOf("🌙", "🦉", "🐢", "⌛", "😅")
+    val pool = if (early) earlySet else lateSet
+    val seed = (photoId xor (if (early) 0x5F3759DFL else 0x27D4EB2FL)).toInt()
+    val idx = ((seed and Int.MAX_VALUE) % pool.size)
+    return pool[idx]
 }
 
 private fun queueStatusLabel(status: String): String {

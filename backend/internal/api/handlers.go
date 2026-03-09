@@ -747,28 +747,33 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 
 	out := make([]gin.H, 0, len(photos))
 	for _, p := range photos {
+		isEarly := false
 		isLate := false
+		if prompt.TriggeredAt != nil && p.CreatedAt.Before(*prompt.TriggeredAt) {
+			isEarly = true
+		}
 		if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
-            isLate = true
-        }
-        reactions := reactionByPhoto[p.ID]
-        if reactions == nil {
-            reactions = []gin.H{}
-        }
-        comments := commentByPhoto[p.ID]
-        if comments == nil {
-            comments = []gin.H{}
-        }
+			isLate = true
+		}
+		reactions := reactionByPhoto[p.ID]
+		if reactions == nil {
+			reactions = []gin.H{}
+		}
+		comments := commentByPhoto[p.ID]
+		if comments == nil {
+			comments = []gin.H{}
+		}
 		out = append(out, gin.H{
-			"isLate": isLate,
-			"photo":  s.photoJSON(p),
+			"isEarly": isEarly,
+			"isLate":  isLate,
+			"photo":   s.photoJSON(p),
 			"user": gin.H{
-				"id":       p.User.ID,
-				"username": p.User.Username,
+				"id":            p.User.ID,
+				"username":      p.User.Username,
 				"favoriteColor": defaultColor(p.User.FavoriteColor),
 			},
-			"reactions":      reactions,
-			"comments":       comments,
+			"reactions":       reactions,
+			"comments":        comments,
 			"triggerSource":   prompt.TriggerSource,
 			"requestedByUser": prompt.RequestedBy,
 		})
@@ -830,7 +835,11 @@ func (s *Server) handleFeed(c *gin.Context) {
 
 	out := make([]gin.H, 0, len(photos))
 	for _, p := range photos {
+		isEarly := false
 		isLate := false
+		if prompt.TriggeredAt != nil && p.CreatedAt.Before(*prompt.TriggeredAt) {
+			isEarly = true
+		}
 		if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
 			isLate = true
 		}
@@ -843,11 +852,12 @@ func (s *Server) handleFeed(c *gin.Context) {
 			comments = []gin.H{}
 		}
 		out = append(out, gin.H{
+			"isEarly":    isEarly,
 			"isLate":     isLate,
 			"photo":      s.photoJSON(p),
 			"user": gin.H{
-				"id":       p.User.ID,
-				"username": p.User.Username,
+				"id":            p.User.ID,
+				"username":      p.User.Username,
 				"favoriteColor": defaultColor(p.User.FavoriteColor),
 			},
 			"reactions":      reactions,
