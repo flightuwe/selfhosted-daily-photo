@@ -49,6 +49,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -2642,12 +2643,14 @@ fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onS
             items(rows.size) { idx ->
                 when (val row = rows[idx]) {
                     is ChatRow.DayHeader -> {
-                        Card {
+                        val headerColor = weekdayRainbowColor(row.day)
+                        Card(colors = CardDefaults.cardColors(containerColor = headerColor)) {
                             Text(
                                 formatDayLabel(row.day),
                                 modifier = Modifier.fillMaxWidth().padding(8.dp),
                                 textAlign = TextAlign.Center,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.Black
                             )
                         }
                     }
@@ -3065,6 +3068,19 @@ private fun createdAtDay(value: String): String {
         if (prefix[4] == '-' && prefix[7] == '-') return prefix
     }
     return value
+}
+
+private fun weekdayRainbowColor(day: String): Color {
+    val weekday = runCatching { LocalDate.parse(day).dayOfWeek.value }.getOrElse { 1 }
+    return when (weekday) {
+        1 -> Color(0xFFFF6B6B) // Montag - Rot
+        2 -> Color(0xFFFFA94D) // Dienstag - Orange
+        3 -> Color(0xFFFFE066) // Mittwoch - Gelb
+        4 -> Color(0xFF8CE99A) // Donnerstag - Gruen
+        5 -> Color(0xFF66D9E8) // Freitag - Cyan
+        6 -> Color(0xFF74C0FC) // Samstag - Blau
+        else -> Color(0xFFB197FC) // Sonntag - Violett
+    }
 }
 
 private fun formatRemaining(seconds: Long): String {
