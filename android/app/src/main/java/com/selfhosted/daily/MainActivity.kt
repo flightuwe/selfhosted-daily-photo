@@ -181,7 +181,11 @@ data class PromptPhoto(
     val caption: String?,
     val url: String,
     val secondUrl: String? = null,
-    val createdAt: String
+    val createdAt: String,
+    val capsuleMode: String? = null,
+    val capsuleVisibleAt: String? = null,
+    val capsulePrivate: Boolean = false,
+    val capsuleGroupRemind: Boolean = false
 )
 data class PromptResponse(
     val day: String,
@@ -202,6 +206,7 @@ data class PromptMeta(
 data class FeedItem(
     val isEarly: Boolean = false,
     val isLate: Boolean = false,
+    val capsuleLocked: Boolean = false,
     val photo: PromptPhoto,
     val user: User,
     val reactions: List<ReactionCount>? = null,
@@ -209,6 +214,14 @@ data class FeedItem(
     val triggerSource: String? = null,
     val requestedByUser: String? = null
 )
+
+data class CapsuleUploadOptions(
+    val mode: String = "",
+    val privateOnly: Boolean = false,
+    val groupRemind: Boolean = false
+) {
+    val enabled: Boolean get() = mode.isNotBlank()
+}
 data class MonthlyReliableUser(
     val id: Long,
     val username: String,
@@ -349,7 +362,10 @@ interface Api {
     suspend fun upload(
         @Header("Authorization") token: String,
         @Part photo: MultipartBody.Part,
-        @Part("kind") kind: RequestBody
+        @Part("kind") kind: RequestBody,
+        @Part("capsule_mode") capsuleMode: RequestBody? = null,
+        @Part("capsule_private") capsulePrivate: RequestBody? = null,
+        @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null
     )
 
     @Multipart
@@ -358,7 +374,10 @@ interface Api {
         @Header("Authorization") token: String,
         @Part photoBack: MultipartBody.Part,
         @Part photoFront: MultipartBody.Part,
-        @Part("kind") kind: RequestBody
+        @Part("kind") kind: RequestBody,
+        @Part("capsule_mode") capsuleMode: RequestBody? = null,
+        @Part("capsule_private") capsulePrivate: RequestBody? = null,
+        @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null
     )
 
     @GET("chat")
@@ -610,7 +629,7 @@ class AppRepo(private val api: Api, private val context: Context) {
         return if (version.isNotBlank()) "$name (Android $version)" else name
     }
 
-    suspend fun upload(uri: Uri, isPrompt: Boolean) {
+    suspend fun upload(uri: Uri, isPrompt: Boolean, capsule: CapsuleUploadOptions = CapsuleUploadOptions()) {
         val file = copyUriToTemp(uri)
         val part = MultipartBody.Part.createFormData(
             "photo",
@@ -618,13 +637,17 @@ class AppRepo(private val api: Api, private val context: Context) {
             file.asRequestBody("image/*".toMediaTypeOrNull())
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
-        api.upload("Bearer ${token()}", part, kind)
+        val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
+        val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
+        api.upload("Bearer ${token()}", part, kind, capsuleMode, capsulePrivate, capsuleGroup)
     }
 
     suspend fun uploadDual(
         backUri: Uri,
         frontUri: Uri,
         isPrompt: Boolean,
+        capsule: CapsuleUploadOptions = CapsuleUploadOptions(),
         onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
     ) {
         val backFile = copyUriToTemp(backUri)
@@ -657,12 +680,20 @@ class AppRepo(private val api: Api, private val context: Context) {
             frontBody
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
+        val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
+        val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         emit()
-        api.uploadDual("Bearer ${token()}", backPart, frontPart, kind)
+        api.uploadDual("Bearer ${token()}", backPart, frontPart, kind, capsuleMode, capsulePrivate, capsuleGroup)
         onProgress(totalBytes, totalBytes)
     }
 
-    suspend fun enqueueDualUpload(backUri: Uri, frontUri: Uri, isPrompt: Boolean): QueuedUploadItem {
+    suspend fun enqueueDualUpload(
+        backUri: Uri,
+        frontUri: Uri,
+        isPrompt: Boolean,
+        capsule: CapsuleUploadOptions = CapsuleUploadOptions()
+    ): QueuedUploadItem {
         val backFile = copyUriToTemp(backUri)
         val frontFile = copyUriToTemp(frontUri)
         val queuedDir = File(context.filesDir, "upload-queue").apply { mkdirs() }
@@ -673,6 +704,9 @@ class AppRepo(private val api: Api, private val context: Context) {
             backPath = backQueued.absolutePath,
             frontPath = frontQueued.absolutePath,
             isPrompt = isPrompt,
+            capsuleMode = capsule.mode,
+            capsulePrivate = capsule.privateOnly,
+            capsuleGroupRemind = capsule.groupRemind,
             authToken = token()
         )
     }
@@ -1234,11 +1268,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         back: Uri,
         front: Uri,
         asPrompt: Boolean,
+        capsule: CapsuleUploadOptions = CapsuleUploadOptions(),
         onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
     ): Boolean {
         state = state.copy(loading = true)
         return try {
-            repo.uploadDual(back, front, asPrompt, onProgress)
+            repo.uploadDual(back, front, asPrompt, capsule, onProgress)
             state = state.copy(loading = false, message = "Fotos gepostet")
             refreshAll()
             true
@@ -1248,10 +1283,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
-    suspend fun enqueueDualUpload(back: Uri, front: Uri, asPrompt: Boolean): Boolean {
+    suspend fun enqueueDualUpload(
+        back: Uri,
+        front: Uri,
+        asPrompt: Boolean,
+        capsule: CapsuleUploadOptions = CapsuleUploadOptions()
+    ): Boolean {
         state = state.copy(loading = true)
         return runCatching {
-            repo.enqueueDualUpload(back, front, asPrompt)
+            repo.enqueueDualUpload(back, front, asPrompt, capsule)
         }.onSuccess {
             repo.syncUploadQueueScheduler()
             state = state.copy(
@@ -1611,6 +1651,7 @@ fun AppScreen(vm: MainVm) {
     var captureUri by remember { mutableStateOf<Uri?>(null) }
     var captureTarget by remember { mutableStateOf<String?>(null) }
     var captureAsPrompt by remember { mutableStateOf(true) }
+    var captureCapsule by remember { mutableStateOf(CapsuleUploadOptions()) }
     var backPreviewUri by remember { mutableStateOf<Uri?>(null) }
     var frontPreviewUri by remember { mutableStateOf<Uri?>(null) }
 
@@ -1651,11 +1692,17 @@ fun AppScreen(vm: MainVm) {
                         cameraUploadDone = false
                         val asPrompt = captureAsPrompt
                         scope.launch {
-                            val ok = vm.enqueueDualUpload(back, front, asPrompt)
+                            val ok = vm.enqueueDualUpload(
+                                back,
+                                front,
+                                asPrompt,
+                                if (asPrompt) CapsuleUploadOptions() else captureCapsule
+                            )
                             cameraUploading = false
                             if (ok) {
                                 backPreviewUri = null
                                 frontPreviewUri = null
+                                captureCapsule = CapsuleUploadOptions()
                                 cameraUploadPercent = 100
                                 cameraUploadDone = true
                                 if (asPrompt) vm.setTab(AppTab.FEED)
@@ -1695,8 +1742,9 @@ fun AppScreen(vm: MainVm) {
         cameraLauncher.launch(uri)
     }
 
-    fun startDualCapture(asPrompt: Boolean) {
+    fun startDualCapture(asPrompt: Boolean, capsule: CapsuleUploadOptions = CapsuleUploadOptions()) {
         captureAsPrompt = asPrompt
+        captureCapsule = if (asPrompt) CapsuleUploadOptions() else capsule
         cameraUploadPercent = 0
         cameraUploadError = ""
         cameraUploadDone = false
@@ -2093,11 +2141,12 @@ fun AppScreen(vm: MainVm) {
                     backPreviewUri = backPreviewUri,
                     frontPreviewUri = frontPreviewUri,
                     onCapturePrompt = { startDualCapture(true) },
-                    onCaptureExtra = { startDualCapture(false) },
+                    onCaptureExtra = { capsule -> startDualCapture(false, capsule) },
                     onRequestSpecialMoment = { showSpecialMomentConfirm = true },
                     onReset = {
                         backPreviewUri = null
                         frontPreviewUri = null
+                        captureCapsule = CapsuleUploadOptions()
                         cameraUploading = false
                         cameraUploadPercent = 0
                         cameraUploadError = ""
@@ -2113,13 +2162,19 @@ fun AppScreen(vm: MainVm) {
                             cameraUploadDone = false
                             val asPrompt = captureAsPrompt
                             scope.launch {
-                                val ok = vm.enqueueDualUpload(back, front, asPrompt)
+                                val ok = vm.enqueueDualUpload(
+                                    back,
+                                    front,
+                                    asPrompt,
+                                    if (asPrompt) CapsuleUploadOptions() else captureCapsule
+                                )
                                 cameraUploading = false
                                 if (ok) {
                                     cameraUploadPercent = 100
                                     cameraUploadDone = true
                                     backPreviewUri = null
                                     frontPreviewUri = null
+                                    captureCapsule = CapsuleUploadOptions()
                                     if (asPrompt) vm.setTab(AppTab.FEED)
                                 } else {
                                     cameraUploadDone = false
@@ -2413,7 +2468,7 @@ fun CameraTab(
     backPreviewUri: Uri?,
     frontPreviewUri: Uri?,
     onCapturePrompt: () -> Unit,
-    onCaptureExtra: () -> Unit,
+    onCaptureExtra: (CapsuleUploadOptions) -> Unit,
     onRequestSpecialMoment: () -> Unit,
     onReset: () -> Unit,
     onRetryUpload: () -> Unit,
@@ -2428,6 +2483,7 @@ fun CameraTab(
     val hasPosted = prompt?.hasPosted == true
     val canUpload = prompt?.canUpload == true
     val canSpecial = specialMomentStatus?.canRequest == true
+    var showCapsuleDialog by remember { mutableStateOf(false) }
     val dayLabel = formatDayLabel(prompt?.day ?: LocalDate.now().toString())
     val specialLabel = if (canSpecial) {
         "Sondermoment anfordern"
@@ -2469,7 +2525,20 @@ fun CameraTab(
                     }
                 }
             }
-            Button(onClick = onCaptureExtra, modifier = Modifier.fillMaxWidth()) { Text("Weitere Bilder hinzufuegen") }
+            Button(onClick = { onCaptureExtra(CapsuleUploadOptions()) }, modifier = Modifier.fillMaxWidth()) { Text("Weitere Bilder hinzufuegen") }
+            TextButton(
+                onClick = { showCapsuleDialog = true },
+                enabled = !canUpload,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Fuer spaeter merken")
+            }
+            if (canUpload) {
+                Text(
+                    "Time Capsule ist waehrend des aktiven Daily-Fensters gesperrt.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             SpecialMomentActionButton(
                 text = specialLabel,
                 onClick = onRequestSpecialMoment,
@@ -2571,6 +2640,49 @@ fun CameraTab(
                 }
             }
         }
+    }
+
+    if (showCapsuleDialog) {
+        AlertDialog(
+            onDismissRequest = { showCapsuleDialog = false },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showCapsuleDialog = false }) { Text("Schliessen") }
+            },
+            title = { Text("Fuer spaeter merken") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            showCapsuleDialog = false
+                            onCaptureExtra(CapsuleUploadOptions(mode = "30d"))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("in 30 Tagen zeigen") }
+                    Button(
+                        onClick = {
+                            showCapsuleDialog = false
+                            onCaptureExtra(CapsuleUploadOptions(mode = "1y"))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("in 1 Jahr zeigen") }
+                    Button(
+                        onClick = {
+                            showCapsuleDialog = false
+                            onCaptureExtra(CapsuleUploadOptions(mode = "30d", privateOnly = true))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("nur mir zeigen") }
+                    Button(
+                        onClick = {
+                            showCapsuleDialog = false
+                            onCaptureExtra(CapsuleUploadOptions(mode = "30d", groupRemind = true))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Gruppe spaeter erinnern") }
+                }
+            }
+        )
     }
 }
 
@@ -2835,17 +2947,27 @@ fun FeedTab(
                             } else if (item.photo.promptOnly) {
                                 Text("⏳ Daily-Moment", color = Color(0xFF1F5FBF))
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                urls.forEach { url ->
-                                    AsyncImage(
-                                        model = url,
-                                        contentDescription = "${item.user.username} Foto",
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(180.dp)
-                                            .clickable { onOpenViewer(urls, item.photo.id) },
-                                        contentScale = ContentScale.Crop
-                                    )
+                            if (item.capsuleLocked) {
+                                Text(
+                                    "🧊 Oeffnet wieder am ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}",
+                                    color = secondaryTextColor
+                                )
+                                if (item.photo.capsulePrivate) {
+                                    Text("private Kapsel", color = secondaryTextColor)
+                                }
+                            } else {
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    urls.forEach { url ->
+                                        AsyncImage(
+                                            model = url,
+                                            contentDescription = "${item.user.username} Foto",
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(180.dp)
+                                                .clickable { onOpenViewer(urls, item.photo.id) },
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    }
                                 }
                             }
                             val reactions = item.reactions.orEmpty()
@@ -3635,6 +3757,26 @@ private fun formatMomentTime(raw: String?): String {
             }.getOrElse {
                 raw.take(16).replace('T', ' ')
             }
+        }
+    }
+    return parsed
+}
+
+private fun formatCapsuleOpenAt(raw: String?): String {
+    if (raw.isNullOrBlank()) return "spaeter"
+    val parsed = runCatching {
+        OffsetDateTime.parse(raw)
+            .atZoneSameInstant(ZoneId.systemDefault())
+            .toLocalDateTime()
+            .format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
+    }.getOrElse {
+        runCatching {
+            LocalDateTime.parse(raw.replace(" ", "T"))
+                .atZone(ZoneId.systemDefault())
+                .toLocalDateTime()
+                .format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
+        }.getOrElse {
+            raw.take(16).replace('T', ' ')
         }
     }
     return parsed

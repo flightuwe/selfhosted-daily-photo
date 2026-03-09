@@ -32,6 +32,9 @@ data class QueuedUploadItem(
     val backPath: String,
     val frontPath: String,
     val isPrompt: Boolean,
+    val capsuleMode: String,
+    val capsulePrivate: Boolean,
+    val capsuleGroupRemind: Boolean,
     val authToken: String,
     val status: String,
     val attempts: Int,
@@ -71,6 +74,9 @@ object UploadQueueManager {
         backPath: String,
         frontPath: String,
         isPrompt: Boolean,
+        capsuleMode: String = "",
+        capsulePrivate: Boolean = false,
+        capsuleGroupRemind: Boolean = false,
         authToken: String
     ): QueuedUploadItem {
         val now = System.currentTimeMillis()
@@ -79,6 +85,9 @@ object UploadQueueManager {
             backPath = backPath,
             frontPath = frontPath,
             isPrompt = isPrompt,
+            capsuleMode = capsuleMode.trim(),
+            capsulePrivate = capsulePrivate,
+            capsuleGroupRemind = capsuleGroupRemind,
             authToken = authToken,
             status = UploadQueueStatus.WAITING,
             attempts = 0,
@@ -228,6 +237,9 @@ object UploadQueueManager {
                     backPath = o.optString("backPath"),
                     frontPath = o.optString("frontPath"),
                     isPrompt = o.optBoolean("isPrompt", true),
+                    capsuleMode = o.optString("capsuleMode"),
+                    capsulePrivate = o.optBoolean("capsulePrivate", false),
+                    capsuleGroupRemind = o.optBoolean("capsuleGroupRemind", false),
                     authToken = o.optString("authToken"),
                     status = o.optString("status", UploadQueueStatus.WAITING),
                     attempts = o.optInt("attempts", 0),
@@ -251,6 +263,9 @@ object UploadQueueManager {
                     put("backPath", item.backPath)
                     put("frontPath", item.frontPath)
                     put("isPrompt", item.isPrompt)
+                    put("capsuleMode", item.capsuleMode)
+                    put("capsulePrivate", item.capsulePrivate)
+                    put("capsuleGroupRemind", item.capsuleGroupRemind)
                     put("authToken", item.authToken)
                     put("status", item.status)
                     put("attempts", item.attempts)
@@ -353,8 +368,24 @@ class UploadQueueWorker(
             frontBody
         )
         val kind = (if (item.isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
+        val capsuleModePart = item.capsuleMode.trim().takeIf { it.isNotBlank() }
+            ?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val capsulePrivatePart = if (capsuleModePart != null) {
+            item.capsulePrivate.toString().toRequestBody("text/plain".toMediaTypeOrNull())
+        } else null
+        val capsuleGroupRemindPart = if (capsuleModePart != null) {
+            item.capsuleGroupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull())
+        } else null
         UploadQueueManager.markProgress(applicationContext, item.id, 1)
-        api.uploadDual("Bearer ${item.authToken}", backPart, frontPart, kind)
+        api.uploadDual(
+            "Bearer ${item.authToken}",
+            backPart,
+            frontPart,
+            kind,
+            capsuleModePart,
+            capsulePrivatePart,
+            capsuleGroupRemindPart
+        )
         UploadQueueManager.markProgress(applicationContext, item.id, 100)
     }
 }

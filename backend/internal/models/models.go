@@ -81,6 +81,10 @@ type Photo struct {
     FilePath   string    `gorm:"size:255;not null" json:"filePath"`
     SecondPath string    `gorm:"size:255" json:"secondPath"`
     Caption    string    `gorm:"size:255" json:"caption"`
+    CapsuleMode        string     `gorm:"size:16" json:"capsuleMode"`
+    CapsuleVisibleAt   *time.Time `json:"capsuleVisibleAt"`
+    CapsulePrivate     bool       `gorm:"default:false" json:"capsulePrivate"`
+    CapsuleGroupRemind bool       `gorm:"default:false" json:"capsuleGroupRemind"`
     CreatedAt  time.Time `json:"createdAt"`
 }
 

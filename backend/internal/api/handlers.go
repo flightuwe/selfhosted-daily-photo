@@ -572,6 +572,8 @@ func (s *Server) handleUpload(c *gin.Context) {
     }
 
 	day := time.Now().In(s.Location).Format("2006-01-02")
+    now := time.Now().In(s.Location)
+    todayWindowActive := s.isDailyWindowActive(day, now)
 
     hasPosted, err := s.userHasPostedForDay(user.ID, day)
     if err != nil {
@@ -595,6 +597,12 @@ func (s *Server) handleUpload(c *gin.Context) {
 		}
     }
 
+    capsuleMode, capsuleVisibleAt, capsulePrivate, capsuleGroupRemind, capsuleErr := parseCapsuleForm(c, kind, todayWindowActive, now)
+    if capsuleErr != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": capsuleErr.Error()})
+        return
+    }
+
     src, err := fileHeader.Open()
     if err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "open upload failed"})
@@ -615,6 +623,10 @@ func (s *Server) handleUpload(c *gin.Context) {
         PromptOnly: kind == "prompt",
         FilePath:   relPath,
         Caption:    c.PostForm("caption"),
+        CapsuleMode: capsuleMode,
+        CapsuleVisibleAt: capsuleVisibleAt,
+        CapsulePrivate: capsulePrivate,
+        CapsuleGroupRemind: capsuleGroupRemind,
     }
     if err := s.DB.Create(&photo).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
@@ -753,7 +765,9 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 	}
 
 	out := make([]gin.H, 0, len(photos))
+    now := time.Now().In(s.Location)
 	for _, p := range photos {
+        capsuleLocked := p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt)
 		isEarly := false
 		isLate := false
 		if prompt.TriggeredAt != nil && p.CreatedAt.Before(*prompt.TriggeredAt) {
@@ -773,6 +787,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 		out = append(out, gin.H{
 			"isEarly": isEarly,
 			"isLate":  isLate,
+            "capsuleLocked": capsuleLocked,
 			"photo":   s.photoJSON(p),
 			"user": gin.H{
 				"id":            p.User.ID,
@@ -841,7 +856,12 @@ func (s *Server) handleFeed(c *gin.Context) {
 	}
 
 	out := make([]gin.H, 0, len(photos))
+    now := time.Now().In(s.Location)
 	for _, p := range photos {
+        capsuleLocked := p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt)
+        if p.CapsulePrivate && p.UserID != user.ID {
+            continue
+        }
 		isEarly := false
 		isLate := false
 		if prompt.TriggeredAt != nil && p.CreatedAt.Before(*prompt.TriggeredAt) {
@@ -861,6 +881,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 		out = append(out, gin.H{
 			"isEarly":    isEarly,
 			"isLate":     isLate,
+            "capsuleLocked": capsuleLocked,
 			"photo":      s.photoJSON(p),
 			"user": gin.H{
 				"id":            p.User.ID,
@@ -1713,6 +1734,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 
     now := time.Now().In(s.Location)
     day := now.Format("2006-01-02")
+    todayWindowActive := s.isDailyWindowActive(day, now)
 
     hasPosted, err := s.userHasPostedForDay(user.ID, day)
     if err != nil {
@@ -1736,6 +1758,12 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		}
     }
 
+    capsuleMode, capsuleVisibleAt, capsulePrivate, capsuleGroupRemind, capsuleErr := parseCapsuleForm(c, kind, todayWindowActive, now)
+    if capsuleErr != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": capsuleErr.Error()})
+        return
+    }
+
     backPath, err := s.saveUploadedFile(day, user.ID, backHeader)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "save back failed"})
@@ -1754,6 +1782,10 @@ func (s *Server) handleDualUpload(c *gin.Context) {
         FilePath:   backPath,
         SecondPath: frontPath,
         Caption:    c.PostForm("caption"),
+        CapsuleMode: capsuleMode,
+        CapsuleVisibleAt: capsuleVisibleAt,
+        CapsulePrivate: capsulePrivate,
+        CapsuleGroupRemind: capsuleGroupRemind,
     }
     if err := s.DB.Create(&photo).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
@@ -2108,12 +2140,16 @@ func (s *Server) removePhotoFile(relPath string) error {
 
 func (s *Server) photoJSON(p models.Photo) gin.H {
     out := gin.H{
-        "id":         p.ID,
-        "day":        p.Day,
-        "promptOnly": p.PromptOnly,
-        "caption":    p.Caption,
-        "createdAt":  p.CreatedAt,
-        "url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
+        "id":                 p.ID,
+        "day":                p.Day,
+        "promptOnly":         p.PromptOnly,
+        "caption":            p.Caption,
+        "createdAt":          p.CreatedAt,
+        "capsuleMode":        p.CapsuleMode,
+        "capsuleVisibleAt":   p.CapsuleVisibleAt,
+        "capsulePrivate":     p.CapsulePrivate,
+        "capsuleGroupRemind": p.CapsuleGroupRemind,
+        "url":                fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
     }
     if p.SecondPath != "" {
         out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
@@ -2236,6 +2272,14 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 }
 
 func (s *Server) ensurePhotoVisibleToUser(userID uint, photo models.Photo) (bool, string) {
+    now := time.Now().In(s.Location)
+    if photo.CapsulePrivate && photo.UserID != userID {
+        return false, "private capsule"
+    }
+    if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) && photo.UserID != userID {
+        return false, "capsule locked"
+    }
+
 	today := time.Now().In(s.Location).Format("2006-01-02")
 	if photo.Day != today {
 		return true, ""
@@ -2251,6 +2295,54 @@ func (s *Server) ensurePhotoVisibleToUser(userID uint, photo models.Photo) (bool
 		return false, "Poste zuerst dein Foto, um die Beitraege der anderen zu sehen"
 	}
 	return true, ""
+}
+
+func (s *Server) isDailyWindowActive(day string, now time.Time) bool {
+    var prompt models.DailyPrompt
+    if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
+        return false
+    }
+    return prompt.UploadUntil != nil && now.Before(*prompt.UploadUntil)
+}
+
+func parseCapsuleForm(c *gin.Context, kind string, dailyWindowActive bool, now time.Time) (string, *time.Time, bool, bool, error) {
+    mode := strings.ToLower(strings.TrimSpace(c.PostForm("capsule_mode")))
+    privateFlag := parseFormBool(c.PostForm("capsule_private"))
+    groupRemind := parseFormBool(c.PostForm("capsule_group_remind"))
+
+    if mode == "" {
+        if privateFlag || groupRemind {
+            return "", nil, false, false, errors.New("capsule_mode required")
+        }
+        return "", nil, false, false, nil
+    }
+
+    if kind != "extra" {
+        return "", nil, false, false, errors.New("time capsule only allowed for extra uploads")
+    }
+    if dailyWindowActive {
+        return "", nil, false, false, errors.New("time capsule unavailable during daily moment window")
+    }
+
+    var visibleAt time.Time
+    switch mode {
+    case "30d":
+        visibleAt = now.AddDate(0, 0, 30)
+    case "1y":
+        visibleAt = now.AddDate(1, 0, 0)
+    default:
+        return "", nil, false, false, errors.New("invalid capsule_mode (allowed: 30d, 1y)")
+    }
+    return mode, &visibleAt, privateFlag, groupRemind, nil
+}
+
+func parseFormBool(v string) bool {
+    switch strings.ToLower(strings.TrimSpace(v)) {
+    case "1", "true", "yes", "on":
+        return true
+    default:
+        return false
+    }
 }
 
 func (s *Server) photoInteractionsPayload(photoID uint, viewerID uint) (gin.H, error) {
