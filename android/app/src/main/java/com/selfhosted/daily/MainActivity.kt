@@ -1976,27 +1976,98 @@ fun AppScreen(vm: MainVm) {
 
 @Composable
 fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: String, pushProvider: String) {
-    Column(
+    val transition = rememberInfiniteTransition(label = "startup")
+    val pulseA by transition.animateFloat(
+        initialValue = 0.2f,
+        targetValue = 0.9f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse-a"
+    )
+    val pulseB by transition.animateFloat(
+        initialValue = 0.9f,
+        targetValue = 0.2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1700, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse-b"
+    )
+    val logoScale by transition.animateFloat(
+        initialValue = 0.97f,
+        targetValue = 1.03f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1300, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "logo-scale"
+    )
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                    ),
+                    start = Offset(0f, 0f),
+                    end = Offset(1200f, 2200f)
+                )
+            )
             .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
+        contentAlignment = Alignment.Center
     ) {
-        Image(
-            painter = painterResource(id = R.drawable.ic_launcher_foreground),
-            contentDescription = "Daily Logo",
-            modifier = Modifier.size(96.dp)
-        )
-        Spacer(modifier = Modifier.height(12.dp))
-        Text("Daily", style = MaterialTheme.typography.headlineSmall)
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(if (serverConnected) "Server verbunden" else "Server wird geprueft ...")
-        Text("Server-Version: $serverVersion")
-        Text("Push-Provider: $pushProvider")
-        Text("App-Version: $appVersion")
-        Spacer(modifier = Modifier.height(12.dp))
-        Text("Lade ...")
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 22.dp, vertical = 26.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.size(146.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .size((130f * pulseA).dp)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f), CircleShape)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size((130f * pulseB).dp)
+                            .background(MaterialTheme.colorScheme.tertiary.copy(alpha = 0.14f), CircleShape)
+                    )
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_launcher_foreground),
+                        contentDescription = "Daily Logo",
+                        modifier = Modifier
+                            .size(92.dp)
+                            .graphicsLayer {
+                                scaleX = logoScale
+                                scaleY = logoScale
+                            }
+                    )
+                }
+
+                Text("Daily", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+
+                Text(
+                    if (serverConnected) "Server verbunden" else "Server wird geprueft ...",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text("Server-Version: $serverVersion", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Push-Provider: $pushProvider", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("App-Version: $appVersion", color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                Spacer(modifier = Modifier.height(4.dp))
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text("Starte App ...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 }
 
