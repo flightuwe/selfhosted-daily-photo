@@ -1113,6 +1113,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    fun refreshUploadQueueLocal() {
+        if (repo.token().isBlank()) return
+        state = state.copy(uploadQueue = repo.uploadQueue())
+    }
+
     suspend fun sendChat(body: String) {
         val trimmed = body.trim()
         if (trimmed.isBlank()) return
@@ -1475,8 +1480,15 @@ fun AppScreen(vm: MainVm) {
         if (state.token.isBlank()) return@LaunchedEffect
         while (true) {
             vm.refreshAll()
-            val hasRunningUpload = state.uploadQueue.any { it.status == UploadQueueStatus.RUNNING }
-            delay(if (hasRunningUpload) 1_500 else 20_000)
+            delay(20_000)
+        }
+    }
+
+    LaunchedEffect(state.token, state.startupDone) {
+        if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
+        while (true) {
+            vm.refreshUploadQueueLocal()
+            delay(1_000)
         }
     }
 
@@ -2225,7 +2237,7 @@ fun CameraTab(
             }
         }
 
-        val queueItems = uploadQueue.take(6)
+        val queueItems = visibleQueueItems(uploadQueue)
         if (queueItems.isNotEmpty()) {
             Text("Upload-Queue", style = MaterialTheme.typography.titleMedium)
             queueItems.forEach { item ->
@@ -3105,6 +3117,23 @@ private fun queueStatusLabel(status: String): String {
         UploadQueueStatus.SUCCESS -> "erfolgreich"
         else -> status
     }
+}
+
+private fun visibleQueueItems(items: List<QueuedUploadItem>, nowMs: Long = System.currentTimeMillis()): List<QueuedUploadItem> {
+    val successKeepMs = 90_000L
+    val failedKeepMs = 12 * 60 * 60 * 1000L
+    return items
+        .asSequence()
+        .filter { item ->
+            when (item.status) {
+                UploadQueueStatus.SUCCESS -> (nowMs - item.updatedAtMs) <= successKeepMs
+                UploadQueueStatus.FAILED -> (nowMs - item.updatedAtMs) <= failedKeepMs
+                else -> true
+            }
+        }
+        .sortedByDescending { it.updatedAtMs }
+        .take(6)
+        .toList()
 }
 
 private fun rainbowColor(hue: Float): Color {
