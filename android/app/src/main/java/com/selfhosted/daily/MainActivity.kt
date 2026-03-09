@@ -1244,6 +1244,24 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(darkMode = repo.isDarkMode(), oledMode = repo.isOledMode())
     }
 
+    fun setThemeMode(mode: Int) {
+        when (mode.coerceIn(0, 2)) {
+            0 -> {
+                repo.setDarkMode(false)
+                repo.setOledMode(false)
+            }
+            1 -> {
+                repo.setDarkMode(true)
+                repo.setOledMode(false)
+            }
+            else -> {
+                repo.setDarkMode(true)
+                repo.setOledMode(true)
+            }
+        }
+        state = state.copy(darkMode = repo.isDarkMode(), oledMode = repo.isOledMode())
+    }
+
     fun setUploadQuality(value: Int) {
         repo.setUploadQuality(value)
         state = state.copy(uploadQuality = repo.uploadQuality())
@@ -1896,8 +1914,7 @@ fun AppScreen(vm: MainVm) {
                     streakDays = computePostingStreak(state.photos),
                     promptRules = state.promptRules,
                     photos = state.photos,
-                    darkMode = state.darkMode,
-                    oledMode = state.oledMode,
+                    themeMode = themeModeValue(state.darkMode, state.oledMode),
                     currentPassword = pwCurrent,
                     newPassword = pwNext,
                     editableUsername = profileUsername,
@@ -1910,8 +1927,7 @@ fun AppScreen(vm: MainVm) {
                     uploadQuality = state.uploadQuality,
                     autoUpdateEnabled = state.autoUpdateEnabled,
                     chatPushEnabled = state.user?.chatPushEnabled ?: false,
-                    onDarkModeChange = { vm.setDarkMode(it) },
-                    onOledModeChange = { vm.setOledMode(it) },
+                    onThemeModeChange = { vm.setThemeMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onChatPushEnabledChange = { scope.launch { vm.setChatPushEnabled(it) } },
@@ -2636,8 +2652,7 @@ fun ProfileTab(
     streakDays: Int,
     promptRules: PromptRulesResponse?,
     photos: List<PromptPhoto>,
-    darkMode: Boolean,
-    oledMode: Boolean,
+    themeMode: Int,
     currentPassword: String,
     newPassword: String,
     editableUsername: String,
@@ -2650,8 +2665,7 @@ fun ProfileTab(
     uploadQuality: Int,
     autoUpdateEnabled: Boolean,
     chatPushEnabled: Boolean,
-    onDarkModeChange: (Boolean) -> Unit,
-    onOledModeChange: (Boolean) -> Unit,
+    onThemeModeChange: (Int) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onChatPushEnabledChange: (Boolean) -> Unit,
@@ -2672,6 +2686,7 @@ fun ProfileTab(
 ) {
     var showColorPicker by remember { mutableStateOf(false) }
     var pickerHsv by remember(editableColor) { mutableStateOf(hexToHsv(normalizeHexColor(editableColor))) }
+    var themeSliderValue by remember(themeMode) { mutableStateOf(themeMode.toFloat()) }
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
         item {
@@ -2697,21 +2712,27 @@ fun ProfileTab(
                 subtitle = "Design, Chat-Push, Auto-Update",
                 initiallyExpanded = true
             ) {
+                Text("Darstellung: ${themeModeLabel(themeSliderValue.toInt())}")
+                Slider(
+                    value = themeSliderValue,
+                    onValueChange = {
+                        themeSliderValue = it.coerceIn(0f, 2f)
+                    },
+                    valueRange = 0f..2f,
+                    steps = 1,
+                    onValueChangeFinished = {
+                        val selected = themeSliderValue.toInt().coerceIn(0, 2)
+                        themeSliderValue = selected.toFloat()
+                        onThemeModeChange(selected)
+                    }
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Dark Mode")
-                    Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("OLED Schwarz")
-                    Switch(checked = oledMode, onCheckedChange = onOledModeChange)
+                    Text("Light", color = if (themeSliderValue < 0.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Dark", color = if (themeSliderValue in 0.5f..1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("OLED", color = if (themeSliderValue > 1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -2994,6 +3015,18 @@ private fun formatMomentTime(raw: String?): String {
         dt.toLocalTime().format(DateTimeFormatter.ofPattern("HH:mm"))
     }.getOrElse {
         raw.take(16).replace('T', ' ')
+    }
+}
+
+private fun themeModeValue(darkMode: Boolean, oledMode: Boolean): Int {
+    return if (!darkMode) 0 else if (oledMode) 2 else 1
+}
+
+private fun themeModeLabel(mode: Int): String {
+    return when (mode) {
+        0 -> "Light"
+        1 -> "Dark"
+        else -> "OLED-Schwarz"
     }
 }
 
