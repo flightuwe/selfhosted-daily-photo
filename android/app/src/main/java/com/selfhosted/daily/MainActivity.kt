@@ -1,6 +1,7 @@
 ﻿package com.selfhosted.daily
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -11,6 +12,7 @@ import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.media.RingtoneManager
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -40,11 +42,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.material.pullrefresh.pullRefresh
+import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -80,10 +87,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.consume
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -116,10 +124,12 @@ import okio.Buffer
 import okio.BufferedSink
 import okio.ForwardingSink
 import okio.buffer
+import org.json.JSONObject
 import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.Multipart
@@ -138,6 +148,8 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.random.Random
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 enum class AuthMode { LOGIN, REGISTER }
@@ -317,6 +329,9 @@ interface Api {
     @GET("me/photos")
     suspend fun myPhotos(@Header("Authorization") token: String): MyPhotoResponse
 
+    @DELETE("me/photos/{id}")
+    suspend fun deleteMyPhoto(@Header("Authorization") token: String, @Path("id") id: Long)
+
     @PUT("me/password")
     suspend fun changePassword(
         @Header("Authorization") token: String,
@@ -412,10 +427,10 @@ class AppRepo(private val api: Api, private val context: Context) {
         prefs.edit().putBoolean("oled_mode", enabled).apply()
     }
 
-    fun uploadQuality(): Int = prefs.getInt("upload_quality", 82).coerceIn(45, 95)
+    fun uploadQuality(): Int = prefs.getInt("upload_quality", 80).coerceIn(20, 100)
 
     fun setUploadQuality(value: Int) {
-        prefs.edit().putInt("upload_quality", value.coerceIn(45, 95)).apply()
+        prefs.edit().putInt("upload_quality", value.coerceIn(20, 100)).apply()
     }
 
     private fun lastSyncedDeviceToken(): String = prefs.getString("last_synced_device_token", "") ?: ""
@@ -462,6 +477,18 @@ class AppRepo(private val api: Api, private val context: Context) {
         prefs.edit().putBoolean("chat_push_enabled_local", enabled).apply()
     }
 
+    fun customNotificationToneEnabled(): Boolean = prefs.getBoolean("custom_notification_tone_enabled", false)
+
+    fun setCustomNotificationToneEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("custom_notification_tone_enabled", enabled).apply()
+    }
+
+    fun customNotificationToneUri(): String = prefs.getString("custom_notification_tone_uri", "") ?: ""
+
+    fun setCustomNotificationToneUri(uri: String) {
+        prefs.edit().putString("custom_notification_tone_uri", uri.trim()).apply()
+    }
+
     fun lastSeenOtherChatMillis(): Long = prefs.getLong("chat_seen_other_ms", 0L)
 
     fun setLastSeenOtherChatMillis(value: Long) {
@@ -478,6 +505,23 @@ class AppRepo(private val api: Api, private val context: Context) {
     fun markChangelogSeen(currentVersion: String) {
         if (currentVersion.isBlank()) return
         prefs.edit().putString("last_seen_changelog_version", currentVersion).apply()
+    }
+
+    fun randomStartupQuote(): String {
+        return runCatching {
+            val raw = context.assets.open("daily_photo_quotes.json")
+                .bufferedReader(Charsets.UTF_8)
+                .use { it.readText() }
+            val obj = JSONObject(raw)
+            val arr = obj.optJSONArray("quotes") ?: return@runCatching ""
+            val quotes = buildList<String> {
+                for (i in 0 until arr.length()) {
+                    val q = arr.optString(i).trim()
+                    if (q.isNotBlank()) add(q)
+                }
+            }
+            quotes.randomOrNull().orEmpty()
+        }.getOrDefault("")
     }
 
     suspend fun login(username: String, password: String): User {
@@ -515,6 +559,10 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun feedDayStats(): List<DayStatItem> = api.feedDayStats("Bearer ${token()}").items
 
     suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
+
+    suspend fun deleteMyPhoto(photoId: Long) {
+        api.deleteMyPhoto("Bearer ${token()}", photoId)
+    }
 
     suspend fun listChat(): List<ChatItem> = api.chat("Bearer ${token()}").items
 
@@ -771,6 +819,7 @@ data class UiState(
     val dayPhotoCounts: Map<String, Int> = emptyMap(),
     val feedFocusDay: String? = null,
     val feedPaging: Boolean = false,
+    val feedRefreshing: Boolean = false,
     val feedTodayLocked: Boolean = false,
     val chatHasOtherMessages: Boolean = true,
     val chatHasUnreadMessages: Boolean = false,
@@ -783,9 +832,11 @@ data class UiState(
     val message: String = "",
     val activeTab: AppTab = AppTab.CAMERA,
     val startupDone: Boolean = false,
+    val startupQuote: String = "",
     val serverConnected: Boolean = false,
     val serverVersion: String = "unbekannt",
     val pushProvider: String = "unknown",
+    val lastPingMs: Long? = null,
     val showPromptDialog: Boolean = false,
     val showChangelogDialog: Boolean = false,
     val changelogLines: List<String> = emptyList(),
@@ -795,10 +846,12 @@ data class UiState(
     val updateInfo: UpdateInfo? = null,
     val darkMode: Boolean = false,
     val oledMode: Boolean = false,
-    val uploadQuality: Int = 82,
+    val uploadQuality: Int = 80,
     val autoUpdateEnabled: Boolean = false,
     val notificationMasterEnabled: Boolean = true,
-    val feedPostPushEnabled: Boolean = false
+    val feedPostPushEnabled: Boolean = false,
+    val customNotificationToneEnabled: Boolean = false,
+    val customNotificationToneUri: String = ""
 )
 
 data class DashboardData(
@@ -822,14 +875,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             uploadQuality = repo.uploadQuality(),
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
-            feedPostPushEnabled = repo.feedPostPushEnabled()
+            feedPostPushEnabled = repo.feedPostPushEnabled(),
+            customNotificationToneEnabled = repo.customNotificationToneEnabled(),
+            customNotificationToneUri = repo.customNotificationToneUri()
         )
     )
         private set
 
     suspend fun bootstrap() {
         if (state.startupDone) return
-        state = state.copy(startupDone = false)
+        state = state.copy(startupDone = false, startupQuote = "")
         repo.syncAutoUpdateScheduler()
         repo.syncUploadQueueScheduler()
         val started = System.currentTimeMillis()
@@ -840,9 +895,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         val changelogLines = runCatching { repo.changelogLines(BuildConfig.VERSION_NAME) }
             .getOrDefault(emptyList())
+        val healthOk = health?.ok == true
+        val startupQuote = if (healthOk) repo.randomStartupQuote() else ""
+        if (healthOk && startupQuote.isNotBlank()) {
+            state = state.copy(
+                startupDone = false,
+                startupQuote = startupQuote,
+                serverConnected = true,
+                serverVersion = health?.version ?: "nicht erreichbar",
+                pushProvider = health?.provider ?: "unknown"
+            )
+            delay(1300)
+        }
         state = state.copy(
             startupDone = true,
-            serverConnected = health?.ok == true,
+            startupQuote = startupQuote,
+            serverConnected = healthOk,
             serverVersion = health?.version ?: "nicht erreichbar",
             pushProvider = health?.provider ?: "unknown",
             showChangelogDialog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME),
@@ -851,6 +919,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
+            customNotificationToneEnabled = repo.customNotificationToneEnabled(),
+            customNotificationToneUri = repo.customNotificationToneUri(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
     }
@@ -916,6 +986,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
+            customNotificationToneEnabled = repo.customNotificationToneEnabled(),
+            customNotificationToneUri = repo.customNotificationToneUri(),
             invitePreview = null
         )
     }
@@ -1008,6 +1080,31 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }.onFailure {
             state = state.copy(loading = false, message = apiError(it, "Laden fehlgeschlagen"))
         }
+    }
+
+    suspend fun refreshFeed() {
+        if (state.feedRefreshing) return
+        state = state.copy(feedRefreshing = true)
+        val started = System.currentTimeMillis()
+        try {
+            refreshAll()
+        } finally {
+            val elapsed = System.currentTimeMillis() - started
+            if (elapsed < 700) delay(700 - elapsed)
+            state = state.copy(feedRefreshing = false)
+        }
+    }
+
+    suspend fun deleteMyPhoto(photoId: Long) {
+        state = state.copy(loading = true)
+        runCatching { repo.deleteMyPhoto(photoId) }
+            .onSuccess {
+                state = state.copy(loading = false, message = "Beitrag geloescht")
+                refreshAll()
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Beitrag loeschen fehlgeschlagen"))
+            }
     }
 
     suspend fun loadOlderFeedDays(count: Int = 3) {
@@ -1238,13 +1335,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun checkConnection() {
         state = state.copy(loading = true)
+        val startedAt = System.currentTimeMillis()
         runCatching { repo.health() }
             .onSuccess { health ->
+                val pingMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
                 state = state.copy(
                     loading = false,
                     serverConnected = health.ok,
                     serverVersion = health.version,
                     pushProvider = health.provider,
+                    lastPingMs = pingMs,
                     message = if (health.ok) "Verbindung erfolgreich geprueft" else "Server nicht erreichbar"
                 )
             }
@@ -1252,6 +1352,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state = state.copy(
                     loading = false,
                     serverConnected = false,
+                    lastPingMs = null,
                     message = apiError(it, "Verbindung pruefen fehlgeschlagen")
                 )
             }
@@ -1360,6 +1461,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedPostPushEnabled = feed,
             notificationMasterEnabled = master
         )
+    }
+
+    fun setCustomNotificationToneEnabled(enabled: Boolean) {
+        repo.setCustomNotificationToneEnabled(enabled)
+        state = state.copy(customNotificationToneEnabled = repo.customNotificationToneEnabled())
+    }
+
+    fun setCustomNotificationToneUri(uri: String) {
+        repo.setCustomNotificationToneUri(uri)
+        state = state.copy(customNotificationToneUri = repo.customNotificationToneUri())
     }
 
     suspend fun updateProfile(username: String, favoriteColor: String) {
@@ -1563,6 +1674,19 @@ fun AppScreen(vm: MainVm) {
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {}
+    val notificationTonePickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val picked = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI, Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                result.data?.getParcelableExtra<Uri>(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            }
+            vm.setCustomNotificationToneUri(picked?.toString().orEmpty())
+        }
+    }
 
     fun openCameraFor(target: String) {
         val uri = createTempImageUri(context)
@@ -1598,9 +1722,8 @@ fun AppScreen(vm: MainVm) {
     if (!state.startupDone) {
         StartupScreen(
             serverConnected = state.serverConnected,
-            serverVersion = state.serverVersion,
             appVersion = BuildConfig.VERSION_NAME,
-            pushProvider = state.pushProvider
+            startupQuote = state.startupQuote
         )
         return
     }
@@ -1746,25 +1869,20 @@ fun AppScreen(vm: MainVm) {
     }
 
     if (viewerUrls.isNotEmpty()) {
+        val closeViewer = {
+            viewerUrls = emptyList()
+            viewerIndex = 0
+            viewerPhotoId = null
+            viewerComment = ""
+            vm.clearPhotoInteractions()
+        }
         AlertDialog(
-            onDismissRequest = {
-                viewerUrls = emptyList()
-                viewerIndex = 0
-                viewerPhotoId = null
-                viewerComment = ""
-                vm.clearPhotoInteractions()
-            },
+            onDismissRequest = closeViewer,
             confirmButton = {
                 if (viewerUrls.size > 1 && viewerIndex < viewerUrls.lastIndex) {
                     TextButton(onClick = { viewerIndex += 1 }) { Text("Naechstes Bild") }
                 } else {
-                    TextButton(onClick = {
-                        viewerUrls = emptyList()
-                        viewerIndex = 0
-                        viewerPhotoId = null
-                        viewerComment = ""
-                        vm.clearPhotoInteractions()
-                    }) { Text("Schliessen") }
+                    TextButton(onClick = closeViewer) { Text("Schliessen") }
                 }
             },
             dismissButton = {
@@ -1783,29 +1901,45 @@ fun AppScreen(vm: MainVm) {
                     Box(
                         modifier = Modifier.pointerInput(viewerUrls, viewerIndex) {
                             var dragX = 0f
-                            detectHorizontalDragGestures(
-                                onHorizontalDrag = { _, amount ->
-                                    dragX += amount
+                            var dragY = 0f
+                            detectDragGestures(
+                                onDrag = { change, dragAmount ->
+                                    dragX += dragAmount.x
+                                    dragY += dragAmount.y
+                                    change.consume()
                                 },
                                 onDragEnd = {
-                                    if (dragX > 80f && viewerIndex > 0) {
+                                    val absX = abs(dragX)
+                                    val absY = abs(dragY)
+                                    if (absY > absX && dragY > 120f) {
+                                        closeViewer()
+                                    } else if (dragX > 80f && viewerIndex > 0) {
                                         viewerIndex -= 1
                                     } else if (dragX < -80f && viewerIndex < viewerUrls.lastIndex) {
                                         viewerIndex += 1
                                     }
                                     dragX = 0f
+                                    dragY = 0f
                                 }
                             )
                         }
                     ) {
-                        ZoomableViewerImage(url = viewerUrls[viewerIndex])
+                        ZoomableViewerImage(
+                            url = viewerUrls[viewerIndex],
+                            onDoubleTap = {
+                                viewerPhotoId?.let { pid ->
+                                    val emoji = viewerReactionEmojis[Random.nextInt(viewerReactionEmojis.size)]
+                                    scope.launch { vm.reactPhoto(pid, emoji) }
+                                }
+                            }
+                        )
                     }
                     Text("Unter diesem Bild kannst du reagieren oder kommentieren.")
                     if (viewerPhotoId != null) {
                         val interactions = state.photoInteractions
                         val countByEmoji = interactions?.reactions.orEmpty().associate { it.emoji to it.count }
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            listOf("❤️", "👍", "😂", "🔥", "😮").forEach { emoji ->
+                            viewerReactionEmojis.forEach { emoji ->
                                 val selected = interactions?.myReaction == emoji
                                 Button(
                                     onClick = { scope.launch { vm.reactPhoto(viewerPhotoId ?: 0L, emoji) } },
@@ -2015,9 +2149,11 @@ fun AppScreen(vm: MainVm) {
                     promptMetaByDay = state.promptMetaByDay,
                     focusDay = state.feedFocusDay,
                     listState = feedListState,
+                    refreshing = state.feedRefreshing,
                     todayLocked = state.feedTodayLocked,
                     paging = state.feedPaging,
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
+                    onRefresh = { scope.launch { vm.refreshFeed() } },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
                     onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
                     onOpenViewer = { urls, photoId ->
@@ -2069,17 +2205,33 @@ fun AppScreen(vm: MainVm) {
                     pushProvider = state.pushProvider,
                     apiBaseUrl = BuildConfig.API_BASE_URL,
                     serverConnected = state.serverConnected,
+                    lastPingMs = state.lastPingMs,
                     uploadQuality = state.uploadQuality,
                     autoUpdateEnabled = state.autoUpdateEnabled,
                     notificationMasterEnabled = state.notificationMasterEnabled,
                     chatPushEnabled = state.user?.chatPushEnabled ?: false,
                     feedPostPushEnabled = state.feedPostPushEnabled,
+                    customNotificationToneEnabled = state.customNotificationToneEnabled,
+                    customNotificationToneUri = state.customNotificationToneUri,
                     onThemeModeChange = { vm.setThemeMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onChatPushEnabledChange = { scope.launch { vm.setChatPushEnabled(it) } },
                     onNotificationMasterEnabledChange = { scope.launch { vm.setNotificationMasterEnabled(it) } },
                     onFeedPostPushEnabledChange = { vm.setFeedPostPushEnabled(it) },
+                    onCustomNotificationToneEnabledChange = { vm.setCustomNotificationToneEnabled(it) },
+                    onPickCustomNotificationTone = {
+                        val currentUri = state.customNotificationToneUri.trim().takeIf { it.isNotBlank() }?.let(Uri::parse)
+                        val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_NOTIFICATION)
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Benachrichtigungston waehlen")
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, currentUri)
+                        }
+                        notificationTonePickerLauncher.launch(intent)
+                    },
+                    onClearCustomNotificationTone = { vm.setCustomNotificationToneUri("") },
                     onEditableUsernameChange = { profileUsername = it },
                     onEditableColorChange = { profileColor = it },
                     onSaveProfile = {
@@ -2123,6 +2275,7 @@ fun AppScreen(vm: MainVm) {
                         }
                     },
                     onLogout = { vm.logout() },
+                    onDeletePhoto = { photoId -> scope.launch { vm.deleteMyPhoto(photoId) } },
                     onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
                         viewerIndex = 0
@@ -2142,7 +2295,7 @@ fun AppScreen(vm: MainVm) {
 }
 
 @Composable
-fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: String, pushProvider: String) {
+fun StartupScreen(serverConnected: Boolean, appVersion: String, startupQuote: String) {
     val transition = rememberInfiniteTransition(label = "startup")
     val pulseA by transition.animateFloat(
         initialValue = 0.2f,
@@ -2171,6 +2324,16 @@ fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: S
         ),
         label = "logo-scale"
     )
+    val dotsPhase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "connect-dots"
+    )
+    val dots = ".".repeat((dotsPhase * 3f).toInt().coerceIn(0, 3))
 
     Box(
         modifier = Modifier
@@ -2223,16 +2386,20 @@ fun StartupScreen(serverConnected: Boolean, serverVersion: String, appVersion: S
                 Text("Daily", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
 
                 Text(
-                    if (serverConnected) "Server verbunden" else "Server wird geprueft ...",
+                    if (serverConnected) "Verbindung zum Server hergestellt" else "Verbindung zum Server$dots",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Text("Server-Version: $serverVersion", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("Push-Provider: $pushProvider", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (serverConnected && startupQuote.isNotBlank()) {
+                    Text(
+                        "\"$startupQuote\"",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center
+                    )
+                }
                 Text("App-Version: $appVersion", color = MaterialTheme.colorScheme.onSurfaceVariant)
 
                 Spacer(modifier = Modifier.height(4.dp))
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                Text("Starte App ...", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -2531,6 +2698,7 @@ fun ChatTabIcon(showIndicator: Boolean, unread: Boolean) {
 }
 
 @Composable
+@OptIn(ExperimentalMaterialApi::class)
 fun FeedTab(
     prompt: PromptResponse?,
     days: List<String>,
@@ -2539,15 +2707,18 @@ fun FeedTab(
     promptMetaByDay: Map<String, PromptMeta>,
     focusDay: String?,
     listState: LazyListState,
+    refreshing: Boolean,
     todayLocked: Boolean,
     paging: Boolean,
     onTakePhoto: () -> Unit,
+    onRefresh: () -> Unit,
     onLoadOlder: () -> Unit,
     onLoadNewer: () -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     val primaryTextColor = MaterialTheme.colorScheme.onSurface
     val secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val pullRefreshState = rememberPullRefreshState(refreshing = refreshing, onRefresh = onRefresh)
 
     val rows = remember(days, byDay, monthRecapByDay, promptMetaByDay) {
         buildList {
@@ -2581,27 +2752,43 @@ fun FeedTab(
     }
 
     if (rows.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Noch keine Beitraege gefunden")
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pullRefresh(pullRefreshState)
+        ) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Noch keine Beitraege gefunden")
+            }
+            PullRefreshIndicator(
+                refreshing = refreshing,
+                state = pullRefreshState,
+                modifier = Modifier.align(Alignment.TopCenter)
+            )
         }
         return
     }
 
-    LazyColumn(
-        state = listState,
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pullRefresh(pullRefreshState)
     ) {
-        if (todayLocked && prompt?.hasPosted == false) {
-            item("today-locked") {
-                Card {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Heutiger Feed ist gesperrt, bis du dein heutiges Foto postest.")
-                        Button(onClick = onTakePhoto) { Text("Foto aufnehmen") }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (todayLocked && prompt?.hasPosted == false) {
+                item("today-locked") {
+                    Card {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Heutiger Feed ist gesperrt, bis du dein heutiges Foto postest.")
+                            Button(onClick = onTakePhoto) { Text("Foto aufnehmen") }
+                        }
                     }
                 }
             }
-        }
 
         items(rows, key = {
             when (it) {
@@ -2696,11 +2883,17 @@ fun FeedTab(
             }
         }
 
-        if (paging) {
-            item("paging") {
-                Text("Lade weitere Tage ...", modifier = Modifier.padding(12.dp))
+            if (paging) {
+                item("paging") {
+                    Text("Lade weitere Tage ...", modifier = Modifier.padding(12.dp))
+                }
             }
         }
+        PullRefreshIndicator(
+            refreshing = refreshing,
+            state = pullRefreshState,
+            modifier = Modifier.align(Alignment.TopCenter)
+        )
     }
 }
 
@@ -2780,6 +2973,7 @@ fun CalendarTab(
 
 @Composable
 fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onSend: () -> Unit) {
+    val listState = rememberLazyListState()
     val rows = remember(items) {
         buildList<ChatRow> {
             var lastDay = ""
@@ -2793,9 +2987,18 @@ fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onS
             }
         }
     }
+    LaunchedEffect(rows.size) {
+        if (rows.isNotEmpty()) {
+            listState.scrollToItem(rows.lastIndex)
+        }
+    }
     Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Chat", style = MaterialTheme.typography.titleLarge)
-        LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             items(rows.size) { idx ->
                 when (val row = rows[idx]) {
                     is ChatRow.DayHeader -> {
@@ -2887,17 +3090,23 @@ fun ProfileTab(
     pushProvider: String,
     apiBaseUrl: String,
     serverConnected: Boolean,
+    lastPingMs: Long?,
     uploadQuality: Int,
     autoUpdateEnabled: Boolean,
     notificationMasterEnabled: Boolean,
     chatPushEnabled: Boolean,
     feedPostPushEnabled: Boolean,
+    customNotificationToneEnabled: Boolean,
+    customNotificationToneUri: String,
     onThemeModeChange: (Int) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onChatPushEnabledChange: (Boolean) -> Unit,
     onNotificationMasterEnabledChange: (Boolean) -> Unit,
     onFeedPostPushEnabledChange: (Boolean) -> Unit,
+    onCustomNotificationToneEnabledChange: (Boolean) -> Unit,
+    onPickCustomNotificationTone: () -> Unit,
+    onClearCustomNotificationTone: () -> Unit,
     onEditableUsernameChange: (String) -> Unit,
     onEditableColorChange: (String) -> Unit,
     onSaveProfile: () -> Unit,
@@ -2911,11 +3120,14 @@ fun ProfileTab(
     onRollInviteCode: () -> Unit,
     onShareInviteCode: () -> Unit,
     onLogout: () -> Unit,
+    onDeletePhoto: (Long) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
+    val context = LocalContext.current
     var showColorPicker by remember { mutableStateOf(false) }
     var pickerHsv by remember(editableColor) { mutableStateOf(hexToHsv(normalizeHexColor(editableColor))) }
     var themeSliderValue by remember(themeMode) { mutableStateOf(themeMode.toFloat()) }
+    var deleteCandidate by remember { mutableStateOf<PromptPhoto?>(null) }
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
         item {
@@ -3044,6 +3256,34 @@ fun ProfileTab(
                     Text("Push bei Posts anderer Nutzer")
                     Switch(checked = feedPostPushEnabled, onCheckedChange = onFeedPostPushEnabledChange)
                 }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Custom-Benachrichtigungston")
+                    Switch(
+                        checked = customNotificationToneEnabled,
+                        onCheckedChange = onCustomNotificationToneEnabledChange
+                    )
+                }
+                if (customNotificationToneEnabled) {
+                    val toneLabel = remember(customNotificationToneUri) {
+                        resolveNotificationToneTitle(context, customNotificationToneUri)
+                    }
+                    Text(
+                        "Ausgewaehlter Ton: ${if (toneLabel.isBlank()) "System-Standard" else toneLabel}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(onClick = onPickCustomNotificationTone, modifier = Modifier.weight(1f)) {
+                            Text("Ton auswaehlen")
+                        }
+                        Button(onClick = onClearCustomNotificationTone, modifier = Modifier.weight(1f)) {
+                            Text("Zuruecksetzen")
+                        }
+                    }
+                }
             }
         }
 
@@ -3123,6 +3363,7 @@ fun ProfileTab(
                         Text("App-Version: $appVersion")
                         Text("Server-Version: $serverVersion")
                         Text("Push-Provider: $pushProvider")
+                        Text("Letzter Ping: ${lastPingMs?.let { "${it} ms" } ?: "-"}")
                         Text("API: $apiBaseUrl")
                         Spacer(modifier = Modifier.height(6.dp))
                         Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
@@ -3164,7 +3405,7 @@ fun ProfileTab(
                         Slider(
                             value = uploadQuality.toFloat(),
                             onValueChange = { onUploadQualityChange(it.toInt()) },
-                            valueRange = 45f..95f
+                            valueRange = 20f..100f
                         )
                         Text("Weniger Qualitaet = kleiner und schnellerer Upload")
                     }
@@ -3197,7 +3438,20 @@ fun ProfileTab(
                                     modifier = Modifier
                                         .size(96.dp)
                                         .background(Color.LightGray)
-                                        .clickable { onOpenViewer(urls, photo.id) },
+                                        .pointerInput(photo.id) {
+                                            detectTapGestures(
+                                                onPress = {
+                                                    val pressedAt = System.currentTimeMillis()
+                                                    val released = tryAwaitRelease()
+                                                    val holdMs = System.currentTimeMillis() - pressedAt
+                                                    if (released && holdMs >= 3000L) {
+                                                        deleteCandidate = photo
+                                                    } else if (released) {
+                                                        onOpenViewer(urls, photo.id)
+                                                    }
+                                                }
+                                            )
+                                        },
                                     contentScale = ContentScale.Crop
                                 )
                                 if (photo.secondUrl != null) {
@@ -3262,6 +3516,29 @@ fun ProfileTab(
             }
         )
     }
+
+    deleteCandidate?.let { photo ->
+        AlertDialog(
+            onDismissRequest = { deleteCandidate = null },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeletePhoto(photo.id)
+                        deleteCandidate = null
+                    }
+                ) { Text("Loeschen") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteCandidate = null }) { Text("Abbrechen") }
+            },
+            title = { Text("Beitrag loeschen?") },
+            text = {
+                Text(
+                    "Willst du diesen Beitrag wirklich loeschen?\n\nTag: ${formatDayLabel(photo.day)}\nHalte ein Bild 3 Sekunden gedrueckt, um diesen Dialog zu oeffnen."
+                )
+            }
+        )
+    }
 }
 
 private fun formatDayLabel(day: String): String {
@@ -3288,6 +3565,27 @@ private sealed class ChatRow {
 }
 
 private fun createdAtDay(value: String): String {
+    val raw = value.trim()
+    if (raw.isBlank()) return value
+    runCatching {
+        return OffsetDateTime.parse(raw)
+            .atZoneSameInstant(ZoneId.systemDefault())
+            .toLocalDate()
+            .toString()
+    }
+    runCatching {
+        return LocalDateTime.parse(raw)
+            .atZone(ZoneId.systemDefault())
+            .toLocalDate()
+            .toString()
+    }
+    runCatching {
+        val normalized = raw.replace(" ", "T")
+        return LocalDateTime.parse(normalized)
+            .atZone(ZoneId.systemDefault())
+            .toLocalDate()
+            .toString()
+    }
     if (value.length >= 10) {
         val prefix = value.substring(0, 10)
         if (prefix[4] == '-' && prefix[7] == '-') return prefix
@@ -3317,12 +3615,29 @@ private fun formatRemaining(seconds: Long): String {
 
 private fun formatMomentTime(raw: String?): String {
     if (raw.isNullOrBlank()) return "-"
-    return runCatching {
-        val dt = OffsetDateTime.parse(raw)
-        dt.toLocalTime().format(DateTimeFormatter.ofPattern("HH:mm"))
+    val parsed = runCatching {
+        OffsetDateTime.parse(raw)
+            .atZoneSameInstant(ZoneId.systemDefault())
+            .toLocalTime()
+            .format(DateTimeFormatter.ofPattern("HH:mm"))
     }.getOrElse {
-        raw.take(16).replace('T', ' ')
+        runCatching {
+            LocalDateTime.parse(raw)
+                .atZone(ZoneId.systemDefault())
+                .toLocalTime()
+                .format(DateTimeFormatter.ofPattern("HH:mm"))
+        }.getOrElse {
+            runCatching {
+                LocalDateTime.parse(raw.replace(" ", "T"))
+                    .atZone(ZoneId.systemDefault())
+                    .toLocalTime()
+                    .format(DateTimeFormatter.ofPattern("HH:mm"))
+            }.getOrElse {
+                raw.take(16).replace('T', ' ')
+            }
+        }
     }
+    return parsed
 }
 
 private fun themeModeValue(darkMode: Boolean, oledMode: Boolean): Int {
@@ -3379,6 +3694,16 @@ private fun rainbowColor(hue: Float): Color {
     val h = ((hue % 360f) + 360f) % 360f
     val intColor = AndroidColor.HSVToColor(floatArrayOf(h, 0.55f, 0.95f))
     return Color(intColor)
+}
+
+private fun resolveNotificationToneTitle(context: Context, uriValue: String): String {
+    val raw = uriValue.trim()
+    if (raw.isBlank()) return ""
+    return runCatching {
+        val uri = Uri.parse(raw)
+        val ringtone = RingtoneManager.getRingtone(context, uri) ?: return@runCatching raw
+        ringtone.getTitle(context)?.trim().orEmpty()
+    }.getOrElse { raw }
 }
 
 private fun formatBytes(bytes: Double): String {
@@ -3532,8 +3857,10 @@ private fun helpLines(): List<String> = listOf(
     "- Das Symbol ! oeffnet den Changelog der aktuellen App-Version."
 )
 
+private val viewerReactionEmojis = listOf("❤️", "👍", "😂", "🔥", "😮")
+
 @Composable
-private fun ZoomableViewerImage(url: String) {
+private fun ZoomableViewerImage(url: String, onDoubleTap: (() -> Unit)? = null) {
     var scale by remember(url) { mutableStateOf(1f) }
     var offset by remember(url) { mutableStateOf(Offset.Zero) }
 
@@ -3552,8 +3879,7 @@ private fun ZoomableViewerImage(url: String) {
             .pointerInput(url) {
                 detectTapGestures(
                     onDoubleTap = {
-                        scale = 1f
-                        offset = Offset.Zero
+                        onDoubleTap?.invoke()
                     }
                 )
             }

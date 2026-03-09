@@ -70,6 +70,7 @@ func (s *Server) Router() *gin.Engine {
             protected.PUT("/me/preferences", s.handleUpdatePreferences)
             protected.PUT("/me/password", s.handleChangePassword)
             protected.GET("/me/photos", s.handleMyPhotos)
+            protected.DELETE("/me/photos/:id", s.handleDeleteMyPhoto)
             protected.POST("/devices", s.handleDevice)
             protected.GET("/prompt/current", s.handleCurrentPrompt)
             protected.GET("/prompt/rules", s.handlePromptRules)
@@ -1786,6 +1787,48 @@ func (s *Server) handleMyPhotos(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": out})
 }
 
+func (s *Server) handleDeleteMyPhoto(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photoID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+
+	var photo models.Photo
+	if err := s.DB.First(&photo, photoID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+		return
+	}
+	if photo.UserID != user.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not allowed"})
+		return
+	}
+
+	if err := s.DB.Where("photo_id = ?", photo.ID).Delete(&models.PhotoReaction{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete reactions failed"})
+		return
+	}
+	if err := s.DB.Where("photo_id = ?", photo.ID).Delete(&models.PhotoComment{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete comments failed"})
+		return
+	}
+	if err := s.DB.Delete(&photo).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	if err := s.removePhotoFile(photo.FilePath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete file failed"})
+		return
+	}
+	if err := s.removePhotoFile(photo.SecondPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete second file failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true, "deletedId": photo.ID})
+}
+
 func (s *Server) handlePhotoInteractions(c *gin.Context) {
 	user, _ := userFromContext(c)
 	photoID, err := parseUintParam(c.Param("id"))
@@ -2048,6 +2091,19 @@ func (s *Server) saveUploadedFile(day string, userID uint, header *multipart.Fil
     defer src.Close()
     ext := strings.ToLower(filepath.Ext(header.Filename))
     return s.Store.SavePhoto(day, userID, src, ext)
+}
+
+func (s *Server) removePhotoFile(relPath string) error {
+    rel := strings.TrimSpace(relPath)
+    if rel == "" {
+        return nil
+    }
+    fullPath := filepath.Join(s.Config.UploadDir, rel)
+    err := os.Remove(fullPath)
+    if err != nil && !errors.Is(err, os.ErrNotExist) {
+        return err
+    }
+    return nil
 }
 
 func (s *Server) photoJSON(p models.Photo) gin.H {
