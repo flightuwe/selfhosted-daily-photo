@@ -896,8 +896,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun jumpToDay(day: String) {
-        loadFeedWindow(day, around = 5)
-        state = state.copy(activeTab = AppTab.FEED)
+        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day)
+        loadFeedWindow(day, around = 0)
+        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day)
     }
 
     suspend fun refreshAll() {
