@@ -101,7 +101,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.consume
+import androidx.compose.ui.input.pointer.consumePositionChange
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
@@ -4512,7 +4512,7 @@ private fun FullscreenPhotoViewer(
                                 detectVerticalDragGestures(
                                     onVerticalDrag = { change, dragAmount ->
                                         dragY += dragAmount
-                                        change.consume()
+                    change.consumePositionChange()
                                     },
                                     onDragEnd = {
                                         if (dragY > 140f) onClose()
