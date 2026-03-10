@@ -2,6 +2,7 @@
 
 import android.Manifest
 import android.app.Activity
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -12,6 +13,7 @@ import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.media.RingtoneManager
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
@@ -761,6 +763,22 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun changelogLines(currentVersion: String): List<String> =
         UpdateReleaseChecker.changelogLinesForVersion(currentVersion)
 
+    fun downloadLatestApk(update: UpdateInfo): Long {
+        val fallbackUrl = "https://github.com/flightuwe/selfhosted-daily-photo/releases/latest/download/app-release.apk"
+        val apkUrl = update.apkUrl?.trim().takeUnless { it.isNullOrBlank() } ?: fallbackUrl
+        val safeVersion = update.latestVersion.trim().ifBlank { "latest" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val request = DownloadManager.Request(Uri.parse(apkUrl))
+            .setTitle("Daily Update $safeVersion")
+            .setDescription("Neue APK wird heruntergeladen")
+            .setMimeType("application/vnd.android.package-archive")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "daily-v$safeVersion.apk")
+            .setAllowedOverMetered(true)
+            .setAllowedOverRoaming(true)
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        return dm.enqueue(request)
+    }
+
     private fun copyUriToTemp(uri: Uri): File {
         val resolver = context.contentResolver
         val originalName = resolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -924,6 +942,10 @@ data class UiState(
     val promptRules: PromptRulesResponse? = null,
     val specialMomentStatus: SpecialMomentStatus? = null,
     val updateInfo: UpdateInfo? = null,
+    val updateAvailable: Boolean = false,
+    val latestUpdateInfo: UpdateInfo? = null,
+    val updateCheckInFlight: Boolean = false,
+    val updateError: String? = null,
     val darkMode: Boolean = false,
     val oledMode: Boolean = false,
     val uploadQuality: Int = 80,
@@ -1048,6 +1070,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             customNotificationToneUri = repo.customNotificationToneUri(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
+        runCatching { checkForUpdate(silent = true) }
     }
 
     suspend fun login(username: String, password: String) {
@@ -1487,17 +1510,47 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure { state = state.copy(loading = false, message = apiError(it, "Passwort aendern fehlgeschlagen")) }
     }
 
-    suspend fun checkForUpdate() {
-        state = state.copy(loading = true)
+    suspend fun checkForUpdate(silent: Boolean = false) {
+        state = state.copy(
+            loading = if (silent) state.loading else true,
+            updateCheckInFlight = true,
+            updateError = null
+        )
         runCatching { repo.checkForUpdate(BuildConfig.VERSION_NAME) }
             .onSuccess { update ->
                 state = if (update != null) {
-                    state.copy(loading = false, updateInfo = update, message = "Neue Version ${update.latestVersion} gefunden")
+                    state.copy(
+                        loading = if (silent) state.loading else false,
+                        updateInfo = if (silent) state.updateInfo else update,
+                        updateAvailable = true,
+                        latestUpdateInfo = update,
+                        updateCheckInFlight = false,
+                        updateError = null,
+                        message = if (silent) state.message else "Neue Version ${update.latestVersion} gefunden"
+                    )
                 } else {
-                    state.copy(loading = false, message = "Du nutzt bereits die neueste Version")
+                    state.copy(
+                        loading = if (silent) state.loading else false,
+                        updateInfo = if (silent) state.updateInfo else null,
+                        updateAvailable = false,
+                        latestUpdateInfo = null,
+                        updateCheckInFlight = false,
+                        updateError = null,
+                        message = if (silent) state.message else "Du nutzt bereits die neueste Version"
+                    )
                 }
             }
-            .onFailure { state = state.copy(loading = false, message = apiError(it, "Update-Pruefung fehlgeschlagen")) }
+            .onFailure {
+                val err = apiError(it, "Update-Pruefung fehlgeschlagen")
+                state = state.copy(
+                    loading = if (silent) state.loading else false,
+                    updateCheckInFlight = false,
+                    updateAvailable = false,
+                    latestUpdateInfo = null,
+                    updateError = err,
+                    message = if (silent) state.message else err
+                )
+            }
     }
 
     suspend fun checkConnection() {
@@ -1541,6 +1594,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun dismissUpdateDialog() {
         state = state.copy(updateInfo = null)
+    }
+
+    fun downloadLatestUpdateFromBadge() {
+        val update = state.latestUpdateInfo
+        if (update == null) {
+            state = state.copy(message = "Keine Update-Information verfuegbar")
+            return
+        }
+        runCatching { repo.downloadLatestApk(update) }
+            .onSuccess {
+                state = state.copy(
+                    message = "Download gestartet: ${update.latestVersion}",
+                    updateAvailable = false
+                )
+            }
+            .onFailure { state = state.copy(message = apiError(it, "Download konnte nicht gestartet werden")) }
     }
 
     suspend fun showChangelogDialog() {
@@ -1969,8 +2038,7 @@ fun AppScreen(vm: MainVm) {
             confirmButton = {
                 TextButton(onClick = {
                     vm.dismissUpdateDialog()
-                    val target = update.apkUrl ?: update.releaseUrl
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
+                    vm.downloadLatestUpdateFromBadge()
                 }) { Text("Download") }
             },
             dismissButton = {
@@ -2174,9 +2242,12 @@ fun AppScreen(vm: MainVm) {
                 AppTab.CAMERA -> CameraTab(
                     prompt = state.prompt,
                     promptRules = state.promptRules,
+                    updateAvailable = state.updateAvailable,
+                    updateCheckInFlight = state.updateCheckInFlight,
                     specialMomentStatus = state.specialMomentStatus,
                     backPreviewUri = backPreviewUri,
                     frontPreviewUri = frontPreviewUri,
+                    onDownloadUpdate = { vm.downloadLatestUpdateFromBadge() },
                     onCapturePrompt = { startDualCapture(true) },
                     onCaptureExtra = { capsule -> startDualCapture(false, capsule) },
                     onRequestSpecialMoment = { showSpecialMomentConfirm = true },
@@ -2505,9 +2576,12 @@ fun StartupScreen(serverConnected: Boolean, appVersion: String, startupQuote: St
 fun CameraTab(
     prompt: PromptResponse?,
     promptRules: PromptRulesResponse?,
+    updateAvailable: Boolean,
+    updateCheckInFlight: Boolean,
     specialMomentStatus: SpecialMomentStatus?,
     backPreviewUri: Uri?,
     frontPreviewUri: Uri?,
+    onDownloadUpdate: () -> Unit,
     onCapturePrompt: () -> Unit,
     onCaptureExtra: (CapsuleUploadOptions) -> Unit,
     onRequestSpecialMoment: () -> Unit,
@@ -2533,6 +2607,25 @@ fun CameraTab(
         val rem = specialMomentStatus?.remainingSeconds ?: 0L
         "Sondermoment schon angefordert, naechster Sondermoment in ${formatRemaining(rem)}"
     }
+    val updatePulse = rememberInfiniteTransition(label = "camera-update-pulse")
+    val updateScale by updatePulse.animateFloat(
+        initialValue = 0.96f,
+        targetValue = 1.06f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "camera-update-scale"
+    )
+    val updateAlpha by updatePulse.animateFloat(
+        initialValue = 0.74f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "camera-update-alpha"
+    )
 
     Column(
         modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -2543,7 +2636,30 @@ fun CameraTab(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            RainbowDailyTitle()
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RainbowDailyTitle()
+                if (updateAvailable) {
+                    Text(
+                        text = "UPDATE VERFUEGBAR",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .graphicsLayer {
+                                scaleX = updateScale
+                                scaleY = updateScale
+                                alpha = updateAlpha
+                            }
+                            .background(Color(0xFFD32F2F), shape = MaterialTheme.shapes.small)
+                            .clickable(onClick = onDownloadUpdate)
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                } else if (updateCheckInFlight) {
+                    Text("Update-Check ...", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             Text(dayLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (!prompt?.triggered.isNullOrBlank()) {
@@ -3042,7 +3158,7 @@ fun FeedTab(
                     val item = row.item
                     val meta = promptMetaByDay[row.day]
                     val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
-                    val isDailyMomentPost = item.photo.promptOnly && isWithinDailyMomentWindow(
+                    val isDailyMomentPost = isWithinDailyMomentWindow(
                         item.photo.createdAt,
                         meta?.triggeredAt,
                         meta?.uploadUntil
@@ -3054,14 +3170,14 @@ fun FeedTab(
                                 fontWeight = FontWeight.SemiBold,
                                 color = parseUserColor(item.user.favoriteColor)
                             )
-                            if (item.photo.promptOnly && !isDailyMomentPost) {
+                            if (!isDailyMomentPost) {
                                 Text(
                                     "🕒 ${formatMomentTime(item.photo.createdAt)}",
                                     color = secondaryTextColor,
                                     fontWeight = FontWeight.SemiBold
                                 )
-                            } else if (isDailyMomentPost) {
-                                Text("⏳ Daily-Moment", color = Color(0xFF1F5FBF))
+                            } else {
+                                DailyMomentBadge()
                             }
                             if (item.capsuleLocked) {
                                 Text(
@@ -3087,7 +3203,12 @@ fun FeedTab(
                                 }
                             }
                             val reactions = item.reactions.orEmpty()
-                            val comments = item.comments.orEmpty()
+                            val comments = item.comments.orEmpty().sortedWith(
+                                compareBy<PhotoCommentItem>(
+                                    { parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN },
+                                    { it.id }
+                                )
+                            )
                             if (reactions.isNotEmpty()) {
                                 Text(
                                     reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
@@ -3095,7 +3216,7 @@ fun FeedTab(
                                 )
                             }
                             if (comments.isNotEmpty()) {
-                                comments.take(2).forEach { comment ->
+                                comments.forEach { comment ->
                                     Text(
                                         "${comment.user.username}: ${comment.body}",
                                         color = secondaryTextColor
@@ -4087,6 +4208,35 @@ private fun rainbowColor(hue: Float): Color {
     val h = ((hue % 360f) + 360f) % 360f
     val intColor = AndroidColor.HSVToColor(floatArrayOf(h, 0.55f, 0.95f))
     return Color(intColor)
+}
+
+@Composable
+private fun DailyMomentBadge() {
+    val transition = rememberInfiniteTransition(label = "daily-feed-badge-rainbow")
+    val hueShift by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 12000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "daily-feed-badge-hue"
+    )
+    val rainbowBrush = Brush.horizontalGradient(
+        colors = listOf(
+            rainbowColor(hueShift + 0f),
+            rainbowColor(hueShift + 70f),
+            rainbowColor(hueShift + 140f),
+            rainbowColor(hueShift + 210f)
+        )
+    )
+    Box(
+        modifier = Modifier
+            .background(rainbowBrush, shape = MaterialTheme.shapes.small)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
+    ) {
+        Text("⏳ Daily-Moment", color = Color.White, fontWeight = FontWeight.SemiBold)
+    }
 }
 
 private fun resolveNotificationToneTitle(context: Context, uriValue: String): String {

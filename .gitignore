@@ -8,6 +8,8 @@ android/local.properties
 android/app/build/
 android/build/
 android/app/google-services.json
+android/signing/
+*.keystore
 google-services.json
 
 # Go
@@ -22,3 +24,6 @@ deploy/certs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local temp/debug artifacts
+_tmp_*

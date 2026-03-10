@@ -7,6 +7,7 @@ export type Settings = {
   promptWindowStartHour: number;
   promptWindowEndHour: number;
   uploadWindowMinutes: number;
+  feedCommentPreviewLimit: number;
   promptNotificationText: string;
   maxUploadBytes: number;
   chatCommandEnabled: boolean;
@@ -152,6 +153,7 @@ const settingsDefaults: Settings = {
   promptWindowStartHour: 8,
   promptWindowEndHour: 20,
   uploadWindowMinutes: 10,
+  feedCommentPreviewLimit: 10,
   promptNotificationText: "Zeit fuer dein Daily Foto",
   maxUploadBytes: 0,
   chatCommandEnabled: false,
@@ -176,6 +178,7 @@ function normalizeSettings(raw: any): Settings {
     promptWindowStartHour: Number(raw?.promptWindowStartHour ?? raw?.PromptWindowStartHour ?? settingsDefaults.promptWindowStartHour),
     promptWindowEndHour: Number(raw?.promptWindowEndHour ?? raw?.PromptWindowEndHour ?? settingsDefaults.promptWindowEndHour),
     uploadWindowMinutes: Number(raw?.uploadWindowMinutes ?? raw?.UploadWindowMinutes ?? settingsDefaults.uploadWindowMinutes),
+    feedCommentPreviewLimit: Number(raw?.feedCommentPreviewLimit ?? raw?.FeedCommentPreviewLimit ?? settingsDefaults.feedCommentPreviewLimit),
     promptNotificationText: String(raw?.promptNotificationText ?? raw?.PromptNotificationText ?? settingsDefaults.promptNotificationText),
     maxUploadBytes: Number(raw?.maxUploadBytes ?? raw?.MaxUploadBytes ?? settingsDefaults.maxUploadBytes),
     chatCommandEnabled: Boolean(raw?.chatCommandEnabled ?? raw?.ChatCommandEnabled ?? settingsDefaults.chatCommandEnabled),

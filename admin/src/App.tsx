@@ -40,6 +40,7 @@ const DEFAULT_SETTINGS: Settings = {
   promptWindowStartHour: 8,
   promptWindowEndHour: 20,
   uploadWindowMinutes: 10,
+  feedCommentPreviewLimit: 10,
   promptNotificationText: "Zeit fuer dein Daily Foto",
   maxUploadBytes: 0,
   chatCommandEnabled: false,
@@ -1023,6 +1024,7 @@ export function App() {
               <div className="settings-grid">
                 <p><strong>Prompt-Fenster:</strong> {savedSettings.promptWindowStartHour}:00 - {savedSettings.promptWindowEndHour}:00</p>
                 <p><strong>Upload-Fenster:</strong> {savedSettings.uploadWindowMinutes} Minuten</p>
+                <p><strong>Feed-Kommentare pro Bild:</strong> {savedSettings.feedCommentPreviewLimit}</p>
                 <p><strong>Max Upload:</strong> {savedSettings.maxUploadBytes <= 0 ? "Unbegrenzt" : `${Math.round(savedSettings.maxUploadBytes / (1024 * 1024))} MB`}</p>
                 <p><strong>Notification-Text:</strong> {savedSettings.promptNotificationText}</p>
               </div>
@@ -1058,6 +1060,16 @@ export function App() {
                   max={60}
                   value={settings.uploadWindowMinutes}
                   onChange={(e) => setSettings({ ...settings, uploadWindowMinutes: Number(e.target.value) })}
+                />
+              </label>
+              <label>
+                Feed-Kommentare pro Bild
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={settings.feedCommentPreviewLimit}
+                  onChange={(e) => setSettings({ ...settings, feedCommentPreviewLimit: Number(e.target.value) })}
                 />
               </label>
               <label>

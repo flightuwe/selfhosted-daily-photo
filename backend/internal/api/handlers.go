@@ -931,6 +931,7 @@ type settingsRequest struct {
     PromptWindowStartHour  int    `json:"promptWindowStartHour"`
     PromptWindowEndHour    int    `json:"promptWindowEndHour"`
     UploadWindowMinutes    int    `json:"uploadWindowMinutes"`
+    FeedCommentPreviewLimit int   `json:"feedCommentPreviewLimit"`
     PromptNotificationText string `json:"promptNotificationText"`
     MaxUploadBytes         int64  `json:"maxUploadBytes"`
     ChatCommandEnabled     bool   `json:"chatCommandEnabled"`
@@ -978,6 +979,7 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
     settings.PromptWindowStartHour = req.PromptWindowStartHour
     settings.PromptWindowEndHour = req.PromptWindowEndHour
     settings.UploadWindowMinutes = req.UploadWindowMinutes
+    settings.FeedCommentPreviewLimit = req.FeedCommentPreviewLimit
     settings.PromptNotificationText = req.PromptNotificationText
     settings.MaxUploadBytes = req.MaxUploadBytes
     settings.ChatCommandEnabled = req.ChatCommandEnabled
@@ -2361,6 +2363,12 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 	if len(photoIDs) == 0 {
 		return reactionByPhoto, commentByPhoto, nil
 	}
+    commentLimit := 10
+    var settings models.AppSettings
+    if err := s.DB.First(&settings).Error; err == nil {
+        settings = normalizeSettings(settings)
+        commentLimit = settings.FeedCommentPreviewLimit
+    }
 
 	var reactionRows []photoReactionPreviewRow
 	if err := s.DB.Model(&models.PhotoReaction{}).
@@ -2381,12 +2389,12 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 	var comments []models.PhotoComment
 	if err := s.DB.Preload("User").
 		Where("photo_id IN ?", photoIDs).
-		Order("created_at desc").
+		Order("created_at desc, id desc").
 		Find(&comments).Error; err != nil {
 		return nil, nil, err
 	}
 	for _, item := range comments {
-		if len(commentByPhoto[item.PhotoID]) >= 2 {
+		if len(commentByPhoto[item.PhotoID]) >= commentLimit {
 			continue
 		}
 		commentByPhoto[item.PhotoID] = append(commentByPhoto[item.PhotoID], gin.H{
@@ -2804,6 +2812,12 @@ func normalizeSettings(settings models.AppSettings) models.AppSettings {
     }
     if settings.UploadWindowMinutes <= 0 {
         settings.UploadWindowMinutes = 10
+    }
+    if settings.FeedCommentPreviewLimit <= 0 {
+        settings.FeedCommentPreviewLimit = 10
+    }
+    if settings.FeedCommentPreviewLimit > 50 {
+        settings.FeedCommentPreviewLimit = 50
     }
     return settings
 }

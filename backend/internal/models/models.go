@@ -37,6 +37,7 @@ type AppSettings struct {
     PromptWindowStartHour  int       `gorm:"default:8" json:"promptWindowStartHour"`
     PromptWindowEndHour    int       `gorm:"default:20" json:"promptWindowEndHour"`
     UploadWindowMinutes    int       `gorm:"default:10" json:"uploadWindowMinutes"`
+    FeedCommentPreviewLimit int      `gorm:"default:10" json:"feedCommentPreviewLimit"`
     PromptNotificationText string    `gorm:"size:255;default:'Zeit fuer dein Daily Foto'" json:"promptNotificationText"`
     MaxUploadBytes         int64     `gorm:"default:0" json:"maxUploadBytes"`
     ChatCommandEnabled     bool      `gorm:"default:false" json:"chatCommandEnabled"`
