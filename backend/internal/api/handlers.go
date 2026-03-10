@@ -290,14 +290,33 @@ func (s *Server) handleMe(c *gin.Context) {
     var photos []models.Photo
     dailyMomentCount := int64(0)
     if err := s.DB.Where("user_id = ?", user.ID).Order("created_at desc").Limit(500).Find(&photos).Error; err == nil {
-        promptByDay, _ := s.promptMetaByDay()
+        days := make([]string, 0, len(photos))
+        daySeen := make(map[string]struct{}, len(photos))
+        for _, p := range photos {
+            if _, exists := daySeen[p.Day]; exists {
+                continue
+            }
+            daySeen[p.Day] = struct{}{}
+            days = append(days, p.Day)
+        }
+
+        promptByDay := make(map[string]models.DailyPrompt, len(days))
+        if len(days) > 0 {
+            var prompts []models.DailyPrompt
+            if err := s.DB.Where("day IN ?", days).Find(&prompts).Error; err == nil {
+                for _, pr := range prompts {
+                    promptByDay[pr.Day] = pr
+                }
+            }
+        }
+
         countedDays := map[string]struct{}{}
         for _, p := range photos {
             if _, exists := countedDays[p.Day]; exists {
                 continue
             }
-            prompt := promptByDay[p.Day]
-            if prompt == nil || prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
+            prompt, ok := promptByDay[p.Day]
+            if !ok || prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
                 continue
             }
             if !p.CreatedAt.Before(*prompt.TriggeredAt) && !p.CreatedAt.After(*prompt.UploadUntil) {
