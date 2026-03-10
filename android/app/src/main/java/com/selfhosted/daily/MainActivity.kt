@@ -4603,6 +4603,7 @@ private fun ViewerInteractionSheet(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ZoomableViewerImage(
     url: String,
