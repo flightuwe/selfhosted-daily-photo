@@ -2275,6 +2275,7 @@ fun AppScreen(vm: MainVm) {
     var viewerPhotoId by remember { mutableStateOf<Long?>(null) }
     var viewerOwnDownloadFallback by remember { mutableStateOf(false) }
     var viewerComment by remember { mutableStateOf("") }
+    var profileAvatarPreviewUrl by remember { mutableStateOf("") }
     var showSpecialMomentConfirm by remember { mutableStateOf(false) }
     var requestFrontCapture by remember { mutableStateOf(false) }
     var cameraUploading by remember { mutableStateOf(false) }
@@ -2490,8 +2491,16 @@ fun AppScreen(vm: MainVm) {
 
     state.viewedProfile?.let { profile ->
         AlertDialog(
-            onDismissRequest = { vm.closeViewedProfile() },
-            confirmButton = { TextButton(onClick = { vm.closeViewedProfile() }) { Text("Schliessen") } },
+            onDismissRequest = {
+                profileAvatarPreviewUrl = ""
+                vm.closeViewedProfile()
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    profileAvatarPreviewUrl = ""
+                    vm.closeViewedProfile()
+                }) { Text("Schliessen") }
+            },
             title = { Text("@${profile.user.username}") },
             text = {
                 Column(
@@ -2511,6 +2520,7 @@ fun AppScreen(vm: MainVm) {
                                 modifier = Modifier
                                     .size(84.dp)
                                     .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                                    .clickable { profileAvatarPreviewUrl = profile.user.avatarUrl }
                             )
                         }
                         if (profile.user.bio.isNotBlank()) {
@@ -2536,6 +2546,7 @@ fun AppScreen(vm: MainVm) {
                                                     .weight(1f)
                                                     .height(92.dp)
                                                     .clickable {
+                                                        profileAvatarPreviewUrl = ""
                                                         vm.closeViewedProfile()
                                                         viewerUrls = urls
                                                         viewerIndex = 0
@@ -2552,6 +2563,29 @@ fun AppScreen(vm: MainVm) {
                 }
             }
         )
+    }
+    if (profileAvatarPreviewUrl.isNotBlank()) {
+        Dialog(
+            onDismissRequest = { profileAvatarPreviewUrl = "" },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.82f))
+                    .clickable { profileAvatarPreviewUrl = "" },
+                contentAlignment = Alignment.Center
+            ) {
+                AsyncImage(
+                    model = profileAvatarPreviewUrl,
+                    contentDescription = "Profilbild Grossansicht",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
+        }
     }
     if (state.viewedProfileLoading) {
         AlertDialog(
