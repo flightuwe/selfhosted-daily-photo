@@ -303,6 +303,25 @@ data class FeedResponse(
 data class DayListResponse(val items: List<String>)
 data class DayStatItem(val day: String, val count: Long)
 data class DayStatsResponse(val items: List<DayStatItem>)
+data class TopReactionStat(val emoji: String, val count: Long)
+data class LatestActiveUser(
+    val username: String,
+    val createdAt: String
+)
+data class DailyMomentParticipationStat(
+    val participants: Int,
+    val totalUsers: Int,
+    val percent: Int
+)
+data class CommunityStatsResponse(
+    val registeredUsers: Long = 0,
+    val activeUsersToday: Long = 0,
+    val latestActiveUser: LatestActiveUser? = null,
+    val postsToday: Long = 0,
+    val chatMessagesToday: Long = 0,
+    val topReactions7d: List<TopReactionStat> = emptyList(),
+    val dailyMomentParticipation7d: DailyMomentParticipationStat = DailyMomentParticipationStat(0, 0, 0)
+)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
 data class UserProfileResponse(
     val profileVisible: Boolean = false,
@@ -406,6 +425,9 @@ interface Api {
 
     @GET("feed/day-stats")
     suspend fun feedDayStats(@Header("Authorization") token: String): DayStatsResponse
+
+    @GET("community/stats")
+    suspend fun communityStats(@Header("Authorization") token: String): CommunityStatsResponse
 
     @GET("me/photos")
     suspend fun myPhotos(@Header("Authorization") token: String): MyPhotoResponse
@@ -762,6 +784,7 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun feedByDay(day: String): FeedResponse = api.feed("Bearer ${token()}", day)
     suspend fun feedDays(): List<String> = api.feedDays("Bearer ${token()}").items
     suspend fun feedDayStats(): List<DayStatItem> = api.feedDayStats("Bearer ${token()}").items
+    suspend fun communityStats(): CommunityStatsResponse = api.communityStats("Bearer ${token()}")
 
     suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
 
@@ -1077,6 +1100,8 @@ data class UiState(
     val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
     val calendarDays: List<String> = emptyList(),
     val dayPhotoCounts: Map<String, Int> = emptyMap(),
+    val communityStats: CommunityStatsResponse? = null,
+    val communityStatsLoading: Boolean = false,
     val feedFocusDay: String? = null,
     val feedFocusPhotoId: Long? = null,
     val feedPaging: Boolean = false,
@@ -1138,7 +1163,8 @@ data class DashboardData(
     val photos: List<PromptPhoto>,
     val chat: List<ChatItem>,
     val feedDays: List<String>,
-    val dayStats: List<DayStatItem>
+    val dayStats: List<DayStatItem>,
+    val communityStats: CommunityStatsResponse?
 )
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
@@ -1151,6 +1177,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         "invite",
         "profile_account",
         "app_connection",
+        "community_stats",
         "moment_rules",
         "upload_quality",
         "past_posts"
@@ -1441,7 +1468,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun refreshAll() {
         if (repo.token().isBlank()) return
-        state = state.copy(loading = true)
+        state = state.copy(loading = true, communityStatsLoading = true)
         runCatching {
             repo.syncDeviceTokenIfNeeded()
             val meResp = repo.me()
@@ -1454,7 +1481,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val chat = repo.listChat()
             val feedDays = repo.feedDays()
             val dayStats = runCatching { repo.feedDayStats() }.getOrDefault(emptyList())
-            DashboardData(me, meResp.dailyMomentCount, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats)
+            val communityStats = runCatching { repo.communityStats() }.getOrNull()
+            DashboardData(me, meResp.dailyMomentCount, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats, communityStats)
         }.onSuccess { payload ->
             val me = payload.me
             val dailyMomentCount = payload.dailyMomentCount
@@ -1500,6 +1528,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 chatHasUnreadMessages = hasUnreadChat,
                 calendarDays = calendarDays,
                 dayPhotoCounts = dayPhotoCounts,
+                communityStats = payload.communityStats,
+                communityStatsLoading = false,
                 uploadQueue = repo.uploadQueue(),
                 autoUpdateEnabled = autoUpdateEnabled,
                 feedPostPushEnabled = feedPostPushEnabled,
@@ -1515,7 +1545,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val anchor = if (focus != null && calendarDays.contains(focus)) focus else prompt.day
             loadFeedWindow(anchor, around = 3)
         }.onFailure {
-            state = state.copy(loading = false, message = apiError(it, "Laden fehlgeschlagen"))
+            state = state.copy(loading = false, communityStatsLoading = false, message = apiError(it, "Laden fehlgeschlagen"))
         }
     }
 
@@ -2924,6 +2954,8 @@ fun AppScreen(vm: MainVm) {
                     quietHoursEnabled = state.user?.quietHoursEnabled ?: false,
                     quietHoursStart = state.user?.quietHoursStart ?: "22:00",
                     quietHoursEnd = state.user?.quietHoursEnd ?: "07:00",
+                    communityStats = state.communityStats,
+                    communityStatsLoading = state.communityStatsLoading,
                     onThemeModeChange = { vm.setThemeMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
@@ -4064,6 +4096,8 @@ fun ProfileTab(
     quietHoursEnabled: Boolean,
     quietHoursStart: String,
     quietHoursEnd: String,
+    communityStats: CommunityStatsResponse?,
+    communityStatsLoading: Boolean,
     onThemeModeChange: (Int) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
@@ -4555,6 +4589,50 @@ fun ProfileTab(
                         Text("API: $apiBaseUrl")
                         Spacer(modifier = Modifier.height(6.dp))
                         Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
+                    }
+                }
+            }
+        }
+
+        item {
+            CollapsibleSection(
+                title = "Community-Stats",
+                subtitle = "Heute + letzte 7 Tage",
+                expanded = sectionExpanded("community_stats"),
+                onExpandedChange = { onProfileSectionExpandedChange("community_stats", it) }
+            ) {
+                Card {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (communityStatsLoading && communityStats == null) {
+                            Text("Community-Stats werden geladen ...")
+                        } else if (communityStats == null) {
+                            Text("Noch keine Daten vorhanden")
+                        } else {
+                            Text("👥 Registrierte Nutzer: ${communityStats.registeredUsers}")
+                            Text("✅ Heute aktiv: ${communityStats.activeUsersToday}")
+                            val latest = communityStats.latestActiveUser
+                            Text(
+                                if (latest == null) {
+                                    "🕒 Zuletzt aktiv: -"
+                                } else {
+                                    "🕒 Zuletzt aktiv: @${latest.username} · ${formatMomentTime(latest.createdAt)}"
+                                }
+                            )
+                            Text("📸 Posts heute: ${communityStats.postsToday}")
+                            Text("💬 Chat-Nachrichten heute: ${communityStats.chatMessagesToday}")
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("🏆 Top 5 Reaktionen (7 Tage)", fontWeight = FontWeight.SemiBold)
+                            if (communityStats.topReactions7d.isEmpty()) {
+                                Text("Noch keine Reaktionen in den letzten 7 Tagen")
+                            } else {
+                                communityStats.topReactions7d.take(5).forEachIndexed { index, item ->
+                                    Text("${index + 1}. ${item.emoji}  ${item.count}")
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            val dm = communityStats.dailyMomentParticipation7d
+                            Text("🌈 Daily-Moment-Quote (7 Tage): ${dm.participants}/${dm.totalUsers} Nutzer (${dm.percent}%)")
+                        }
                     }
                 }
             }
@@ -5246,6 +5324,7 @@ private fun helpLines(): List<String> = listOf(
     "",
     "Reiter M: Profil",
     "- Profil, Streak, alte Beitraege und Verbindungsstatus.",
+    "- Community-Stats zeigen Gruppenaktivitaet von heute und den letzten 7 Tagen.",
     "- Benutzername und Namensfarbe anpassen.",
     "- Invite-Code ansehen, erneuern und direkt teilen.",
     "- Vergangene Beitraege: lang druecken zum Loeschen (mit Bestaetigung).",

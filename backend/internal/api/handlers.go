@@ -5,6 +5,7 @@ import (
     "errors"
     "fmt"
     "io"
+    "math"
     "mime/multipart"
     "net/http"
     "os"
@@ -81,10 +82,11 @@ func (s *Server) Router() *gin.Engine {
             protected.POST("/moment/special/request", s.handleSpecialMomentRequest)
             protected.POST("/uploads", s.handleUpload)
             protected.POST("/uploads/dual", s.handleDualUpload)
-			protected.GET("/feed", s.handleFeed)
-			protected.GET("/feed/days", s.handleFeedDays)
-			protected.GET("/feed/day-stats", s.handleFeedDayStats)
-			protected.GET("/chat", s.handleChatList)
+            protected.GET("/feed", s.handleFeed)
+            protected.GET("/feed/days", s.handleFeedDays)
+            protected.GET("/feed/day-stats", s.handleFeedDayStats)
+            protected.GET("/community/stats", s.handleCommunityStats)
+            protected.GET("/chat", s.handleChatList)
 			protected.POST("/chat", s.handleChatCreate)
 			protected.GET("/photos/:id/interactions", s.handlePhotoInteractions)
 			protected.POST("/photos/:id/reaction", s.handlePhotoReaction)
@@ -1679,6 +1681,118 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
         })
     }
     c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) handleCommunityStats(c *gin.Context) {
+    now := time.Now().In(s.Location)
+    todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, s.Location)
+    todayDay := now.Format("2006-01-02")
+    sinceDay := now.AddDate(0, 0, -6).Format("2006-01-02")
+    sinceTime := now.AddDate(0, 0, -7)
+
+    var registeredUsers int64
+    _ = s.DB.Model(&models.User{}).Count(&registeredUsers).Error
+
+    var activeUsersToday int64
+    _ = s.DB.Model(&models.Photo{}).
+        Select("COUNT(DISTINCT user_id)").
+        Where("day = ?", todayDay).
+        Scan(&activeUsersToday).Error
+
+    var postsToday int64
+    _ = s.DB.Model(&models.Photo{}).
+        Where("day = ?", todayDay).
+        Count(&postsToday).Error
+
+    var chatMessagesToday int64
+    _ = s.DB.Model(&models.ChatMessage{}).
+        Where("created_at >= ?", todayStart).
+        Count(&chatMessagesToday).Error
+
+    type latestRow struct {
+        Username  string    `gorm:"column:username"`
+        CreatedAt time.Time `gorm:"column:created_at"`
+    }
+    var latest latestRow
+    latestFound := s.DB.Table("photos").
+        Select("users.username as username, photos.created_at as created_at").
+        Joins("JOIN users ON users.id = photos.user_id").
+        Order("photos.created_at desc").
+        Limit(1).
+        Scan(&latest)
+
+    type reactionRow struct {
+        Emoji string `gorm:"column:emoji"`
+        Count int64  `gorm:"column:count"`
+    }
+    var reactionRows []reactionRow
+    _ = s.DB.Model(&models.PhotoReaction{}).
+        Select("emoji, COUNT(*) as count").
+        Where("created_at >= ?", sinceTime).
+        Group("emoji").
+        Order("count desc").
+        Limit(5).
+        Scan(&reactionRows).Error
+
+    var prompts []models.DailyPrompt
+    _ = s.DB.
+        Where("day >= ? AND day <= ?", sinceDay, todayDay).
+        Find(&prompts).Error
+    promptByDay := make(map[string]models.DailyPrompt, len(prompts))
+    for _, p := range prompts {
+        promptByDay[p.Day] = p
+    }
+
+    var photos []models.Photo
+    _ = s.DB.
+        Where("day >= ? AND day <= ?", sinceDay, todayDay).
+        Find(&photos).Error
+    dailyMomentUsers := map[uint]struct{}{}
+    for _, p := range photos {
+        prompt, ok := promptByDay[p.Day]
+        if !ok || prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
+            continue
+        }
+        if !p.CreatedAt.Before(*prompt.TriggeredAt) && !p.CreatedAt.After(*prompt.UploadUntil) {
+            dailyMomentUsers[p.UserID] = struct{}{}
+        }
+    }
+
+    participants := len(dailyMomentUsers)
+    percent := 0
+    if registeredUsers > 0 {
+        percent = int(math.Round((float64(participants) / float64(registeredUsers)) * 100.0))
+    }
+
+    topReactions := make([]gin.H, 0, len(reactionRows))
+    for _, row := range reactionRows {
+        topReactions = append(topReactions, gin.H{
+            "emoji": row.Emoji,
+            "count": row.Count,
+        })
+    }
+
+    latestActive := any(nil)
+    if latestFound.Error == nil && strings.TrimSpace(latest.Username) != "" {
+        latestActive = gin.H{
+            "username":  latest.Username,
+            "createdAt": latest.CreatedAt,
+        }
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "registeredUsers":  registeredUsers,
+        "activeUsersToday": activeUsersToday,
+        "latestActiveUser": latestActive,
+        "postsToday":       postsToday,
+        "chatMessagesToday": chatMessagesToday,
+        "topReactions7d":   topReactions,
+        "dailyMomentParticipation7d": gin.H{
+            "participants": participants,
+            "totalUsers":   registeredUsers,
+            "percent":      percent,
+        },
+    })
 }
 
 func (s *Server) handleChatCreate(c *gin.Context) {
