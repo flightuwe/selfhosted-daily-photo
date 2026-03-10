@@ -2680,21 +2680,21 @@ fun CameraTab(
                             pendingCapsule = CapsuleUploadOptions(mode = "7d")
                         },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("in einer Woche zeigen") }
+                    ) { Text("in einer Woche zeigen 👶") }
                     Button(
                         onClick = {
                             showCapsuleDialog = false
                             pendingCapsule = CapsuleUploadOptions(mode = "30d")
                         },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("in 30 Tagen zeigen") }
+                    ) { Text("in 30 Tagen zeigen 🧑") }
                     Button(
                         onClick = {
                             showCapsuleDialog = false
                             pendingCapsule = CapsuleUploadOptions(mode = "1y")
                         },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("in einem Jahr zeigen") }
+                    ) { Text("in einem Jahr zeigen 💀") }
                 }
             }
         )
