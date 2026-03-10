@@ -917,6 +917,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     )
         private set
 
+    private suspend fun fetchChangelogLinesFresh(): List<String> {
+        suspend fun loadOnce(): List<String> =
+            runCatching { repo.changelogLines(BuildConfig.VERSION_NAME) }
+                .getOrDefault(emptyList())
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+
+        fun isPlaceholderOnly(lines: List<String>): Boolean =
+            lines.size == 1 && lines.first().equals("Keine Action-Historie verfuegbar.", ignoreCase = true)
+
+        var lines = loadOnce()
+        if (lines.isEmpty() || isPlaceholderOnly(lines)) {
+            delay(800)
+            val retry = loadOnce()
+            if (retry.isNotEmpty() && !isPlaceholderOnly(retry)) {
+                lines = retry
+            }
+        }
+        return lines.filterNot { it.equals("Keine Action-Historie verfuegbar.", ignoreCase = true) }
+    }
+
     suspend fun bootstrap() {
         if (state.startupDone) return
         state = state.copy(startupDone = false, startupQuote = "")
@@ -928,8 +949,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (elapsed < 900) {
             delay(900 - elapsed)
         }
-        val changelogLines = runCatching { repo.changelogLines(BuildConfig.VERSION_NAME) }
-            .getOrDefault(emptyList())
+        val showChangelog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME)
+        val changelogLines = if (showChangelog) fetchChangelogLinesFresh() else emptyList()
         val healthOk = health?.ok == true
         val startupQuote = if (healthOk) repo.randomStartupQuote() else ""
         if (healthOk && startupQuote.isNotBlank()) {
@@ -948,7 +969,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverConnected = healthOk,
             serverVersion = health?.version ?: "nicht erreichbar",
             pushProvider = health?.provider ?: "unknown",
-            showChangelogDialog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME),
+            showChangelogDialog = showChangelog,
             changelogLines = changelogLines,
             uploadQueue = repo.uploadQueue(),
             autoUpdateEnabled = repo.autoUpdateEnabled(),
@@ -1432,8 +1453,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun showChangelogDialog() {
-        val lines = runCatching { repo.changelogLines(BuildConfig.VERSION_NAME) }
-            .getOrDefault(emptyList())
+        val lines = fetchChangelogLinesFresh()
         state = state.copy(
             showChangelogDialog = true,
             changelogLines = if (lines.isNotEmpty()) lines else state.changelogLines
