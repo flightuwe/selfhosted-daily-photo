@@ -244,6 +244,25 @@ func (s *Server) handleInviteRegister(c *gin.Context) {
         return
     }
 
+    welcomeText := fmt.Sprintf("Herzlich willkommen %s (Einladung von %s erhalten)", user.Username, inviter.Username)
+    _ = s.DB.Create(&models.ChatMessage{
+        UserID: inviter.ID,
+        Body:   welcomeText,
+        Source: "command",
+    }).Error
+
+    inviteTokens := s.inviteRegistrationNotificationTokens()
+    if len(inviteTokens) > 0 {
+        sendResult, sendErr := s.Notifier.Send(inviteTokens, notify.Message{
+            Title:  "Neues Mitglied",
+            Body:   welcomeText,
+            Type:   "invite_registered",
+            Action: "open_chat",
+        })
+        s.recordPushResult(sendResult, sendErr)
+        s.removeInvalidTokens(sendResult.InvalidTokens)
+    }
+
     token, _ := s.Auth.Sign(user.ID, user.Username, user.IsAdmin)
     c.JSON(http.StatusCreated, gin.H{
         "token": token,
@@ -477,8 +496,9 @@ func (s *Server) handleUpdateProfile(c *gin.Context) {
 func (s *Server) handleUpdatePreferences(c *gin.Context) {
     user, _ := userFromContext(c)
     var req struct {
-        ChatPushEnabled    *bool `json:"chatPushEnabled"`
-        AllowPhotoDownload *bool `json:"allowPhotoDownload"`
+        ChatPushEnabled               *bool `json:"chatPushEnabled"`
+        InviteRegistrationPushEnabled *bool `json:"inviteRegistrationPushEnabled"`
+        AllowPhotoDownload            *bool `json:"allowPhotoDownload"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
@@ -487,6 +507,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
     updates := map[string]any{}
     if req.ChatPushEnabled != nil {
         updates["chat_push_enabled"] = *req.ChatPushEnabled
+    }
+    if req.InviteRegistrationPushEnabled != nil {
+        updates["invite_registration_push_enabled"] = *req.InviteRegistrationPushEnabled
     }
     if req.AllowPhotoDownload != nil {
         updates["allow_photo_download"] = *req.AllowPhotoDownload
@@ -2573,6 +2596,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
         "isAdmin":            u.IsAdmin,
         "favoriteColor":      defaultColor(u.FavoriteColor),
         "chatPushEnabled":    u.ChatPushEnabled,
+        "inviteRegistrationPushEnabled": u.InviteRegistrationPushEnabled,
         "allowPhotoDownload": u.AllowPhotoDownload,
         "avatarUrl":          avatarURL,
         "bio":                strings.TrimSpace(u.Bio),
@@ -2978,6 +3002,20 @@ func (s *Server) chatNotificationTokens(senderID uint) []string {
         Select("device_tokens.token").
         Joins("JOIN users ON users.id = device_tokens.user_id").
         Where("users.id <> ? AND users.chat_push_enabled = ?", senderID, true).
+        Find(&rows).Error
+    tokens := make([]string, 0, len(rows))
+    for _, t := range rows {
+        tokens = append(tokens, t.Token)
+    }
+    return tokens
+}
+
+func (s *Server) inviteRegistrationNotificationTokens() []string {
+    var rows []models.DeviceToken
+    _ = s.DB.Table("device_tokens").
+        Select("device_tokens.token").
+        Joins("JOIN users ON users.id = device_tokens.user_id").
+        Where("users.invite_registration_push_enabled = ?", true).
         Find(&rows).Error
     tokens := make([]string, 0, len(rows))
     for _, t := range rows {

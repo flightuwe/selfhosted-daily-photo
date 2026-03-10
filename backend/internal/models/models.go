@@ -9,6 +9,7 @@ type User struct {
     IsAdmin      bool      `gorm:"default:false" json:"isAdmin"`
     FavoriteColor string   `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
     ChatPushEnabled bool   `gorm:"default:false" json:"chatPushEnabled"`
+    InviteRegistrationPushEnabled bool `gorm:"default:false" json:"inviteRegistrationPushEnabled"`
     AllowPhotoDownload bool `gorm:"default:false" json:"allowPhotoDownload"`
     AvatarPath   string    `gorm:"size:255" json:"avatarUrl"`
     Bio          string    `gorm:"size:280" json:"bio"`

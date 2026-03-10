@@ -173,6 +173,7 @@ data class User(
     val isAdmin: Boolean,
     val favoriteColor: String = "#1F5FBF",
     val chatPushEnabled: Boolean = false,
+    val inviteRegistrationPushEnabled: Boolean = false,
     val allowPhotoDownload: Boolean = false,
     val avatarUrl: String = "",
     val bio: String = "",
@@ -205,6 +206,7 @@ data class ProfileUpdateRequest(
 )
 data class PreferencesUpdateRequest(
     val chatPushEnabled: Boolean,
+    val inviteRegistrationPushEnabled: Boolean,
     val allowPhotoDownload: Boolean
 )
 data class AuthResponse(val token: String, val user: User)
@@ -569,6 +571,12 @@ class AppRepo(private val api: Api, private val context: Context) {
         prefs.edit().putBoolean("chat_push_enabled_local", enabled).apply()
     }
 
+    fun inviteRegistrationPushLocalEnabled(): Boolean = prefs.getBoolean("invite_registration_push_enabled_local", false)
+
+    fun setInviteRegistrationPushLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("invite_registration_push_enabled_local", enabled).apply()
+    }
+
     fun customNotificationToneEnabled(): Boolean = prefs.getBoolean("custom_notification_tone_enabled", false)
 
     fun setCustomNotificationToneEnabled(enabled: Boolean) {
@@ -732,11 +740,16 @@ class AppRepo(private val api: Api, private val context: Context) {
         return api.uploadAvatar("Bearer ${token()}", part).user
     }
 
-    suspend fun updatePreferences(chatPushEnabled: Boolean, allowPhotoDownload: Boolean): User =
+    suspend fun updatePreferences(
+        chatPushEnabled: Boolean,
+        inviteRegistrationPushEnabled: Boolean,
+        allowPhotoDownload: Boolean
+    ): User =
         api.updatePreferences(
             "Bearer ${token()}",
             PreferencesUpdateRequest(
                 chatPushEnabled = chatPushEnabled,
+                inviteRegistrationPushEnabled = inviteRegistrationPushEnabled,
                 allowPhotoDownload = allowPhotoDownload
             )
         ).user
@@ -1109,6 +1122,7 @@ data class UiState(
     val autoUpdateEnabled: Boolean = false,
     val notificationMasterEnabled: Boolean = true,
     val feedPostPushEnabled: Boolean = false,
+    val inviteRegistrationPushEnabled: Boolean = false,
     val customNotificationToneEnabled: Boolean = false,
     val customNotificationToneUri: String = "",
     val profileSectionExpanded: Map<String, Boolean> = emptyMap()
@@ -1152,6 +1166,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
+            inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri()
         )
@@ -1462,9 +1477,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && !prompt.hasPosted && marker != repo.seenPromptMarker()
             if (shouldPopup) repo.setSeenPromptMarker(marker)
             repo.setChatPushLocalEnabled(me.chatPushEnabled)
+            repo.setInviteRegistrationPushLocalEnabled(me.inviteRegistrationPushEnabled)
             repo.syncQuietHoursFromUser(me)
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
+            val inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled()
             val autoUpdateEnabled = repo.autoUpdateEnabled()
             val profileSectionExpanded = profileSectionIds.associateWith { sectionId ->
                 repo.getProfileSectionExpanded(me.id, sectionId)
@@ -1486,7 +1503,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 uploadQueue = repo.uploadQueue(),
                 autoUpdateEnabled = autoUpdateEnabled,
                 feedPostPushEnabled = feedPostPushEnabled,
-                notificationMasterEnabled = notificationMaster && autoUpdateEnabled && feedPostPushEnabled && me.chatPushEnabled,
+                inviteRegistrationPushEnabled = inviteRegistrationPushEnabled,
+                notificationMasterEnabled = notificationMaster && autoUpdateEnabled && feedPostPushEnabled && me.chatPushEnabled && inviteRegistrationPushEnabled,
                 profileSectionExpanded = profileSectionExpanded,
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
@@ -1936,7 +1954,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val auto = repo.autoUpdateEnabled()
         val chat = state.user?.chatPushEnabled ?: repo.chatPushLocalEnabled()
         val feed = repo.feedPostPushEnabled()
-        val master = auto && chat && feed
+        val invite = state.user?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
+        val master = auto && chat && feed && invite
         repo.setNotificationMasterEnabled(master)
         state = state.copy(
             autoUpdateEnabled = auto,
@@ -1949,7 +1968,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val auto = repo.autoUpdateEnabled()
         val chat = state.user?.chatPushEnabled ?: repo.chatPushLocalEnabled()
         val feed = repo.feedPostPushEnabled()
-        val master = auto && chat && feed
+        val invite = state.user?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
+        val master = auto && chat && feed && invite
         repo.setNotificationMasterEnabled(master)
         state = state.copy(
             feedPostPushEnabled = feed,
@@ -2037,15 +2057,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun setChatPushEnabled(enabled: Boolean) {
         state = state.copy(loading = true)
         val allowDownload = state.user?.allowPhotoDownload ?: false
-        runCatching { repo.updatePreferences(enabled, allowDownload) }
+        val inviteEnabled = state.user?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
+        runCatching { repo.updatePreferences(enabled, inviteEnabled, allowDownload) }
             .onSuccess { user ->
                 repo.setChatPushLocalEnabled(user.chatPushEnabled)
+                repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed
+                val master = auto && user.chatPushEnabled && feed && user.inviteRegistrationPushEnabled
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
+                    inviteRegistrationPushEnabled = user.inviteRegistrationPushEnabled,
                     loading = false,
                     notificationMasterEnabled = master,
                     message = "Chat-Push aktualisiert"
@@ -2059,29 +2082,34 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setNotificationMasterEnabled(enabled)
         repo.setAutoUpdateEnabled(enabled)
         repo.setFeedPostPushEnabled(enabled)
+        repo.setInviteRegistrationPushLocalEnabled(enabled)
         var nextUser = state.user
         if (state.user != null) {
             val allowDownload = state.user?.allowPhotoDownload ?: false
-            runCatching { repo.updatePreferences(enabled, allowDownload) }
+            runCatching { repo.updatePreferences(enabled, enabled, allowDownload) }
                 .onSuccess {
                     nextUser = it
                     repo.setChatPushLocalEnabled(it.chatPushEnabled)
+                    repo.setInviteRegistrationPushLocalEnabled(it.inviteRegistrationPushEnabled)
                 }
                 .onFailure {
                     state = state.copy(message = apiError(it, "Master-Benachrichtigung teilweise fehlgeschlagen"))
                 }
         } else {
             repo.setChatPushLocalEnabled(enabled)
+            repo.setInviteRegistrationPushLocalEnabled(enabled)
         }
         val auto = repo.autoUpdateEnabled()
         val feed = repo.feedPostPushEnabled()
         val chat = nextUser?.chatPushEnabled ?: repo.chatPushLocalEnabled()
-        val masterEffective = auto && feed && chat
+        val invite = nextUser?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
+        val masterEffective = auto && feed && chat && invite
         repo.setNotificationMasterEnabled(masterEffective)
         state = state.copy(
             user = nextUser,
             autoUpdateEnabled = auto,
             feedPostPushEnabled = feed,
+            inviteRegistrationPushEnabled = invite,
             notificationMasterEnabled = masterEffective,
             loading = false,
             message = if (masterEffective == enabled) {
@@ -2095,7 +2123,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun setAllowPhotoDownloadEnabled(enabled: Boolean) {
         val current = state.user ?: return
         state = state.copy(loading = true)
-        runCatching { repo.updatePreferences(current.chatPushEnabled, enabled) }
+        runCatching { repo.updatePreferences(current.chatPushEnabled, current.inviteRegistrationPushEnabled, enabled) }
             .onSuccess { user ->
                 state = state.copy(
                     user = user,
@@ -2105,6 +2133,29 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             .onFailure {
                 state = state.copy(loading = false, message = apiError(it, "Download-Freigabe speichern fehlgeschlagen"))
+            }
+    }
+
+    suspend fun setInviteRegistrationPushEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching { repo.updatePreferences(current.chatPushEnabled, enabled, current.allowPhotoDownload) }
+            .onSuccess { user ->
+                repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
+                val auto = repo.autoUpdateEnabled()
+                val feed = repo.feedPostPushEnabled()
+                val master = auto && user.chatPushEnabled && feed && user.inviteRegistrationPushEnabled
+                repo.setNotificationMasterEnabled(master)
+                state = state.copy(
+                    user = user,
+                    inviteRegistrationPushEnabled = user.inviteRegistrationPushEnabled,
+                    notificationMasterEnabled = master,
+                    loading = false,
+                    message = "Push bei neuen Mitgliedern aktualisiert"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Push-Einstellung speichern fehlgeschlagen"))
             }
     }
 
@@ -2855,6 +2906,7 @@ fun AppScreen(vm: MainVm) {
                     autoUpdateEnabled = state.autoUpdateEnabled,
                     notificationMasterEnabled = state.notificationMasterEnabled,
                     chatPushEnabled = state.user?.chatPushEnabled ?: false,
+                    inviteRegistrationPushEnabled = state.user?.inviteRegistrationPushEnabled ?: state.inviteRegistrationPushEnabled,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     feedPostPushEnabled = state.feedPostPushEnabled,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
@@ -2876,6 +2928,7 @@ fun AppScreen(vm: MainVm) {
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onChatPushEnabledChange = { scope.launch { vm.setChatPushEnabled(it) } },
+                    onInviteRegistrationPushEnabledChange = { scope.launch { vm.setInviteRegistrationPushEnabled(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onNotificationMasterEnabledChange = { scope.launch { vm.setNotificationMasterEnabled(it) } },
                     onFeedPostPushEnabledChange = { vm.setFeedPostPushEnabled(it) },
@@ -3993,6 +4046,7 @@ fun ProfileTab(
     autoUpdateEnabled: Boolean,
     notificationMasterEnabled: Boolean,
     chatPushEnabled: Boolean,
+    inviteRegistrationPushEnabled: Boolean,
     allowPhotoDownload: Boolean,
     feedPostPushEnabled: Boolean,
     customNotificationToneEnabled: Boolean,
@@ -4014,6 +4068,7 @@ fun ProfileTab(
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onChatPushEnabledChange: (Boolean) -> Unit,
+    onInviteRegistrationPushEnabledChange: (Boolean) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onNotificationMasterEnabledChange: (Boolean) -> Unit,
     onFeedPostPushEnabledChange: (Boolean) -> Unit,
@@ -4172,7 +4227,7 @@ fun ProfileTab(
             )
             CollapsibleSection(
                 title = "Benachrichtigungen",
-                subtitle = "Master + Update, Chat und Feed",
+                subtitle = "Master + Update, Chat, Feed und neue Mitglieder",
                 expanded = sectionExpanded("notifications"),
                 onExpandedChange = { onProfileSectionExpandedChange("notifications", it) }
             ) {
@@ -4229,6 +4284,17 @@ fun ProfileTab(
                 ) {
                     Text("Push bei Posts anderer Nutzer")
                     Switch(checked = feedPostPushEnabled, onCheckedChange = onFeedPostPushEnabledChange)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Push bei neuen Mitgliedern")
+                    Switch(
+                        checked = inviteRegistrationPushEnabled,
+                        onCheckedChange = onInviteRegistrationPushEnabledChange
+                    )
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -5188,7 +5254,7 @@ private fun helpLines(): List<String> = listOf(
     "",
     "Benachrichtigungen",
     "- Master-Schalter aktiviert/deaktiviert alle App-Benachrichtigungen.",
-    "- Einzel-Toggles: Update-Checks, Chat-Push, Push bei Posts anderer Nutzer.",
+    "- Einzel-Toggles: Update-Checks, Chat-Push, Push bei Posts anderer Nutzer und Push bei neuen Mitgliedern.",
     "- Optional: eigener Benachrichtigungston + Ton-Test.",
     "",
     "Updates und Changelog",
