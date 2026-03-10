@@ -103,6 +103,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
@@ -1846,19 +1847,12 @@ fun AppScreen(vm: MainVm) {
     }
 
     if (state.showPromptDialog) {
-        AlertDialog(
-            onDismissRequest = { vm.dismissPromptDialog() },
-            confirmButton = {
-                TextButton(onClick = {
-                    vm.dismissPromptDialog()
-                    startDualCapture(true)
-                }) { Text("Kamera oeffnen") }
+        DailyMomentStartOverlay(
+            onCaptureNow = {
+                vm.dismissPromptDialog()
+                startDualCapture(true)
             },
-            dismissButton = {
-                TextButton(onClick = { vm.dismissPromptDialog() }) { Text("Spaeter") }
-            },
-            title = { Text("Zeit fuer deinen taeglichen Moment") },
-            text = { Text("Nimm jetzt Rueckkamera und Frontkamera auf.") }
+            onLater = { vm.dismissPromptDialog() }
         )
     }
 
@@ -3891,6 +3885,83 @@ private fun formatMomentTime(raw: String?): String {
         }
     }
     return parsed
+}
+
+@Composable
+private fun DailyMomentStartOverlay(
+    onCaptureNow: () -> Unit,
+    onLater: () -> Unit
+) {
+    val transition = rememberInfiniteTransition(label = "daily-overlay-rainbow")
+    val hueShift by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 12000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "daily-overlay-hue"
+    )
+
+    val bgBrush = Brush.linearGradient(
+        colors = listOf(
+            rainbowColor(hueShift + 0f).copy(alpha = 0.90f),
+            rainbowColor(hueShift + 90f).copy(alpha = 0.90f),
+            rainbowColor(hueShift + 180f).copy(alpha = 0.90f),
+            rainbowColor(hueShift + 270f).copy(alpha = 0.90f)
+        )
+    )
+
+    Dialog(onDismissRequest = onLater) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(12.dp)
+        ) {
+            Card {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(bgBrush)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        "Daily-Moment gestartet!",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        "Jetzt sofort aufnehmen: Rueckkamera + Frontkamera.",
+                        color = Color.White
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onCaptureNow,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.White,
+                                contentColor = Color(0xFF111111)
+                            )
+                        ) {
+                            Text("Daily-Moment aufnehmen")
+                        }
+                        TextButton(
+                            onClick = onLater,
+                            modifier = Modifier.weight(0.45f)
+                        ) {
+                            Text("Spaeter", color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun isWithinDailyMomentWindow(createdAtRaw: String?, triggeredAtRaw: String?, uploadUntilRaw: String?): Boolean {
