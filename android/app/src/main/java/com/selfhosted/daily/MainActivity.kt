@@ -175,7 +175,10 @@ data class InvitePreviewResponse(val inviteCode: String, val inviter: InviteOwne
 data class InviteCodeResponse(val inviteCode: String)
 data class DeviceTokenRequest(val token: String, val deviceName: String = "")
 data class PasswordChangeRequest(val currentPassword: String, val newPassword: String)
-data class ChatMessageRequest(val body: String)
+data class ChatMessageRequest(
+    val body: String,
+    val clientMessageId: String? = null
+)
 data class PromptPhoto(
     val id: Long,
     val day: String,
@@ -587,8 +590,11 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     suspend fun listChat(): List<ChatItem> = api.chat("Bearer ${token()}").items
 
-    suspend fun sendChat(body: String) {
-        api.sendChat("Bearer ${token()}", ChatMessageRequest(body))
+    suspend fun sendChat(body: String, clientMessageId: String) {
+        api.sendChat(
+            "Bearer ${token()}",
+            ChatMessageRequest(body = body, clientMessageId = clientMessageId)
+        )
     }
 
     suspend fun photoInteractions(photoId: Long): PhotoInteractionsResponse =
@@ -865,6 +871,7 @@ data class UiState(
     val uploadQueue: List<QueuedUploadItem> = emptyList(),
     val photoInteractions: PhotoInteractionsResponse? = null,
     val interactionsLoading: Boolean = false,
+    val chatSending: Boolean = false,
     val loading: Boolean = false,
     val message: String = "",
     val activeTab: AppTab = AppTab.CAMERA,
@@ -1354,12 +1361,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(uploadQueue = repo.uploadQueue())
     }
 
-    suspend fun sendChat(body: String) {
+    suspend fun sendChat(body: String): Boolean {
         val trimmed = body.trim()
-        if (trimmed.isBlank()) return
-        runCatching { repo.sendChat(trimmed) }
+        if (trimmed.isBlank() || state.chatSending) return false
+        val clientMessageId = UUID.randomUUID().toString()
+        state = state.copy(chatSending = true)
+        val ok = runCatching { repo.sendChat(trimmed, clientMessageId) }
             .onSuccess { refreshAll() }
             .onFailure { state = state.copy(message = apiError(it, "Chat senden fehlgeschlagen")) }
+            .isSuccess
+        state = state.copy(chatSending = false)
+        return ok
     }
 
     suspend fun loadPhotoInteractions(photoId: Long) {
@@ -2264,13 +2276,14 @@ fun AppScreen(vm: MainVm) {
                 AppTab.CHAT -> ChatTab(
                     items = state.chat,
                     input = chatInput,
+                    sending = state.chatSending,
                     onInput = { chatInput = it },
                     onSend = {
                         val body = chatInput
-                        if (body.isNotBlank()) {
+                        if (body.isNotBlank() && !state.chatSending) {
                             scope.launch {
-                                vm.sendChat(body)
-                                chatInput = ""
+                                val ok = vm.sendChat(body)
+                                if (ok) chatInput = ""
                             }
                         }
                     }
@@ -3199,7 +3212,13 @@ fun CalendarTab(
 }
 
 @Composable
-fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onSend: () -> Unit) {
+fun ChatTab(
+    items: List<ChatItem>,
+    input: String,
+    sending: Boolean,
+    onInput: (String) -> Unit,
+    onSend: () -> Unit
+) {
     val listState = rememberLazyListState()
     val rows = remember(items) {
         buildList<ChatRow> {
@@ -3261,9 +3280,16 @@ fun ChatTab(items: List<ChatItem>, input: String, onInput: (String) -> Unit, onS
                 value = input,
                 onValueChange = onInput,
                 label = { Text("Nachricht") },
+                enabled = !sending,
                 modifier = Modifier.weight(1f)
             )
-            Button(onClick = onSend, modifier = Modifier.align(Alignment.CenterVertically)) { Text("Senden") }
+            Button(
+                onClick = onSend,
+                enabled = !sending && input.trim().isNotEmpty(),
+                modifier = Modifier.align(Alignment.CenterVertically)
+            ) {
+                Text(if (sending) "Sende..." else "Senden")
+            }
         }
     }
 }

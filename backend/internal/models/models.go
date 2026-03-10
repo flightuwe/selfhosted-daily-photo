@@ -108,9 +108,10 @@ type PhotoComment struct {
 
 type ChatMessage struct {
     ID        uint      `gorm:"primaryKey" json:"id"`
-    UserID    uint      `gorm:"index;not null" json:"userId"`
+    UserID    uint      `gorm:"index;not null;index:idx_chat_msg_user_client,unique" json:"userId"`
     User      User      `json:"user"`
     Body      string    `gorm:"size:500;not null" json:"body"`
+    ClientMessageID *string   `gorm:"size:64;index:idx_chat_msg_user_client,unique" json:"-"`
     CreatedAt time.Time `json:"createdAt"`
 }
 

@@ -1470,7 +1470,8 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
 func (s *Server) handleChatCreate(c *gin.Context) {
     user, _ := userFromContext(c)
     var req struct {
-        Body string `json:"body" binding:"required,min=1,max=500"`
+        Body            string `json:"body" binding:"required,min=1,max=500"`
+        ClientMessageID string `json:"clientMessageId" binding:"omitempty,max=64"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
@@ -1481,16 +1482,62 @@ func (s *Server) handleChatCreate(c *gin.Context) {
         c.JSON(http.StatusBadRequest, gin.H{"error": "message empty"})
         return
     }
+    clientMessageID := strings.TrimSpace(req.ClientMessageID)
+    if clientMessageID != "" {
+        var existing models.ChatMessage
+        err := s.DB.Preload("User").
+            Where("user_id = ? AND client_message_id = ?", user.ID, clientMessageID).
+            First(&existing).Error
+        if err == nil {
+            c.JSON(http.StatusOK, gin.H{
+                "id":        existing.ID,
+                "body":      existing.Body,
+                "createdAt": existing.CreatedAt,
+                "user": gin.H{
+                    "id":            existing.User.ID,
+                    "username":      existing.User.Username,
+                    "favoriteColor": defaultColor(existing.User.FavoriteColor),
+                },
+            })
+            return
+        }
+        if !errors.Is(err, gorm.ErrRecordNotFound) {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "chat dedupe lookup failed"})
+            return
+        }
+    }
 
     if handled, err := s.tryHandleChatCommand(c, user, body); handled || err != nil {
         return
     }
 
-    msg := models.ChatMessage{UserID: user.ID, Body: body}
-    if err := s.DB.Create(&msg).Error; err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
-        return
-    }
+	msg := models.ChatMessage{UserID: user.ID, Body: body}
+	if clientMessageID != "" {
+		msg.ClientMessageID = &clientMessageID
+	}
+	if err := s.DB.Create(&msg).Error; err != nil {
+		if clientMessageID != "" {
+			var existing models.ChatMessage
+			findErr := s.DB.Preload("User").
+				Where("user_id = ? AND client_message_id = ?", user.ID, clientMessageID).
+				First(&existing).Error
+			if findErr == nil {
+				c.JSON(http.StatusOK, gin.H{
+					"id":        existing.ID,
+					"body":      existing.Body,
+					"createdAt": existing.CreatedAt,
+					"user": gin.H{
+						"id":            existing.User.ID,
+						"username":      existing.User.Username,
+						"favoriteColor": defaultColor(existing.User.FavoriteColor),
+					},
+				})
+				return
+			}
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+		return
+	}
     pushText := fmt.Sprintf("Neue Chat-Nachricht von %s", user.Username)
     tokens := s.chatNotificationTokens(user.ID)
     if len(tokens) > 0 {
