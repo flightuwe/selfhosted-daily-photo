@@ -1395,6 +1395,7 @@ func (s *Server) handleChatList(c *gin.Context) {
         out = append(out, gin.H{
             "id":        m.ID,
             "body":      m.Body,
+            "source":    defaultIfBlank(strings.TrimSpace(m.Source), "user"),
             "createdAt": m.CreatedAt,
             "user": gin.H{
                 "id":       m.User.ID,
@@ -1492,6 +1493,7 @@ func (s *Server) handleChatCreate(c *gin.Context) {
             c.JSON(http.StatusOK, gin.H{
                 "id":        existing.ID,
                 "body":      existing.Body,
+                "source":    defaultIfBlank(strings.TrimSpace(existing.Source), "user"),
                 "createdAt": existing.CreatedAt,
                 "user": gin.H{
                     "id":            existing.User.ID,
@@ -1515,20 +1517,21 @@ func (s *Server) handleChatCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "chat dedupe lookup failed"})
 		return
 	} else if ok {
-		c.JSON(http.StatusOK, gin.H{
-			"id":        existing.ID,
-			"body":      existing.Body,
-			"createdAt": existing.CreatedAt,
-			"user": gin.H{
-				"id":            existing.User.ID,
-				"username":      existing.User.Username,
-				"favoriteColor": defaultColor(existing.User.FavoriteColor),
+        c.JSON(http.StatusOK, gin.H{
+            "id":        existing.ID,
+            "body":      existing.Body,
+            "source":    defaultIfBlank(strings.TrimSpace(existing.Source), "user"),
+            "createdAt": existing.CreatedAt,
+            "user": gin.H{
+                "id":            existing.User.ID,
+                "username":      existing.User.Username,
+                "favoriteColor": defaultColor(existing.User.FavoriteColor),
 			},
 		})
 		return
 	}
 
-	msg := models.ChatMessage{UserID: user.ID, Body: body}
+	msg := models.ChatMessage{UserID: user.ID, Body: body, Source: "user"}
 	if clientMessageID != "" {
 		msg.ClientMessageID = &clientMessageID
 	}
@@ -1542,6 +1545,7 @@ func (s *Server) handleChatCreate(c *gin.Context) {
 				c.JSON(http.StatusOK, gin.H{
 					"id":        existing.ID,
 					"body":      existing.Body,
+                    "source":    defaultIfBlank(strings.TrimSpace(existing.Source), "user"),
 					"createdAt": existing.CreatedAt,
 					"user": gin.H{
 						"id":            existing.User.ID,
@@ -1570,6 +1574,7 @@ func (s *Server) handleChatCreate(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"id":        msg.ID,
 		"body":      msg.Body,
+        "source":    defaultIfBlank(strings.TrimSpace(msg.Source), "user"),
         "createdAt": msg.CreatedAt,
         "user": gin.H{
             "id":       user.ID,
@@ -1658,6 +1663,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
             chatMessage = models.ChatMessage{
                 UserID: user.ID,
                 Body:   renderCommandText(defaultIfBlank(cmd.ResponseText, "Moment wurde von {user} angefordert."), user.Username),
+                Source: "command",
             }
             if err := s.DB.Create(&chatMessage).Error; err != nil {
                 c.JSON(http.StatusInternalServerError, gin.H{"error": "command chat write failed"})
@@ -1674,6 +1680,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
             chatMessage = models.ChatMessage{
                 UserID: user.ID,
                 Body:   renderCommandText(defaultIfBlank(cmd.ResponseText, "Chat wurde von {user} geleert."), user.Username),
+                Source: "command",
             }
             if err := s.DB.Create(&chatMessage).Error; err != nil {
                 c.JSON(http.StatusInternalServerError, gin.H{"error": "command chat write failed"})
@@ -1693,6 +1700,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
             chatMessage = models.ChatMessage{
                 UserID: user.ID,
                 Body:   renderCommandText(defaultIfBlank(cmd.ResponseText, "Push wurde von {user} gesendet."), user.Username),
+                Source: "command",
             }
             if err := s.DB.Create(&chatMessage).Error; err != nil {
                 c.JSON(http.StatusInternalServerError, gin.H{"error": "command chat write failed"})
@@ -1704,6 +1712,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
         chatMessage = models.ChatMessage{
             UserID: user.ID,
             Body:   renderCommandText(defaultIfBlank(cmd.ResponseText, "Command von {user} ausgefuehrt."), user.Username),
+            Source: "command",
         }
         if err := s.DB.Create(&chatMessage).Error; err != nil {
             c.JSON(http.StatusInternalServerError, gin.H{"error": "command chat write failed"})
@@ -1731,6 +1740,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
     if hasChatMessage {
         resp["id"] = chatMessage.ID
         resp["body"] = chatMessage.Body
+        resp["source"] = defaultIfBlank(strings.TrimSpace(chatMessage.Source), "command")
         resp["createdAt"] = chatMessage.CreatedAt
         resp["user"] = gin.H{
             "id":            user.ID,

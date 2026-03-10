@@ -271,7 +271,13 @@ data class DayListResponse(val items: List<String>)
 data class DayStatItem(val day: String, val count: Long)
 data class DayStatsResponse(val items: List<DayStatItem>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
-data class ChatItem(val id: Long, val body: String, val createdAt: String, val user: User)
+data class ChatItem(
+    val id: Long,
+    val body: String,
+    val createdAt: String,
+    val user: User,
+    val source: String = "user"
+)
 data class ChatResponse(val items: List<ChatItem>)
 data class ReactionCount(val emoji: String, val count: Long)
 data class PhotoCommentItem(val id: Long, val body: String, val createdAt: String, val user: User)
@@ -557,6 +563,25 @@ class AppRepo(private val api: Api, private val context: Context) {
             }
             quotes.randomOrNull().orEmpty()
         }.getOrDefault("")
+    }
+
+    fun lastStartupChatSignature(): String = prefs.getString("startup_chat_signature", "") ?: ""
+
+    fun setLastStartupChatSignature(signature: String) {
+        prefs.edit().putString("startup_chat_signature", signature.trim()).apply()
+    }
+
+    fun randomStartupChatLine(chatItems: List<ChatItem>): String {
+        val candidates = chatItems
+            .filter { it.body.trim().isNotBlank() }
+            .filter { it.source.equals("user", ignoreCase = true) || it.source.isBlank() }
+            .map { it to "${it.user.id}|${it.body.trim()}" }
+        if (candidates.isEmpty()) return ""
+        val lastSig = lastStartupChatSignature()
+        val pool = if (candidates.size > 1) candidates.filter { it.second != lastSig } else candidates
+        val picked = pool.randomOrNull() ?: candidates.random()
+        setLastStartupChatSignature(picked.second)
+        return "${picked.first.user.username}: ${picked.first.body.trim()}"
     }
 
     suspend fun login(username: String, password: String): User {
@@ -989,7 +1014,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val showChangelog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME)
         val changelogLines = if (showChangelog) fetchChangelogLinesFresh() else emptyList()
         val healthOk = health?.ok == true
-        val startupQuote = if (healthOk) repo.randomStartupQuote() else ""
+        val startupQuote = if (healthOk) {
+            if (repo.token().isNotBlank()) {
+                val chatLine = runCatching { repo.randomStartupChatLine(repo.listChat()) }.getOrDefault("")
+                if (chatLine.isNotBlank()) chatLine else repo.randomStartupQuote()
+            } else {
+                repo.randomStartupQuote()
+            }
+        } else ""
         if (healthOk && startupQuote.isNotBlank()) {
             state = state.copy(
                 startupDone = false,

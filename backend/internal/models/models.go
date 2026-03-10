@@ -111,6 +111,7 @@ type ChatMessage struct {
     UserID    uint      `gorm:"index;not null;index:idx_chat_msg_user_client,unique" json:"userId"`
     User      User      `json:"user"`
     Body      string    `gorm:"size:500;not null" json:"body"`
+    Source    string    `gorm:"size:16;not null;default:'user';index" json:"source"`
     ClientMessageID *string   `gorm:"size:64;index:idx_chat_msg_user_client,unique" json:"-"`
     CreatedAt time.Time `json:"createdAt"`
 }
