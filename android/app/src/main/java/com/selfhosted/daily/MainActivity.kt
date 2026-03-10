@@ -2716,10 +2716,11 @@ fun AppScreen(vm: MainVm) {
     }
 
     state.viewedProfile?.let { profile ->
-        val profileAvatarUrl = profile.user.avatarUrl.toString().trim()
-        val profileBio = profile.user.bio.toString().trim()
-        val profileStatusText = profile.user.statusText.toString().trim()
-        val profileStatusEmoji = profile.user.statusEmoji.toString().trim()
+        val profileUsername = safeApiString(profile.user.username, "unbekannt")
+        val profileAvatarUrl = safeApiString(profile.user.avatarUrl)
+        val profileBio = safeApiString(profile.user.bio)
+        val profileStatusText = safeApiString(profile.user.statusText)
+        val profileStatusEmoji = safeApiString(profile.user.statusEmoji)
         AlertDialog(
             onDismissRequest = {
                 profileAvatarPreviewUrl = ""
@@ -2731,7 +2732,7 @@ fun AppScreen(vm: MainVm) {
                     vm.closeViewedProfile()
                 }) { Text("Schliessen") }
             },
-            title = { Text("@${profile.user.username}") },
+            title = { Text("@$profileUsername") },
             text = {
                 Column(
                     modifier = Modifier
@@ -3254,6 +3255,8 @@ fun AppScreen(vm: MainVm) {
                             val share = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/plain"
                                 putExtra(Intent.EXTRA_STREAM, uri)
+                                putExtra(Intent.EXTRA_SUBJECT, "Daily Diagnose Export")
+                                putExtra(Intent.EXTRA_TEXT, "Diagnose-Export aus Daily")
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
                             context.startActivity(Intent.createChooser(share, "Diagnose teilen"))
@@ -5872,6 +5875,11 @@ private fun createTempImageUri(context: Context): Uri {
     val dir = File(context.cacheDir, "camera").apply { mkdirs() }
     val file = File.createTempFile("moment_", ".jpg", dir)
     return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}
+
+private fun safeApiString(value: String?, fallback: String = ""): String {
+    val clean = value?.trim().orEmpty()
+    return if (clean.isBlank()) fallback else clean
 }
 
 private fun fallbackChangelogLines(): List<String> {
