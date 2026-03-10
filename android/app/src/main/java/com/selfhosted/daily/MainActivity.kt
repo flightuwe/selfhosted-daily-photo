@@ -2475,7 +2475,7 @@ fun AppScreen(vm: MainVm) {
                             vm.nextProfileSetupStep()
                         }
                         else -> {
-                            vm.jumpToSetupSection("notifications")
+                            vm.jumpToSetupSection("profile_account")
                             vm.closeProfileSetupGuide(markCompleted = true)
                         }
                     }
@@ -4178,6 +4178,8 @@ fun ProfileTab(
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     val context = LocalContext.current
+    val appPrefs = remember(context) { context.getSharedPreferences("app", Context.MODE_PRIVATE) }
+    val expiryPresetKey = remember(username) { "status_expiry_preset_${username.lowercase(Locale.ROOT)}" }
     var showColorPicker by remember { mutableStateOf(false) }
     var pickerHsv by remember(editableColor) { mutableStateOf(hexToHsv(normalizeHexColor(editableColor))) }
     var themeSliderValue by remember(themeMode) { mutableStateOf(themeMode.toFloat()) }
@@ -4191,6 +4193,9 @@ fun ProfileTab(
     var statusTextValue by remember(statusText) { mutableStateOf(statusText) }
     var statusEmojiValue by remember(statusEmoji) { mutableStateOf(statusEmoji) }
     var statusExpiresAtValue by remember(statusExpiresAt) { mutableStateOf(statusExpiresAt ?: "") }
+    var statusExpiryPreset by remember(statusExpiresAt, username) {
+        mutableStateOf(appPrefs.getString(expiryPresetKey, "none") ?: "none")
+    }
     var profileVisibleValue by remember(profileVisible) { mutableStateOf(profileVisible) }
     var avatarVisibleValue by remember(avatarVisible) { mutableStateOf(avatarVisible) }
     var bioVisibleValue by remember(bioVisible) { mutableStateOf(bioVisible) }
@@ -4234,7 +4239,40 @@ fun ProfileTab(
                 ) { Text(if (updateChecked) "Update geprueft" else "Update pruefen") }
                 Button(onClick = onShowChangelog) { Text("!") }
                 Button(onClick = onShowHelp) { Text("Hilfe") }
-                Button(onClick = onOpenSetupGuide) { Text("Setup") }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            val setupTransition = rememberInfiniteTransition(label = "setup-rainbow")
+            val setupHue by setupTransition.animateFloat(
+                initialValue = 0f,
+                targetValue = 360f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 14000, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "setup-rainbow-hue"
+            )
+            val setupBrush = Brush.horizontalGradient(
+                listOf(
+                    rainbowColor(setupHue + 0f),
+                    rainbowColor(setupHue + 80f),
+                    rainbowColor(setupHue + 160f),
+                    rainbowColor(setupHue + 240f)
+                )
+            )
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(setupBrush, shape = MaterialTheme.shapes.medium),
+                colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+            ) {
+                Button(
+                    onClick = onOpenSetupGuide,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.Transparent,
+                        contentColor = Color.White
+                    )
+                ) { Text("Profil-Setup Assistent") }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Row(modifier = Modifier.fillMaxWidth()) {
@@ -4461,17 +4499,71 @@ fun ProfileTab(
                     label = { Text("Status-Emoji") },
                     modifier = Modifier.fillMaxWidth()
                 )
+                val expiryTransition = rememberInfiniteTransition(label = "status-expiry-rainbow")
+                val expiryHue by expiryTransition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 360f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 16000, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart
+                    ),
+                    label = "status-expiry-hue"
+                )
+                val expiryBrush = Brush.horizontalGradient(
+                    listOf(
+                        rainbowColor(expiryHue + 0f),
+                        rainbowColor(expiryHue + 90f),
+                        rainbowColor(expiryHue + 180f),
+                        rainbowColor(expiryHue + 270f)
+                    )
+                )
+                val expiryLabel = when (statusExpiryPreset) {
+                    "24h" -> "24 Stunden"
+                    "72h" -> "72 Stunden"
+                    "7d" -> "7 Tage"
+                    "none" -> "Kein Verfallsdatum"
+                    else -> if (statusExpiresAtValue.isNotBlank()) "Bis ${formatCapsuleOpenAt(statusExpiresAtValue)}" else "Kein Verfallsdatum"
+                }
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(expiryBrush, shape = MaterialTheme.shapes.small),
+                    colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+                ) {
+                    Text(
+                        text = "Verfallsdatum: $expiryLabel",
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = { statusExpiresAtValue = OffsetDateTime.now().plusHours(24).toString() }, modifier = Modifier.weight(1f)) {
+                    Button(onClick = {
+                        statusExpiresAtValue = OffsetDateTime.now().plusHours(24).toString()
+                        statusExpiryPreset = "24h"
+                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                    }, modifier = Modifier.weight(1f)) {
                         Text("24h")
                     }
-                    Button(onClick = { statusExpiresAtValue = OffsetDateTime.now().plusHours(72).toString() }, modifier = Modifier.weight(1f)) {
+                    Button(onClick = {
+                        statusExpiresAtValue = OffsetDateTime.now().plusHours(72).toString()
+                        statusExpiryPreset = "72h"
+                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                    }, modifier = Modifier.weight(1f)) {
                         Text("72h")
                     }
-                    Button(onClick = { statusExpiresAtValue = OffsetDateTime.now().plusDays(7).toString() }, modifier = Modifier.weight(1f)) {
+                    Button(onClick = {
+                        statusExpiresAtValue = OffsetDateTime.now().plusDays(7).toString()
+                        statusExpiryPreset = "7d"
+                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                    }, modifier = Modifier.weight(1f)) {
                         Text("7d")
                     }
-                    Button(onClick = { statusExpiresAtValue = "" }, modifier = Modifier.weight(1f)) {
+                    Button(onClick = {
+                        statusExpiresAtValue = ""
+                        statusExpiryPreset = "none"
+                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                    }, modifier = Modifier.weight(1f)) {
                         Text("∞")
                     }
                 }
@@ -4571,13 +4663,20 @@ fun ProfileTab(
                 )
                 Button(
                     onClick = {
+                        val expiryRaw = statusExpiresAtValue.trim()
+                        if (expiryRaw.isBlank()) {
+                            statusExpiryPreset = "none"
+                        } else if (statusExpiryPreset !in listOf("24h", "72h", "7d")) {
+                            statusExpiryPreset = "custom"
+                        }
+                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
                         onSaveProfile(
                             editableUsername.trim(),
                             normalizeHexColor(editableColor),
                             bioValue.trim(),
                             statusTextValue.trim(),
                             statusEmojiValue.trim(),
-                            statusExpiresAtValue.trim().ifBlank { null },
+                            expiryRaw.ifBlank { null },
                             profileVisibleValue,
                             avatarVisibleValue,
                             bioVisibleValue,
