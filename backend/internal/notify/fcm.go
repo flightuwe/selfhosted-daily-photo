@@ -51,7 +51,7 @@ func NewFCMSender(projectID, serviceAccountFile string) (*FCMSender, error) {
 
 func (s *FCMSender) Name() string { return "fcm" }
 
-func (s *FCMSender) SendDailyPrompt(tokens []string, body string) (SendResult, error) {
+func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
 	result := SendResult{Requested: len(tokens)}
 	if len(tokens) == 0 {
 		return result, nil
@@ -64,17 +64,33 @@ func (s *FCMSender) SendDailyPrompt(tokens []string, body string) (SendResult, e
 
 	url := fmt.Sprintf("https://fcm.googleapis.com/v1/projects/%s/messages:send", s.projectID)
 	var firstErr error
+	title := strings.TrimSpace(message.Title)
+	if title == "" {
+		title = "Daily Moment"
+	}
+	body := strings.TrimSpace(message.Body)
+	if body == "" {
+		body = "Zeit fuer deinen taeglichen Moment."
+	}
+	msgType := strings.TrimSpace(strings.ToLower(message.Type))
+	if msgType == "" {
+		msgType = "daily_prompt"
+	}
+	action := strings.TrimSpace(message.Action)
+	if action == "" {
+		action = "open_app"
+	}
 	for _, t := range tokens {
 		payload := map[string]any{
 			"message": map[string]any{
 				"token": t,
 				"notification": map[string]string{
-					"title": "Daily Moment",
+					"title": title,
 					"body":  body,
 				},
 				"data": map[string]string{
-					"type":   "daily_prompt",
-					"action": "open_camera",
+					"type":   msgType,
+					"action": action,
 					"body":   body,
 				},
 				"android": map[string]any{
@@ -114,4 +130,13 @@ func (s *FCMSender) SendDailyPrompt(tokens []string, body string) (SendResult, e
 		result.Sent++
 	}
 	return result, firstErr
+}
+
+func (s *FCMSender) SendDailyPrompt(tokens []string, body string) (SendResult, error) {
+	return s.Send(tokens, Message{
+		Title:  "Daily Moment",
+		Body:   body,
+		Type:   "daily_prompt",
+		Action: "open_camera",
+	})
 }

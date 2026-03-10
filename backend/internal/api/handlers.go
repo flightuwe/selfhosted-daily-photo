@@ -633,6 +633,7 @@ func (s *Server) handleUpload(c *gin.Context) {
         return
     }
 
+    s.notifyPostCreated(user, photo)
     c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
 }
 
@@ -1485,7 +1486,12 @@ func (s *Server) handleChatCreate(c *gin.Context) {
     pushText := fmt.Sprintf("Neue Chat-Nachricht von %s", user.Username)
     tokens := s.chatNotificationTokens(user.ID)
     if len(tokens) > 0 {
-        sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, pushText)
+        sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+            Title:  "Daily Chat",
+            Body:   pushText,
+            Type:   "chat",
+            Action: "open_chat",
+        })
         s.recordPushResult(sendResult, sendErr)
         s.removeInvalidTokens(sendResult.InvalidTokens)
     }
@@ -1806,6 +1812,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
         return
     }
 
+    s.notifyPostCreated(user, photo)
     c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
 }
 
@@ -2459,6 +2466,20 @@ func (s *Server) userDeviceTokens(userID uint) []string {
     return tokens
 }
 
+func (s *Server) postNotificationTokens(senderID uint) []string {
+    var rows []models.DeviceToken
+    _ = s.DB.Table("device_tokens").
+        Select("device_tokens.token").
+        Joins("JOIN users ON users.id = device_tokens.user_id").
+        Where("users.id <> ?", senderID).
+        Find(&rows).Error
+    tokens := make([]string, 0, len(rows))
+    for _, t := range rows {
+        tokens = append(tokens, t.Token)
+    }
+    return tokens
+}
+
 func (s *Server) chatNotificationTokens(senderID uint) []string {
     var rows []models.DeviceToken
     _ = s.DB.Table("device_tokens").
@@ -2471,6 +2492,26 @@ func (s *Server) chatNotificationTokens(senderID uint) []string {
         tokens = append(tokens, t.Token)
     }
     return tokens
+}
+
+func (s *Server) notifyPostCreated(author models.User, photo models.Photo) {
+    // Private or delayed capsules should not trigger immediate post notifications.
+    if photo.CapsulePrivate || photo.CapsuleVisibleAt != nil {
+        return
+    }
+    tokens := s.postNotificationTokens(author.ID)
+    if len(tokens) == 0 {
+        return
+    }
+    body := fmt.Sprintf("%s hat gepostet", author.Username)
+    sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+        Title:  "Neuer Beitrag",
+        Body:   body,
+        Type:   "post",
+        Action: "open_feed",
+    })
+    s.recordPushResult(sendResult, sendErr)
+    s.removeInvalidTokens(sendResult.InvalidTokens)
 }
 
 func (s *Server) removeInvalidTokens(tokens []string) int64 {
