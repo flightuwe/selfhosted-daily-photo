@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -43,7 +44,7 @@ func NewFCMSender(projectID, serviceAccountFile string) (*FCMSender, error) {
 	return &FCMSender{
 		projectID: projectID,
 		client: &http.Client{
-			Timeout: 12 * time.Second,
+			Timeout: 6 * time.Second,
 		},
 		tokenSrc: jwtCfg.TokenSource(context.Background()),
 	}, nil
@@ -52,8 +53,9 @@ func NewFCMSender(projectID, serviceAccountFile string) (*FCMSender, error) {
 func (s *FCMSender) Name() string { return "fcm" }
 
 func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
-	result := SendResult{Requested: len(tokens)}
-	if len(tokens) == 0 {
+	cleaned := dedupeTokens(tokens)
+	result := SendResult{Requested: len(cleaned)}
+	if len(cleaned) == 0 {
 		return result, nil
 	}
 
@@ -80,7 +82,16 @@ func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
 	if action == "" {
 		action = "open_app"
 	}
-	for _, t := range tokens {
+	workers := 8
+	if len(cleaned) < workers {
+		workers = len(cleaned)
+	}
+
+	var mu sync.Mutex
+	jobs := make(chan string, len(cleaned))
+	var wg sync.WaitGroup
+
+	sendOne := func(t string) (bool, error) {
 		payload := map[string]any{
 			"message": map[string]any{
 				"token": t,
@@ -105,31 +116,67 @@ func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
 
 		resp, err := s.client.Do(req)
 		if err != nil {
-			result.Failed++
-			if firstErr == nil {
-				firstErr = fmt.Errorf("fcm request failed: %w", err)
-			}
-			continue
+			return false, fmt.Errorf("fcm request failed: %w", err)
 		}
 		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if resp.StatusCode >= 300 {
-			result.Failed++
-			raw := string(respBody)
-			if strings.Contains(raw, "UNREGISTERED") ||
-				strings.Contains(raw, "registration-token-not-registered") ||
-				strings.Contains(raw, "Requested entity was not found") ||
-				strings.Contains(raw, "invalid registration token") {
-				result.InvalidTokens = append(result.InvalidTokens, t)
+			rawBody := string(respBody)
+			invalid := strings.Contains(rawBody, "UNREGISTERED") ||
+				strings.Contains(rawBody, "registration-token-not-registered") ||
+				strings.Contains(rawBody, "Requested entity was not found") ||
+				strings.Contains(strings.ToLower(rawBody), "invalid registration token")
+			return invalid, fmt.Errorf("fcm response %d: %s", resp.StatusCode, rawBody)
+		}
+		return false, nil
+	}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range jobs {
+				invalid, err := sendOne(t)
+				mu.Lock()
+				if err != nil {
+					result.Failed++
+					if invalid {
+						result.InvalidTokens = append(result.InvalidTokens, t)
+					}
+					if firstErr == nil {
+						firstErr = err
+					}
+				} else {
+					result.Sent++
+				}
+				mu.Unlock()
 			}
-			if firstErr == nil {
-				firstErr = fmt.Errorf("fcm response %d: %s", resp.StatusCode, raw)
-			}
+		}()
+	}
+
+	for _, t := range cleaned {
+		jobs <- t
+	}
+	close(jobs)
+	wg.Wait()
+	return result, firstErr
+}
+
+func dedupeTokens(tokens []string) []string {
+	seen := make(map[string]struct{}, len(tokens))
+	out := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		t := strings.TrimSpace(token)
+		if t == "" {
 			continue
 		}
-		result.Sent++
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
 	}
-	return result, firstErr
+	return out
 }
 
 func (s *FCMSender) SendDailyPrompt(tokens []string, body string) (SendResult, error) {
