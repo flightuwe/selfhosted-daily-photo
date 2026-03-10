@@ -1954,7 +1954,6 @@ fun AppScreen(vm: MainVm) {
                                 onDrag = { change, dragAmount ->
                                     dragX += dragAmount.x
                                     dragY += dragAmount.y
-                                    change.consume()
                                 },
                                 onDragEnd = {
                                     val absX = abs(dragX)
