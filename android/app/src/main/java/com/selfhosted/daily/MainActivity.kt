@@ -2929,7 +2929,13 @@ fun FeedTab(
                 }
                 is FeedRow.PhotoItem -> {
                     val item = row.item
+                    val meta = promptMetaByDay[row.day]
                     val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
+                    val isDailyMomentPost = item.photo.promptOnly && isWithinDailyMomentWindow(
+                        item.photo.createdAt,
+                        meta?.triggeredAt,
+                        meta?.uploadUntil
+                    )
                     Card {
                         Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
@@ -2937,13 +2943,13 @@ fun FeedTab(
                                 fontWeight = FontWeight.SemiBold,
                                 color = parseUserColor(item.user.favoriteColor)
                             )
-                            if (item.isEarly || item.isLate) {
+                            if (item.photo.promptOnly && !isDailyMomentPost) {
                                 Text(
                                     "🕒 ${formatMomentTime(item.photo.createdAt)}",
                                     color = secondaryTextColor,
                                     fontWeight = FontWeight.SemiBold
                                 )
-                            } else if (item.photo.promptOnly) {
+                            } else if (isDailyMomentPost) {
                                 Text("⏳ Daily-Moment", color = Color(0xFF1F5FBF))
                             }
                             if (item.capsuleLocked) {
@@ -3782,6 +3788,30 @@ private fun formatMomentTime(raw: String?): String {
         }
     }
     return parsed
+}
+
+private fun isWithinDailyMomentWindow(createdAtRaw: String?, triggeredAtRaw: String?, uploadUntilRaw: String?): Boolean {
+    val created = parseOffsetOrLocalDateTime(createdAtRaw) ?: return false
+    val triggered = parseOffsetOrLocalDateTime(triggeredAtRaw) ?: return false
+    val until = parseOffsetOrLocalDateTime(uploadUntilRaw) ?: return false
+    return !created.isBefore(triggered) && !created.isAfter(until)
+}
+
+private fun parseOffsetOrLocalDateTime(raw: String?): LocalDateTime? {
+    if (raw.isNullOrBlank()) return null
+    return runCatching {
+        OffsetDateTime.parse(raw)
+            .atZoneSameInstant(ZoneId.systemDefault())
+            .toLocalDateTime()
+    }.getOrElse {
+        runCatching {
+            LocalDateTime.parse(raw)
+        }.getOrElse {
+            runCatching {
+                LocalDateTime.parse(raw.replace(" ", "T"))
+            }.getOrNull()
+        }
+    }
 }
 
 private fun formatCapsuleOpenAt(raw: String?): String {
