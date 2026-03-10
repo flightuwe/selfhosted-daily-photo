@@ -13,6 +13,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import java.time.LocalTime
 import kotlin.random.Random
 
 class PushMessagingService : FirebaseMessagingService() {
@@ -35,6 +36,7 @@ class PushMessagingService : FirebaseMessagingService() {
         val feedEnabled = prefs.getBoolean("feed_post_push_enabled", false)
         if ((type == "chat" || type == "chat_message") && !chatEnabled) return
         if ((type == "feed_post" || type == "post" || type == "extra_post") && !feedEnabled) return
+        if (isBlockedByQuietHours(type, prefs)) return
 
         val tone = toneConfig(prefs)
         val channelId = ensurePromptChannel(this, tone)
@@ -73,6 +75,9 @@ class PushMessagingService : FirebaseMessagingService() {
         private const val CHANNEL_UPDATE_ID = "daily_updates"
         private const val PREF_CUSTOM_TONE_ENABLED = "custom_notification_tone_enabled"
         private const val PREF_CUSTOM_TONE_URI = "custom_notification_tone_uri"
+        private const val PREF_QUIET_HOURS_ENABLED = "quiet_hours_enabled"
+        private const val PREF_QUIET_HOURS_START = "quiet_hours_start"
+        private const val PREF_QUIET_HOURS_END = "quiet_hours_end"
 
         fun showLocalUpdateNotification(context: Context, update: UpdateInfo) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -155,6 +160,28 @@ class PushMessagingService : FirebaseMessagingService() {
             val uriRaw = prefs.getString(PREF_CUSTOM_TONE_URI, "").orEmpty().trim()
             val uri = if (enabled && uriRaw.isNotBlank()) runCatching { Uri.parse(uriRaw) }.getOrNull() else null
             return ToneConfig(enabled, uri)
+        }
+
+        private fun isBlockedByQuietHours(type: String, prefs: android.content.SharedPreferences): Boolean {
+            val quietEnabled = prefs.getBoolean(PREF_QUIET_HOURS_ENABLED, false)
+            if (!quietEnabled) return false
+            val normalized = type.trim().lowercase()
+            if (normalized == "daily_prompt" || normalized == "daily_moment" || normalized == "special_moment" || normalized == "special_request") {
+                return false
+            }
+
+            val startRaw = prefs.getString(PREF_QUIET_HOURS_START, "22:00").orEmpty()
+            val endRaw = prefs.getString(PREF_QUIET_HOURS_END, "07:00").orEmpty()
+            val start = runCatching { LocalTime.parse(startRaw) }.getOrElse { LocalTime.of(22, 0) }
+            val end = runCatching { LocalTime.parse(endRaw) }.getOrElse { LocalTime.of(7, 0) }
+            val now = LocalTime.now()
+            return if (start == end) {
+                true
+            } else if (start < end) {
+                now >= start && now < end
+            } else {
+                now >= start || now < end
+            }
         }
 
         private fun ensurePromptChannel(context: Context, tone: ToneConfig): String {

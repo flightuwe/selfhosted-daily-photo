@@ -90,7 +90,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -174,10 +173,36 @@ data class User(
     val isAdmin: Boolean,
     val favoriteColor: String = "#1F5FBF",
     val chatPushEnabled: Boolean = false,
-    val allowPhotoDownload: Boolean = false
+    val allowPhotoDownload: Boolean = false,
+    val avatarUrl: String = "",
+    val bio: String = "",
+    val statusText: String = "",
+    val statusEmoji: String = "",
+    val statusExpiresAt: String? = null,
+    val profileVisible: Boolean = false,
+    val avatarVisible: Boolean = false,
+    val bioVisible: Boolean = false,
+    val statusVisible: Boolean = false,
+    val quietHoursEnabled: Boolean = false,
+    val quietHoursStart: String = "22:00",
+    val quietHoursEnd: String = "07:00"
 )
 data class MeResponse(val user: User, val dailyMomentCount: Int = 0)
-data class ProfileUpdateRequest(val username: String, val favoriteColor: String)
+data class ProfileUpdateRequest(
+    val username: String,
+    val favoriteColor: String,
+    val bio: String = "",
+    val statusText: String = "",
+    val statusEmoji: String = "",
+    val statusExpiresAt: String? = null,
+    val profileVisible: Boolean = false,
+    val avatarVisible: Boolean = false,
+    val bioVisible: Boolean = false,
+    val statusVisible: Boolean = false,
+    val quietHoursEnabled: Boolean = false,
+    val quietHoursStart: String = "22:00",
+    val quietHoursEnd: String = "07:00"
+)
 data class PreferencesUpdateRequest(
     val chatPushEnabled: Boolean,
     val allowPhotoDownload: Boolean
@@ -277,6 +302,12 @@ data class DayListResponse(val items: List<String>)
 data class DayStatItem(val day: String, val count: Long)
 data class DayStatsResponse(val items: List<DayStatItem>)
 data class MyPhotoResponse(val items: List<PromptPhoto>)
+data class UserProfileResponse(
+    val profileVisible: Boolean = false,
+    val isSelf: Boolean = false,
+    val user: User,
+    val photos: List<PromptPhoto> = emptyList()
+)
 data class ChatItem(
     val id: Long,
     val body: String,
@@ -328,6 +359,12 @@ interface Api {
 
     @GET("me")
     suspend fun me(@Header("Authorization") token: String): MeResponse
+
+    @GET("users/{id}/profile")
+    suspend fun userProfile(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): UserProfileResponse
 
     @GET("me/invite")
     suspend fun myInviteCode(@Header("Authorization") token: String): InviteCodeResponse
@@ -408,6 +445,13 @@ interface Api {
         @Part("capsule_private") capsulePrivate: RequestBody? = null,
         @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null
     )
+
+    @Multipart
+    @POST("me/avatar")
+    suspend fun uploadAvatar(
+        @Header("Authorization") token: String,
+        @Part avatar: MultipartBody.Part
+    ): MeResponse
 
     @GET("chat")
     suspend fun chat(@Header("Authorization") token: String): ChatResponse
@@ -547,6 +591,36 @@ class AppRepo(private val api: Api, private val context: Context) {
         prefs.edit().putLong("chat_seen_other_ms", value.coerceAtLeast(0L)).apply()
     }
 
+    fun profileSetupNeverAsk(): Boolean = prefs.getBoolean("profile_setup_never_ask", false)
+
+    fun setProfileSetupNeverAsk(value: Boolean) {
+        prefs.edit().putBoolean("profile_setup_never_ask", value).apply()
+    }
+
+    fun profileSetupCompleted(): Boolean = prefs.getBoolean("profile_setup_completed", false)
+
+    fun setProfileSetupCompleted(value: Boolean) {
+        prefs.edit().putBoolean("profile_setup_completed", value).apply()
+    }
+
+    fun syncQuietHoursFromUser(user: User) {
+        prefs.edit()
+            .putBoolean("quiet_hours_enabled", user.quietHoursEnabled)
+            .putString("quiet_hours_start", user.quietHoursStart)
+            .putString("quiet_hours_end", user.quietHoursEnd)
+            .apply()
+    }
+
+    fun getProfileSectionExpanded(userId: Long, sectionId: String): Boolean {
+        val key = "profile_section_${userId}_${sectionId.trim()}"
+        return prefs.getBoolean(key, false)
+    }
+
+    fun setProfileSectionExpanded(userId: Long, sectionId: String, expanded: Boolean) {
+        val key = "profile_section_${userId}_${sectionId.trim()}"
+        prefs.edit().putBoolean(key, expanded).apply()
+    }
+
     fun lastSeenChangelogVersion(): String = prefs.getString("last_seen_changelog_version", "") ?: ""
 
     fun shouldShowChangelog(currentVersion: String): Boolean {
@@ -614,8 +688,49 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun me(): MeResponse = api.me("Bearer ${token()}")
     suspend fun myInviteCode(): String = api.myInviteCode("Bearer ${token()}").inviteCode
     suspend fun rollMyInviteCode(): String = api.rollInviteCode("Bearer ${token()}").inviteCode
-    suspend fun updateProfile(username: String, favoriteColor: String): User =
-        api.updateProfile("Bearer ${token()}", ProfileUpdateRequest(username, favoriteColor)).user
+    suspend fun updateProfile(
+        username: String,
+        favoriteColor: String,
+        bio: String,
+        statusText: String,
+        statusEmoji: String,
+        statusExpiresAt: String?,
+        profileVisible: Boolean,
+        avatarVisible: Boolean,
+        bioVisible: Boolean,
+        statusVisible: Boolean,
+        quietHoursEnabled: Boolean,
+        quietHoursStart: String,
+        quietHoursEnd: String
+    ): User =
+        api.updateProfile(
+            "Bearer ${token()}",
+            ProfileUpdateRequest(
+                username = username,
+                favoriteColor = favoriteColor,
+                bio = bio,
+                statusText = statusText,
+                statusEmoji = statusEmoji,
+                statusExpiresAt = statusExpiresAt,
+                profileVisible = profileVisible,
+                avatarVisible = avatarVisible,
+                bioVisible = bioVisible,
+                statusVisible = statusVisible,
+                quietHoursEnabled = quietHoursEnabled,
+                quietHoursStart = quietHoursStart,
+                quietHoursEnd = quietHoursEnd
+            )
+        ).user
+
+    suspend fun uploadAvatar(uri: Uri): User {
+        val file = copyUriToTemp(uri)
+        val part = MultipartBody.Part.createFormData(
+            "avatar",
+            file.name,
+            file.asRequestBody("image/*".toMediaTypeOrNull())
+        )
+        return api.uploadAvatar("Bearer ${token()}", part).user
+    }
 
     suspend fun updatePreferences(chatPushEnabled: Boolean, allowPhotoDownload: Boolean): User =
         api.updatePreferences(
@@ -636,6 +751,8 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun feedDayStats(): List<DayStatItem> = api.feedDayStats("Bearer ${token()}").items
 
     suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
+
+    suspend fun userProfile(userId: Long): UserProfileResponse = api.userProfile("Bearer ${token()}", userId)
 
     suspend fun deleteMyPhoto(photoId: Long) {
         api.deleteMyPhoto("Bearer ${token()}", photoId)
@@ -959,6 +1076,8 @@ data class UiState(
     val chat: List<ChatItem> = emptyList(),
     val uploadQueue: List<QueuedUploadItem> = emptyList(),
     val photoInteractions: PhotoInteractionsResponse? = null,
+    val viewedProfile: UserProfileResponse? = null,
+    val viewedProfileLoading: Boolean = false,
     val interactionsLoading: Boolean = false,
     val chatSending: Boolean = false,
     val loading: Boolean = false,
@@ -971,6 +1090,9 @@ data class UiState(
     val pushProvider: String = "unknown",
     val lastPingMs: Long? = null,
     val showPromptDialog: Boolean = false,
+    val showProfileSetupPrompt: Boolean = false,
+    val showProfileSetupGuide: Boolean = false,
+    val profileSetupStep: Int = 0,
     val showChangelogDialog: Boolean = false,
     val changelogLines: List<String> = emptyList(),
     val showHelpDialog: Boolean = false,
@@ -988,7 +1110,8 @@ data class UiState(
     val notificationMasterEnabled: Boolean = true,
     val feedPostPushEnabled: Boolean = false,
     val customNotificationToneEnabled: Boolean = false,
-    val customNotificationToneUri: String = ""
+    val customNotificationToneUri: String = "",
+    val profileSectionExpanded: Map<String, Boolean> = emptyMap()
 )
 
 data class DashboardData(
@@ -1008,6 +1131,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val chatSendMutex = Mutex()
     private val pendingChatBodies = mutableMapOf<String, Long>()
     private val pendingChatWindowMs = 4_000L
+    private val profileSectionIds = listOf(
+        "display",
+        "notifications",
+        "invite",
+        "profile_account",
+        "app_connection",
+        "moment_rules",
+        "upload_quality",
+        "past_posts"
+    )
+    private var profileSetupPromptShownInSession = false
 
     var state by mutableStateOf(
         UiState(
@@ -1060,6 +1194,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun bootstrap() {
         if (state.startupDone) return
+        profileSetupPromptShownInSession = false
         state = state.copy(startupDone = false, startupQuote = "")
         repo.syncAutoUpdateScheduler()
         repo.syncUploadQueueScheduler()
@@ -1159,6 +1294,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun logout() {
         repo.clearToken()
+        profileSetupPromptShownInSession = false
         state = UiState(
             startupDone = true,
             serverConnected = state.serverConnected,
@@ -1174,6 +1310,84 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             customNotificationToneUri = repo.customNotificationToneUri(),
             invitePreview = null
         )
+    }
+
+    fun setProfileSectionExpanded(sectionId: String, expanded: Boolean) {
+        val userId = state.user?.id ?: return
+        val normalizedId = sectionId.trim()
+        if (normalizedId.isBlank()) return
+        repo.setProfileSectionExpanded(userId, normalizedId, expanded)
+        state = state.copy(profileSectionExpanded = state.profileSectionExpanded + (normalizedId to expanded))
+    }
+
+    private fun profileSetupIncomplete(user: User): Boolean {
+        val hasAvatar = user.avatarUrl.trim().isNotBlank()
+        val hasBio = user.bio.trim().isNotBlank()
+        val hasStatus = user.statusText.trim().isNotBlank() || user.statusEmoji.trim().isNotBlank()
+        val hasAnyVisibility = user.profileVisible || user.avatarVisible || user.bioVisible || user.statusVisible
+        return !(hasAvatar && hasBio && hasStatus && hasAnyVisibility)
+    }
+
+    private fun maybeShowProfileSetupPrompt(user: User) {
+        if (profileSetupPromptShownInSession) return
+        if (repo.profileSetupNeverAsk()) return
+        if (repo.profileSetupCompleted()) return
+        if (!profileSetupIncomplete(user)) {
+            repo.setProfileSetupCompleted(true)
+            return
+        }
+        profileSetupPromptShownInSession = true
+        state = state.copy(showProfileSetupPrompt = true)
+    }
+
+    fun profileSetupPromptYes() {
+        state = state.copy(
+            showProfileSetupPrompt = false,
+            showProfileSetupGuide = true,
+            profileSetupStep = 0,
+            activeTab = AppTab.PROFILE
+        )
+    }
+
+    fun profileSetupPromptNo() {
+        state = state.copy(showProfileSetupPrompt = false)
+    }
+
+    fun profileSetupPromptNeverAsk() {
+        repo.setProfileSetupNeverAsk(true)
+        state = state.copy(showProfileSetupPrompt = false)
+    }
+
+    fun openProfileSetupGuide() {
+        state = state.copy(showProfileSetupGuide = true, profileSetupStep = 0, activeTab = AppTab.PROFILE)
+    }
+
+    fun closeProfileSetupGuide(markCompleted: Boolean) {
+        if (markCompleted) {
+            repo.setProfileSetupCompleted(true)
+        }
+        state = state.copy(showProfileSetupGuide = false, profileSetupStep = 0)
+    }
+
+    fun nextProfileSetupStep() {
+        val next = (state.profileSetupStep + 1).coerceAtMost(2)
+        state = state.copy(profileSetupStep = next)
+    }
+
+    fun jumpToSetupSection(sectionId: String) {
+        setTab(AppTab.PROFILE)
+        setProfileSectionExpanded(sectionId, true)
+    }
+
+    suspend fun loadUserProfile(userId: Long) {
+        state = state.copy(viewedProfileLoading = true, viewedProfile = null)
+        runCatching { repo.userProfile(userId) }
+            .onSuccess { state = state.copy(viewedProfileLoading = false, viewedProfile = it) }
+            .onFailure { state = state.copy(viewedProfileLoading = false, message = apiError(it, "Profil laden fehlgeschlagen")) }
+    }
+
+    fun closeViewedProfile() {
+        state = state.copy(viewedProfile = null, viewedProfileLoading = false)
     }
 
     fun setTab(tab: AppTab) {
@@ -1248,9 +1462,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && !prompt.hasPosted && marker != repo.seenPromptMarker()
             if (shouldPopup) repo.setSeenPromptMarker(marker)
             repo.setChatPushLocalEnabled(me.chatPushEnabled)
+            repo.syncQuietHoursFromUser(me)
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
             val autoUpdateEnabled = repo.autoUpdateEnabled()
+            val profileSectionExpanded = profileSectionIds.associateWith { sectionId ->
+                repo.getProfileSectionExpanded(me.id, sectionId)
+            }
 
             state = state.copy(
                 user = me,
@@ -1269,10 +1487,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 autoUpdateEnabled = autoUpdateEnabled,
                 feedPostPushEnabled = feedPostPushEnabled,
                 notificationMasterEnabled = notificationMaster && autoUpdateEnabled && feedPostPushEnabled && me.chatPushEnabled,
+                profileSectionExpanded = profileSectionExpanded,
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
             )
+            maybeShowProfileSetupPrompt(me)
             val focus = state.feedFocusDay
             val anchor = if (focus != null && calendarDays.contains(focus)) focus else prompt.day
             loadFeedWindow(anchor, around = 3)
@@ -1763,14 +1983,55 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure { state = state.copy(message = apiError(it, "Bild konnte nicht heruntergeladen werden")) }
     }
 
-    suspend fun updateProfile(username: String, favoriteColor: String) {
+    suspend fun updateProfile(
+        username: String,
+        favoriteColor: String,
+        bio: String,
+        statusText: String,
+        statusEmoji: String,
+        statusExpiresAt: String?,
+        profileVisible: Boolean,
+        avatarVisible: Boolean,
+        bioVisible: Boolean,
+        statusVisible: Boolean,
+        quietHoursEnabled: Boolean,
+        quietHoursStart: String,
+        quietHoursEnd: String
+    ) {
         state = state.copy(loading = true)
-        runCatching { repo.updateProfile(username, favoriteColor) }
+        runCatching {
+            repo.updateProfile(
+                username = username,
+                favoriteColor = favoriteColor,
+                bio = bio,
+                statusText = statusText,
+                statusEmoji = statusEmoji,
+                statusExpiresAt = statusExpiresAt,
+                profileVisible = profileVisible,
+                avatarVisible = avatarVisible,
+                bioVisible = bioVisible,
+                statusVisible = statusVisible,
+                quietHoursEnabled = quietHoursEnabled,
+                quietHoursStart = quietHoursStart,
+                quietHoursEnd = quietHoursEnd
+            )
+        }
             .onSuccess { user ->
+                repo.syncQuietHoursFromUser(user)
                 state = state.copy(user = user, loading = false, message = "Profil aktualisiert")
                 refreshAll()
             }
             .onFailure { state = state.copy(loading = false, message = apiError(it, "Profil speichern fehlgeschlagen")) }
+    }
+
+    suspend fun uploadAvatar(uri: Uri) {
+        state = state.copy(loading = true)
+        runCatching { repo.uploadAvatar(uri) }
+            .onSuccess { user ->
+                state = state.copy(user = user, loading = false, message = "Profilbild aktualisiert")
+                refreshAll()
+            }
+            .onFailure { state = state.copy(loading = false, message = apiError(it, "Profilbild Upload fehlgeschlagen")) }
     }
 
     suspend fun setChatPushEnabled(enabled: Boolean) {
@@ -1931,6 +2192,7 @@ fun AppScreen(vm: MainVm) {
     var viewerUrls by remember { mutableStateOf<List<String>>(emptyList()) }
     var viewerIndex by remember { mutableStateOf(0) }
     var viewerPhotoId by remember { mutableStateOf<Long?>(null) }
+    var viewerOwnDownloadFallback by remember { mutableStateOf(false) }
     var viewerComment by remember { mutableStateOf("") }
     var showSpecialMomentConfirm by remember { mutableStateOf(false) }
     var requestFrontCapture by remember { mutableStateOf(false) }
@@ -2088,6 +2350,137 @@ fun AppScreen(vm: MainVm) {
         )
     }
 
+    if (state.showProfileSetupPrompt) {
+        AlertDialog(
+            onDismissRequest = { vm.profileSetupPromptNo() },
+            confirmButton = {
+                TextButton(onClick = { vm.profileSetupPromptYes() }) { Text("Ja") }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { vm.profileSetupPromptNo() }) { Text("Nein") }
+                    TextButton(onClick = { vm.profileSetupPromptNeverAsk() }) { Text("Nicht mehr fragen") }
+                }
+            },
+            title = { Text("Profil einrichten?") },
+            text = { Text("Moechtest du Profilbild, Kurzbeschreibung, Status und Sichtbarkeit jetzt einrichten? Alles ist optional.") }
+        )
+    }
+
+    if (state.showProfileSetupGuide) {
+        val step = state.profileSetupStep
+        val title = when (step) {
+            0 -> "Setup: Profil & Datenschutz"
+            1 -> "Setup: Sichtbarkeit"
+            else -> "Setup: Benachrichtigungen & Ruhezeit"
+        }
+        val body = when (step) {
+            0 -> "Lege Profilbild, Kurzbeschreibung und Status fest. Alles bleibt privat, bis du es sichtbar schaltest."
+            1 -> "Schalte separat frei: Profil aufrufbar, Profilbild sichtbar, Bio sichtbar, Status sichtbar."
+            else -> "Aktiviere Ruhezeiten, wenn du nachts keine Pushs willst. Daily- und Sondermoment bleiben als Ausnahmen aktiv."
+        }
+        AlertDialog(
+            onDismissRequest = { vm.closeProfileSetupGuide(markCompleted = false) },
+            confirmButton = {
+                TextButton(onClick = {
+                    when (step) {
+                        0 -> {
+                            vm.jumpToSetupSection("profile_account")
+                            vm.nextProfileSetupStep()
+                        }
+                        1 -> {
+                            vm.jumpToSetupSection("profile_account")
+                            vm.nextProfileSetupStep()
+                        }
+                        else -> {
+                            vm.jumpToSetupSection("notifications")
+                            vm.closeProfileSetupGuide(markCompleted = true)
+                        }
+                    }
+                }) { Text(if (step < 2) "Weiter" else "Fertig") }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.closeProfileSetupGuide(markCompleted = false) }) { Text("Spaeter") }
+            },
+            title = { Text(title) },
+            text = { Text(body) }
+        )
+    }
+
+    state.viewedProfile?.let { profile ->
+        AlertDialog(
+            onDismissRequest = { vm.closeViewedProfile() },
+            confirmButton = { TextButton(onClick = { vm.closeViewedProfile() }) { Text("Schliessen") } },
+            title = { Text("@${profile.user.username}") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (!profile.profileVisible && !profile.isSelf) {
+                        Text("Profil privat")
+                    } else {
+                        if (profile.user.avatarUrl.isNotBlank()) {
+                            AsyncImage(
+                                model = profile.user.avatarUrl,
+                                contentDescription = "Avatar",
+                                modifier = Modifier
+                                    .size(84.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                            )
+                        }
+                        if (profile.user.bio.isNotBlank()) {
+                            Text(profile.user.bio)
+                        }
+                        if (profile.user.statusVisible && (profile.user.statusText.isNotBlank() || profile.user.statusEmoji.isNotBlank())) {
+                            Text("${profile.user.statusEmoji} ${profile.user.statusText}".trim())
+                        }
+                        if (profile.photos.isNotEmpty()) {
+                            val rows = profile.photos.chunked(3)
+                            rows.forEach { row ->
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                    for (i in 0 until 3) {
+                                        val item = row.getOrNull(i)
+                                        if (item == null) {
+                                            Spacer(modifier = Modifier.weight(1f))
+                                        } else {
+                                            val urls = listOfNotNull(item.url, item.secondUrl)
+                                            AsyncImage(
+                                                model = item.url,
+                                                contentDescription = "Profilbild",
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(92.dp)
+                                                    .clickable {
+                                                        vm.closeViewedProfile()
+                                                        viewerUrls = urls
+                                                        viewerIndex = 0
+                                                        viewerPhotoId = item.id
+                                                    },
+                                                contentScale = ContentScale.Crop
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    }
+    if (state.viewedProfileLoading) {
+        AlertDialog(
+            onDismissRequest = {},
+            confirmButton = {},
+            title = { Text("Profil wird geladen") },
+            text = { Text("Bitte kurz warten ...") }
+        )
+    }
+
     if (showSpecialMomentConfirm) {
         AlertDialog(
             onDismissRequest = { showSpecialMomentConfirm = false },
@@ -2181,6 +2574,7 @@ fun AppScreen(vm: MainVm) {
             viewerUrls = emptyList()
             viewerIndex = 0
             viewerPhotoId = null
+            viewerOwnDownloadFallback = false
             viewerComment = ""
             vm.clearPhotoInteractions()
         }
@@ -2191,6 +2585,7 @@ fun AppScreen(vm: MainVm) {
             comment = viewerComment,
             interactions = state.photoInteractions,
             interactionsLoading = state.interactionsLoading,
+            ownDownloadFallback = viewerOwnDownloadFallback,
             onCommentChange = { viewerComment = it },
             onCommentSend = {
                 val body = viewerComment
@@ -2377,6 +2772,8 @@ fun AppScreen(vm: MainVm) {
                         viewerUrls = urls
                         viewerIndex = 0
                         viewerPhotoId = photoId
+                        val isOwn = photoId != null && state.photos.any { it.id == photoId }
+                        viewerOwnDownloadFallback = isOwn && (state.user?.allowPhotoDownload == true)
                     }
                 )
 
@@ -2398,10 +2795,13 @@ fun AppScreen(vm: MainVm) {
                     onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
                     onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
                     onFocusPhotoConsumed = { vm.clearFeedPhotoFocus() },
+                    onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
                     onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
                         viewerIndex = 0
                         viewerPhotoId = photoId
+                        val isOwn = photoId != null && state.photos.any { it.id == photoId }
+                        viewerOwnDownloadFallback = isOwn && (state.user?.allowPhotoDownload == true)
                     }
                 )
 
@@ -2421,6 +2821,7 @@ fun AppScreen(vm: MainVm) {
                     input = chatInput,
                     sending = state.chatSending,
                     onInput = { chatInput = it },
+                    onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
                     onSend = {
                         val body = chatInput
                         if (body.isNotBlank() && !state.chatSending) {
@@ -2458,6 +2859,19 @@ fun AppScreen(vm: MainVm) {
                     feedPostPushEnabled = state.feedPostPushEnabled,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
+                    profileSectionsExpanded = state.profileSectionExpanded,
+                    avatarUrl = state.user?.avatarUrl.orEmpty(),
+                    bio = state.user?.bio.orEmpty(),
+                    statusText = state.user?.statusText.orEmpty(),
+                    statusEmoji = state.user?.statusEmoji.orEmpty(),
+                    statusExpiresAt = state.user?.statusExpiresAt,
+                    profileVisible = state.user?.profileVisible ?: false,
+                    avatarVisible = state.user?.avatarVisible ?: false,
+                    bioVisible = state.user?.bioVisible ?: false,
+                    statusVisible = state.user?.statusVisible ?: false,
+                    quietHoursEnabled = state.user?.quietHoursEnabled ?: false,
+                    quietHoursStart = state.user?.quietHoursStart ?: "22:00",
+                    quietHoursEnd = state.user?.quietHoursEnd ?: "07:00",
                     onThemeModeChange = { vm.setThemeMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
@@ -2479,11 +2893,29 @@ fun AppScreen(vm: MainVm) {
                     },
                     onClearCustomNotificationTone = { vm.setCustomNotificationToneUri("") },
                     onTestCustomNotificationTone = { vm.testCustomNotificationTone() },
+                    onProfileSectionExpandedChange = { sectionId, expanded -> vm.setProfileSectionExpanded(sectionId, expanded) },
+                    onUploadAvatar = { uri -> scope.launch { vm.uploadAvatar(uri) } },
                     onEditableUsernameChange = { profileUsername = it },
                     onEditableColorChange = { profileColor = it },
-                    onSaveProfile = {
-                        if (profileUsername.trim().length >= 3) {
-                            scope.launch { vm.updateProfile(profileUsername, profileColor) }
+                    onSaveProfile = { usernameValue, colorValue, bioValue, statusTextValue, statusEmojiValue, statusExpiresAtValue, profileVisibleValue, avatarVisibleValue, bioVisibleValue, statusVisibleValue, quietEnabledValue, quietStartValue, quietEndValue ->
+                        if (usernameValue.trim().length >= 3) {
+                            scope.launch {
+                                vm.updateProfile(
+                                    username = usernameValue,
+                                    favoriteColor = colorValue,
+                                    bio = bioValue,
+                                    statusText = statusTextValue,
+                                    statusEmoji = statusEmojiValue,
+                                    statusExpiresAt = statusExpiresAtValue,
+                                    profileVisible = profileVisibleValue,
+                                    avatarVisible = avatarVisibleValue,
+                                    bioVisible = bioVisibleValue,
+                                    statusVisible = statusVisibleValue,
+                                    quietHoursEnabled = quietEnabledValue,
+                                    quietHoursStart = quietStartValue,
+                                    quietHoursEnd = quietEndValue
+                                )
+                            }
                         }
                     },
                     onCurrentPasswordChange = { pwCurrent = it },
@@ -2500,6 +2932,7 @@ fun AppScreen(vm: MainVm) {
                     onCheckUpdate = { scope.launch { vm.checkForUpdate() } },
                     onShowChangelog = { scope.launch { vm.showChangelogDialog() } },
                     onShowHelp = { vm.showHelpDialog() },
+                    onOpenSetupGuide = { vm.openProfileSetupGuide() },
                     onCheckConnection = { scope.launch { vm.checkConnection() } },
                     onRollInviteCode = { scope.launch { vm.rollInviteCode() } },
                     onShareInviteCode = {
@@ -2527,6 +2960,8 @@ fun AppScreen(vm: MainVm) {
                         viewerUrls = urls
                         viewerIndex = 0
                         viewerPhotoId = photoId
+                        val isOwn = photoId != null && state.photos.any { it.id == photoId }
+                        viewerOwnDownloadFallback = isOwn && (state.user?.allowPhotoDownload == true)
                     }
                 )
             }
@@ -3095,6 +3530,7 @@ fun FeedTab(
     onLoadNewer: () -> Unit,
     onJumpToCapsule: (day: String, photoId: Long) -> Unit,
     onFocusPhotoConsumed: () -> Unit,
+    onOpenUserProfile: (Long) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     val primaryTextColor = MaterialTheme.colorScheme.onSurface
@@ -3248,8 +3684,17 @@ fun FeedTab(
                             Text(
                                 item.user.username,
                                 fontWeight = FontWeight.SemiBold,
-                                color = parseUserColor(item.user.favoriteColor)
+                                color = parseUserColor(item.user.favoriteColor),
+                                modifier = Modifier.clickable { onOpenUserProfile(item.user.id) }
                             )
+                            if (item.user.statusVisible && (item.user.statusText.isNotBlank() || item.user.statusEmoji.isNotBlank())) {
+                                Text(
+                                    "${item.user.statusEmoji} ${item.user.statusText}".trim(),
+                                    color = secondaryTextColor,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                             if (!isDailyMomentPost) {
                                 Text(
                                     "🕒 ${formatMomentTime(item.photo.createdAt)}",
@@ -3414,6 +3859,7 @@ fun ChatTab(
     input: String,
     sending: Boolean,
     onInput: (String) -> Unit,
+    onOpenUserProfile: (Long) -> Unit,
     onSend: () -> Unit
 ) {
     val listState = rememberLazyListState()
@@ -3463,7 +3909,8 @@ fun ChatTab(
                                 Text(
                                     item.user.username,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = parseUserColor(item.user.favoriteColor)
+                                    color = parseUserColor(item.user.favoriteColor),
+                                    modifier = Modifier.clickable { onOpenUserProfile(item.user.id) }
                                 )
                                 Text(item.body)
                             }
@@ -3495,16 +3942,16 @@ fun ChatTab(
 private fun CollapsibleSection(
     title: String,
     subtitle: String? = null,
-    initiallyExpanded: Boolean = false,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    var expanded by rememberSaveable(title) { mutableStateOf(initiallyExpanded) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { expanded = !expanded },
+                    .clickable { onExpandedChange(!expanded) },
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -3550,6 +3997,19 @@ fun ProfileTab(
     feedPostPushEnabled: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
+    profileSectionsExpanded: Map<String, Boolean>,
+    avatarUrl: String,
+    bio: String,
+    statusText: String,
+    statusEmoji: String,
+    statusExpiresAt: String?,
+    profileVisible: Boolean,
+    avatarVisible: Boolean,
+    bioVisible: Boolean,
+    statusVisible: Boolean,
+    quietHoursEnabled: Boolean,
+    quietHoursStart: String,
+    quietHoursEnd: String,
     onThemeModeChange: (Int) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
@@ -3561,15 +4021,32 @@ fun ProfileTab(
     onPickCustomNotificationTone: () -> Unit,
     onClearCustomNotificationTone: () -> Unit,
     onTestCustomNotificationTone: () -> Unit,
+    onProfileSectionExpandedChange: (String, Boolean) -> Unit,
+    onUploadAvatar: (Uri) -> Unit,
     onEditableUsernameChange: (String) -> Unit,
     onEditableColorChange: (String) -> Unit,
-    onSaveProfile: () -> Unit,
+    onSaveProfile: (
+        username: String,
+        favoriteColor: String,
+        bio: String,
+        statusText: String,
+        statusEmoji: String,
+        statusExpiresAt: String?,
+        profileVisible: Boolean,
+        avatarVisible: Boolean,
+        bioVisible: Boolean,
+        statusVisible: Boolean,
+        quietHoursEnabled: Boolean,
+        quietHoursStart: String,
+        quietHoursEnd: String
+    ) -> Unit,
     onCurrentPasswordChange: (String) -> Unit,
     onNewPasswordChange: (String) -> Unit,
     onChangePassword: () -> Unit,
     onCheckUpdate: () -> Unit,
     onShowChangelog: () -> Unit,
     onShowHelp: () -> Unit,
+    onOpenSetupGuide: () -> Unit,
     onCheckConnection: () -> Unit,
     onRollInviteCode: () -> Unit,
     onShareInviteCode: () -> Unit,
@@ -3586,6 +4063,21 @@ fun ProfileTab(
     var updatePulseTick by remember { mutableStateOf(0) }
     var updateChecked by remember { mutableStateOf(false) }
     val updateButtonScale = remember { Animatable(1f) }
+    fun sectionExpanded(sectionId: String): Boolean = profileSectionsExpanded[sectionId] ?: false
+    var bioValue by remember(bio) { mutableStateOf(bio) }
+    var statusTextValue by remember(statusText) { mutableStateOf(statusText) }
+    var statusEmojiValue by remember(statusEmoji) { mutableStateOf(statusEmoji) }
+    var statusExpiresAtValue by remember(statusExpiresAt) { mutableStateOf(statusExpiresAt ?: "") }
+    var profileVisibleValue by remember(profileVisible) { mutableStateOf(profileVisible) }
+    var avatarVisibleValue by remember(avatarVisible) { mutableStateOf(avatarVisible) }
+    var bioVisibleValue by remember(bioVisible) { mutableStateOf(bioVisible) }
+    var statusVisibleValue by remember(statusVisible) { mutableStateOf(statusVisible) }
+    var quietHoursEnabledValue by remember(quietHoursEnabled) { mutableStateOf(quietHoursEnabled) }
+    var quietHoursStartValue by remember(quietHoursStart) { mutableStateOf(quietHoursStart) }
+    var quietHoursEndValue by remember(quietHoursEnd) { mutableStateOf(quietHoursEnd) }
+    val avatarPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) onUploadAvatar(uri)
+    }
 
     LaunchedEffect(updatePulseTick) {
         if (updatePulseTick <= 0) return@LaunchedEffect
@@ -3619,6 +4111,7 @@ fun ProfileTab(
                 ) { Text(if (updateChecked) "Update geprueft" else "Update pruefen") }
                 Button(onClick = onShowChangelog) { Text("!") }
                 Button(onClick = onShowHelp) { Text("Hilfe") }
+                Button(onClick = onOpenSetupGuide) { Text("Setup") }
             }
             Spacer(modifier = Modifier.height(8.dp))
             Row(modifier = Modifier.fillMaxWidth()) {
@@ -3630,7 +4123,8 @@ fun ProfileTab(
             CollapsibleSection(
                 title = "Anzeige",
                 subtitle = "Design und Theme",
-                initiallyExpanded = true
+                expanded = sectionExpanded("display"),
+                onExpandedChange = { onProfileSectionExpandedChange("display", it) }
             ) {
                 Text("Darstellung: ${themeModeLabel(themeSliderValue.toInt())}")
                 Slider(
@@ -3679,7 +4173,8 @@ fun ProfileTab(
             CollapsibleSection(
                 title = "Benachrichtigungen",
                 subtitle = "Master + Update, Chat und Feed",
-                initiallyExpanded = true
+                expanded = sectionExpanded("notifications"),
+                onExpandedChange = { onProfileSectionExpandedChange("notifications", it) }
             ) {
                 Card(
                     modifier = Modifier
@@ -3776,7 +4271,8 @@ fun ProfileTab(
             CollapsibleSection(
                 title = "Invite-Code",
                 subtitle = "Code teilen oder erneuern",
-                initiallyExpanded = false
+                expanded = sectionExpanded("invite"),
+                onExpandedChange = { onProfileSectionExpandedChange("invite", it) }
             ) {
                 Text(inviteCode.ifBlank { "wird geladen ..." }, fontWeight = FontWeight.SemiBold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -3791,20 +4287,69 @@ fun ProfileTab(
             CollapsibleSection(
                 title = "Profil & Konto",
                 subtitle = "Benutzername, Farbe und Passwort",
-                initiallyExpanded = false
+                expanded = sectionExpanded("profile_account"),
+                onExpandedChange = { onProfileSectionExpandedChange("profile_account", it) }
             ) {
+                if (avatarUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = avatarUrl,
+                        contentDescription = "Profilbild",
+                        modifier = Modifier
+                            .size(96.dp)
+                            .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                    )
+                }
+                Button(
+                    onClick = { avatarPickerLauncher.launch("image/*") },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Profilbild hochladen") }
                 OutlinedTextField(
                     value = editableUsername,
                     onValueChange = onEditableUsernameChange,
                     label = { Text("Benutzername") },
                     modifier = Modifier.fillMaxWidth()
                 )
+                OutlinedTextField(
+                    value = bioValue,
+                    onValueChange = { bioValue = it.take(280) },
+                    label = { Text("Kurzbeschreibung") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = statusTextValue,
+                    onValueChange = { statusTextValue = it.take(120) },
+                    label = { Text("Status-Text") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = statusEmojiValue,
+                    onValueChange = { statusEmojiValue = it.take(8) },
+                    label = { Text("Status-Emoji") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = { statusExpiresAtValue = OffsetDateTime.now().plusHours(24).toString() }, modifier = Modifier.weight(1f)) {
+                        Text("24h")
+                    }
+                    Button(onClick = { statusExpiresAtValue = OffsetDateTime.now().plusHours(72).toString() }, modifier = Modifier.weight(1f)) {
+                        Text("72h")
+                    }
+                    Button(onClick = { statusExpiresAtValue = OffsetDateTime.now().plusDays(7).toString() }, modifier = Modifier.weight(1f)) {
+                        Text("7d")
+                    }
+                    Button(onClick = { statusExpiresAtValue = "" }, modifier = Modifier.weight(1f)) {
+                        Text("∞")
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Download der eigenen Bilder fuer andere Benutzer zulassen")
+                    Text(
+                        "Download der eigenen Bilder fuer andere Benutzer zulassen",
+                        modifier = Modifier.weight(1f)
+                    )
                     Switch(
                         checked = allowPhotoDownload,
                         onCheckedChange = { checked ->
@@ -3815,6 +4360,61 @@ fun ProfileTab(
                             }
                         }
                     )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Profil aufrufbar")
+                    Switch(checked = profileVisibleValue, onCheckedChange = { profileVisibleValue = it })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Profilbild sichtbar")
+                    Switch(checked = avatarVisibleValue, onCheckedChange = { avatarVisibleValue = it })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Kurzbeschreibung sichtbar")
+                    Switch(checked = bioVisibleValue, onCheckedChange = { bioVisibleValue = it })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Status sichtbar")
+                    Switch(checked = statusVisibleValue, onCheckedChange = { statusVisibleValue = it })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Ruhezeit aktiv")
+                    Switch(checked = quietHoursEnabledValue, onCheckedChange = { quietHoursEnabledValue = it })
+                }
+                if (quietHoursEnabledValue) {
+                    OutlinedTextField(
+                        value = quietHoursStartValue,
+                        onValueChange = { quietHoursStartValue = it.take(5) },
+                        label = { Text("Ruhezeit Start (HH:mm)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = quietHoursEndValue,
+                        onValueChange = { quietHoursEndValue = it.take(5) },
+                        label = { Text("Ruhezeit Ende (HH:mm)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text("Ausnahmen: Daily-Moment und Sondermoment bleiben aktiv.")
                 }
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3835,7 +4435,26 @@ fun ProfileTab(
                     color = parseUserColor(editableColor),
                     fontWeight = FontWeight.Bold
                 )
-                Button(onClick = onSaveProfile, modifier = Modifier.fillMaxWidth()) { Text("Profil speichern") }
+                Button(
+                    onClick = {
+                        onSaveProfile(
+                            editableUsername.trim(),
+                            normalizeHexColor(editableColor),
+                            bioValue.trim(),
+                            statusTextValue.trim(),
+                            statusEmojiValue.trim(),
+                            statusExpiresAtValue.trim().ifBlank { null },
+                            profileVisibleValue,
+                            avatarVisibleValue,
+                            bioVisibleValue,
+                            statusVisibleValue,
+                            quietHoursEnabledValue,
+                            quietHoursStartValue.trim().ifBlank { "22:00" },
+                            quietHoursEndValue.trim().ifBlank { "07:00" }
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Profil speichern") }
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
                     value = currentPassword,
@@ -3857,7 +4476,8 @@ fun ProfileTab(
             CollapsibleSection(
                 title = "App & Verbindung",
                 subtitle = "Versionen und Serverstatus",
-                initiallyExpanded = true
+                expanded = sectionExpanded("app_connection"),
+                onExpandedChange = { onProfileSectionExpandedChange("app_connection", it) }
             ) {
                 Card {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -3878,7 +4498,8 @@ fun ProfileTab(
             CollapsibleSection(
                 title = "Moment-Bedingungen",
                 subtitle = "Aktuelle Regeln vom Server",
-                initiallyExpanded = false
+                expanded = sectionExpanded("moment_rules"),
+                onExpandedChange = { onProfileSectionExpandedChange("moment_rules", it) }
             ) {
                 Card {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -3899,7 +4520,8 @@ fun ProfileTab(
             CollapsibleSection(
                 title = "Upload-Komprimierung",
                 subtitle = "Qualitaet vs. Geschwindigkeit",
-                initiallyExpanded = false
+                expanded = sectionExpanded("upload_quality"),
+                onExpandedChange = { onProfileSectionExpandedChange("upload_quality", it) }
             ) {
                 Card {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -3919,7 +4541,8 @@ fun ProfileTab(
             CollapsibleSection(
                 title = "Vergangene Beitraege",
                 subtitle = "Deine Galerie",
-                initiallyExpanded = false
+                expanded = sectionExpanded("past_posts"),
+                onExpandedChange = { onProfileSectionExpandedChange("past_posts", it) }
             ) {
                 if (photos.isEmpty()) {
                     Text("Noch keine Beitraege")
@@ -4588,6 +5211,7 @@ private fun FullscreenPhotoViewer(
     comment: String,
     interactions: PhotoInteractionsResponse?,
     interactionsLoading: Boolean,
+    ownDownloadFallback: Boolean,
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
     onReact: (String) -> Unit,
@@ -4637,6 +5261,7 @@ private fun FullscreenPhotoViewer(
                     comment = comment,
                     interactions = interactions,
                     interactionsLoading = interactionsLoading,
+                    ownDownloadFallback = ownDownloadFallback,
                     onCommentChange = onCommentChange,
                     onCommentSend = onCommentSend,
                     onReact = onReact,
@@ -4711,6 +5336,7 @@ private fun ViewerInteractionSheet(
     comment: String,
     interactions: PhotoInteractionsResponse?,
     interactionsLoading: Boolean,
+    ownDownloadFallback: Boolean,
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
     onReact: (String) -> Unit,
@@ -4739,6 +5365,12 @@ private fun ViewerInteractionSheet(
                 }
             }
         }
+        if ((interactions?.canDownload == true || ownDownloadFallback) && currentImageUrl.isNotBlank()) {
+            Button(
+                onClick = { onDownloadCurrent(currentImageUrl) },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Post herunterladen") }
+        }
         OutlinedTextField(
             value = comment,
             onValueChange = onCommentChange,
@@ -4750,12 +5382,6 @@ private fun ViewerInteractionSheet(
             enabled = comment.isNotBlank(),
             modifier = Modifier.fillMaxWidth()
         ) { Text("Kommentieren") }
-        if (interactions?.canDownload == true && currentImageUrl.isNotBlank()) {
-            Button(
-                onClick = { onDownloadCurrent(currentImageUrl) },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Post herunterladen") }
-        }
         if (interactionsLoading) {
             Text("Interaktionen werden geladen ...")
         }
@@ -4832,4 +5458,3 @@ private fun ZoomableViewerImage(
         contentScale = ContentScale.Fit
     )
 }
-

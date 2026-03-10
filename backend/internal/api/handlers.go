@@ -4,6 +4,7 @@ import (
     "crypto/rand"
     "errors"
     "fmt"
+    "io"
     "mime/multipart"
     "net/http"
     "os"
@@ -64,9 +65,11 @@ func (s *Server) Router() *gin.Engine {
 		protected.Use(s.requireAuth)
 		{
             protected.GET("/me", s.handleMe)
+            protected.GET("/users/:id/profile", s.handleUserProfile)
             protected.GET("/me/invite", s.handleMyInvite)
             protected.POST("/me/invite/roll", s.handleRollMyInvite)
             protected.PUT("/me/profile", s.handleUpdateProfile)
+            protected.POST("/me/avatar", s.handleUploadAvatar)
             protected.PUT("/me/preferences", s.handleUpdatePreferences)
             protected.PUT("/me/password", s.handleChangePassword)
             protected.GET("/me/photos", s.handleMyPhotos)
@@ -244,7 +247,7 @@ func (s *Server) handleInviteRegister(c *gin.Context) {
     token, _ := s.Auth.Sign(user.ID, user.Username, user.IsAdmin)
     c.JSON(http.StatusCreated, gin.H{
         "token": token,
-        "user": user,
+        "user":  s.userOwnJSON(user),
         "inviter": gin.H{
             "id":            inviter.ID,
             "username":      inviter.Username,
@@ -272,7 +275,7 @@ func (s *Server) handleLogin(c *gin.Context) {
     }
 
     token, _ := s.Auth.Sign(user.ID, user.Username, user.IsAdmin)
-    c.JSON(http.StatusOK, gin.H{"token": token, "user": user})
+    c.JSON(http.StatusOK, gin.H{"token": token, "user": s.userOwnJSON(user)})
 }
 
 func (s *Server) handleMe(c *gin.Context) {
@@ -280,14 +283,32 @@ func (s *Server) handleMe(c *gin.Context) {
     if user.FavoriteColor == "" {
         user.FavoriteColor = "#1F5FBF"
     }
-    var dailyMomentCount int64
-    _ = s.DB.Table("photos").
-        Joins("JOIN daily_prompts ON daily_prompts.day = photos.day").
-        Where("photos.user_id = ? AND daily_prompts.triggered_at IS NOT NULL AND daily_prompts.upload_until IS NOT NULL AND photos.created_at >= daily_prompts.triggered_at AND photos.created_at <= daily_prompts.upload_until", user.ID).
-        Distinct("photos.day").
-        Count(&dailyMomentCount).Error
+
+    // Keep this count in Go instead of SQL datetime comparisons.
+    // SQLite can store mixed datetime formats/timezones, and direct SQL comparisons
+    // may undercount even though a post is inside the prompt window.
+    var photos []models.Photo
+    dailyMomentCount := int64(0)
+    if err := s.DB.Where("user_id = ?", user.ID).Order("created_at desc").Limit(500).Find(&photos).Error; err == nil {
+        promptByDay, _ := s.promptMetaByDay()
+        countedDays := map[string]struct{}{}
+        for _, p := range photos {
+            if _, exists := countedDays[p.Day]; exists {
+                continue
+            }
+            prompt := promptByDay[p.Day]
+            if prompt == nil || prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
+                continue
+            }
+            if !p.CreatedAt.Before(*prompt.TriggeredAt) && !p.CreatedAt.After(*prompt.UploadUntil) {
+                dailyMomentCount++
+                countedDays[p.Day] = struct{}{}
+            }
+        }
+    }
+
     c.JSON(http.StatusOK, gin.H{
-        "user":             user,
+        "user":             s.userOwnJSON(user),
         "dailyMomentCount": dailyMomentCount,
     })
 }
@@ -324,8 +345,19 @@ func (s *Server) handleRollMyInvite(c *gin.Context) {
 func (s *Server) handleUpdateProfile(c *gin.Context) {
     user, _ := userFromContext(c)
     var req struct {
-        Username      string `json:"username" binding:"required,min=3,max=64"`
-        FavoriteColor string `json:"favoriteColor"`
+        Username          string  `json:"username" binding:"required,min=3,max=64"`
+        FavoriteColor     string  `json:"favoriteColor"`
+        Bio               *string `json:"bio"`
+        StatusText        *string `json:"statusText"`
+        StatusEmoji       *string `json:"statusEmoji"`
+        StatusExpiresAt   *string `json:"statusExpiresAt"`
+        ProfileVisible    *bool   `json:"profileVisible"`
+        AvatarVisible     *bool   `json:"avatarVisible"`
+        BioVisible        *bool   `json:"bioVisible"`
+        StatusVisible     *bool   `json:"statusVisible"`
+        QuietHoursEnabled *bool   `json:"quietHoursEnabled"`
+        QuietHoursStart   *string `json:"quietHoursStart"`
+        QuietHoursEnd     *string `json:"quietHoursEnd"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
@@ -348,10 +380,69 @@ func (s *Server) handleUpdateProfile(c *gin.Context) {
         return
     }
 
-    if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]any{
+    updates := map[string]any{
         "username":       username,
         "favorite_color": color,
-    }).Error; err != nil {
+    }
+    if req.Bio != nil {
+        updates["bio"] = strings.TrimSpace(*req.Bio)
+    }
+    if req.StatusText != nil {
+        updates["status_text"] = strings.TrimSpace(*req.StatusText)
+    }
+    if req.StatusEmoji != nil {
+        updates["status_emoji"] = strings.TrimSpace(*req.StatusEmoji)
+    }
+    if req.StatusExpiresAt != nil {
+        expRaw := strings.TrimSpace(*req.StatusExpiresAt)
+        if expRaw == "" {
+            updates["status_expires_at"] = nil
+        } else {
+            parsed, err := time.Parse(time.RFC3339, expRaw)
+            if err != nil {
+                c.JSON(http.StatusBadRequest, gin.H{"error": "invalid statusExpiresAt"})
+                return
+            }
+            updates["status_expires_at"] = parsed.In(s.Location)
+        }
+    }
+    if req.ProfileVisible != nil {
+        updates["profile_visible"] = *req.ProfileVisible
+    }
+    if req.AvatarVisible != nil {
+        updates["avatar_visible"] = *req.AvatarVisible
+    }
+    if req.BioVisible != nil {
+        updates["bio_visible"] = *req.BioVisible
+    }
+    if req.StatusVisible != nil {
+        updates["status_visible"] = *req.StatusVisible
+    }
+    if req.QuietHoursEnabled != nil {
+        updates["quiet_hours_enabled"] = *req.QuietHoursEnabled
+    }
+    if req.QuietHoursStart != nil {
+        start := strings.TrimSpace(*req.QuietHoursStart)
+        if start != "" && !isHHMM(start) {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid quietHoursStart"})
+            return
+        }
+        if start != "" {
+            updates["quiet_hours_start"] = start
+        }
+    }
+    if req.QuietHoursEnd != nil {
+        end := strings.TrimSpace(*req.QuietHoursEnd)
+        if end != "" && !isHHMM(end) {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid quietHoursEnd"})
+            return
+        }
+        if end != "" {
+            updates["quiet_hours_end"] = end
+        }
+    }
+
+    if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).Updates(updates).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
         return
     }
@@ -361,7 +452,7 @@ func (s *Server) handleUpdateProfile(c *gin.Context) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
         return
     }
-    c.JSON(http.StatusOK, gin.H{"user": updated})
+    c.JSON(http.StatusOK, gin.H{"user": s.userOwnJSON(updated)})
 }
 
 func (s *Server) handleUpdatePreferences(c *gin.Context) {
@@ -394,7 +485,76 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
         return
     }
-    c.JSON(http.StatusOK, gin.H{"user": updated})
+    c.JSON(http.StatusOK, gin.H{"user": s.userOwnJSON(updated)})
+}
+
+func (s *Server) handleUploadAvatar(c *gin.Context) {
+    user, _ := userFromContext(c)
+    fileHeader, err := c.FormFile("avatar")
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "avatar file required"})
+        return
+    }
+    relPath, err := s.saveAvatarFile(user.ID, fileHeader)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "avatar save failed"})
+        return
+    }
+
+    var current models.User
+    if err := s.DB.Select("id", "avatar_path").First(&current, user.ID).Error; err == nil {
+        old := strings.TrimSpace(current.AvatarPath)
+        if old != "" && old != relPath && strings.HasPrefix(old, "avatars/") {
+            _ = s.removePhotoFile(old)
+        }
+    }
+    if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("avatar_path", relPath).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "avatar update failed"})
+        return
+    }
+    var updated models.User
+    if err := s.DB.First(&updated, user.ID).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"user": s.userOwnJSON(updated)})
+}
+
+func (s *Server) handleUserProfile(c *gin.Context) {
+    viewer, _ := userFromContext(c)
+    targetID, err := parseUintParam(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+        return
+    }
+    var target models.User
+    if err := s.DB.First(&target, targetID).Error; err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+        return
+    }
+    sameUser := viewer.ID == target.ID
+    if !sameUser && !target.ProfileVisible {
+        c.JSON(http.StatusOK, gin.H{
+            "profileVisible": false,
+            "user":           s.userPublicJSON(viewer.ID, target),
+            "photos":         []gin.H{},
+            "isSelf":         false,
+        })
+        return
+    }
+
+    photos, err := s.loadVisibleUserPhotos(viewer.ID, target.ID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "profile query failed"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "profileVisible": true,
+        "user":           s.userPublicJSON(viewer.ID, target),
+        "photos":         photos,
+        "isSelf":         sameUser,
+    })
 }
 
 func (s *Server) handleChangePassword(c *gin.Context) {
@@ -818,11 +978,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 			"isLate":  isLate,
             "capsuleLocked": capsuleLocked,
 			"photo":   s.photoJSON(p),
-			"user": gin.H{
-				"id":            p.User.ID,
-				"username":      p.User.Username,
-				"favoriteColor": defaultColor(p.User.FavoriteColor),
-			},
+			"user": s.userPublicJSON(adminUser.ID, p.User),
 			"reactions":       reactions,
 			"comments":        comments,
 			"triggerSource":   prompt.TriggerSource,
@@ -912,11 +1068,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 			"isLate":     isLate,
             "capsuleLocked": capsuleLocked,
 			"photo":      s.photoJSON(p),
-			"user": gin.H{
-				"id":            p.User.ID,
-				"username":      p.User.Username,
-				"favoriteColor": defaultColor(p.User.FavoriteColor),
-			},
+			"user":      s.userPublicJSON(user.ID, p.User),
 			"reactions":      reactions,
 			"comments":       comments,
 			"triggerSource":   prompt.TriggerSource,
@@ -1406,6 +1558,7 @@ func (s *Server) handleAdminClearChat(c *gin.Context) {
 }
 
 func (s *Server) handleChatList(c *gin.Context) {
+    viewer, _ := userFromContext(c)
     var messages []models.ChatMessage
     if err := s.DB.Preload("User").Order("created_at desc").Limit(100).Find(&messages).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -1419,11 +1572,7 @@ func (s *Server) handleChatList(c *gin.Context) {
             "body":      m.Body,
             "source":    defaultIfBlank(strings.TrimSpace(m.Source), "user"),
             "createdAt": m.CreatedAt,
-            "user": gin.H{
-                "id":       m.User.ID,
-                "username": m.User.Username,
-                "favoriteColor": defaultColor(m.User.FavoriteColor),
-            },
+            "user":      s.userPublicJSON(viewer.ID, m.User),
         })
     }
     c.JSON(http.StatusOK, gin.H{"items": out})
@@ -2308,6 +2457,36 @@ func (s *Server) saveUploadedFile(day string, userID uint, header *multipart.Fil
     return s.Store.SavePhoto(day, userID, src, ext)
 }
 
+func (s *Server) saveAvatarFile(userID uint, header *multipart.FileHeader) (string, error) {
+    src, err := header.Open()
+    if err != nil {
+        return "", err
+    }
+    defer src.Close()
+
+    ext := strings.ToLower(strings.TrimSpace(filepath.Ext(header.Filename)))
+    switch ext {
+    case ".jpg", ".jpeg", ".png", ".webp":
+    default:
+        ext = ".jpg"
+    }
+    fileName := fmt.Sprintf("u%d_%d%s", userID, time.Now().UnixNano(), ext)
+    relPath := filepath.ToSlash(filepath.Join("avatars", fileName))
+    fullPath := filepath.Join(s.Config.UploadDir, relPath)
+    if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+        return "", err
+    }
+    dst, err := os.Create(fullPath)
+    if err != nil {
+        return "", err
+    }
+    defer dst.Close()
+    if _, err := io.Copy(dst, src); err != nil {
+        return "", err
+    }
+    return relPath, nil
+}
+
 func (s *Server) removePhotoFile(relPath string) error {
     rel := strings.TrimSpace(relPath)
     if rel == "" {
@@ -2338,6 +2517,124 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
         out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
     }
     return out
+}
+
+func (s *Server) avatarURL(path string) string {
+    cleaned := strings.TrimSpace(path)
+    if cleaned == "" {
+        return ""
+    }
+    if strings.HasPrefix(cleaned, "http://") || strings.HasPrefix(cleaned, "https://") {
+        return cleaned
+    }
+    cleaned = strings.TrimPrefix(cleaned, "/")
+    return fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, cleaned)
+}
+
+func statusIsActive(u models.User, now time.Time) bool {
+    text := strings.TrimSpace(u.StatusText)
+    emoji := strings.TrimSpace(u.StatusEmoji)
+    if text == "" && emoji == "" {
+        return false
+    }
+    if u.StatusExpiresAt == nil {
+        return true
+    }
+    return !now.After(*u.StatusExpiresAt)
+}
+
+func (s *Server) userOwnJSON(u models.User) gin.H {
+    avatarURL := ""
+    if strings.TrimSpace(u.AvatarPath) != "" {
+        avatarURL = s.avatarURL(u.AvatarPath)
+    }
+    return gin.H{
+        "id":                 u.ID,
+        "username":           u.Username,
+        "isAdmin":            u.IsAdmin,
+        "favoriteColor":      defaultColor(u.FavoriteColor),
+        "chatPushEnabled":    u.ChatPushEnabled,
+        "allowPhotoDownload": u.AllowPhotoDownload,
+        "avatarUrl":          avatarURL,
+        "bio":                strings.TrimSpace(u.Bio),
+        "statusText":         strings.TrimSpace(u.StatusText),
+        "statusEmoji":        strings.TrimSpace(u.StatusEmoji),
+        "statusExpiresAt":    u.StatusExpiresAt,
+        "profileVisible":     u.ProfileVisible,
+        "avatarVisible":      u.AvatarVisible,
+        "bioVisible":         u.BioVisible,
+        "statusVisible":      u.StatusVisible,
+        "quietHoursEnabled":  u.QuietHoursEnabled,
+        "quietHoursStart":    defaultIfBlank(u.QuietHoursStart, "22:00"),
+        "quietHoursEnd":      defaultIfBlank(u.QuietHoursEnd, "07:00"),
+        "createdAt":          u.CreatedAt,
+    }
+}
+
+func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
+    own := viewerID == u.ID
+    out := gin.H{
+        "id":            u.ID,
+        "username":      u.Username,
+        "isAdmin":       u.IsAdmin,
+        "favoriteColor": defaultColor(u.FavoriteColor),
+    }
+    now := time.Now().In(s.Location)
+    if own {
+        for k, v := range s.userOwnJSON(u) {
+            out[k] = v
+        }
+        return out
+    }
+
+    out["profileVisible"] = u.ProfileVisible
+    if !u.ProfileVisible {
+        out["avatarVisible"] = false
+        out["bioVisible"] = false
+        out["statusVisible"] = false
+        return out
+    }
+
+    if u.AvatarVisible && strings.TrimSpace(u.AvatarPath) != "" {
+        out["avatarVisible"] = true
+        out["avatarUrl"] = s.avatarURL(u.AvatarPath)
+    } else {
+        out["avatarVisible"] = false
+    }
+    if u.BioVisible && strings.TrimSpace(u.Bio) != "" {
+        out["bioVisible"] = true
+        out["bio"] = strings.TrimSpace(u.Bio)
+    } else {
+        out["bioVisible"] = false
+    }
+    if u.StatusVisible && statusIsActive(u, now) {
+        out["statusVisible"] = true
+        out["statusText"] = strings.TrimSpace(u.StatusText)
+        out["statusEmoji"] = strings.TrimSpace(u.StatusEmoji)
+        out["statusExpiresAt"] = u.StatusExpiresAt
+    } else {
+        out["statusVisible"] = false
+    }
+    return out
+}
+
+func (s *Server) loadVisibleUserPhotos(viewerID uint, targetID uint) ([]gin.H, error) {
+    var photos []models.Photo
+    if err := s.DB.Where("user_id = ?", targetID).Order("created_at desc").Limit(120).Find(&photos).Error; err != nil {
+        return nil, err
+    }
+    now := time.Now().In(s.Location)
+    out := make([]gin.H, 0, len(photos))
+    for _, p := range photos {
+        if p.CapsulePrivate && viewerID != targetID {
+            continue
+        }
+        if p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt) && viewerID != targetID {
+            continue
+        }
+        out = append(out, s.photoJSON(p))
+    }
+    return out, nil
 }
 
 func (s *Server) allDeviceTokens() []string {
@@ -2841,6 +3138,7 @@ func defaultColor(v string) string {
 }
 
 var colorRe = regexp.MustCompile(`^#?[0-9a-fA-F]{6}$`)
+var hhmmRe = regexp.MustCompile(`^(?:[01]\d|2[0-3]):[0-5]\d$`)
 
 func normalizeColor(v string) (string, bool) {
     x := strings.TrimSpace(v)
@@ -2854,6 +3152,10 @@ func normalizeColor(v string) (string, bool) {
         x = "#" + x
     }
     return strings.ToUpper(x), true
+}
+
+func isHHMM(v string) bool {
+    return hhmmRe.MatchString(strings.TrimSpace(v))
 }
 
 func normalizeSettings(settings models.AppSettings) models.AppSettings {

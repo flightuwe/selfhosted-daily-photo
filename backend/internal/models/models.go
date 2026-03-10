@@ -10,6 +10,18 @@ type User struct {
     FavoriteColor string   `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
     ChatPushEnabled bool   `gorm:"default:false" json:"chatPushEnabled"`
     AllowPhotoDownload bool `gorm:"default:false" json:"allowPhotoDownload"`
+    AvatarPath   string    `gorm:"size:255" json:"avatarUrl"`
+    Bio          string    `gorm:"size:280" json:"bio"`
+    StatusText   string    `gorm:"size:120" json:"statusText"`
+    StatusEmoji  string    `gorm:"size:16" json:"statusEmoji"`
+    StatusExpiresAt *time.Time `json:"statusExpiresAt"`
+    ProfileVisible bool    `gorm:"default:false" json:"profileVisible"`
+    AvatarVisible bool     `gorm:"default:false" json:"avatarVisible"`
+    BioVisible bool        `gorm:"default:false" json:"bioVisible"`
+    StatusVisible bool     `gorm:"default:false" json:"statusVisible"`
+    QuietHoursEnabled bool `gorm:"default:false" json:"quietHoursEnabled"`
+    QuietHoursStart string `gorm:"size:5;default:'22:00'" json:"quietHoursStart"`
+    QuietHoursEnd string   `gorm:"size:5;default:'07:00'" json:"quietHoursEnd"`
     CreatedAt    time.Time `json:"createdAt"`
 }
 
