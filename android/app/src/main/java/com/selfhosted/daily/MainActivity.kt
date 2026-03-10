@@ -125,6 +125,7 @@ import coil.compose.AsyncImage
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.tasks.await
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
@@ -921,6 +922,10 @@ data class DashboardData(
 )
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
+    private val chatSendMutex = Mutex()
+    private val pendingChatBodies = mutableMapOf<String, Long>()
+    private val pendingChatWindowMs = 4_000L
+
     var state by mutableStateOf(
         UiState(
             token = repo.token(),
@@ -935,6 +940,19 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         )
     )
         private set
+
+    private fun normalizeChatBody(body: String): String =
+        body.trim().split(Regex("\\s+")).filter { it.isNotBlank() }.joinToString(" ").lowercase()
+
+    private fun cleanupPendingChatBodies(nowMs: Long) {
+        val it = pendingChatBodies.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            if (nowMs-entry.value > pendingChatWindowMs) {
+                it.remove()
+            }
+        }
+    }
 
     private suspend fun fetchChangelogLinesFresh(): List<String> {
         suspend fun loadOnce(): List<String> =
@@ -1374,14 +1392,31 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun sendChat(body: String): Boolean {
         val trimmed = body.trim()
         if (trimmed.isBlank() || state.chatSending) return false
+        if (!chatSendMutex.tryLock()) return false
+        val nowMs = System.currentTimeMillis()
+        val normalized = normalizeChatBody(trimmed)
+        cleanupPendingChatBodies(nowMs)
+        val pendingAt = pendingChatBodies[normalized]
+        if (pendingAt != null && nowMs-pendingAt <= pendingChatWindowMs) {
+            chatSendMutex.unlock()
+            return false
+        }
+
         val clientMessageId = UUID.randomUUID().toString()
+        pendingChatBodies[normalized] = nowMs
         state = state.copy(chatSending = true)
-        val ok = runCatching { repo.sendChat(trimmed, clientMessageId) }
-            .onSuccess { refreshAll() }
-            .onFailure { state = state.copy(message = apiError(it, "Chat senden fehlgeschlagen")) }
-            .isSuccess
-        state = state.copy(chatSending = false)
-        return ok
+        return try {
+            runCatching { repo.sendChat(trimmed, clientMessageId) }
+                .onSuccess { refreshAll() }
+                .onFailure {
+                    pendingChatBodies.remove(normalized)
+                    state = state.copy(message = apiError(it, "Chat senden fehlgeschlagen"))
+                }
+                .isSuccess
+        } finally {
+            state = state.copy(chatSending = false)
+            chatSendMutex.unlock()
+        }
     }
 
     suspend fun loadPhotoInteractions(photoId: Long) {

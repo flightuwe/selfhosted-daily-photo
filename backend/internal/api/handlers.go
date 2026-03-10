@@ -1507,9 +1507,26 @@ func (s *Server) handleChatCreate(c *gin.Context) {
         }
     }
 
-    if handled, err := s.tryHandleChatCommand(c, user, body); handled || err != nil {
-        return
-    }
+	if handled, err := s.tryHandleChatCommand(c, user, body); handled || err != nil {
+		return
+	}
+
+	if existing, ok, err := s.findRecentDuplicateChatMessage(user.ID, body, 3*time.Second); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "chat dedupe lookup failed"})
+		return
+	} else if ok {
+		c.JSON(http.StatusOK, gin.H{
+			"id":        existing.ID,
+			"body":      existing.Body,
+			"createdAt": existing.CreatedAt,
+			"user": gin.H{
+				"id":            existing.User.ID,
+				"username":      existing.User.Username,
+				"favoriteColor": defaultColor(existing.User.FavoriteColor),
+			},
+		})
+		return
+	}
 
 	msg := models.ChatMessage{UserID: user.ID, Body: body}
 	if clientMessageID != "" {
@@ -1550,16 +1567,46 @@ func (s *Server) handleChatCreate(c *gin.Context) {
         s.recordPushResult(sendResult, sendErr)
         s.removeInvalidTokens(sendResult.InvalidTokens)
     }
-    c.JSON(http.StatusCreated, gin.H{
-        "id":        msg.ID,
-        "body":      msg.Body,
+	c.JSON(http.StatusCreated, gin.H{
+		"id":        msg.ID,
+		"body":      msg.Body,
         "createdAt": msg.CreatedAt,
         "user": gin.H{
             "id":       user.ID,
             "username": user.Username,
             "favoriteColor": defaultColor(user.FavoriteColor),
         },
-    })
+	})
+}
+
+func (s *Server) findRecentDuplicateChatMessage(userID uint, body string, window time.Duration) (models.ChatMessage, bool, error) {
+	normalized := normalizeChatBodyForDedupe(body)
+	if normalized == "" {
+		return models.ChatMessage{}, false, nil
+	}
+	cutoff := time.Now().Add(-window)
+	var recent []models.ChatMessage
+	if err := s.DB.Preload("User").
+		Where("user_id = ? AND created_at >= ?", userID, cutoff).
+		Order("created_at desc").
+		Limit(20).
+		Find(&recent).Error; err != nil {
+		return models.ChatMessage{}, false, err
+	}
+	for _, msg := range recent {
+		if normalizeChatBodyForDedupe(msg.Body) == normalized {
+			return msg, true, nil
+		}
+	}
+	return models.ChatMessage{}, false, nil
+}
+
+func normalizeChatBodyForDedupe(v string) string {
+	parts := strings.Fields(strings.TrimSpace(v))
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.ToLower(strings.Join(parts, " "))
 }
 
 func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body string) (bool, error) {
