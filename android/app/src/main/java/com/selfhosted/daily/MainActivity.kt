@@ -2564,25 +2564,25 @@ fun CameraTab(
                 }
             }
             Button(onClick = { onCaptureExtra(CapsuleUploadOptions()) }, modifier = Modifier.fillMaxWidth()) { Text("Weitere Bilder hinzufuegen") }
-            TextButton(
-                onClick = { showCapsuleDialog = true },
-                enabled = !canUpload,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Fuer spaeter merken")
-            }
-            if (canUpload) {
+            if (!canUpload) {
+                TextButton(
+                    onClick = { showCapsuleDialog = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Fuer spaeter merken")
+                }
+                SpecialMomentActionButton(
+                    text = specialLabel,
+                    onClick = onRequestSpecialMoment,
+                    enabled = canSpecial,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
                 Text(
-                    "Time Capsule ist waehrend des aktiven Daily-Fensters gesperrt.",
+                    "Time Capsule und Sondermoment sind waehrend des aktiven Daily-Fensters gesperrt.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            SpecialMomentActionButton(
-                text = specialLabel,
-                onClick = onRequestSpecialMoment,
-                enabled = canSpecial,
-                modifier = Modifier.fillMaxWidth()
-            )
         } else {
             Text("Heute sind zwei Fotos noetig: Rueckkamera und Frontkamera.")
             if (prompt?.triggered.isNullOrBlank()) {
@@ -2599,12 +2599,14 @@ fun CameraTab(
                     blink = canUpload,
                     modifier = Modifier.fillMaxWidth()
                 )
-                SpecialMomentActionButton(
-                    text = specialLabel,
-                    onClick = onRequestSpecialMoment,
-                    enabled = canSpecial,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (!canUpload) {
+                    SpecialMomentActionButton(
+                        text = specialLabel,
+                        onClick = onRequestSpecialMoment,
+                        enabled = canSpecial,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             } else {
                 Text("Rueckkamera aufgenommen")
                 AsyncImage(

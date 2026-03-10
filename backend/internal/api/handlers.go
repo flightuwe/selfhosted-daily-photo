@@ -489,6 +489,14 @@ func (s *Server) handleSpecialMomentStatus(c *gin.Context) {
 func (s *Server) handleSpecialMomentRequest(c *gin.Context) {
     user, _ := userFromContext(c)
     now := time.Now().In(s.Location)
+    day := now.Format("2006-01-02")
+
+    if s.isDailyWindowActive(day, now) {
+        c.JSON(http.StatusForbidden, gin.H{
+            "error": "special moment unavailable during active daily window",
+        })
+        return
+    }
 
     status, err := s.specialMomentStatus(user.ID)
     if err != nil {
