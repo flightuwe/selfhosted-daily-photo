@@ -3066,9 +3066,7 @@ fun FeedTab(
                                 comments.take(2).forEach { comment ->
                                     Text(
                                         "${comment.user.username}: ${comment.body}",
-                                        color = secondaryTextColor,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
+                                        color = secondaryTextColor
                                     )
                                 }
                             }
