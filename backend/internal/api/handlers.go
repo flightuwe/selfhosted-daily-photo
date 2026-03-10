@@ -2281,6 +2281,12 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 			},
 		})
 	}
+	for photoID, list := range commentByPhoto {
+		for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
+			list[i], list[j] = list[j], list[i]
+		}
+		commentByPhoto[photoID] = list
+	}
 
 	return reactionByPhoto, commentByPhoto, nil
 }
