@@ -2339,14 +2339,16 @@ func parseCapsuleForm(c *gin.Context, kind string, dailyWindowActive bool, now t
     }
 
     var visibleAt time.Time
-    switch mode {
-    case "30d":
-        visibleAt = now.AddDate(0, 0, 30)
-    case "1y":
-        visibleAt = now.AddDate(1, 0, 0)
-    default:
-        return "", nil, false, false, errors.New("invalid capsule_mode (allowed: 30d, 1y)")
-    }
+	switch mode {
+    case "7d":
+        visibleAt = now.AddDate(0, 0, 7)
+	case "30d":
+		visibleAt = now.AddDate(0, 0, 30)
+	case "1y":
+		visibleAt = now.AddDate(1, 0, 0)
+	default:
+		return "", nil, false, false, errors.New("invalid capsule_mode (allowed: 7d, 30d, 1y)")
+	}
     return mode, &visibleAt, privateFlag, groupRemind, nil
 }
 

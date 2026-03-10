@@ -852,6 +852,7 @@ data class UiState(
     val calendarDays: List<String> = emptyList(),
     val dayPhotoCounts: Map<String, Int> = emptyMap(),
     val feedFocusDay: String? = null,
+    val feedFocusPhotoId: Long? = null,
     val feedPaging: Boolean = false,
     val feedRefreshing: Boolean = false,
     val feedTodayLocked: Boolean = false,
@@ -1042,10 +1043,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(activeTab = tab)
     }
 
+    fun clearFeedPhotoFocus() {
+        if (state.feedFocusPhotoId != null) {
+            state = state.copy(feedFocusPhotoId = null)
+        }
+    }
+
     suspend fun jumpToDay(day: String) {
-        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day)
+        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = null)
         loadFeedWindow(day, around = 0)
-        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day)
+        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = null)
+    }
+
+    suspend fun jumpToPhoto(day: String, photoId: Long) {
+        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = photoId)
+        loadFeedWindow(day, around = 3)
+        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = photoId)
     }
 
     suspend fun refreshAll() {
@@ -1206,7 +1219,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 promptMetaByDay = emptyMap(),
                 feed = emptyList(),
                 feedTodayLocked = state.prompt?.hasPosted == false,
-                feedFocusDay = state.prompt?.day
+                feedFocusDay = state.prompt?.day,
+                feedFocusPhotoId = null
             )
             return
         }
@@ -1235,7 +1249,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             promptMetaByDay = promptMap,
             feed = map[today] ?: emptyList(),
             feedTodayLocked = todayLocked,
-            feedFocusDay = target
+            feedFocusDay = target,
+            feedFocusPhotoId = state.feedFocusPhotoId
         )
     }
 
@@ -2202,6 +2217,7 @@ fun AppScreen(vm: MainVm) {
                     monthRecapByDay = state.monthRecapByDay,
                     promptMetaByDay = state.promptMetaByDay,
                     focusDay = state.feedFocusDay,
+                    focusPhotoId = state.feedFocusPhotoId,
                     listState = feedListState,
                     refreshing = state.feedRefreshing,
                     todayLocked = state.feedTodayLocked,
@@ -2210,6 +2226,8 @@ fun AppScreen(vm: MainVm) {
                     onRefresh = { scope.launch { vm.refreshFeed() } },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
                     onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
+                    onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
+                    onFocusPhotoConsumed = { vm.clearFeedPhotoFocus() },
                     onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
                         viewerIndex = 0
@@ -2483,6 +2501,7 @@ fun CameraTab(
     val canUpload = prompt?.canUpload == true
     val canSpecial = specialMomentStatus?.canRequest == true
     var showCapsuleDialog by remember { mutableStateOf(false) }
+    var pendingCapsule by remember { mutableStateOf<CapsuleUploadOptions?>(null) }
     val dayLabel = formatDayLabel(prompt?.day ?: LocalDate.now().toString())
     val specialLabel = if (canSpecial) {
         "Sondermoment anfordern"
@@ -2651,36 +2670,56 @@ fun CameraTab(
             title = { Text("Fuer spaeter merken") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Achtung: Wenn du eine Time Capsule waehlst, bleibt der Beitrag bis zum gewaehlten Datum verborgen.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Button(
                         onClick = {
                             showCapsuleDialog = false
-                            onCaptureExtra(CapsuleUploadOptions(mode = "30d"))
+                            pendingCapsule = CapsuleUploadOptions(mode = "7d")
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("in einer Woche zeigen") }
+                    Button(
+                        onClick = {
+                            showCapsuleDialog = false
+                            pendingCapsule = CapsuleUploadOptions(mode = "30d")
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("in 30 Tagen zeigen") }
                     Button(
                         onClick = {
                             showCapsuleDialog = false
-                            onCaptureExtra(CapsuleUploadOptions(mode = "1y"))
+                            pendingCapsule = CapsuleUploadOptions(mode = "1y")
                         },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("in 1 Jahr zeigen") }
-                    Button(
-                        onClick = {
-                            showCapsuleDialog = false
-                            onCaptureExtra(CapsuleUploadOptions(mode = "30d", privateOnly = true))
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("nur mir zeigen") }
-                    Button(
-                        onClick = {
-                            showCapsuleDialog = false
-                            onCaptureExtra(CapsuleUploadOptions(mode = "30d", groupRemind = true))
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Gruppe spaeter erinnern") }
+                    ) { Text("in einem Jahr zeigen") }
                 }
             }
+        )
+    }
+    pendingCapsule?.let { selected ->
+        val label = when (selected.mode) {
+            "7d" -> "in einer Woche"
+            "30d" -> "in 30 Tagen"
+            "1y" -> "in einem Jahr"
+            else -> selected.mode
+        }
+        AlertDialog(
+            onDismissRequest = { pendingCapsule = null },
+            confirmButton = {
+                Button(onClick = {
+                    showCapsuleDialog = false
+                    pendingCapsule = null
+                    onCaptureExtra(selected)
+                }) { Text("Ja, Time Capsule starten") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingCapsule = null }) { Text("Abbrechen") }
+            },
+            title = { Text("Bitte bestaetigen") },
+            text = { Text("Du siehst diesen Beitrag dann erst wieder $label. Wirklich fortfahren?") }
         )
     }
 }
@@ -2817,6 +2856,7 @@ fun FeedTab(
     monthRecapByDay: Map<String, MonthlyRecap>,
     promptMetaByDay: Map<String, PromptMeta>,
     focusDay: String?,
+    focusPhotoId: Long?,
     listState: LazyListState,
     refreshing: Boolean,
     todayLocked: Boolean,
@@ -2825,6 +2865,8 @@ fun FeedTab(
     onRefresh: () -> Unit,
     onLoadOlder: () -> Unit,
     onLoadNewer: () -> Unit,
+    onJumpToCapsule: (day: String, photoId: Long) -> Unit,
+    onFocusPhotoConsumed: () -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     val primaryTextColor = MaterialTheme.colorScheme.onSurface
@@ -2841,11 +2883,32 @@ fun FeedTab(
         }
     }
 
-    LaunchedEffect(focusDay, rows.size) {
-        val target = focusDay ?: return@LaunchedEffect
-        val idx = rows.indexOfFirst { it is FeedRow.DayHeader && it.day == target }
+    val todayDay = prompt?.day ?: LocalDate.now().toString()
+    val capsuleTargets = remember(rows, todayDay) {
+        rows.asSequence()
+            .filterIsInstance<FeedRow.PhotoItem>()
+            .map { it.day to it.item }
+            .filter { (day, item) ->
+                day != todayDay &&
+                    !item.photo.capsuleMode.isNullOrBlank()
+            }
+            .map { (day, item) -> day to item.photo.id }
+            .distinct()
+            .toList()
+    }
+
+    LaunchedEffect(focusDay, focusPhotoId, rows.size) {
+        val idx = if (focusPhotoId != null) {
+            rows.indexOfFirst { it is FeedRow.PhotoItem && it.item.photo.id == focusPhotoId }
+        } else {
+            val target = focusDay ?: return@LaunchedEffect
+            rows.indexOfFirst { it is FeedRow.DayHeader && it.day == target }
+        }
         if (idx >= 0) {
             listState.scrollToItem(idx)
+        }
+        if (focusPhotoId != null) {
+            onFocusPhotoConsumed()
         }
     }
 
@@ -2923,6 +2986,22 @@ fun FeedTab(
                                     fontWeight = FontWeight.Bold,
                                     color = Color.Black
                                 )
+                            }
+                            if (row.day == todayDay && capsuleTargets.isNotEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "Time Capsules verfuegbar",
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.Black
+                                )
+                                capsuleTargets.forEach { (day, photoId) ->
+                                    TextButton(
+                                        onClick = { onJumpToCapsule(day, photoId) },
+                                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)
+                                    ) {
+                                        Text("↪ Capsule vom ${formatDayWithWeekday(day)} oeffnen", color = Color.Black)
+                                    }
+                                }
                             }
                         }
                     }
