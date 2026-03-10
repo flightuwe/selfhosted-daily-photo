@@ -31,6 +31,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.Image
@@ -102,7 +104,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.consumePositionChange
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
@@ -4611,6 +4612,15 @@ private fun ZoomableViewerImage(
 ) {
     var scale by remember(url) { mutableStateOf(1f) }
     var offset by remember(url) { mutableStateOf(Offset.Zero) }
+    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        val nextScale = (scale * zoomChange).coerceIn(1f, 5f)
+        if (nextScale == 1f) {
+            offset = Offset.Zero
+        } else {
+            offset += panChange
+        }
+        scale = nextScale
+    }
 
     LaunchedEffect(active) {
         if (active) {
@@ -4641,17 +4651,12 @@ private fun ZoomableViewerImage(
                     }
                 )
             }
-            .pointerInput(url) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    val nextScale = (scale * zoom).coerceIn(1f, 5f)
-                    if (nextScale == 1f) {
-                        offset = Offset.Zero
-                    } else {
-                        offset += pan
-                    }
-                    scale = nextScale
-                }
-            },
+            // Important: keep single-finger horizontal swipes for pager navigation.
+            // Pan gestures are only consumed while zoomed in.
+            .transformable(
+                state = transformState,
+                canPan = { scale > 1f }
+            ),
         contentScale = ContentScale.Fit
     )
 }
