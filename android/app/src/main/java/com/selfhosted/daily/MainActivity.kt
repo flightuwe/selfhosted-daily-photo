@@ -2514,8 +2514,14 @@ fun CameraTab(
         modifier = Modifier.verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        RainbowDailyTitle()
-        Text(dayLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            RainbowDailyTitle()
+            Text(dayLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         if (!prompt?.triggered.isNullOrBlank()) {
             Text("Der heutige Moment war um ${formatMomentTime(prompt?.triggered)}.")
         } else {
