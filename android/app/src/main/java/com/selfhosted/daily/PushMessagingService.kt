@@ -110,6 +110,44 @@ class PushMessagingService : FirebaseMessagingService() {
             NotificationManagerCompat.from(context).notify(2001, notification)
         }
 
+        fun showLocalToneTestNotification(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+
+            val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
+            val tone = toneConfig(prefs)
+            val channelId = ensurePromptChannel(context, tone)
+
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pending = PendingIntent.getActivity(
+                context,
+                3001,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("Daily Ton-Test")
+                .setContentText("So klingt dein aktueller Benachrichtigungston.")
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pending)
+                .apply {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && tone.enabled && tone.uri != null) {
+                        setSound(tone.uri)
+                    }
+                }
+                .build()
+
+            NotificationManagerCompat.from(context).notify(3001, notification)
+        }
+
         private data class ToneConfig(val enabled: Boolean, val uri: Uri?)
 
         private fun toneConfig(prefs: android.content.SharedPreferences): ToneConfig {

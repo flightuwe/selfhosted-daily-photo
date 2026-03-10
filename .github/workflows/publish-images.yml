@@ -24,11 +24,19 @@ jobs:
         run: |
           echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           echo "server_version=srv-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to GHCR (retry)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          n=0
+          until [ "$n" -ge 5 ]
+          do
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin && break
+            n=$((n+1))
+            sleep $((5*n))
+          done
+          [ "$n" -lt 5 ] || (echo "::error::GHCR login failed after retries" && exit 1)
       - uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
