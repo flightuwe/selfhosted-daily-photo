@@ -440,3 +440,37 @@ export async function getDebugLogs(token: string, userId?: number, limit = 150):
   const data = await parse<{ items: DebugLogItem[] }>(res);
   return data.items || [];
 }
+
+export async function downloadDebugLogs(
+  token: string,
+  opts?: { userId?: number; sinceHours?: number; format?: "csv" | "json"; limit?: number }
+): Promise<void> {
+  const qs = new URLSearchParams();
+  if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
+  qs.set("sinceHours", String(opts?.sinceHours ?? 24));
+  qs.set("format", opts?.format ?? "csv");
+  qs.set("limit", String(opts?.limit ?? 5000));
+
+  const res = await fetch(`${apiBase}/admin/debug/logs/export?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    throw new Error(body.error || "Download fehlgeschlagen");
+  }
+
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") || "";
+  const fileMatch = disposition.match(/filename="?([^"]+)"?/i);
+  const fallbackExt = (opts?.format ?? "csv") === "json" ? "json" : "csv";
+  const filename = fileMatch?.[1] || `debug-logs-last-24h.${fallbackExt}`;
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

@@ -11,6 +11,7 @@ import {
   getChat,
   getChatCommands,
   getDebugLogs,
+  downloadDebugLogs,
   getSystemHealth,
   getSettings,
   getStats,
@@ -232,6 +233,28 @@ export function App() {
     try {
       const items = await getDebugLogs(authToken, userId && userId > 0 ? userId : undefined, 200);
       setDebugLogs(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDownloadUserLogs() {
+    if (debugUserFilter <= 0) {
+      setMessage("Bitte erst einen Nutzer auswaehlen.");
+      return;
+    }
+    try {
+      await downloadDebugLogs(token, { userId: debugUserFilter, sinceHours: 24, format: "csv" });
+      setMessage("Nutzer-Logs (24h) wurden heruntergeladen.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDownloadAllLogs24h() {
+    try {
+      await downloadDebugLogs(token, { sinceHours: 24, format: "csv" });
+      setMessage("Gesamte Logs (24h) wurden heruntergeladen.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1055,6 +1078,8 @@ export function App() {
                   ))}
                 </select>
                 <button onClick={() => loadDebugLogs(token, debugUserFilter)}>Aktualisieren</button>
+                <button onClick={onDownloadUserLogs}>Nutzer-Logs 24h downloaden</button>
+                <button onClick={onDownloadAllLogs24h}>Alle Logs 24h downloaden</button>
               </div>
             </div>
             {debugLogs.length === 0 && <p>Keine Debug-Eintraege vorhanden.</p>}

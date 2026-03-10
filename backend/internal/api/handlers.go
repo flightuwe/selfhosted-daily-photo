@@ -1,6 +1,8 @@
 package api
 
 import (
+    "bytes"
+    "encoding/csv"
     "crypto/rand"
     "errors"
     "fmt"
@@ -114,6 +116,7 @@ func (s *Server) Router() *gin.Engine {
             admin.PUT("/chat/commands/:id", s.handleAdminUpdateChatCommand)
             admin.DELETE("/chat/commands/:id", s.handleAdminDeleteChatCommand)
             admin.GET("/debug/logs", s.handleAdminDebugLogs)
+            admin.GET("/debug/logs/export", s.handleAdminDebugLogsExport)
             admin.GET("/system/health", s.handleAdminSystemHealth)
 
             admin.GET("/users", s.handleAdminListUsers)
@@ -1527,6 +1530,138 @@ func (s *Server) handleAdminDebugLogs(c *gin.Context) {
     }
 
     c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) handleAdminDebugLogsExport(c *gin.Context) {
+    userID := uint(0)
+    if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+        parsed, err := parseUintParam(raw)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+            return
+        }
+        userID = parsed
+    }
+
+    sinceHours := 24
+    if raw := strings.TrimSpace(c.Query("sinceHours")); raw != "" {
+        n, err := strconv.Atoi(raw)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
+            return
+        }
+        if n < 1 {
+            n = 1
+        }
+        if n > 168 {
+            n = 168
+        }
+        sinceHours = n
+    }
+
+    format := strings.ToLower(strings.TrimSpace(c.Query("format")))
+    if format == "" {
+        format = "csv"
+    }
+    if format != "csv" && format != "json" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid format"})
+        return
+    }
+
+    limit := 5000
+    if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+        n, err := strconv.Atoi(raw)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+            return
+        }
+        if n < 10 {
+            n = 10
+        }
+        if n > 10000 {
+            n = 10000
+        }
+        limit = n
+    }
+
+    since := time.Now().In(s.Location).Add(-time.Duration(sinceHours) * time.Hour)
+    q := s.DB.Preload("User").Where("created_at >= ?", since).Order("created_at desc").Limit(limit)
+    if userID != 0 {
+        q = q.Where("user_id = ?", userID)
+    }
+
+    var rows []models.ClientDebugLog
+    if err := q.Find(&rows).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+
+    nameScope := "all-users"
+    if userID != 0 {
+        nameScope = fmt.Sprintf("user-%d", userID)
+    }
+    ts := time.Now().In(s.Location).Format("20060102-150405")
+
+    if format == "json" {
+        filename := fmt.Sprintf("debug-logs-%s-last-%dh-%s.json", nameScope, sinceHours, ts)
+        c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+        c.Header("Content-Type", "application/json; charset=utf-8")
+
+        items := make([]gin.H, 0, len(rows))
+        for _, row := range rows {
+            items = append(items, gin.H{
+                "id":         row.ID,
+                "createdAt":  row.CreatedAt,
+                "type":       row.Type,
+                "message":    row.Message,
+                "meta":       row.Meta,
+                "appVersion": row.AppVersion,
+                "deviceName": row.DeviceName,
+                "user": gin.H{
+                    "id":       row.User.ID,
+                    "username": row.User.Username,
+                },
+            })
+        }
+
+        c.JSON(http.StatusOK, gin.H{
+            "generatedAt": time.Now().In(s.Location),
+            "sinceHours":  sinceHours,
+            "userId":      userID,
+            "count":       len(items),
+            "items":       items,
+        })
+        return
+    }
+
+    filename := fmt.Sprintf("debug-logs-%s-last-%dh-%s.csv", nameScope, sinceHours, ts)
+    c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+    c.Header("Content-Type", "text/csv; charset=utf-8")
+
+    var buf bytes.Buffer
+    writer := csv.NewWriter(&buf)
+    _ = writer.Write([]string{
+        "id", "created_at", "user_id", "username", "device_name", "app_version", "type", "message", "meta",
+    })
+    for _, row := range rows {
+        _ = writer.Write([]string{
+            strconv.FormatUint(uint64(row.ID), 10),
+            row.CreatedAt.In(s.Location).Format(time.RFC3339),
+            strconv.FormatUint(uint64(row.UserID), 10),
+            row.User.Username,
+            row.DeviceName,
+            row.AppVersion,
+            row.Type,
+            row.Message,
+            row.Meta,
+        })
+    }
+    writer.Flush()
+    if err := writer.Error(); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "csv export failed"})
+        return
+    }
+    c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
 }
 
 func (s *Server) handleAdminUpdateUser(c *gin.Context) {
