@@ -50,6 +50,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -104,6 +106,7 @@ import androidx.compose.ui.input.pointer.consumePositionChange
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -124,6 +127,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.tasks.await
@@ -138,6 +142,7 @@ import okio.BufferedSink
 import okio.ForwardingSink
 import okio.buffer
 import org.json.JSONObject
+import org.json.JSONArray
 import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -365,6 +370,22 @@ data class PromptRulesResponse(
     val timezone: String
 )
 
+data class ClientDebugLogUploadRequest(
+    val type: String,
+    val message: String,
+    val meta: String = "",
+    val appVersion: String,
+    val deviceName: String
+)
+
+data class DebugLogEntry(
+    val id: String,
+    val type: String,
+    val message: String,
+    val meta: String = "",
+    val createdAt: String
+)
+
 interface Api {
     @GET("health")
     suspend fun health(): HealthResponse
@@ -483,6 +504,12 @@ interface Api {
     @POST("chat")
     suspend fun sendChat(@Header("Authorization") token: String, @Body body: ChatMessageRequest)
 
+    @POST("debug/client-log")
+    suspend fun uploadClientDebugLog(
+        @Header("Authorization") token: String,
+        @Body body: ClientDebugLogUploadRequest
+    )
+
     @GET("photos/{id}/interactions")
     suspend fun photoInteractions(
         @Header("Authorization") token: String,
@@ -507,6 +534,11 @@ interface Api {
 class AppRepo(private val api: Api, private val context: Context) {
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     private val maxUploadDimensionPx = 1600
+    private val debugLogsPrefKey = "debug_logs_v1"
+    private val debugUploadEnabledKey = "debug_upload_enabled"
+    private val debugLastUploadAtKey = "debug_last_upload_at"
+    private val debugMaxEntries = 500
+    private val debugUploadMinIntervalMs = 5 * 60 * 1000L
 
     fun token(): String = prefs.getString("token", "") ?: ""
 
@@ -517,6 +549,126 @@ class AppRepo(private val api: Api, private val context: Context) {
     fun clearToken() {
         prefs.edit().remove("token").apply()
         UploadQueueManager.clear(context)
+    }
+
+    fun diagnosticsUploadEnabled(): Boolean = prefs.getBoolean(debugUploadEnabledKey, false)
+
+    fun setDiagnosticsUploadEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(debugUploadEnabledKey, enabled).apply()
+    }
+
+    private fun readDebugLogsInternal(): MutableList<DebugLogEntry> {
+        val raw = prefs.getString(debugLogsPrefKey, "") ?: ""
+        if (raw.isBlank()) return mutableListOf()
+        return runCatching {
+            val arr = JSONArray(raw)
+            val out = mutableListOf<DebugLogEntry>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                out.add(
+                    DebugLogEntry(
+                        id = obj.optString("id", UUID.randomUUID().toString()),
+                        type = obj.optString("type", "unknown"),
+                        message = obj.optString("message", ""),
+                        meta = obj.optString("meta", ""),
+                        createdAt = obj.optString("createdAt", "")
+                    )
+                )
+            }
+            out
+        }.getOrElse { mutableListOf() }
+    }
+
+    private fun writeDebugLogsInternal(items: List<DebugLogEntry>) {
+        val arr = JSONArray()
+        items.takeLast(debugMaxEntries).forEach { item ->
+            val obj = JSONObject()
+            obj.put("id", item.id)
+            obj.put("type", item.type)
+            obj.put("message", item.message)
+            obj.put("meta", item.meta)
+            obj.put("createdAt", item.createdAt)
+            arr.put(obj)
+        }
+        prefs.edit().putString(debugLogsPrefKey, arr.toString()).apply()
+    }
+
+    fun recentDebugLogs(limit: Int = 80): List<DebugLogEntry> =
+        readDebugLogsInternal().takeLast(limit).reversed()
+
+    fun logDebug(type: String, message: String, meta: String = "") {
+        val cleanType = type.trim().ifBlank { "unknown" }.take(32)
+        val cleanMessage = message.trim().ifBlank { "unknown error" }.take(500)
+        val cleanMeta = meta.trim().take(4000)
+        val createdAt = OffsetDateTime.now().toString()
+        val current = readDebugLogsInternal()
+        current.add(
+            DebugLogEntry(
+                id = UUID.randomUUID().toString(),
+                type = cleanType,
+                message = cleanMessage,
+                meta = cleanMeta,
+                createdAt = createdAt
+            )
+        )
+        writeDebugLogsInternal(current)
+    }
+
+    fun exportDebugLogsForShare(): Uri {
+        val exportDir = File(context.cacheDir, "diagnostics").apply { mkdirs() }
+        val file = File(exportDir, "daily-diagnose-${System.currentTimeMillis()}.txt")
+        val lines = buildString {
+            appendLine("Daily Diagnose Export")
+            appendLine("Generated: ${OffsetDateTime.now()}")
+            appendLine("App version: ${BuildConfig.VERSION_NAME}")
+            appendLine("Device: ${currentDeviceName()}")
+            appendLine("")
+            recentDebugLogs(300).reversed().forEach { row ->
+                appendLine("[${row.createdAt}] ${row.type}: ${row.message}")
+                if (row.meta.isNotBlank()) appendLine("meta: ${row.meta}")
+            }
+        }
+        file.writeText(lines, Charsets.UTF_8)
+        return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    }
+
+    suspend fun uploadRecentDebugLogs(force: Boolean = false): Int {
+        if (token().isBlank()) return 0
+        if (!force && !diagnosticsUploadEnabled()) return 0
+        val now = System.currentTimeMillis()
+        val last = prefs.getLong(debugLastUploadAtKey, 0L)
+        if (!force && now-last < debugUploadMinIntervalMs) return 0
+        val rows = recentDebugLogs(20)
+        if (rows.isEmpty()) return 0
+        var sent = 0
+        rows.forEach { row ->
+            runCatching {
+                api.uploadClientDebugLog(
+                    "Bearer ${token()}",
+                    ClientDebugLogUploadRequest(
+                        type = row.type,
+                        message = row.message,
+                        meta = row.meta,
+                        appVersion = BuildConfig.VERSION_NAME,
+                        deviceName = currentDeviceName()
+                    )
+                )
+            }.onSuccess { sent += 1 }
+        }
+        if (sent > 0) {
+            prefs.edit().putLong(debugLastUploadAtKey, now).apply()
+        }
+        return sent
+    }
+
+    fun installCrashHandler() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            val msg = throwable.message ?: throwable::class.java.simpleName
+            val stack = throwable.stackTraceToString().take(3500)
+            logDebug("crash_unhandled", msg, "thread=${thread.name};stack=$stack")
+            previous?.uncaughtException(thread, throwable)
+        }
     }
 
     fun uploadQueue(): List<QueuedUploadItem> = UploadQueueManager.list(context)
@@ -1131,6 +1283,7 @@ data class UiState(
     val showProfileSetupPrompt: Boolean = false,
     val showProfileSetupGuide: Boolean = false,
     val profileSetupStep: Int = 0,
+    val profileSetupJumpTarget: String = "",
     val showChangelogDialog: Boolean = false,
     val changelogLines: List<String> = emptyList(),
     val showHelpDialog: Boolean = false,
@@ -1150,6 +1303,8 @@ data class UiState(
     val inviteRegistrationPushEnabled: Boolean = false,
     val customNotificationToneEnabled: Boolean = false,
     val customNotificationToneUri: String = "",
+    val diagnosticsUploadEnabled: Boolean = false,
+    val debugLogs: List<DebugLogEntry> = emptyList(),
     val profileSectionExpanded: Map<String, Boolean> = emptyMap()
 )
 
@@ -1169,6 +1324,7 @@ data class DashboardData(
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
     private val chatSendMutex = Mutex()
+    private val profileSaveMutex = Mutex()
     private val pendingChatBodies = mutableMapOf<String, Long>()
     private val pendingChatWindowMs = 4_000L
     private val profileSectionIds = listOf(
@@ -1176,7 +1332,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         "notifications",
         "invite",
         "profile_account",
+        "profile_privacy",
         "app_connection",
+        "debug_diagnose",
         "community_stats",
         "moment_rules",
         "upload_quality",
@@ -1195,7 +1353,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
-            customNotificationToneUri = repo.customNotificationToneUri()
+            customNotificationToneUri = repo.customNotificationToneUri(),
+            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled(),
+            debugLogs = repo.recentDebugLogs()
         )
     )
         private set
@@ -1281,6 +1441,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
+            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled(),
+            debugLogs = repo.recentDebugLogs(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
         runCatching { checkForUpdate(silent = true) }
@@ -1350,6 +1512,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
+            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled(),
+            debugLogs = repo.recentDebugLogs(),
             invitePreview = null
         )
     }
@@ -1360,6 +1524,34 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (normalizedId.isBlank()) return
         repo.setProfileSectionExpanded(userId, normalizedId, expanded)
         state = state.copy(profileSectionExpanded = state.profileSectionExpanded + (normalizedId to expanded))
+    }
+
+    private suspend fun logApiFailure(type: String, endpoint: String, throwable: Throwable, extraMeta: String = "") {
+        val code = (throwable as? HttpException)?.code()
+        val base = "endpoint=$endpoint;http=${code ?: -1};error=${throwable::class.java.simpleName}"
+        val meta = if (extraMeta.isBlank()) base else "$base;$extraMeta"
+        repo.logDebug(type = type, message = throwable.message ?: "request failed", meta = meta)
+        if (state.diagnosticsUploadEnabled) {
+            runCatching { repo.uploadRecentDebugLogs() }
+        }
+    }
+
+    fun setDiagnosticsUploadEnabled(enabled: Boolean) {
+        repo.setDiagnosticsUploadEnabled(enabled)
+        state = state.copy(diagnosticsUploadEnabled = enabled, message = if (enabled) "Diagnose-Upload aktiviert" else "Diagnose-Upload deaktiviert")
+    }
+
+    fun refreshDebugLogs() {
+        state = state.copy(debugLogs = repo.recentDebugLogs())
+    }
+
+    suspend fun uploadDebugLogsNow() {
+        val sent = runCatching { repo.uploadRecentDebugLogs(force = true) }.getOrElse { 0 }
+        state = state.copy(message = if (sent > 0) "Diagnose hochgeladen ($sent Eintraege)" else "Keine Diagnose hochgeladen")
+    }
+
+    fun exportDebugLogsForShare(): Uri? {
+        return runCatching { repo.exportDebugLogsForShare() }.getOrNull()
     }
 
     private fun profileSetupIncomplete(user: User): Boolean {
@@ -1419,13 +1611,33 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun jumpToSetupSection(sectionId: String) {
         setTab(AppTab.PROFILE)
         setProfileSectionExpanded(sectionId, true)
+        if (sectionId == "profile_account") {
+            setProfileSectionExpanded("profile_privacy", true)
+        }
+        state = state.copy(profileSetupJumpTarget = sectionId)
+    }
+
+    fun consumeProfileSetupJumpTarget() {
+        if (state.profileSetupJumpTarget.isNotBlank()) {
+            state = state.copy(profileSetupJumpTarget = "")
+        }
     }
 
     suspend fun loadUserProfile(userId: Long) {
         state = state.copy(viewedProfileLoading = true, viewedProfile = null)
         runCatching { repo.userProfile(userId) }
-            .onSuccess { state = state.copy(viewedProfileLoading = false, viewedProfile = it) }
-            .onFailure { state = state.copy(viewedProfileLoading = false, message = apiError(it, "Profil laden fehlgeschlagen")) }
+            .onSuccess {
+                repo.logDebug(
+                    type = "profile_open_ok",
+                    message = "profile opened",
+                    meta = "targetUserId=$userId;profileVisible=${it.profileVisible};photoCount=${it.photos.size}"
+                )
+                state = state.copy(viewedProfileLoading = false, viewedProfile = it)
+            }
+            .onFailure {
+                state = state.copy(viewedProfileLoading = false, message = apiError(it, "Profil laden fehlgeschlagen"))
+                logApiFailure("profile_open_failed", "/api/users/:id/profile", it, "targetUserId=$userId")
+            }
     }
 
     fun closeViewedProfile() {
@@ -1535,6 +1747,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 feedPostPushEnabled = feedPostPushEnabled,
                 inviteRegistrationPushEnabled = inviteRegistrationPushEnabled,
                 notificationMasterEnabled = notificationMaster && autoUpdateEnabled && feedPostPushEnabled && me.chatPushEnabled && inviteRegistrationPushEnabled,
+                diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled(),
+                debugLogs = repo.recentDebugLogs(),
                 profileSectionExpanded = profileSectionExpanded,
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
@@ -1546,6 +1760,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             loadFeedWindow(anchor, around = 3)
         }.onFailure {
             state = state.copy(loading = false, communityStatsLoading = false, message = apiError(it, "Laden fehlgeschlagen"))
+            logApiFailure("dashboard_load_failed", "refresh_all", it)
         }
     }
 
@@ -1773,6 +1988,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 .onFailure {
                     pendingChatBodies.remove(normalized)
                     state = state.copy(message = apiError(it, "Chat senden fehlgeschlagen"))
+                    logApiFailure("chat_send_failed", "/api/chat", it)
                 }
                 .isSuccess
         } finally {
@@ -2048,30 +2264,38 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         quietHoursStart: String,
         quietHoursEnd: String
     ) {
-        state = state.copy(loading = true)
-        runCatching {
-            repo.updateProfile(
-                username = username,
-                favoriteColor = favoriteColor,
-                bio = bio,
-                statusText = statusText,
-                statusEmoji = statusEmoji,
-                statusExpiresAt = statusExpiresAt,
-                profileVisible = profileVisible,
-                avatarVisible = avatarVisible,
-                bioVisible = bioVisible,
-                statusVisible = statusVisible,
-                quietHoursEnabled = quietHoursEnabled,
-                quietHoursStart = quietHoursStart,
-                quietHoursEnd = quietHoursEnd
-            )
+        if (username.trim().length < 3) {
+            state = state.copy(message = "Benutzername muss mindestens 3 Zeichen haben")
+            return
         }
-            .onSuccess { user ->
-                repo.syncQuietHoursFromUser(user)
-                state = state.copy(user = user, loading = false, message = "Profil aktualisiert")
-                refreshAll()
+        profileSaveMutex.lock()
+        state = state.copy(loading = true)
+        try {
+            runCatching {
+                repo.updateProfile(
+                    username = username,
+                    favoriteColor = favoriteColor,
+                    bio = bio,
+                    statusText = statusText,
+                    statusEmoji = statusEmoji,
+                    statusExpiresAt = statusExpiresAt,
+                    profileVisible = profileVisible,
+                    avatarVisible = avatarVisible,
+                    bioVisible = bioVisible,
+                    statusVisible = statusVisible,
+                    quietHoursEnabled = quietHoursEnabled,
+                    quietHoursStart = quietHoursStart,
+                    quietHoursEnd = quietHoursEnd
+                )
             }
-            .onFailure { state = state.copy(loading = false, message = apiError(it, "Profil speichern fehlgeschlagen")) }
+                .onSuccess { user ->
+                    repo.syncQuietHoursFromUser(user)
+                    state = state.copy(user = user, loading = false, message = "Profil aktualisiert")
+                }
+                .onFailure { state = state.copy(loading = false, message = apiError(it, "Profil speichern fehlgeschlagen")) }
+        } finally {
+            profileSaveMutex.unlock()
+        }
     }
 
     suspend fun uploadAvatar(uri: Uri) {
@@ -2229,9 +2453,11 @@ class MainActivity : ComponentActivity() {
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(Api::class.java)
+        val repo = AppRepo(api, this)
+        repo.installCrashHandler()
 
         setContent {
-            val vm: MainVm = viewModel(factory = MainVmFactory(AppRepo(api, this)))
+            val vm: MainVm = viewModel(factory = MainVmFactory(repo))
             val useDark = vm.state.darkMode
             val useOled = vm.state.oledMode
             val oledColorScheme = darkColorScheme(
@@ -2471,11 +2697,11 @@ fun AppScreen(vm: MainVm) {
                             vm.nextProfileSetupStep()
                         }
                         1 -> {
-                            vm.jumpToSetupSection("profile_account")
+                            vm.jumpToSetupSection("profile_privacy")
                             vm.nextProfileSetupStep()
                         }
                         else -> {
-                            vm.jumpToSetupSection("profile_account")
+                            vm.jumpToSetupSection("profile_privacy")
                             vm.closeProfileSetupGuide(markCompleted = true)
                         }
                     }
@@ -2490,6 +2716,10 @@ fun AppScreen(vm: MainVm) {
     }
 
     state.viewedProfile?.let { profile ->
+        val profileAvatarUrl = profile.user.avatarUrl.toString().trim()
+        val profileBio = profile.user.bio.toString().trim()
+        val profileStatusText = profile.user.statusText.toString().trim()
+        val profileStatusEmoji = profile.user.statusEmoji.toString().trim()
         AlertDialog(
             onDismissRequest = {
                 profileAvatarPreviewUrl = ""
@@ -2513,21 +2743,21 @@ fun AppScreen(vm: MainVm) {
                     if (!profile.profileVisible && !profile.isSelf) {
                         Text("Profil privat")
                     } else {
-                        if (profile.user.avatarUrl.isNotBlank()) {
+                        if (profileAvatarUrl.isNotBlank()) {
                             AsyncImage(
-                                model = profile.user.avatarUrl,
+                                model = profileAvatarUrl,
                                 contentDescription = "Avatar",
                                 modifier = Modifier
                                     .size(84.dp)
                                     .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
-                                    .clickable { profileAvatarPreviewUrl = profile.user.avatarUrl }
+                                    .clickable { profileAvatarPreviewUrl = profileAvatarUrl }
                             )
                         }
-                        if (profile.user.bio.isNotBlank()) {
-                            Text(profile.user.bio)
+                        if (profileBio.isNotBlank()) {
+                            Text(profileBio)
                         }
-                        if (profile.user.statusVisible && (profile.user.statusText.isNotBlank() || profile.user.statusEmoji.isNotBlank())) {
-                            Text("${profile.user.statusEmoji} ${profile.user.statusText}".trim())
+                        if (profile.user.statusVisible && (profileStatusText.isNotBlank() || profileStatusEmoji.isNotBlank())) {
+                            Text("$profileStatusEmoji $profileStatusText".trim())
                         }
                         if (profile.photos.isNotEmpty()) {
                             val rows = profile.photos.chunked(3)
@@ -2975,6 +3205,9 @@ fun AppScreen(vm: MainVm) {
                     feedPostPushEnabled = state.feedPostPushEnabled,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
+                    diagnosticsUploadEnabled = state.diagnosticsUploadEnabled,
+                    debugLogs = state.debugLogs,
+                    profileSetupJumpTarget = state.profileSetupJumpTarget,
                     profileSectionsExpanded = state.profileSectionExpanded,
                     avatarUrl = state.user?.avatarUrl.orEmpty(),
                     bio = state.user?.bio.orEmpty(),
@@ -3012,31 +3245,44 @@ fun AppScreen(vm: MainVm) {
                     },
                     onClearCustomNotificationTone = { vm.setCustomNotificationToneUri("") },
                     onTestCustomNotificationTone = { vm.testCustomNotificationTone() },
+                    onDiagnosticsUploadEnabledChange = { vm.setDiagnosticsUploadEnabled(it) },
+                    onRefreshDebugLogs = { vm.refreshDebugLogs() },
+                    onUploadDebugLogs = { scope.launch { vm.uploadDebugLogsNow() } },
+                    onShareDebugLogs = {
+                        val uri = vm.exportDebugLogsForShare()
+                        if (uri != null) {
+                            val share = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(share, "Diagnose teilen"))
+                        }
+                    },
                     onProfileSectionExpandedChange = { sectionId, expanded -> vm.setProfileSectionExpanded(sectionId, expanded) },
                     onUploadAvatar = { uri -> scope.launch { vm.uploadAvatar(uri) } },
                     onEditableUsernameChange = { profileUsername = it },
                     onEditableColorChange = { profileColor = it },
-                    onSaveProfile = { usernameValue, colorValue, bioValue, statusTextValue, statusEmojiValue, statusExpiresAtValue, profileVisibleValue, avatarVisibleValue, bioVisibleValue, statusVisibleValue, quietEnabledValue, quietStartValue, quietEndValue ->
-                        if (usernameValue.trim().length >= 3) {
-                            scope.launch {
-                                vm.updateProfile(
-                                    username = usernameValue,
-                                    favoriteColor = colorValue,
-                                    bio = bioValue,
-                                    statusText = statusTextValue,
-                                    statusEmoji = statusEmojiValue,
-                                    statusExpiresAt = statusExpiresAtValue,
-                                    profileVisible = profileVisibleValue,
-                                    avatarVisible = avatarVisibleValue,
-                                    bioVisible = bioVisibleValue,
-                                    statusVisible = statusVisibleValue,
-                                    quietHoursEnabled = quietEnabledValue,
-                                    quietHoursStart = quietStartValue,
-                                    quietHoursEnd = quietEndValue
-                                )
-                            }
+                    onAutoSaveProfile = { usernameValue, colorValue, bioValue, statusTextValue, statusEmojiValue, statusExpiresAtValue, profileVisibleValue, avatarVisibleValue, bioVisibleValue, statusVisibleValue, quietEnabledValue, quietStartValue, quietEndValue ->
+                        scope.launch {
+                            vm.updateProfile(
+                                username = usernameValue,
+                                favoriteColor = colorValue,
+                                bio = bioValue,
+                                statusText = statusTextValue,
+                                statusEmoji = statusEmojiValue,
+                                statusExpiresAt = statusExpiresAtValue,
+                                profileVisible = profileVisibleValue,
+                                avatarVisible = avatarVisibleValue,
+                                bioVisible = bioVisibleValue,
+                                statusVisible = statusVisibleValue,
+                                quietHoursEnabled = quietEnabledValue,
+                                quietHoursStart = quietStartValue,
+                                quietHoursEnd = quietEndValue
+                            )
                         }
                     },
+                    onConsumeSetupJumpTarget = { vm.consumeProfileSetupJumpTarget() },
                     onCurrentPasswordChange = { pwCurrent = it },
                     onNewPasswordChange = { pwNext = it },
                     onChangePassword = {
@@ -4089,6 +4335,7 @@ private fun CollapsibleSection(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ProfileTab(
     username: String,
@@ -4117,6 +4364,9 @@ fun ProfileTab(
     feedPostPushEnabled: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
+    diagnosticsUploadEnabled: Boolean,
+    debugLogs: List<DebugLogEntry>,
+    profileSetupJumpTarget: String,
     profileSectionsExpanded: Map<String, Boolean>,
     avatarUrl: String,
     bio: String,
@@ -4144,11 +4394,15 @@ fun ProfileTab(
     onPickCustomNotificationTone: () -> Unit,
     onClearCustomNotificationTone: () -> Unit,
     onTestCustomNotificationTone: () -> Unit,
+    onDiagnosticsUploadEnabledChange: (Boolean) -> Unit,
+    onRefreshDebugLogs: () -> Unit,
+    onUploadDebugLogs: () -> Unit,
+    onShareDebugLogs: () -> Unit,
     onProfileSectionExpandedChange: (String, Boolean) -> Unit,
     onUploadAvatar: (Uri) -> Unit,
     onEditableUsernameChange: (String) -> Unit,
     onEditableColorChange: (String) -> Unit,
-    onSaveProfile: (
+    onAutoSaveProfile: (
         username: String,
         favoriteColor: String,
         bio: String,
@@ -4163,6 +4417,7 @@ fun ProfileTab(
         quietHoursStart: String,
         quietHoursEnd: String
     ) -> Unit,
+    onConsumeSetupJumpTarget: () -> Unit,
     onCurrentPasswordChange: (String) -> Unit,
     onNewPasswordChange: (String) -> Unit,
     onChangePassword: () -> Unit,
@@ -4203,8 +4458,55 @@ fun ProfileTab(
     var quietHoursEnabledValue by remember(quietHoursEnabled) { mutableStateOf(quietHoursEnabled) }
     var quietHoursStartValue by remember(quietHoursStart) { mutableStateOf(quietHoursStart) }
     var quietHoursEndValue by remember(quietHoursEnd) { mutableStateOf(quietHoursEnd) }
+    var usernameDirty by remember { mutableStateOf(false) }
+    var bioDirty by remember { mutableStateOf(false) }
+    var statusTextDirty by remember { mutableStateOf(false) }
+    var statusEmojiDirty by remember { mutableStateOf(false) }
+    var quietStartDirty by remember { mutableStateOf(false) }
+    var quietEndDirty by remember { mutableStateOf(false) }
+    var autosaveJob by remember { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
+    val accountBringRequester = remember { BringIntoViewRequester() }
+    val privacyBringRequester = remember { BringIntoViewRequester() }
     val avatarPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) onUploadAvatar(uri)
+    }
+
+    fun triggerProfileAutosave(debounced: Boolean) {
+        val saveAction = {
+            val expiryRaw = statusExpiresAtValue.trim()
+            if (expiryRaw.isBlank()) {
+                statusExpiryPreset = "none"
+            } else if (statusExpiryPreset !in listOf("24h", "72h", "7d")) {
+                statusExpiryPreset = "custom"
+            }
+            appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+            onAutoSaveProfile(
+                editableUsername.trim(),
+                normalizeHexColor(editableColor),
+                bioValue.trim(),
+                statusTextValue.trim(),
+                statusEmojiValue.trim(),
+                expiryRaw.ifBlank { null },
+                profileVisibleValue,
+                avatarVisibleValue,
+                bioVisibleValue,
+                statusVisibleValue,
+                quietHoursEnabledValue,
+                quietHoursStartValue.trim().ifBlank { "22:00" },
+                quietHoursEndValue.trim().ifBlank { "07:00" }
+            )
+        }
+
+        autosaveJob?.cancel()
+        if (debounced) {
+            autosaveJob = scope.launch {
+                delay(500)
+                saveAction()
+            }
+        } else {
+            autosaveJob = scope.launch { saveAction() }
+        }
     }
 
     LaunchedEffect(updatePulseTick) {
@@ -4215,6 +4517,23 @@ fun ProfileTab(
         updateButtonScale.animateTo(1f, animationSpec = tween(170))
         delay(1400)
         updateChecked = false
+    }
+
+    LaunchedEffect(profileSetupJumpTarget) {
+        val target = profileSetupJumpTarget.trim()
+        if (target.isBlank()) return@LaunchedEffect
+        if (target == "profile_account") {
+            onProfileSectionExpandedChange("profile_account", true)
+            onProfileSectionExpandedChange("profile_privacy", true)
+            delay(120)
+            accountBringRequester.bringIntoView()
+        } else if (target == "profile_privacy") {
+            onProfileSectionExpandedChange("profile_account", true)
+            onProfileSectionExpandedChange("profile_privacy", true)
+            delay(120)
+            privacyBringRequester.bringIntoView()
+        }
+        onConsumeSetupJumpTarget()
     }
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
@@ -4458,46 +4777,96 @@ fun ProfileTab(
         item {
             CollapsibleSection(
                 title = "Profil & Konto",
-                subtitle = "Benutzername, Farbe und Passwort",
+                subtitle = "Konto, persoenliche Angaben und Privatsphaere",
                 expanded = sectionExpanded("profile_account"),
                 onExpandedChange = { onProfileSectionExpandedChange("profile_account", it) }
             ) {
-                if (avatarUrl.isNotBlank()) {
-                    AsyncImage(
-                        model = avatarUrl,
-                        contentDescription = "Profilbild",
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .bringIntoViewRequester(accountBringRequester),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Konto", fontWeight = FontWeight.SemiBold)
+                    if (avatarUrl.isNotBlank()) {
+                        AsyncImage(
+                            model = avatarUrl,
+                            contentDescription = "Profilbild",
+                            modifier = Modifier
+                                .size(96.dp)
+                                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                        )
+                    }
+                    Button(
+                        onClick = { avatarPickerLauncher.launch("image/*") },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Profilbild hochladen") }
+                    OutlinedTextField(
+                        value = editableUsername,
+                        onValueChange = {
+                            usernameDirty = true
+                            onEditableUsernameChange(it)
+                        },
+                        label = { Text("Benutzername") },
                         modifier = Modifier
-                            .size(96.dp)
-                            .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                            .fillMaxWidth()
+                            .onFocusChanged {
+                                if (!it.isFocused && usernameDirty) {
+                                    usernameDirty = false
+                                    triggerProfileAutosave(debounced = true)
+                                }
+                            }
                     )
                 }
-                Button(
-                    onClick = { avatarPickerLauncher.launch("image/*") },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Profilbild hochladen") }
-                OutlinedTextField(
-                    value = editableUsername,
-                    onValueChange = onEditableUsernameChange,
-                    label = { Text("Benutzername") },
-                    modifier = Modifier.fillMaxWidth()
-                )
+
+                Text("Persoenlich", fontWeight = FontWeight.SemiBold)
                 OutlinedTextField(
                     value = bioValue,
-                    onValueChange = { bioValue = it.take(280) },
+                    onValueChange = {
+                        bioDirty = true
+                        bioValue = it.take(280)
+                    },
                     label = { Text("Kurzbeschreibung") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged {
+                            if (!it.isFocused && bioDirty) {
+                                bioDirty = false
+                                triggerProfileAutosave(debounced = true)
+                            }
+                        }
                 )
                 OutlinedTextField(
                     value = statusTextValue,
-                    onValueChange = { statusTextValue = it.take(120) },
+                    onValueChange = {
+                        statusTextDirty = true
+                        statusTextValue = it.take(120)
+                    },
                     label = { Text("Status-Text") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged {
+                            if (!it.isFocused && statusTextDirty) {
+                                statusTextDirty = false
+                                triggerProfileAutosave(debounced = true)
+                            }
+                        }
                 )
                 OutlinedTextField(
                     value = statusEmojiValue,
-                    onValueChange = { statusEmojiValue = it.take(8) },
+                    onValueChange = {
+                        statusEmojiDirty = true
+                        statusEmojiValue = it.take(8)
+                    },
                     label = { Text("Status-Emoji") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged {
+                            if (!it.isFocused && statusEmojiDirty) {
+                                statusEmojiDirty = false
+                                triggerProfileAutosave(debounced = true)
+                            }
+                        }
                 )
                 val expiryTransition = rememberInfiniteTransition(label = "status-expiry-rainbow")
                 val expiryHue by expiryTransition.animateFloat(
@@ -4542,6 +4911,7 @@ fun ProfileTab(
                         statusExpiresAtValue = OffsetDateTime.now().plusHours(24).toString()
                         statusExpiryPreset = "24h"
                         appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                        triggerProfileAutosave(debounced = false)
                     }, modifier = Modifier.weight(1f)) {
                         Text("24h")
                     }
@@ -4549,6 +4919,7 @@ fun ProfileTab(
                         statusExpiresAtValue = OffsetDateTime.now().plusHours(72).toString()
                         statusExpiryPreset = "72h"
                         appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                        triggerProfileAutosave(debounced = false)
                     }, modifier = Modifier.weight(1f)) {
                         Text("72h")
                     }
@@ -4556,6 +4927,7 @@ fun ProfileTab(
                         statusExpiresAtValue = OffsetDateTime.now().plusDays(7).toString()
                         statusExpiryPreset = "7d"
                         appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                        triggerProfileAutosave(debounced = false)
                     }, modifier = Modifier.weight(1f)) {
                         Text("7d")
                     }
@@ -4563,84 +4935,10 @@ fun ProfileTab(
                         statusExpiresAtValue = ""
                         statusExpiryPreset = "none"
                         appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                        triggerProfileAutosave(debounced = false)
                     }, modifier = Modifier.weight(1f)) {
                         Text("∞")
                     }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Download der eigenen Bilder fuer andere Benutzer zulassen",
-                        modifier = Modifier.weight(1f)
-                    )
-                    Switch(
-                        checked = allowPhotoDownload,
-                        onCheckedChange = { checked ->
-                            if (checked && !allowPhotoDownload) {
-                                showAllowDownloadWarning = true
-                            } else if (!checked && allowPhotoDownload) {
-                                onAllowPhotoDownloadChange(false)
-                            }
-                        }
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Profil aufrufbar")
-                    Switch(checked = profileVisibleValue, onCheckedChange = { profileVisibleValue = it })
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Profilbild sichtbar")
-                    Switch(checked = avatarVisibleValue, onCheckedChange = { avatarVisibleValue = it })
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Kurzbeschreibung sichtbar")
-                    Switch(checked = bioVisibleValue, onCheckedChange = { bioVisibleValue = it })
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Status sichtbar")
-                    Switch(checked = statusVisibleValue, onCheckedChange = { statusVisibleValue = it })
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Ruhezeit aktiv")
-                    Switch(checked = quietHoursEnabledValue, onCheckedChange = { quietHoursEnabledValue = it })
-                }
-                if (quietHoursEnabledValue) {
-                    OutlinedTextField(
-                        value = quietHoursStartValue,
-                        onValueChange = { quietHoursStartValue = it.take(5) },
-                        label = { Text("Ruhezeit Start (HH:mm)") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = quietHoursEndValue,
-                        onValueChange = { quietHoursEndValue = it.take(5) },
-                        label = { Text("Ruhezeit Ende (HH:mm)") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Text("Ausnahmen: Daily-Moment und Sondermoment bleiben aktiv.")
                 }
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -4661,33 +4959,147 @@ fun ProfileTab(
                     color = parseUserColor(editableColor),
                     fontWeight = FontWeight.Bold
                 )
-                Button(
-                    onClick = {
-                        val expiryRaw = statusExpiresAtValue.trim()
-                        if (expiryRaw.isBlank()) {
-                            statusExpiryPreset = "none"
-                        } else if (statusExpiryPreset !in listOf("24h", "72h", "7d")) {
-                            statusExpiryPreset = "custom"
+
+                CollapsibleSection(
+                    title = "Privatsphaere",
+                    subtitle = "Sichtbarkeit, Download und Ruhezeit",
+                    expanded = sectionExpanded("profile_privacy"),
+                    onExpandedChange = { onProfileSectionExpandedChange("profile_privacy", it) }
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .bringIntoViewRequester(privacyBringRequester),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Download der eigenen Bilder fuer andere Benutzer zulassen",
+                                modifier = Modifier.weight(1f)
+                            )
+                            Switch(
+                                checked = allowPhotoDownload,
+                                onCheckedChange = { checked ->
+                                    if (checked && !allowPhotoDownload) {
+                                        showAllowDownloadWarning = true
+                                    } else if (!checked && allowPhotoDownload) {
+                                        onAllowPhotoDownloadChange(false)
+                                    }
+                                }
+                            )
                         }
-                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
-                        onSaveProfile(
-                            editableUsername.trim(),
-                            normalizeHexColor(editableColor),
-                            bioValue.trim(),
-                            statusTextValue.trim(),
-                            statusEmojiValue.trim(),
-                            expiryRaw.ifBlank { null },
-                            profileVisibleValue,
-                            avatarVisibleValue,
-                            bioVisibleValue,
-                            statusVisibleValue,
-                            quietHoursEnabledValue,
-                            quietHoursStartValue.trim().ifBlank { "22:00" },
-                            quietHoursEndValue.trim().ifBlank { "07:00" }
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Profil speichern") }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Profil aufrufbar")
+                            Switch(
+                                checked = profileVisibleValue,
+                                onCheckedChange = {
+                                    profileVisibleValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                }
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Profilbild sichtbar")
+                            Switch(
+                                checked = avatarVisibleValue,
+                                onCheckedChange = {
+                                    avatarVisibleValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                }
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Kurzbeschreibung sichtbar")
+                            Switch(
+                                checked = bioVisibleValue,
+                                onCheckedChange = {
+                                    bioVisibleValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                }
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Status sichtbar")
+                            Switch(
+                                checked = statusVisibleValue,
+                                onCheckedChange = {
+                                    statusVisibleValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                }
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Ruhezeit aktiv")
+                            Switch(
+                                checked = quietHoursEnabledValue,
+                                onCheckedChange = {
+                                    quietHoursEnabledValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                }
+                            )
+                        }
+                        if (quietHoursEnabledValue) {
+                            OutlinedTextField(
+                                value = quietHoursStartValue,
+                                onValueChange = {
+                                    quietStartDirty = true
+                                    quietHoursStartValue = it.take(5)
+                                },
+                                label = { Text("Ruhezeit Start (HH:mm)") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .onFocusChanged {
+                                        if (!it.isFocused && quietStartDirty) {
+                                            quietStartDirty = false
+                                            triggerProfileAutosave(debounced = true)
+                                        }
+                                    }
+                            )
+                            OutlinedTextField(
+                                value = quietHoursEndValue,
+                                onValueChange = {
+                                    quietEndDirty = true
+                                    quietHoursEndValue = it.take(5)
+                                },
+                                label = { Text("Ruhezeit Ende (HH:mm)") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .onFocusChanged {
+                                        if (!it.isFocused && quietEndDirty) {
+                                            quietEndDirty = false
+                                            triggerProfileAutosave(debounced = true)
+                                        }
+                                    }
+                            )
+                            Text("Ausnahmen: Daily-Moment und Sondermoment bleiben aktiv.")
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
                     value = currentPassword,
@@ -4722,6 +5134,55 @@ fun ProfileTab(
                         Text("API: $apiBaseUrl")
                         Spacer(modifier = Modifier.height(6.dp))
                         Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
+                    }
+                }
+            }
+        }
+
+        item {
+            CollapsibleSection(
+                title = "Debug & Diagnose",
+                subtitle = "Fehlerlogs lokal speichern, exportieren und optional hochladen",
+                expanded = sectionExpanded("debug_diagnose"),
+                onExpandedChange = { onProfileSectionExpandedChange("debug_diagnose", it) }
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Diagnose-Upload aktivieren")
+                    Switch(
+                        checked = diagnosticsUploadEnabled,
+                        onCheckedChange = onDiagnosticsUploadEnabledChange
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(onClick = onRefreshDebugLogs, modifier = Modifier.weight(1f)) { Text("Letzte Fehler") }
+                    Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) { Text("Diagnose exportieren") }
+                }
+                Button(onClick = onUploadDebugLogs, modifier = Modifier.fillMaxWidth()) {
+                    Text("Diagnose jetzt hochladen")
+                }
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (debugLogs.isEmpty()) {
+                            Text("Keine lokalen Fehlereintraege vorhanden")
+                        } else {
+                            debugLogs.take(12).forEach { row ->
+                                Text("[${row.createdAt.take(16)}] ${row.type}", fontWeight = FontWeight.SemiBold)
+                                Text(row.message, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                if (row.meta.isNotBlank()) {
+                                    Text(row.meta, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -4907,6 +5368,7 @@ fun ProfileTab(
                 TextButton(
                     onClick = {
                         onEditableColorChange(hsvToHex(pickerHsv[0], pickerHsv[1], pickerHsv[2]))
+                        triggerProfileAutosave(debounced = false)
                         showColorPicker = false
                     }
                 ) { Text("Uebernehmen") }

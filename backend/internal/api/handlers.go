@@ -67,6 +67,7 @@ func (s *Server) Router() *gin.Engine {
 		{
             protected.GET("/me", s.handleMe)
             protected.GET("/users/:id/profile", s.handleUserProfile)
+            protected.POST("/debug/client-log", s.handleClientDebugLog)
             protected.GET("/me/invite", s.handleMyInvite)
             protected.POST("/me/invite/roll", s.handleRollMyInvite)
             protected.PUT("/me/profile", s.handleUpdateProfile)
@@ -112,6 +113,7 @@ func (s *Server) Router() *gin.Engine {
             admin.POST("/chat/commands", s.handleAdminCreateChatCommand)
             admin.PUT("/chat/commands/:id", s.handleAdminUpdateChatCommand)
             admin.DELETE("/chat/commands/:id", s.handleAdminDeleteChatCommand)
+            admin.GET("/debug/logs", s.handleAdminDebugLogs)
             admin.GET("/system/health", s.handleAdminSystemHealth)
 
             admin.GET("/users", s.handleAdminListUsers)
@@ -647,6 +649,52 @@ func (s *Server) handleDevice(c *gin.Context) {
         DeviceName: strings.TrimSpace(req.DeviceName),
     }
     _ = s.DB.Where("token = ?", req.Token).Assign(d).FirstOrCreate(&d).Error
+    c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+type clientDebugLogRequest struct {
+    Type       string `json:"type" binding:"required,max=32"`
+    Message    string `json:"message" binding:"required,max=500"`
+    Meta       string `json:"meta" binding:"max=4000"`
+    AppVersion string `json:"appVersion" binding:"max=40"`
+    DeviceName string `json:"deviceName" binding:"max=120"`
+}
+
+func (s *Server) handleClientDebugLog(c *gin.Context) {
+    user, _ := userFromContext(c)
+    var req clientDebugLogRequest
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+    logType := strings.TrimSpace(req.Type)
+    if logType == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "type required"})
+        return
+    }
+    msg := strings.TrimSpace(req.Message)
+    if msg == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "message required"})
+        return
+    }
+    entry := models.ClientDebugLog{
+        UserID:     user.ID,
+        Type:       logType,
+        Message:    msg,
+        Meta:       strings.TrimSpace(req.Meta),
+        AppVersion: strings.TrimSpace(req.AppVersion),
+        DeviceName: strings.TrimSpace(req.DeviceName),
+    }
+    if entry.AppVersion == "" {
+        entry.AppVersion = "unknown"
+    }
+    if entry.DeviceName == "" {
+        entry.DeviceName = "unknown"
+    }
+    if err := s.DB.Create(&entry).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "log save failed"})
+        return
+    }
     c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -1322,7 +1370,7 @@ func (s *Server) handleAdminCreateUser(c *gin.Context) {
         return
     }
 
-    c.JSON(http.StatusCreated, toAdminUser(user, 0, 0, nil, 0, "", nil))
+    c.JSON(http.StatusCreated, toAdminUser(user, 0, 0, nil, 0, "", nil, "", "", nil, nil))
 }
 
 func (s *Server) handleAdminListUsers(c *gin.Context) {
@@ -1349,6 +1397,39 @@ func (s *Server) handleAdminListUsers(c *gin.Context) {
         inviteByUserID[row.UsedByID] = row
     }
 
+    type userDebugRow struct {
+        UserID      uint
+        AppVersion  string
+        Message     string
+        CreatedAt   time.Time
+        LastSuccess *time.Time
+    }
+    debugByUserID := make(map[uint]userDebugRow, len(users))
+    debugRows := make([]models.ClientDebugLog, 0)
+    _ = s.DB.Order("created_at desc").Limit(300).Find(&debugRows).Error
+    for _, row := range debugRows {
+        if row.UserID == 0 {
+            continue
+        }
+        entry, exists := debugByUserID[row.UserID]
+        rowType := strings.ToLower(strings.TrimSpace(row.Type))
+        if !exists {
+            entry = userDebugRow{UserID: row.UserID}
+        }
+
+        if entry.LastSuccess == nil && rowType == "profile_open_ok" {
+            t := row.CreatedAt
+            entry.LastSuccess = &t
+        }
+
+        if strings.TrimSpace(entry.Message) == "" && rowType != "profile_open_ok" {
+            entry.AppVersion = strings.TrimSpace(row.AppVersion)
+            entry.Message = strings.TrimSpace(row.Message)
+            entry.CreatedAt = row.CreatedAt
+        }
+        debugByUserID[row.UserID] = entry
+    }
+
     out := make([]gin.H, 0, len(users))
     for _, u := range users {
         var photoCount int64
@@ -1370,10 +1451,82 @@ func (s *Server) handleAdminListUsers(c *gin.Context) {
             deviceNames = append(deviceNames, name)
         }
         invite := inviteByUserID[u.ID]
-        out = append(out, toAdminUser(u, photoCount, tokenCount, deviceNames, invite.InvitedByID, invite.InvitedByName, invite.InvitedAt))
+        dbg := debugByUserID[u.ID]
+        out = append(out, toAdminUser(
+            u,
+            photoCount,
+            tokenCount,
+            deviceNames,
+            invite.InvitedByID,
+            invite.InvitedByName,
+            invite.InvitedAt,
+            dbg.AppVersion,
+            dbg.Message,
+            func() *time.Time {
+                if dbg.CreatedAt.IsZero() {
+                    return nil
+                }
+                t := dbg.CreatedAt
+                return &t
+            }(),
+            dbg.LastSuccess,
+        ))
     }
 
     c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) handleAdminDebugLogs(c *gin.Context) {
+    limit := 100
+    if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+        if n, err := strconv.Atoi(raw); err == nil {
+            if n < 10 {
+                n = 10
+            }
+            if n > 500 {
+                n = 500
+            }
+            limit = n
+        }
+    }
+    userID := uint(0)
+    if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+        parsed, err := parseUintParam(raw)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+            return
+        }
+        userID = parsed
+    }
+
+    q := s.DB.Preload("User").Order("created_at desc").Limit(limit)
+    if userID != 0 {
+        q = q.Where("user_id = ?", userID)
+    }
+    var rows []models.ClientDebugLog
+    if err := q.Find(&rows).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+
+    items := make([]gin.H, 0, len(rows))
+    for _, row := range rows {
+        items = append(items, gin.H{
+            "id":         row.ID,
+            "createdAt":  row.CreatedAt,
+            "type":       row.Type,
+            "message":    row.Message,
+            "meta":       row.Meta,
+            "appVersion": row.AppVersion,
+            "deviceName": row.DeviceName,
+            "user": gin.H{
+                "id":       row.User.ID,
+                "username": row.User.Username,
+            },
+        })
+    }
+
+    c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 func (s *Server) handleAdminUpdateUser(c *gin.Context) {
@@ -1425,7 +1578,7 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
     _ = s.DB.Model(&models.Photo{}).Where("user_id = ?", user.ID).Count(&photoCount).Error
     _ = s.DB.Model(&models.DeviceToken{}).Where("user_id = ?", user.ID).Count(&tokenCount).Error
 
-    c.JSON(http.StatusOK, toAdminUser(user, photoCount, tokenCount, nil, 0, "", nil))
+    c.JSON(http.StatusOK, toAdminUser(user, photoCount, tokenCount, nil, 0, "", nil, "", "", nil, nil))
 }
 
 func (s *Server) handleAdminDeleteUser(c *gin.Context) {
@@ -2731,10 +2884,26 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
     own := viewerID == u.ID
     out := gin.H{
-        "id":            u.ID,
-        "username":      u.Username,
-        "isAdmin":       u.IsAdmin,
-        "favoriteColor": defaultColor(u.FavoriteColor),
+        "id":                          u.ID,
+        "username":                    u.Username,
+        "isAdmin":                     u.IsAdmin,
+        "favoriteColor":               defaultColor(u.FavoriteColor),
+        "chatPushEnabled":             false,
+        "inviteRegistrationPushEnabled": false,
+        "allowPhotoDownload":          u.AllowPhotoDownload,
+        "avatarUrl":                   "",
+        "bio":                         "",
+        "statusText":                  "",
+        "statusEmoji":                 "",
+        "statusExpiresAt":             nil,
+        "profileVisible":              false,
+        "avatarVisible":               false,
+        "bioVisible":                  false,
+        "statusVisible":               false,
+        "quietHoursEnabled":           false,
+        "quietHoursStart":             "22:00",
+        "quietHoursEnd":               "07:00",
+        "createdAt":                   u.CreatedAt,
     }
     now := time.Now().In(s.Location)
     if own {
@@ -2746,9 +2915,6 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 
     out["profileVisible"] = u.ProfileVisible
     if !u.ProfileVisible {
-        out["avatarVisible"] = false
-        out["bioVisible"] = false
-        out["statusVisible"] = false
         return out
     }
 
@@ -2769,8 +2935,6 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
         out["statusText"] = strings.TrimSpace(u.StatusText)
         out["statusEmoji"] = strings.TrimSpace(u.StatusEmoji)
         out["statusExpiresAt"] = u.StatusExpiresAt
-    } else {
-        out["statusVisible"] = false
     }
     return out
 }
@@ -2812,15 +2976,30 @@ func parseUintParam(v string) (uint, error) {
     return uint(n), nil
 }
 
-func toAdminUser(u models.User, photoCount, tokenCount int64, deviceNames []string, invitedByID uint, invitedBy string, invitedAt *time.Time) gin.H {
+func toAdminUser(
+    u models.User,
+    photoCount, tokenCount int64,
+    deviceNames []string,
+    invitedByID uint,
+    invitedBy string,
+    invitedAt *time.Time,
+    lastAppVersion string,
+    lastError string,
+    lastErrorAt *time.Time,
+    lastProfileOkAt *time.Time,
+) gin.H {
     out := gin.H{
-        "id":          u.ID,
-        "username":    u.Username,
-        "isAdmin":     u.IsAdmin,
-        "createdAt":   u.CreatedAt,
-        "photoCount":  photoCount,
-        "deviceCount": tokenCount,
-        "deviceNames": deviceNames,
+        "id":              u.ID,
+        "username":        u.Username,
+        "isAdmin":         u.IsAdmin,
+        "createdAt":       u.CreatedAt,
+        "photoCount":      photoCount,
+        "deviceCount":     tokenCount,
+        "deviceNames":     deviceNames,
+        "lastAppVersion":  strings.TrimSpace(lastAppVersion),
+        "lastError":       strings.TrimSpace(lastError),
+        "lastErrorAt":     lastErrorAt,
+        "lastProfileOkAt": lastProfileOkAt,
     }
     if invitedByID != 0 {
         out["invitedById"] = invitedByID

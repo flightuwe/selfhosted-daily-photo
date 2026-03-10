@@ -40,6 +40,21 @@ export type AdminUser = {
   photoCount: number;
   deviceCount: number;
   deviceNames?: string[];
+  lastAppVersion?: string;
+  lastError?: string;
+  lastErrorAt?: string;
+  lastProfileOkAt?: string;
+};
+
+export type DebugLogItem = {
+  id: number;
+  createdAt: string;
+  type: string;
+  message: string;
+  meta?: string;
+  appVersion?: string;
+  deviceName?: string;
+  user: { id: number; username: string };
 };
 
 export type FeedPhoto = {
@@ -413,4 +428,15 @@ export async function getSystemHealth(token: string): Promise<SystemHealth> {
     headers: { Authorization: `Bearer ${token}` },
   });
   return parse<SystemHealth>(res);
+}
+
+export async function getDebugLogs(token: string, userId?: number, limit = 150): Promise<DebugLogItem[]> {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(limit));
+  if (userId && userId > 0) qs.set("userId", String(userId));
+  const res = await fetch(`${apiBase}/admin/debug/logs?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: DebugLogItem[] }>(res);
+  return data.items || [];
 }

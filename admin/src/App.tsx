@@ -10,6 +10,7 @@ import {
   getCalendar,
   getChat,
   getChatCommands,
+  getDebugLogs,
   getSystemHealth,
   getSettings,
   getStats,
@@ -29,12 +30,13 @@ import {
   type ChatItem,
   type CalendarItem,
   type FeedItem,
+  type DebugLogItem,
   type MonthlyRecap,
   type Settings,
   type SystemHealth,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "settings";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "debug" | "settings";
 
 const DEFAULT_SETTINGS: Settings = {
   promptWindowStartHour: 8,
@@ -108,6 +110,8 @@ export function App() {
   const [commandDraft, setCommandDraft] = useState<CommandDraft>(emptyCommandDraft);
   const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
   const [calendarDrafts, setCalendarDrafts] = useState<Record<string, string>>({});
+  const [debugLogs, setDebugLogs] = useState<DebugLogItem[]>([]);
+  const [debugUserFilter, setDebugUserFilter] = useState<number>(0);
   const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [message, setMessage] = useState("");
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
@@ -151,7 +155,10 @@ export function App() {
     if (activeTab === "system") {
       void loadSystemHealth(token);
     }
-  }, [token, activeTab, feedDay]);
+    if (activeTab === "debug") {
+      void loadDebugLogs(token, debugUserFilter);
+    }
+  }, [token, activeTab, feedDay, debugUserFilter]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -216,6 +223,15 @@ export function App() {
     try {
       const status = await getSystemHealth(authToken);
       setSystemHealth(status);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function loadDebugLogs(authToken: string, userId?: number) {
+    try {
+      const items = await getDebugLogs(authToken, userId && userId > 0 ? userId : undefined, 200);
+      setDebugLogs(items);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -563,6 +579,7 @@ export function App() {
           <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => setActiveTab("feed")}>Feed</button>
           <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => setActiveTab("chat")}>Chat</button>
           <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => setActiveTab("calendar")}>Kalender</button>
+          <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => setActiveTab("debug")}>Debug</button>
           <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => setActiveTab("settings")}>Einstellungen</button>
         </div>
 
@@ -828,6 +845,7 @@ export function App() {
                   <th>Rolle</th>
                   <th>Fotos</th>
                   <th>Geräte</th>
+                  <th>Letzte App/Fehler</th>
                   <th>Passwort ändern</th>
                   <th>Löschen</th>
                 </tr>
@@ -853,6 +871,14 @@ export function App() {
                         ) : (
                           <span className="small">Keine Geraetenamen gemeldet</span>
                         )}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="stack">
+                        <span className="small"><strong>App:</strong> {u.lastAppVersion || "-"}</span>
+                        <span className="small"><strong>Fehler:</strong> {u.lastError ? truncateText(u.lastError, 80) : "-"}</span>
+                        <span className="small"><strong>Fehlerzeit:</strong> {u.lastErrorAt ? formatDateTime(u.lastErrorAt) : "-"}</span>
+                        <span className="small"><strong>Profil OK:</strong> {u.lastProfileOkAt ? formatDateTime(u.lastProfileOkAt) : "-"}</span>
                       </div>
                     </td>
                     <td>
@@ -1017,6 +1043,50 @@ export function App() {
           </div>
         )}
 
+        {activeTab === "debug" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Debug-Logs</h2>
+              <div className="row">
+                <select value={debugUserFilter} onChange={(e) => setDebugUserFilter(Number(e.target.value))}>
+                  <option value={0}>Alle Nutzer</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>@{u.username}</option>
+                  ))}
+                </select>
+                <button onClick={() => loadDebugLogs(token, debugUserFilter)}>Aktualisieren</button>
+              </div>
+            </div>
+            {debugLogs.length === 0 && <p>Keine Debug-Eintraege vorhanden.</p>}
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Zeit</th>
+                  <th>Nutzer</th>
+                  <th>Geraet</th>
+                  <th>App</th>
+                  <th>Typ</th>
+                  <th>Nachricht</th>
+                  <th>Meta</th>
+                </tr>
+              </thead>
+              <tbody>
+                {debugLogs.map((row) => (
+                  <tr key={row.id}>
+                    <td>{formatDateTime(row.createdAt)}</td>
+                    <td>@{row.user?.username || "-"}</td>
+                    <td>{row.deviceName || "-"}</td>
+                    <td>{row.appVersion || "-"}</td>
+                    <td><code>{row.type}</code></td>
+                    <td>{row.message}</td>
+                    <td className="small">{row.meta || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
         {activeTab === "settings" && (
           <div className="stack">
             <article className="settings-current">
@@ -1142,6 +1212,12 @@ function formatDuration(sec: number) {
   if (d > 0) return `${d}d ${h}h ${m}m`;
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+function truncateText(value: string, maxLen = 80) {
+  const text = (value || "").trim();
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen - 1)}…`;
 }
 
 function CardStat({ title, value }: { title: string; value: number | string }) {

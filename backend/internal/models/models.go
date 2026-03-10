@@ -155,3 +155,15 @@ type SpecialMomentRequest struct {
     RequestedAt time.Time `gorm:"index;not null" json:"requestedAt"`
     CreatedAt   time.Time `json:"createdAt"`
 }
+
+type ClientDebugLog struct {
+    ID         uint      `gorm:"primaryKey" json:"id"`
+    UserID     uint      `gorm:"index;not null" json:"userId"`
+    User       User      `json:"user"`
+    DeviceName string    `gorm:"size:120" json:"deviceName"`
+    AppVersion string    `gorm:"size:40" json:"appVersion"`
+    Type       string    `gorm:"size:32;index;not null" json:"type"`
+    Message    string    `gorm:"size:500;not null" json:"message"`
+    Meta       string    `gorm:"size:4000" json:"meta"`
+    CreatedAt  time.Time `gorm:"index" json:"createdAt"`
+}

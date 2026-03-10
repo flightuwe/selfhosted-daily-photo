@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 jobs:
   build-apk:
@@ -125,9 +124,7 @@ jobs:
           set -euo pipefail
 
           CURRENT_TAG="${GITHUB_REF_NAME}"
-          if [[ ! "$CURRENT_TAG" =~ ^v ]]; then
-            CURRENT_TAG="v0.0.0-dev-${GITHUB_RUN_NUMBER}"
-          fi
+          [[ "$CURRENT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || (echo "::error::Expected semantic tag like v0.3.41" && exit 1)
 
           git fetch --tags --force >/dev/null 2>&1 || true
           PREV_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -vx "$CURRENT_TAG" | head -n 1 || true)"
@@ -181,6 +178,13 @@ jobs:
             '{version:$version,releasedAt:$releasedAt,highlights:$highlights,details:[]}' > changelog.json
 
           cp changelog.json dist/changelog.json
+      - name: Validate release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s release-notes.md || (echo "::error::release-notes.md missing or empty" && exit 1)
+          test -s dist/changelog.json || (echo "::error::dist/changelog.json missing or empty" && exit 1)
+          compgen -G "dist/*.apk" >/dev/null || (echo "::error::No APK in dist/" && exit 1)
       - uses: softprops/action-gh-release@v2
         with:
           body_path: release-notes.md

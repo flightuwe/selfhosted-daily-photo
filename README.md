@@ -111,6 +111,13 @@ Diese 5 Secrets muessen gesetzt sein:
    - `git tag vX.Y.Z`
    - `git push origin vX.Y.Z`
 4. APK liegt danach im GitHub Release als `app-release.apk`
+5. Changelog wird automatisch erzeugt:
+   - Release-Body aus `release-notes.md`
+   - Asset `changelog.json` fuer die App
+
+Hinweis:
+- Der Android-Release-Workflow ist absichtlich **tag-only** und akzeptiert nur semantische Tags `vX.Y.Z`.
+- Falls `release-notes.md`, `changelog.json` oder APK fehlen, bricht der Workflow mit Fehler ab.
 
 ## Erste Inbetriebnahme testen
 1. `https://daily.deine-domain.tld/api/health` -> `ok: true`
