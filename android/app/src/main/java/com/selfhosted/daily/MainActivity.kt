@@ -28,7 +28,11 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,6 +61,7 @@ import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.BottomSheetScaffold
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -65,18 +70,22 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberBottomSheetScaffoldState
+import androidx.compose.material3.rememberStandardBottomSheetState
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -90,9 +99,9 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.consume
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -105,6 +114,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
@@ -1966,115 +1976,34 @@ fun AppScreen(vm: MainVm) {
             viewerComment = ""
             vm.clearPhotoInteractions()
         }
-        AlertDialog(
-            onDismissRequest = closeViewer,
-            confirmButton = {
-                if (viewerUrls.size > 1 && viewerIndex < viewerUrls.lastIndex) {
-                    TextButton(onClick = { viewerIndex += 1 }) { Text("Naechstes Bild") }
-                } else {
-                    TextButton(onClick = closeViewer) { Text("Schliessen") }
-                }
-            },
-            dismissButton = {
-                if (viewerUrls.size > 1 && viewerIndex > 0) {
-                    TextButton(onClick = { viewerIndex -= 1 }) { Text("Vorheriges Bild") }
-                }
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(520.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Box(
-                        modifier = Modifier.pointerInput(viewerUrls, viewerIndex) {
-                            var dragX = 0f
-                            var dragY = 0f
-                            detectDragGestures(
-                                onDrag = { change, dragAmount ->
-                                    dragX += dragAmount.x
-                                    dragY += dragAmount.y
-                                },
-                                onDragEnd = {
-                                    val absX = abs(dragX)
-                                    val absY = abs(dragY)
-                                    if (absY > absX && dragY > 120f) {
-                                        closeViewer()
-                                    } else if (dragX > 80f && viewerIndex > 0) {
-                                        viewerIndex -= 1
-                                    } else if (dragX < -80f && viewerIndex < viewerUrls.lastIndex) {
-                                        viewerIndex += 1
-                                    }
-                                    dragX = 0f
-                                    dragY = 0f
-                                }
-                            )
-                        }
-                    ) {
-                        ZoomableViewerImage(
-                            url = viewerUrls[viewerIndex],
-                            onDoubleTap = {
-                                viewerPhotoId?.let { pid ->
-                                    val emoji = viewerReactionEmojis[Random.nextInt(viewerReactionEmojis.size)]
-                                    scope.launch { vm.reactPhoto(pid, emoji) }
-                                }
-                            }
-                        )
-                    }
-                    Text("Unter diesem Bild kannst du reagieren oder kommentieren.")
-                    if (viewerPhotoId != null) {
-                        val interactions = state.photoInteractions
-                        val countByEmoji = interactions?.reactions.orEmpty().associate { it.emoji to it.count }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            viewerReactionEmojis.forEach { emoji ->
-                                val selected = interactions?.myReaction == emoji
-                                Button(
-                                    onClick = { scope.launch { vm.reactPhoto(viewerPhotoId ?: 0L, emoji) } },
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    val count = countByEmoji[emoji] ?: 0L
-                                    Text("${if (selected) "✓" else ""}$emoji $count")
-                                }
-                            }
-                        }
-                        OutlinedTextField(
-                            value = viewerComment,
-                            onValueChange = { viewerComment = it },
-                            label = { Text("Kommentar") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Button(
-                            onClick = {
-                                val body = viewerComment
-                                if (body.isNotBlank()) {
-                                    scope.launch {
-                                        vm.commentPhoto(viewerPhotoId ?: 0L, body)
-                                        viewerComment = ""
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text("Kommentieren") }
-                        if (state.interactionsLoading) {
-                            Text("Interaktionen werden geladen ...")
-                        }
-                        interactions?.comments?.takeLast(40)?.forEach { item ->
-                            Card {
-                                Column(modifier = Modifier.padding(8.dp)) {
-                                    Text(
-                                        item.user.username,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = parseUserColor(item.user.favoriteColor)
-                                    )
-                                    Text(item.body)
-                                }
-                            }
-                        }
+        FullscreenPhotoViewer(
+            urls = viewerUrls,
+            initialIndex = viewerIndex,
+            photoId = viewerPhotoId,
+            comment = viewerComment,
+            interactions = state.photoInteractions,
+            interactionsLoading = state.interactionsLoading,
+            onCommentChange = { viewerComment = it },
+            onCommentSend = {
+                val body = viewerComment
+                if (body.isNotBlank()) {
+                    scope.launch {
+                        vm.commentPhoto(viewerPhotoId ?: 0L, body)
+                        viewerComment = ""
                     }
                 }
-            }
+            },
+            onReact = { emoji ->
+                val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
+                scope.launch { vm.reactPhoto(pid, emoji) }
+            },
+            onDoubleTapReact = {
+                val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
+                val emoji = viewerReactionEmojis[Random.nextInt(viewerReactionEmojis.size)]
+                scope.launch { vm.reactPhoto(pid, emoji) }
+            },
+            onIndexChange = { viewerIndex = it },
+            onClose = closeViewer
         )
     }
 
@@ -4274,17 +4203,214 @@ private fun helpLines(): List<String> = listOf(
 
 private val viewerReactionEmojis = listOf("❤️", "👍", "😂", "🔥", "😮")
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-private fun ZoomableViewerImage(url: String, onDoubleTap: (() -> Unit)? = null) {
+private fun FullscreenPhotoViewer(
+    urls: List<String>,
+    initialIndex: Int,
+    photoId: Long?,
+    comment: String,
+    interactions: PhotoInteractionsResponse?,
+    interactionsLoading: Boolean,
+    onCommentChange: (String) -> Unit,
+    onCommentSend: () -> Unit,
+    onReact: (String) -> Unit,
+    onDoubleTapReact: () -> Unit,
+    onIndexChange: (Int) -> Unit,
+    onClose: () -> Unit
+) {
+    if (urls.isEmpty()) return
+    val safeInitial = initialIndex.coerceIn(0, urls.lastIndex)
+    val pagerState = rememberPagerState(initialPage = safeInitial, pageCount = { urls.size })
+    val scales = remember(urls) { mutableStateMapOf<Int, Float>() }
+    val currentScale = scales[pagerState.currentPage] ?: 1f
+    val sheetState = rememberStandardBottomSheetState(
+        initialValue = SheetValue.PartiallyExpanded,
+        skipHiddenState = true
+    )
+    val scaffoldState = rememberBottomSheetScaffoldState(bottomSheetState = sheetState)
+
+    LaunchedEffect(pagerState.currentPage) {
+        onIndexChange(pagerState.currentPage)
+        scales[pagerState.currentPage] = 1f
+    }
+    LaunchedEffect(safeInitial, urls.size) {
+        if (pagerState.currentPage != safeInitial) {
+            pagerState.scrollToPage(safeInitial)
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        BottomSheetScaffold(
+            scaffoldState = scaffoldState,
+            sheetPeekHeight = 170.dp,
+            sheetContent = {
+                ViewerInteractionSheet(
+                    photoId = photoId,
+                    comment = comment,
+                    interactions = interactions,
+                    interactionsLoading = interactionsLoading,
+                    onCommentChange = onCommentChange,
+                    onCommentSend = onCommentSend,
+                    onReact = onReact
+                )
+            },
+            containerColor = Color.Black,
+            contentColor = Color.White
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+                    .padding(innerPadding)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "${pagerState.currentPage + 1} / ${urls.size}",
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    TextButton(onClick = onClose) { Text("Schliessen") }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(420.dp)
+                        .pointerInput(currentScale, pagerState.currentPage) {
+                            if (currentScale <= 1f) {
+                                var dragY = 0f
+                                detectVerticalDragGestures(
+                                    onVerticalDrag = { change, dragAmount ->
+                                        dragY += dragAmount
+                                        change.consume()
+                                    },
+                                    onDragEnd = {
+                                        if (dragY > 140f) onClose()
+                                        dragY = 0f
+                                    }
+                                )
+                            }
+                        }
+                ) {
+                    HorizontalPager(
+                        state = pagerState,
+                        userScrollEnabled = currentScale <= 1f,
+                        modifier = Modifier.fillMaxSize()
+                    ) { page ->
+                        ZoomableViewerImage(
+                            url = urls[page],
+                            active = page == pagerState.currentPage,
+                            onScaleChanged = { scale -> scales[page] = scale },
+                            onDoubleTap = onDoubleTapReact
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ViewerInteractionSheet(
+    photoId: Long?,
+    comment: String,
+    interactions: PhotoInteractionsResponse?,
+    interactionsLoading: Boolean,
+    onCommentChange: (String) -> Unit,
+    onCommentSend: () -> Unit,
+    onReact: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(360.dp)
+            .padding(10.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text("Unter diesem Bild kannst du reagieren oder kommentieren.")
+        if (photoId == null) return@Column
+        val countByEmoji = interactions?.reactions.orEmpty().associate { it.emoji to it.count }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+            viewerReactionEmojis.forEach { emoji ->
+                val selected = interactions?.myReaction == emoji
+                Button(
+                    onClick = { onReact(emoji) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    val count = countByEmoji[emoji] ?: 0L
+                    Text("${if (selected) "✓" else ""}$emoji $count")
+                }
+            }
+        }
+        OutlinedTextField(
+            value = comment,
+            onValueChange = onCommentChange,
+            label = { Text("Kommentar") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Button(
+            onClick = onCommentSend,
+            enabled = comment.isNotBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Kommentieren") }
+        if (interactionsLoading) {
+            Text("Interaktionen werden geladen ...")
+        }
+        interactions?.comments?.takeLast(40)?.forEach { item ->
+            Card {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    Text(
+                        item.user.username,
+                        fontWeight = FontWeight.SemiBold,
+                        color = parseUserColor(item.user.favoriteColor)
+                    )
+                    Text(item.body)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ZoomableViewerImage(
+    url: String,
+    active: Boolean,
+    onScaleChanged: (Float) -> Unit,
+    onDoubleTap: (() -> Unit)? = null
+) {
     var scale by remember(url) { mutableStateOf(1f) }
     var offset by remember(url) { mutableStateOf(Offset.Zero) }
+
+    LaunchedEffect(active) {
+        if (active) {
+            scale = 1f
+            offset = Offset.Zero
+            onScaleChanged(1f)
+        }
+    }
+    LaunchedEffect(scale) {
+        onScaleChanged(scale)
+    }
 
     AsyncImage(
         model = url,
         contentDescription = "Vollbild",
         modifier = Modifier
-            .fillMaxWidth()
-            .height(420.dp)
+            .fillMaxSize()
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
