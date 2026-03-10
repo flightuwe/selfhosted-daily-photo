@@ -280,7 +280,16 @@ func (s *Server) handleMe(c *gin.Context) {
     if user.FavoriteColor == "" {
         user.FavoriteColor = "#1F5FBF"
     }
-    c.JSON(http.StatusOK, gin.H{"user": user})
+    var dailyMomentCount int64
+    _ = s.DB.Table("photos").
+        Joins("JOIN daily_prompts ON daily_prompts.day = photos.day").
+        Where("photos.user_id = ? AND photos.prompt_only = ? AND daily_prompts.triggered_at IS NOT NULL AND daily_prompts.upload_until IS NOT NULL AND photos.created_at >= daily_prompts.triggered_at AND photos.created_at <= daily_prompts.upload_until", user.ID, true).
+        Distinct("photos.day").
+        Count(&dailyMomentCount).Error
+    c.JSON(http.StatusOK, gin.H{
+        "user":             user,
+        "dailyMomentCount": dailyMomentCount,
+    })
 }
 
 func (s *Server) handleMyInvite(c *gin.Context) {

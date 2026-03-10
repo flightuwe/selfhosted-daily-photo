@@ -177,7 +177,7 @@ data class User(
     val favoriteColor: String = "#1F5FBF",
     val chatPushEnabled: Boolean = false
 )
-data class MeResponse(val user: User)
+data class MeResponse(val user: User, val dailyMomentCount: Int = 0)
 data class ProfileUpdateRequest(val username: String, val favoriteColor: String)
 data class PreferencesUpdateRequest(val chatPushEnabled: Boolean)
 data class AuthResponse(val token: String, val user: User)
@@ -603,7 +603,7 @@ class AppRepo(private val api: Api, private val context: Context) {
     }
 
     suspend fun health(): HealthResponse = api.health()
-    suspend fun me(): User = api.me("Bearer ${token()}").user
+    suspend fun me(): MeResponse = api.me("Bearer ${token()}")
     suspend fun myInviteCode(): String = api.myInviteCode("Bearer ${token()}").inviteCode
     suspend fun rollMyInviteCode(): String = api.rollInviteCode("Bearer ${token()}").inviteCode
     suspend fun updateProfile(username: String, favoriteColor: String): User =
@@ -922,6 +922,7 @@ data class UiState(
     val chatHasOtherMessages: Boolean = true,
     val chatHasUnreadMessages: Boolean = false,
     val photos: List<PromptPhoto> = emptyList(),
+    val dailyMomentCount: Int = 0,
     val chat: List<ChatItem> = emptyList(),
     val uploadQueue: List<QueuedUploadItem> = emptyList(),
     val photoInteractions: PhotoInteractionsResponse? = null,
@@ -959,6 +960,7 @@ data class UiState(
 
 data class DashboardData(
     val me: User,
+    val dailyMomentCount: Int,
     val inviteCode: String,
     val prompt: PromptResponse,
     val rules: PromptRulesResponse,
@@ -1180,7 +1182,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(loading = true)
         runCatching {
             repo.syncDeviceTokenIfNeeded()
-            val me = repo.me()
+            val meResp = repo.me()
+            val me = meResp.user
             val inviteCode = repo.myInviteCode()
             val prompt = repo.prompt()
             val rules = repo.promptRules()
@@ -1189,9 +1192,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val chat = repo.listChat()
             val feedDays = repo.feedDays()
             val dayStats = runCatching { repo.feedDayStats() }.getOrDefault(emptyList())
-            DashboardData(me, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats)
+            DashboardData(me, meResp.dailyMomentCount, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats)
         }.onSuccess { payload ->
             val me = payload.me
+            val dailyMomentCount = payload.dailyMomentCount
             val inviteCode = payload.inviteCode
             val prompt = payload.prompt
             val rules = payload.rules
@@ -1222,6 +1226,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 promptRules = rules,
                 specialMomentStatus = special,
                 photos = photos,
+                dailyMomentCount = dailyMomentCount,
                 chat = chat,
                 chatHasOtherMessages = true,
                 chatHasUnreadMessages = hasUnreadChat,
@@ -2361,6 +2366,7 @@ fun AppScreen(vm: MainVm) {
                     username = state.user?.username ?: "",
                     inviteCode = state.myInviteCode,
                     streakDays = computePostingStreak(state.photos),
+                    dailyMomentCount = state.dailyMomentCount,
                     promptRules = state.promptRules,
                     photos = state.photos,
                     themeMode = themeModeValue(state.darkMode, state.oledMode),
@@ -3449,6 +3455,7 @@ fun ProfileTab(
     username: String,
     inviteCode: String,
     streakDays: Int,
+    dailyMomentCount: Int,
     promptRules: PromptRulesResponse?,
     photos: List<PromptPhoto>,
     themeMode: Int,
@@ -3518,6 +3525,7 @@ fun ProfileTab(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("@$username", style = MaterialTheme.typography.titleLarge)
                 Text("🔥 $streakDays", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("🌈 $dailyMomentCount", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             }
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
