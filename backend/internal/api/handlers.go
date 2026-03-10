@@ -283,7 +283,7 @@ func (s *Server) handleMe(c *gin.Context) {
     var dailyMomentCount int64
     _ = s.DB.Table("photos").
         Joins("JOIN daily_prompts ON daily_prompts.day = photos.day").
-        Where("photos.user_id = ? AND photos.prompt_only = ? AND daily_prompts.triggered_at IS NOT NULL AND daily_prompts.upload_until IS NOT NULL AND photos.created_at >= daily_prompts.triggered_at AND photos.created_at <= daily_prompts.upload_until", user.ID, true).
+        Where("photos.user_id = ? AND daily_prompts.triggered_at IS NOT NULL AND daily_prompts.upload_until IS NOT NULL AND photos.created_at >= daily_prompts.triggered_at AND photos.created_at <= daily_prompts.upload_until", user.ID).
         Distinct("photos.day").
         Count(&dailyMomentCount).Error
     c.JSON(http.StatusOK, gin.H{
@@ -367,14 +367,25 @@ func (s *Server) handleUpdateProfile(c *gin.Context) {
 func (s *Server) handleUpdatePreferences(c *gin.Context) {
     user, _ := userFromContext(c)
     var req struct {
-        ChatPushEnabled bool `json:"chatPushEnabled"`
+        ChatPushEnabled    *bool `json:"chatPushEnabled"`
+        AllowPhotoDownload *bool `json:"allowPhotoDownload"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
         return
     }
-    if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).
-        Update("chat_push_enabled", req.ChatPushEnabled).Error; err != nil {
+    updates := map[string]any{}
+    if req.ChatPushEnabled != nil {
+        updates["chat_push_enabled"] = *req.ChatPushEnabled
+    }
+    if req.AllowPhotoDownload != nil {
+        updates["allow_photo_download"] = *req.AllowPhotoDownload
+    }
+    if len(updates) == 0 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "no preferences provided"})
+        return
+    }
+    if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).Updates(updates).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
         return
     }
@@ -1956,9 +1967,37 @@ func (s *Server) handleMyPhotos(c *gin.Context) {
         return
     }
 
+    days := make([]string, 0, len(photos))
+    daySeen := make(map[string]struct{}, len(photos))
+    for _, p := range photos {
+        if _, ok := daySeen[p.Day]; ok {
+            continue
+        }
+        daySeen[p.Day] = struct{}{}
+        days = append(days, p.Day)
+    }
+
+    var prompts []models.DailyPrompt
+    promptByDay := make(map[string]models.DailyPrompt, len(days))
+    if len(days) > 0 {
+        if err := s.DB.Where("day IN ?", days).Find(&prompts).Error; err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+            return
+        }
+        for _, pr := range prompts {
+            promptByDay[pr.Day] = pr
+        }
+    }
+
     out := make([]gin.H, 0, len(photos))
     for _, p := range photos {
-        out = append(out, s.photoJSON(p))
+        row := s.photoJSON(p)
+        dailyMoment := false
+        if prompt, ok := promptByDay[p.Day]; ok && prompt.TriggeredAt != nil && prompt.UploadUntil != nil {
+            dailyMoment = !p.CreatedAt.Before(*prompt.TriggeredAt) && !p.CreatedAt.After(*prompt.UploadUntil)
+        }
+        row["dailyMoment"] = dailyMoment
+        out = append(out, row)
     }
 	c.JSON(http.StatusOK, gin.H{"items": out})
 }
@@ -2023,7 +2062,7 @@ func (s *Server) handlePhotoInteractions(c *gin.Context) {
 		return
 	}
 
-	out, err := s.photoInteractionsPayload(photoID, user.ID)
+    out, err := s.photoInteractionsPayload(photo, user.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -2090,7 +2129,7 @@ func (s *Server) handlePhotoReaction(c *gin.Context) {
 		return
 	}
 
-	out, err := s.photoInteractionsPayload(photoID, user.ID)
+    out, err := s.photoInteractionsPayload(photo, user.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -2138,7 +2177,7 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 		return
 	}
 
-	out, err := s.photoInteractionsPayload(photoID, user.ID)
+    out, err := s.photoInteractionsPayload(photo, user.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -2503,7 +2542,14 @@ func parseFormBool(v string) bool {
     }
 }
 
-func (s *Server) photoInteractionsPayload(photoID uint, viewerID uint) (gin.H, error) {
+func (s *Server) photoInteractionsPayload(photo models.Photo, viewerID uint) (gin.H, error) {
+    photoID := photo.ID
+    canDownload := false
+    var owner models.User
+    if err := s.DB.Select("id", "allow_photo_download").First(&owner, photo.UserID).Error; err == nil {
+        canDownload = owner.AllowPhotoDownload
+    }
+
 	reactionRows := make([]photoReactionCountRow, 0)
 	if err := s.DB.Model(&models.PhotoReaction{}).
 		Select("emoji, COUNT(*) as count").
@@ -2556,6 +2602,7 @@ func (s *Server) photoInteractionsPayload(photoID uint, viewerID uint) (gin.H, e
 		"reactions":  reactions,
 		"myReaction": myReaction,
 		"comments":   commentItems,
+        "canDownload": canDownload,
 	}, nil
 }
 

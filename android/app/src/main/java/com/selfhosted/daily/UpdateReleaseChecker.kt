@@ -7,12 +7,17 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
+import java.util.concurrent.TimeUnit
 
 object UpdateReleaseChecker {
-    private val http = OkHttpClient()
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
+        .build()
     private const val RELEASES_LATEST_URL = "https://api.github.com/repos/flightuwe/selfhosted-daily-photo/releases/latest"
     private const val RELEASES_TAG_URL_PREFIX = "https://api.github.com/repos/flightuwe/selfhosted-daily-photo/releases/tags/"
-    private const val ACTION_RUNS_URL = "https://api.github.com/repos/flightuwe/selfhosted-daily-photo/actions/runs?per_page=50"
+    private const val RELEASES_DOWNLOAD_URL_PREFIX = "https://github.com/flightuwe/selfhosted-daily-photo/releases/download/"
 
     suspend fun checkForUpdate(currentVersion: String): UpdateInfo? = withContext(Dispatchers.IO) {
         val release = fetchRelease(RELEASES_LATEST_URL) ?: return@withContext null
@@ -26,14 +31,17 @@ object UpdateReleaseChecker {
     suspend fun changelogLinesForVersion(version: String): List<String> = withContext(Dispatchers.IO) {
         val normalized = version.trim().removePrefix("v")
         if (normalized.isBlank()) return@withContext emptyList()
+        val tag = "v$normalized"
 
-        val byTag = fetchRelease("${RELEASES_TAG_URL_PREFIX}v$normalized")
-        val fromActions = fetchActionTitlesSince(byTag?.publishedAt, limit = 12)
-        if (fromActions.isNotEmpty()) return@withContext fromActions
+        val fromAsset = fetchChangelogAsset(tag)
+        if (fromAsset.isNotEmpty()) return@withContext fromAsset
+
+        val byTag = fetchRelease("${RELEASES_TAG_URL_PREFIX}$tag")
+        if (byTag?.notes?.isNotEmpty() == true) return@withContext byTag.notes
 
         val latest = fetchRelease(RELEASES_LATEST_URL)
         if (latest?.notes?.isNotEmpty() == true) return@withContext latest.notes
-        listOf("Keine Action-Historie verfuegbar.")
+        listOf("Release-Infos konnten nicht von GitHub geladen werden.")
     }
 
     private fun fetchRelease(url: String): GitHubRelease? {
@@ -68,9 +76,39 @@ object UpdateReleaseChecker {
         }
     }
 
+    private fun fetchChangelogAsset(tag: String): List<String> {
+        val req = Request.Builder()
+            .url("${RELEASES_DOWNLOAD_URL_PREFIX}$tag/changelog.json")
+            .header("Accept", "application/json")
+            .build()
+
+        http.newCall(req).execute().use { response ->
+            if (!response.isSuccessful) return emptyList()
+            val body = response.body?.string() ?: return emptyList()
+            val json = runCatching { JSONObject(body) }.getOrNull() ?: return emptyList()
+            val highlights = json.optJSONArray("highlights").toStringList(limit = 24)
+            val details = json.optJSONArray("details").toStringList(limit = 24)
+            return (highlights + details)
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .take(24)
+        }
+    }
+
+    private fun JSONArray?.toStringList(limit: Int): List<String> {
+        if (this == null) return emptyList()
+        val out = mutableListOf<String>()
+        for (i in 0 until minOf(length(), limit)) {
+            val value = optString(i).trim()
+            if (value.isNotBlank()) out += value
+        }
+        return out
+    }
+
     private fun fetchActionTitlesSince(sinceIso: String?, limit: Int): List<String> {
         val req = Request.Builder()
-            .url(ACTION_RUNS_URL)
+            .url("https://api.github.com/repos/flightuwe/selfhosted-daily-photo/actions/runs?per_page=50")
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .build()

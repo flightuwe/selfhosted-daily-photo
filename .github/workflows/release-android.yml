@@ -112,10 +112,78 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: app-release-apk
           path: dist
+      - name: Generate release notes and changelog asset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          if [[ ! "$CURRENT_TAG" =~ ^v ]]; then
+            CURRENT_TAG="v0.0.0-dev-${GITHUB_RUN_NUMBER}"
+          fi
+
+          git fetch --tags --force >/dev/null 2>&1 || true
+          PREV_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -vx "$CURRENT_TAG" | head -n 1 || true)"
+
+          if [[ -n "$PREV_TAG" ]]; then
+            RANGE="${PREV_TAG}..HEAD"
+          else
+            RANGE="HEAD~40..HEAD"
+          fi
+
+          mapfile -t RAW_COMMITS < <(git log --no-merges --pretty=format:'%s' $RANGE 2>/dev/null || true)
+          if [[ ${#RAW_COMMITS[@]} -eq 0 ]]; then
+            mapfile -t RAW_COMMITS < <(git log --no-merges --pretty=format:'%s' -n 20 2>/dev/null || true)
+          fi
+
+          declare -A seen
+          HIGHLIGHTS=()
+          for msg in "${RAW_COMMITS[@]}"; do
+            clean="$(echo "$msg" | sed -E 's/[[:space:]]+/ /g; s/^ +//; s/ +$//')"
+            [[ -z "$clean" ]] && continue
+            key="$(echo "$clean" | tr '[:upper:]' '[:lower:]')"
+            if [[ -z "${seen[$key]+x}" ]]; then
+              seen[$key]=1
+              HIGHLIGHTS+=("$clean")
+            fi
+            [[ ${#HIGHLIGHTS[@]} -ge 20 ]] && break
+          done
+
+          if [[ ${#HIGHLIGHTS[@]} -eq 0 ]]; then
+            HIGHLIGHTS=("Interne Verbesserungen und Stabilitaetsupdates.")
+          fi
+
+          {
+            echo "## Daily ${CURRENT_TAG}"
+            echo
+            echo "### Highlights"
+            for h in "${HIGHLIGHTS[@]}"; do
+              echo "- $h"
+            done
+            echo
+            echo "### Assets"
+            echo "- Android APK: \`app-release.apk\`"
+            echo "- Changelog JSON: \`changelog.json\`"
+          } > release-notes.md
+
+          highlights_json="$(printf '%s\n' "${HIGHLIGHTS[@]}" | jq -R . | jq -s .)"
+          jq -n \
+            --arg version "${CURRENT_TAG#v}" \
+            --arg releasedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --argjson highlights "$highlights_json" \
+            '{version:$version,releasedAt:$releasedAt,highlights:$highlights,details:[]}' > changelog.json
+
+          cp changelog.json dist/changelog.json
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.apk
+          body_path: release-notes.md
+          files: |
+            dist/*.apk
+            dist/changelog.json

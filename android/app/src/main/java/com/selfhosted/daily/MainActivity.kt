@@ -37,6 +37,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -54,9 +55,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.pullrefresh.PullRefreshIndicator
@@ -175,11 +173,15 @@ data class User(
     val username: String,
     val isAdmin: Boolean,
     val favoriteColor: String = "#1F5FBF",
-    val chatPushEnabled: Boolean = false
+    val chatPushEnabled: Boolean = false,
+    val allowPhotoDownload: Boolean = false
 )
 data class MeResponse(val user: User, val dailyMomentCount: Int = 0)
 data class ProfileUpdateRequest(val username: String, val favoriteColor: String)
-data class PreferencesUpdateRequest(val chatPushEnabled: Boolean)
+data class PreferencesUpdateRequest(
+    val chatPushEnabled: Boolean,
+    val allowPhotoDownload: Boolean
+)
 data class AuthResponse(val token: String, val user: User)
 data class LoginRequest(val username: String, val password: String)
 data class InviteCodeRequest(val inviteCode: String)
@@ -201,6 +203,7 @@ data class PromptPhoto(
     val url: String,
     val secondUrl: String? = null,
     val createdAt: String,
+    val dailyMoment: Boolean = false,
     val capsuleMode: String? = null,
     val capsuleVisibleAt: String? = null,
     val capsulePrivate: Boolean = false,
@@ -288,7 +291,8 @@ data class PhotoInteractionsResponse(
     val photoId: Long,
     val reactions: List<ReactionCount> = emptyList(),
     val myReaction: String = "",
-    val comments: List<PhotoCommentItem> = emptyList()
+    val comments: List<PhotoCommentItem> = emptyList(),
+    val canDownload: Boolean = false
 )
 data class PhotoReactionRequest(val emoji: String)
 data class PhotoCommentRequest(val body: String)
@@ -533,6 +537,10 @@ class AppRepo(private val api: Api, private val context: Context) {
         prefs.edit().putString("custom_notification_tone_uri", uri.trim()).apply()
     }
 
+    fun triggerLocalToneTestNotification() {
+        PushMessagingService.showLocalToneTestNotification(context)
+    }
+
     fun lastSeenOtherChatMillis(): Long = prefs.getLong("chat_seen_other_ms", 0L)
 
     fun setLastSeenOtherChatMillis(value: Long) {
@@ -609,8 +617,14 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun updateProfile(username: String, favoriteColor: String): User =
         api.updateProfile("Bearer ${token()}", ProfileUpdateRequest(username, favoriteColor)).user
 
-    suspend fun updateChatPushEnabled(enabled: Boolean): User =
-        api.updatePreferences("Bearer ${token()}", PreferencesUpdateRequest(enabled)).user
+    suspend fun updatePreferences(chatPushEnabled: Boolean, allowPhotoDownload: Boolean): User =
+        api.updatePreferences(
+            "Bearer ${token()}",
+            PreferencesUpdateRequest(
+                chatPushEnabled = chatPushEnabled,
+                allowPhotoDownload = allowPhotoDownload
+            )
+        ).user
 
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
     suspend fun promptRules(): PromptRulesResponse = api.promptRules("Bearer ${token()}")
@@ -774,6 +788,25 @@ class AppRepo(private val api: Api, private val context: Context) {
             .setMimeType("application/vnd.android.package-archive")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "daily-v$safeVersion.apk")
+            .setAllowedOverMetered(true)
+            .setAllowedOverRoaming(true)
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        return dm.enqueue(request)
+    }
+
+    fun downloadPhotoToDownloads(photoUrl: String): Long {
+        val safeUrl = photoUrl.trim()
+        require(safeUrl.isNotBlank()) { "empty photo url" }
+        val parsed = Uri.parse(safeUrl)
+        val rawName = parsed.lastPathSegment?.substringAfterLast('/').orEmpty()
+        val fileName = (if (rawName.isNotBlank()) rawName else "daily-photo-${System.currentTimeMillis()}.jpg")
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val request = DownloadManager.Request(parsed)
+            .setTitle("Daily Post")
+            .setDescription("Bild wird heruntergeladen")
+            .setMimeType("image/*")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
             .setAllowedOverMetered(true)
             .setAllowedOverRoaming(true)
         val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
@@ -1714,6 +1747,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(customNotificationToneUri = repo.customNotificationToneUri())
     }
 
+    fun testCustomNotificationTone() {
+        repo.triggerLocalToneTestNotification()
+        state = state.copy(message = "Ton-Test Push gesendet")
+    }
+
+    fun downloadPhotoFromViewer(photoUrl: String) {
+        val safeUrl = photoUrl.trim()
+        if (safeUrl.isBlank()) {
+            state = state.copy(message = "Download fehlgeschlagen: keine Bild-URL")
+            return
+        }
+        runCatching { repo.downloadPhotoToDownloads(safeUrl) }
+            .onSuccess { state = state.copy(message = "Bild-Download gestartet") }
+            .onFailure { state = state.copy(message = apiError(it, "Bild konnte nicht heruntergeladen werden")) }
+    }
+
     suspend fun updateProfile(username: String, favoriteColor: String) {
         state = state.copy(loading = true)
         runCatching { repo.updateProfile(username, favoriteColor) }
@@ -1726,7 +1775,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun setChatPushEnabled(enabled: Boolean) {
         state = state.copy(loading = true)
-        runCatching { repo.updateChatPushEnabled(enabled) }
+        val allowDownload = state.user?.allowPhotoDownload ?: false
+        runCatching { repo.updatePreferences(enabled, allowDownload) }
             .onSuccess { user ->
                 repo.setChatPushLocalEnabled(user.chatPushEnabled)
                 val auto = repo.autoUpdateEnabled()
@@ -1750,7 +1800,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setFeedPostPushEnabled(enabled)
         var nextUser = state.user
         if (state.user != null) {
-            runCatching { repo.updateChatPushEnabled(enabled) }
+            val allowDownload = state.user?.allowPhotoDownload ?: false
+            runCatching { repo.updatePreferences(enabled, allowDownload) }
                 .onSuccess {
                     nextUser = it
                     repo.setChatPushLocalEnabled(it.chatPushEnabled)
@@ -1778,6 +1829,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 "Benachrichtigungen teilweise aktualisiert"
             }
         )
+    }
+
+    suspend fun setAllowPhotoDownloadEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching { repo.updatePreferences(current.chatPushEnabled, enabled) }
+            .onSuccess { user ->
+                state = state.copy(
+                    user = user,
+                    loading = false,
+                    message = if (enabled) "Download-Freigabe aktiviert" else "Download-Freigabe deaktiviert"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Download-Freigabe speichern fehlgeschlagen"))
+            }
     }
 
     private fun latestOtherChatMillis(items: List<ChatItem>, meId: Long?): Long {
@@ -2143,6 +2210,9 @@ fun AppScreen(vm: MainVm) {
                 val emoji = viewerReactionEmojis[Random.nextInt(viewerReactionEmojis.size)]
                 scope.launch { vm.reactPhoto(pid, emoji) }
             },
+            onDownloadCurrent = { photoUrl ->
+                vm.downloadPhotoFromViewer(photoUrl)
+            },
             onIndexChange = { viewerIndex = it },
             onClose = closeViewer
         )
@@ -2384,6 +2454,7 @@ fun AppScreen(vm: MainVm) {
                     autoUpdateEnabled = state.autoUpdateEnabled,
                     notificationMasterEnabled = state.notificationMasterEnabled,
                     chatPushEnabled = state.user?.chatPushEnabled ?: false,
+                    allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     feedPostPushEnabled = state.feedPostPushEnabled,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
@@ -2391,6 +2462,7 @@ fun AppScreen(vm: MainVm) {
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onChatPushEnabledChange = { scope.launch { vm.setChatPushEnabled(it) } },
+                    onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onNotificationMasterEnabledChange = { scope.launch { vm.setNotificationMasterEnabled(it) } },
                     onFeedPostPushEnabledChange = { vm.setFeedPostPushEnabled(it) },
                     onCustomNotificationToneEnabledChange = { vm.setCustomNotificationToneEnabled(it) },
@@ -2406,6 +2478,7 @@ fun AppScreen(vm: MainVm) {
                         notificationTonePickerLauncher.launch(intent)
                     },
                     onClearCustomNotificationTone = { vm.setCustomNotificationToneUri("") },
+                    onTestCustomNotificationTone = { vm.testCustomNotificationTone() },
                     onEditableUsernameChange = { profileUsername = it },
                     onEditableColorChange = { profileColor = it },
                     onSaveProfile = {
@@ -3473,6 +3546,7 @@ fun ProfileTab(
     autoUpdateEnabled: Boolean,
     notificationMasterEnabled: Boolean,
     chatPushEnabled: Boolean,
+    allowPhotoDownload: Boolean,
     feedPostPushEnabled: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
@@ -3480,11 +3554,13 @@ fun ProfileTab(
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onChatPushEnabledChange: (Boolean) -> Unit,
+    onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onNotificationMasterEnabledChange: (Boolean) -> Unit,
     onFeedPostPushEnabledChange: (Boolean) -> Unit,
     onCustomNotificationToneEnabledChange: (Boolean) -> Unit,
     onPickCustomNotificationTone: () -> Unit,
     onClearCustomNotificationTone: () -> Unit,
+    onTestCustomNotificationTone: () -> Unit,
     onEditableUsernameChange: (String) -> Unit,
     onEditableColorChange: (String) -> Unit,
     onSaveProfile: () -> Unit,
@@ -3506,6 +3582,7 @@ fun ProfileTab(
     var pickerHsv by remember(editableColor) { mutableStateOf(hexToHsv(normalizeHexColor(editableColor))) }
     var themeSliderValue by remember(themeMode) { mutableStateOf(themeMode.toFloat()) }
     var deleteCandidate by remember { mutableStateOf<PromptPhoto?>(null) }
+    var showAllowDownloadWarning by remember { mutableStateOf(false) }
     var updatePulseTick by remember { mutableStateOf(0) }
     var updateChecked by remember { mutableStateOf(false) }
     val updateButtonScale = remember { Animatable(1f) }
@@ -3685,6 +3762,12 @@ fun ProfileTab(
                             Text("Zuruecksetzen")
                         }
                     }
+                    Button(
+                        onClick = onTestCustomNotificationTone,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Test-Benachrichtigungston + Push")
+                    }
                 }
             }
         }
@@ -3716,6 +3799,23 @@ fun ProfileTab(
                     label = { Text("Benutzername") },
                     modifier = Modifier.fillMaxWidth()
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Download der eigenen Bilder fuer andere Benutzer zulassen")
+                    Switch(
+                        checked = allowPhotoDownload,
+                        onCheckedChange = { checked ->
+                            if (checked && !allowPhotoDownload) {
+                                showAllowDownloadWarning = true
+                            } else if (!checked && allowPhotoDownload) {
+                                onAllowPhotoDownloadChange(false)
+                            }
+                        }
+                    )
+                }
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Aktuelle Lieblingsfarbe: ${normalizeHexColor(editableColor)}")
@@ -3824,45 +3924,74 @@ fun ProfileTab(
                 if (photos.isEmpty()) {
                     Text("Noch keine Beitraege")
                 } else {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                        userScrollEnabled = false,
-                        modifier = Modifier.height((((photos.size / 3) + 2) * 96).dp)
-                    ) {
-                        items(photos) { photo ->
-                            val urls = listOfNotNull(photo.url, photo.secondUrl)
-                            Column {
-                                AsyncImage(
-                                    model = photo.url,
-                                    contentDescription = "${photo.day}",
-                                    modifier = Modifier
-                                        .size(96.dp)
+                    val rainbowBorder = Brush.linearGradient(
+                        colors = listOf(
+                            Color(0xFFFF5F6D),
+                            Color(0xFFFFC371),
+                            Color(0xFF6EEB83),
+                            Color(0xFF5AA9E6),
+                            Color(0xFFB517FF)
+                        )
+                    )
+                    val photoRows = remember(photos) { photos.chunked(3) }
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        photoRows.forEach { row ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                for (i in 0 until 3) {
+                                    val photo = row.getOrNull(i)
+                                    if (photo == null) {
+                                        Spacer(modifier = Modifier.weight(1f))
+                                        continue
+                                    }
+                                    val urls = listOfNotNull(photo.url, photo.secondUrl)
+                                    val imageModifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(96.dp)
                                         .background(Color.LightGray)
+                                        .then(
+                                            if (photo.dailyMoment) {
+                                                Modifier.border(1.dp, rainbowBorder, MaterialTheme.shapes.small)
+                                            } else {
+                                                Modifier
+                                            }
+                                        )
                                         .pointerInput(photo.id) {
                                             detectTapGestures(
                                                 onPress = {
-                                                    val pressedAt = System.currentTimeMillis()
-                                                    val released = tryAwaitRelease()
-                                                    val holdMs = System.currentTimeMillis() - pressedAt
-                                                    if (released && holdMs >= 3000L) {
-                                                        deleteCandidate = photo
-                                                    } else if (released) {
-                                                        onOpenViewer(urls, photo.id)
+                                                    kotlinx.coroutines.coroutineScope {
+                                                        var longPressTriggered = false
+                                                        val holdJob = launch {
+                                                            delay(3000)
+                                                            longPressTriggered = true
+                                                            deleteCandidate = photo
+                                                        }
+                                                        val released = tryAwaitRelease()
+                                                        holdJob.cancel()
+                                                        if (released && !longPressTriggered) {
+                                                            onOpenViewer(urls, photo.id)
+                                                        }
                                                     }
                                                 }
                                             )
-                                        },
-                                    contentScale = ContentScale.Crop
-                                )
-                                if (photo.secondUrl != null) {
-                                    Text("2 Bilder", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+
+                                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        AsyncImage(
+                                            model = photo.url,
+                                            contentDescription = formatDayLabel(photo.day),
+                                            modifier = imageModifier,
+                                            contentScale = ContentScale.Crop
+                                        )
+                                        if (photo.secondUrl != null) {
+                                            Text("2 Bilder", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                        Text("🕒 ${formatMomentTime(photo.createdAt)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(formatDayLabel(photo.day), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
                                 }
-                                if (!photo.promptOnly) {
-                                    Text("Extra", color = Color(0xFF1F5FBF), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                                Text(photo.day, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }
@@ -3938,6 +4067,27 @@ fun ProfileTab(
                 Text(
                     "Willst du diesen Beitrag wirklich loeschen?\n\nTag: ${formatDayLabel(photo.day)}\nHalte ein Bild 3 Sekunden gedrueckt, um diesen Dialog zu oeffnen."
                 )
+            }
+        )
+    }
+
+    if (showAllowDownloadWarning) {
+        AlertDialog(
+            onDismissRequest = { showAllowDownloadWarning = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showAllowDownloadWarning = false
+                        onAllowPhotoDownloadChange(true)
+                    }
+                ) { Text("Aktivieren") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAllowDownloadWarning = false }) { Text("Abbrechen") }
+            },
+            title = { Text("Download-Freigabe aktivieren?") },
+            text = {
+                Text("Wenn du das aktivierst, koennen andere Benutzer deine Bilder herunterladen.")
             }
         )
     }
@@ -4442,10 +4592,13 @@ private fun FullscreenPhotoViewer(
     onCommentSend: () -> Unit,
     onReact: (String) -> Unit,
     onDoubleTapReact: () -> Unit,
+    onDownloadCurrent: (String) -> Unit,
     onIndexChange: (Int) -> Unit,
     onClose: () -> Unit
 ) {
     if (urls.isEmpty()) return
+    val viewerBg = MaterialTheme.colorScheme.surface
+    val viewerFg = MaterialTheme.colorScheme.onSurface
     val safeInitial = initialIndex.coerceIn(0, urls.lastIndex)
     val pagerState = rememberPagerState(initialPage = safeInitial, pageCount = { urls.size })
     val scales = remember(urls) { mutableStateMapOf<Int, Float>() }
@@ -4480,21 +4633,23 @@ private fun FullscreenPhotoViewer(
             sheetContent = {
                 ViewerInteractionSheet(
                     photoId = photoId,
+                    currentImageUrl = urls.getOrNull(pagerState.currentPage).orEmpty(),
                     comment = comment,
                     interactions = interactions,
                     interactionsLoading = interactionsLoading,
                     onCommentChange = onCommentChange,
                     onCommentSend = onCommentSend,
-                    onReact = onReact
+                    onReact = onReact,
+                    onDownloadCurrent = onDownloadCurrent
                 )
             },
-            containerColor = Color.Black,
-            contentColor = Color.White
+            containerColor = viewerBg,
+            contentColor = viewerFg
         ) { innerPadding ->
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black)
+                    .background(viewerBg)
                     .padding(innerPadding)
             ) {
                 Row(
@@ -4506,7 +4661,7 @@ private fun FullscreenPhotoViewer(
                 ) {
                     Text(
                         "${pagerState.currentPage + 1} / ${urls.size}",
-                        color = Color.White,
+                        color = viewerFg,
                         fontWeight = FontWeight.SemiBold
                     )
                     TextButton(onClick = onClose) { Text("Schliessen") }
@@ -4552,12 +4707,14 @@ private fun FullscreenPhotoViewer(
 @Composable
 private fun ViewerInteractionSheet(
     photoId: Long?,
+    currentImageUrl: String,
     comment: String,
     interactions: PhotoInteractionsResponse?,
     interactionsLoading: Boolean,
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
-    onReact: (String) -> Unit
+    onReact: (String) -> Unit,
+    onDownloadCurrent: (String) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -4593,6 +4750,12 @@ private fun ViewerInteractionSheet(
             enabled = comment.isNotBlank(),
             modifier = Modifier.fillMaxWidth()
         ) { Text("Kommentieren") }
+        if (interactions?.canDownload == true && currentImageUrl.isNotBlank()) {
+            Button(
+                onClick = { onDownloadCurrent(currentImageUrl) },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Post herunterladen") }
+        }
         if (interactionsLoading) {
             Text("Interaktionen werden geladen ...")
         }
