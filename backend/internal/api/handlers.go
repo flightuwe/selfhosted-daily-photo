@@ -944,6 +944,10 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid hours"})
         return
     }
+    if req.PromptWindowStartHour >= req.PromptWindowEndHour {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "start hour must be before end hour"})
+        return
+    }
 
     var settings models.AppSettings
     if err := s.DB.First(&settings).Error; err != nil {
@@ -958,6 +962,9 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
         c.JSON(http.StatusBadRequest, gin.H{"error": "chat command is empty"})
         return
     }
+
+    oldStartHour := settings.PromptWindowStartHour
+    oldEndHour := settings.PromptWindowEndHour
 
     settings.PromptWindowStartHour = req.PromptWindowStartHour
     settings.PromptWindowEndHour = req.PromptWindowEndHour
@@ -976,6 +983,13 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
     if err := s.DB.Save(&settings).Error; err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
         return
+    }
+
+    if s.Prompt != nil && (oldStartHour != settings.PromptWindowStartHour || oldEndHour != settings.PromptWindowEndHour) {
+        if err := s.Prompt.RefreshAutoPlans(30); err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "saved settings but failed to refresh upcoming plans"})
+            return
+        }
     }
 
     c.JSON(http.StatusOK, settings)

@@ -1,8 +1,10 @@
 package scheduler
 
 import (
+    crand "crypto/rand"
+    "errors"
     "log"
-    "math/rand"
+    "math/big"
     "time"
 
     "github.com/yosho/selfhosted-bereal/backend/internal/models"
@@ -96,17 +98,7 @@ func (s *DailyPromptService) EnsurePlanForDay(day string) (models.PromptPlan, er
         return models.PromptPlan{}, err
     }
 
-    spanHours := settings.PromptWindowEndHour - settings.PromptWindowStartHour
-    if spanHours <= 0 {
-        spanHours = 1
-    }
-
-    r := rand.New(rand.NewSource(time.Now().UnixNano()))
-    start := time.Date(dayDate.Year(), dayDate.Month(), dayDate.Day(), settings.PromptWindowStartHour, 0, 0, 0, s.Location)
-    planned := start.Add(time.Duration(r.Intn(spanHours*60)) * time.Minute)
-    if day == time.Now().In(s.Location).Format("2006-01-02") && planned.Before(time.Now().In(s.Location)) {
-        planned = time.Now().In(s.Location).Add(1 * time.Minute)
-    }
+    planned := plannedAtForDay(dayDate, settings, time.Now().In(s.Location), s.Location)
 
     plan = models.PromptPlan{
         Day:       day,
@@ -130,6 +122,101 @@ func (s *DailyPromptService) SetPlanForDay(day string, plannedAt time.Time, manu
         return models.PromptPlan{}, err
     }
     return plan, nil
+}
+
+func (s *DailyPromptService) RefreshAutoPlans(days int) error {
+    if days < 1 {
+        days = 1
+    }
+    if days > 60 {
+        days = 60
+    }
+
+    var settings models.AppSettings
+    if err := s.DB.First(&settings).Error; err != nil {
+        return err
+    }
+
+    now := time.Now().In(s.Location)
+    for i := 0; i < days; i++ {
+        dayDate := now.AddDate(0, 0, i)
+        day := dayDate.Format("2006-01-02")
+
+        var prompt models.DailyPrompt
+        if err := s.DB.Where("day = ?", day).First(&prompt).Error; err == nil && prompt.TriggeredAt != nil {
+            continue
+        }
+
+        planned := plannedAtForDay(dayDate, settings, now, s.Location)
+
+        var plan models.PromptPlan
+        err := s.DB.Where("day = ?", day).First(&plan).Error
+        if err == nil {
+            if plan.IsManual {
+                continue
+            }
+            plan.PlannedAt = planned
+            plan.IsManual = false
+            if saveErr := s.DB.Save(&plan).Error; saveErr != nil {
+                return saveErr
+            }
+            continue
+        }
+        if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+            return err
+        }
+
+        newPlan := models.PromptPlan{
+            Day:       day,
+            PlannedAt: planned,
+            IsManual:  false,
+        }
+        if createErr := s.DB.Create(&newPlan).Error; createErr != nil {
+            return createErr
+        }
+    }
+    return nil
+}
+
+func plannedAtForDay(dayDate time.Time, settings models.AppSettings, now time.Time, loc *time.Location) time.Time {
+    startHour := settings.PromptWindowStartHour
+    endHour := settings.PromptWindowEndHour
+
+    if startHour < 0 || startHour > 23 {
+        startHour = 8
+    }
+    if endHour < 1 || endHour > 24 {
+        endHour = 20
+    }
+    if endHour <= startHour {
+        endHour = startHour + 1
+        if endHour > 24 {
+            startHour = 23
+            endHour = 24
+        }
+    }
+
+    spanMinutes := (endHour - startHour) * 60
+    offsetMinutes := randomOffsetMinutes(spanMinutes)
+
+    start := time.Date(dayDate.Year(), dayDate.Month(), dayDate.Day(), startHour, 0, 0, 0, loc)
+    planned := start.Add(time.Duration(offsetMinutes) * time.Minute)
+
+    if dayDate.Format("2006-01-02") == now.Format("2006-01-02") && planned.Before(now) {
+        planned = now.Add(1 * time.Minute)
+    }
+    return planned
+}
+
+func randomOffsetMinutes(max int) int {
+    if max <= 1 {
+        return 0
+    }
+    n, err := crand.Int(crand.Reader, big.NewInt(int64(max)))
+    if err != nil {
+        return int(time.Now().UnixNano() % int64(max))
+    }
+    return int(n.Int64())
 }
 
 func (s *DailyPromptService) TriggerNow() (models.DailyPrompt, models.AppSettings, error) {
