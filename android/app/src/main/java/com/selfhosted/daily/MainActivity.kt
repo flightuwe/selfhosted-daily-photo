@@ -326,7 +326,22 @@ data class FeedResponse(
     val monthRecap: MonthlyRecap? = null
 )
 data class DayListResponse(val items: List<String>)
-data class DayStatItem(val day: String, val count: Long)
+data class CalendarFeaturedPhoto(
+    val photoId: Long,
+    val url: String,
+    val secondUrl: String? = null,
+    val user: User,
+    val reactionCount: Long = 0,
+    val commentCount: Long = 0,
+    val interactionCount: Long = 0
+)
+data class DayStatItem(
+    val day: String,
+    val count: Long = 0,
+    val postCount: Long = 0,
+    val participantCount: Long = 0,
+    val featuredPhoto: CalendarFeaturedPhoto? = null
+)
 data class DayStatsResponse(val items: List<DayStatItem>)
 data class TopReactionStat(val emoji: String, val count: Long)
 data class LatestActiveUser(
@@ -1291,7 +1306,7 @@ data class UiState(
     val monthRecapByDay: Map<String, MonthlyRecap> = emptyMap(),
     val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
     val calendarDays: List<String> = emptyList(),
-    val dayPhotoCounts: Map<String, Int> = emptyMap(),
+    val calendarDayStats: Map<String, DayStatItem> = emptyMap(),
     val communityStats: CommunityStatsResponse? = null,
     val communityStatsLoading: Boolean = false,
     val feedFocusDay: String? = null,
@@ -1832,7 +1847,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photos = payload.photos
             val chat = payload.chat
             val calendarDays = payload.feedDays
-            val dayPhotoCounts = payload.dayStats.associate { it.day to it.count.toInt() }
+            val calendarDayStats = payload.dayStats.associateBy { it.day }
             val latestOtherChat = latestOtherChatMillis(chat, me.id)
             val seenChat = repo.lastSeenOtherChatMillis()
             var hasUnreadChat = latestOtherChat > seenChat
@@ -1866,7 +1881,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 chatHasOtherMessages = true,
                 chatHasUnreadMessages = hasUnreadChat,
                 calendarDays = calendarDays,
-                dayPhotoCounts = dayPhotoCounts,
+                calendarDayStats = calendarDayStats,
                 communityStats = payload.communityStats,
                 communityStatsLoading = false,
                 uploadQueue = repo.uploadQueue(),
@@ -3354,7 +3369,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
 
                 AppTab.CALENDAR -> CalendarTab(
                     days = state.calendarDays,
-                    dayPhotoCounts = state.dayPhotoCounts,
+                    dayStats = state.calendarDayStats,
                     monthRecapByDay = state.monthRecapByDay,
                     promptMetaByDay = state.promptMetaByDay,
                     selected = state.feedFocusDay ?: state.prompt?.day.orEmpty(),
@@ -4377,7 +4392,7 @@ private fun MonthlyRecapCard(recap: MonthlyRecap) {
 @Composable
 fun CalendarTab(
     days: List<String>,
-    dayPhotoCounts: Map<String, Int>,
+    dayStats: Map<String, DayStatItem>,
     monthRecapByDay: Map<String, MonthlyRecap>,
     promptMetaByDay: Map<String, PromptMeta>,
     selected: String,
@@ -4396,14 +4411,59 @@ fun CalendarTab(
         items(days) { day ->
             val selectedDay = day == selected
             val meta = promptMetaByDay[day]
-            val count = dayPhotoCounts[day] ?: 0
+            val stats = dayStats[day]
+            val participantCount = stats?.participantCount ?: 0
+            val featured = stats?.featuredPhoto
             Card(modifier = Modifier.fillMaxWidth().clickable { onSelect(day) }) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         formatDayWithWeekday(day),
                         fontWeight = if (selectedDay) FontWeight.Bold else FontWeight.Normal
                     )
-                    Text("$count Bilder gepostet", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (participantCount == 1L) "1 Nutzer hat gepostet" else "$participantCount Nutzer haben gepostet",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    featured?.let {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (!it.secondUrl.isNullOrBlank()) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    AsyncImage(
+                                        model = it.url,
+                                        contentDescription = "Kalender-Vorschau 1",
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(88.dp),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                    AsyncImage(
+                                        model = it.secondUrl,
+                                        contentDescription = "Kalender-Vorschau 2",
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(88.dp),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            } else {
+                                AsyncImage(
+                                    model = it.url,
+                                    contentDescription = "Kalender-Vorschau",
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(120.dp),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                            Text(
+                                "${it.reactionCount} Reaktionen · ${it.commentCount} Kommentare",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                     momentReasonLine(meta?.triggerSource, meta?.requestedByUser)?.let { reason ->
                         Text(reason, color = Color(0xFF1F5FBF))
                     }

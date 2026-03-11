@@ -2072,38 +2072,155 @@ func (s *Server) handleFeedDays(c *gin.Context) {
 }
 
 func (s *Server) handleFeedDayStats(c *gin.Context) {
-    user, _ := userFromContext(c)
-    type row struct {
-        Day   string
-        Count int64
-    }
-    var rows []row
-    if err := s.DB.Model(&models.Photo{}).
-        Select("day, COUNT(*) as count").
-        Group("day").
-        Order("day desc").
-        Limit(365).
-        Scan(&rows).Error; err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-        return
-    }
-    today := time.Now().In(s.Location).Format("2006-01-02")
-    hasPostedToday, err := s.userHasPostedForDay(user.ID, today)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-        return
-    }
-    out := make([]gin.H, 0, len(rows))
-    for _, r := range rows {
-        if r.Day == today && !hasPostedToday {
-            continue
-        }
-        out = append(out, gin.H{
-            "day":   r.Day,
-            "count": r.Count,
-        })
-    }
-    c.JSON(http.StatusOK, gin.H{"items": out})
+	user, _ := userFromContext(c)
+	type dayRow struct {
+		Day              string
+		PostCount        int64
+		ParticipantCount int64
+	}
+	type interactionRow struct {
+		PhotoID uint
+		Count   int64
+	}
+	var rows []dayRow
+	if err := s.DB.Model(&models.Photo{}).
+		Select("day, COUNT(*) as post_count, COUNT(DISTINCT user_id) as participant_count").
+		Group("day").
+		Order("day desc").
+		Limit(365).
+		Scan(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	today := time.Now().In(s.Location).Format("2006-01-02")
+	hasPostedToday, err := s.userHasPostedForDay(user.ID, today)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	visibleRows := make([]dayRow, 0, len(rows))
+	visibleDays := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.Day == today && !hasPostedToday {
+			continue
+		}
+		visibleRows = append(visibleRows, r)
+		visibleDays = append(visibleDays, r.Day)
+	}
+
+	var photos []models.Photo
+	if len(visibleDays) > 0 {
+		if err := s.DB.Preload("User").
+			Where("day IN ?", visibleDays).
+			Order("day desc, created_at desc, id desc").
+			Find(&photos).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+	}
+
+	photoIDs := make([]uint, 0, len(photos))
+	for _, photo := range photos {
+		photoIDs = append(photoIDs, photo.ID)
+	}
+
+	reactionCounts := make(map[uint]int64, len(photoIDs))
+	commentCounts := make(map[uint]int64, len(photoIDs))
+	if len(photoIDs) > 0 {
+		var reactionRows []interactionRow
+		if err := s.DB.Model(&models.PhotoReaction{}).
+			Select("photo_id, COUNT(*) as count").
+			Where("photo_id IN ?", photoIDs).
+			Group("photo_id").
+			Scan(&reactionRows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+		for _, row := range reactionRows {
+			reactionCounts[row.PhotoID] = row.Count
+		}
+
+		var commentRows []interactionRow
+		if err := s.DB.Model(&models.PhotoComment{}).
+			Select("photo_id, COUNT(*) as count").
+			Where("photo_id IN ?", photoIDs).
+			Group("photo_id").
+			Scan(&commentRows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+		for _, row := range commentRows {
+			commentCounts[row.PhotoID] = row.Count
+		}
+	}
+
+	featuredByDay := make(map[string]gin.H, len(visibleRows))
+	bestByDay := make(map[string]models.Photo, len(visibleRows))
+	bestReactionByDay := make(map[string]int64, len(visibleRows))
+	bestCommentByDay := make(map[string]int64, len(visibleRows))
+	for _, photo := range photos {
+		day := photo.Day
+		reactionCount := reactionCounts[photo.ID]
+		commentCount := commentCounts[photo.ID]
+		interactionCount := reactionCount + commentCount
+
+		best, ok := bestByDay[day]
+		if ok {
+			bestReaction := bestReactionByDay[day]
+			bestComment := bestCommentByDay[day]
+			bestInteraction := bestReaction + bestComment
+			if interactionCount < bestInteraction {
+				continue
+			}
+			if interactionCount == bestInteraction && reactionCount < bestReaction {
+				continue
+			}
+			if interactionCount == bestInteraction && reactionCount == bestReaction && commentCount < bestComment {
+				continue
+			}
+			if interactionCount == bestInteraction && reactionCount == bestReaction && commentCount == bestComment {
+				if photo.CreatedAt.Before(best.CreatedAt) {
+					continue
+				}
+				if photo.CreatedAt.Equal(best.CreatedAt) && photo.ID < best.ID {
+					continue
+				}
+			}
+		}
+
+		bestByDay[day] = photo
+		bestReactionByDay[day] = reactionCount
+		bestCommentByDay[day] = commentCount
+		featuredByDay[day] = gin.H{
+			"photoId":          photo.ID,
+			"url":              fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, photo.FilePath),
+			"secondUrl":        "",
+			"user":             s.userPublicJSON(user.ID, photo.User),
+			"reactionCount":    reactionCount,
+			"commentCount":     commentCount,
+			"interactionCount": interactionCount,
+		}
+		if photo.SecondPath != "" {
+			featuredByDay[day]["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, photo.SecondPath)
+		}
+	}
+
+	out := make([]gin.H, 0, len(visibleRows))
+	for _, r := range visibleRows {
+		item := gin.H{
+			"day":              r.Day,
+			"count":            r.PostCount,
+			"postCount":        r.PostCount,
+			"participantCount": r.ParticipantCount,
+			"featuredPhoto":    nil,
+		}
+		if featured, ok := featuredByDay[r.Day]; ok {
+			item["featuredPhoto"] = featured
+		}
+		out = append(out, item)
+	}
+	c.JSON(http.StatusOK, gin.H{"items": out})
 }
 
 func (s *Server) handleCommunityStats(c *gin.Context) {
