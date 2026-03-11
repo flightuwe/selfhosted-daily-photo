@@ -1574,15 +1574,25 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun setDiagnosticsUploadEnabled(enabled: Boolean) {
         repo.setDiagnosticsUploadEnabled(enabled)
         state = state.copy(diagnosticsUploadEnabled = enabled, message = if (enabled) "Diagnose-Upload aktiviert" else "Diagnose-Upload deaktiviert")
+        if (enabled) {
+            viewModelScope.launch {
+                runCatching { repo.uploadRecentDebugLogs(force = true) }
+                    .onSuccess { sent ->
+                        if (sent > 0) {
+                            state = state.copy(message = "Diagnose-Upload aktiviert, $sent Eintraege hochgeladen")
+                        }
+                    }
+            }
+        }
     }
 
     fun refreshDebugLogs() {
         state = state.copy(debugLogs = repo.recentDebugLogs())
     }
 
-    suspend fun uploadDebugLogsNow() {
-        val sent = runCatching { repo.uploadRecentDebugLogs(force = true) }.getOrElse { 0 }
-        state = state.copy(message = if (sent > 0) "Diagnose hochgeladen ($sent Eintraege)" else "Keine Diagnose hochgeladen")
+    suspend fun autoUploadDebugLogsIfEnabled() {
+        if (!state.diagnosticsUploadEnabled) return
+        runCatching { repo.uploadRecentDebugLogs() }
     }
 
     fun exportDebugLogsForShare(): Uri? {
@@ -2728,6 +2738,11 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         vm.refreshAll()
     }
 
+    LaunchedEffect(state.token, state.startupDone, state.diagnosticsUploadEnabled) {
+        if (state.token.isBlank() || !state.startupDone || !state.diagnosticsUploadEnabled) return@LaunchedEffect
+        vm.autoUploadDebugLogsIfEnabled()
+    }
+
     LaunchedEffect(state.user?.id, state.user?.username, state.user?.favoriteColor) {
         val u = state.user ?: return@LaunchedEffect
         profileUsername = u.username
@@ -3347,7 +3362,6 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onTestCustomNotificationTone = { vm.testCustomNotificationTone() },
                     onDiagnosticsUploadEnabledChange = { vm.setDiagnosticsUploadEnabled(it) },
                     onRefreshDebugLogs = { vm.refreshDebugLogs() },
-                    onUploadDebugLogs = { scope.launch { vm.uploadDebugLogsNow() } },
                     onShareDebugLogs = {
                         val uri = vm.exportDebugLogsForShare()
                         if (uri != null) {
@@ -4501,7 +4515,6 @@ fun ProfileTab(
     onTestCustomNotificationTone: () -> Unit,
     onDiagnosticsUploadEnabledChange: (Boolean) -> Unit,
     onRefreshDebugLogs: () -> Unit,
-    onUploadDebugLogs: () -> Unit,
     onShareDebugLogs: () -> Unit,
     onProfileSectionExpandedChange: (String, Boolean) -> Unit,
     onUploadAvatar: (Uri) -> Unit,
@@ -5269,15 +5282,16 @@ fun ProfileTab(
                         onCheckedChange = onDiagnosticsUploadEnabledChange
                     )
                 }
+                Text(
+                    "Wenn aktiviert, werden Diagnose-Logs bei App-Start und bei neuen Fehlern automatisch an den Server geschickt.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Button(onClick = onRefreshDebugLogs, modifier = Modifier.weight(1f)) { Text("Letzte Fehler") }
                     Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) { Text("Diagnose exportieren") }
-                }
-                Button(onClick = onUploadDebugLogs, modifier = Modifier.fillMaxWidth()) {
-                    Text("Diagnose jetzt hochladen")
                 }
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
