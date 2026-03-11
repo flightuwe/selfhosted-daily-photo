@@ -169,6 +169,9 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.random.Random
 
+const val EXTRA_LAUNCH_ACTION = "daily_launch_action"
+const val EXTRA_LAUNCH_TYPE = "daily_launch_type"
+
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 enum class AuthMode { LOGIN, REGISTER }
 
@@ -848,6 +851,26 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun setLastStartupChatSignature(signature: String) {
         prefs.edit().putString("startup_chat_signature", signature.trim()).apply()
+    }
+
+    fun captureLaunchIntent(intent: Intent?) {
+        val action = intent?.getStringExtra(EXTRA_LAUNCH_ACTION)?.trim().orEmpty()
+        val type = intent?.getStringExtra(EXTRA_LAUNCH_TYPE)?.trim().orEmpty()
+        if (action.isBlank() && type.isBlank()) return
+        prefs.edit()
+            .putString("pending_launch_action", action)
+            .putString("pending_launch_type", type)
+            .apply()
+    }
+
+    fun consumePendingLaunchAction(): Pair<String, String> {
+        val action = prefs.getString("pending_launch_action", "").orEmpty()
+        val type = prefs.getString("pending_launch_type", "").orEmpty()
+        prefs.edit()
+            .remove("pending_launch_action")
+            .remove("pending_launch_type")
+            .apply()
+        return action to type
     }
 
     fun randomStartupChatLine(chatItems: List<ChatItem>): String {
@@ -1766,6 +1789,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
             )
+            applyPendingLaunchNavigation(prompt, calendarDays)
             maybeShowProfileSetupPrompt(me)
             val focus = state.feedFocusDay
             val anchor = if (focus != null && calendarDays.contains(focus)) focus else prompt.day
@@ -2457,6 +2481,37 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         return 0L
     }
+
+    private fun isActiveMomentWindow(prompt: PromptResponse): Boolean {
+        return prompt.canUpload && !prompt.triggered.isNullOrBlank()
+    }
+
+    private suspend fun applyPendingLaunchNavigation(prompt: PromptResponse, availableDays: List<String>) {
+        val (actionRaw, typeRaw) = repo.consumePendingLaunchAction()
+        val action = actionRaw.trim().lowercase()
+        val type = typeRaw.trim().lowercase()
+        if (action.isBlank() && type.isBlank()) return
+
+        if (isActiveMomentWindow(prompt)) {
+            state = state.copy(activeTab = AppTab.CAMERA)
+            return
+        }
+
+        when {
+            action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" -> {
+                if (prompt.hasPosted) {
+                    val day = if (availableDays.contains(prompt.day)) prompt.day else (availableDays.firstOrNull() ?: prompt.day)
+                    state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = null)
+                }
+            }
+            action == "open_chat" || type == "chat" || type == "chat_message" -> {
+                state = state.copy(activeTab = AppTab.CHAT)
+            }
+            action == "open_camera" || type == "daily_prompt" || type == "daily_moment" || type == "special_moment" || type == "special_request" -> {
+                state = state.copy(activeTab = AppTab.CAMERA)
+            }
+        }
+    }
 }
 
 class MainVmFactory(private val repo: AppRepo) : ViewModelProvider.Factory {
@@ -2465,6 +2520,9 @@ class MainVmFactory(private val repo: AppRepo) : ViewModelProvider.Factory {
 }
 
 class MainActivity : ComponentActivity() {
+    private lateinit var repo: AppRepo
+    private var launchIntentTick by mutableStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -2475,10 +2533,12 @@ class MainActivity : ComponentActivity() {
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(Api::class.java)
-        val repo = AppRepo(api, this)
+        repo = AppRepo(api, this)
         repo.installCrashHandler()
+        repo.captureLaunchIntent(intent)
 
         setContent {
+            val intentTick = launchIntentTick
             val vm: MainVm = viewModel(factory = MainVmFactory(repo))
             val useDark = vm.state.darkMode
             val useOled = vm.state.oledMode
@@ -2487,15 +2547,25 @@ class MainActivity : ComponentActivity() {
                 surface = Color.Black
             )
             MaterialTheme(colorScheme = if (useDark) (if (useOled) oledColorScheme else darkColorScheme()) else lightColorScheme()) {
-                AppScreen(vm)
+                AppScreen(vm, intentTick)
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (::repo.isInitialized) {
+            repo.captureLaunchIntent(intent)
+        }
+        launchIntentTick += 1
+    }
+
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppScreen(vm: MainVm) {
+fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     val state = vm.state
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -2650,6 +2720,12 @@ fun AppScreen(vm: MainVm) {
             vm.refreshUploadQueueLocal()
             delay(1_000)
         }
+    }
+
+    LaunchedEffect(launchIntentTick, state.token, state.startupDone) {
+        if (launchIntentTick <= 0) return@LaunchedEffect
+        if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
+        vm.refreshAll()
     }
 
     LaunchedEffect(state.user?.id, state.user?.username, state.user?.favoriteColor) {
@@ -3776,6 +3852,7 @@ fun CameraTab(
             text = { Text("Du siehst diesen Beitrag dann erst wieder $label. Wirklich fortfahren?") }
         )
     }
+
 }
 
 @Composable
@@ -4327,6 +4404,7 @@ fun ChatTab(
             }
         }
     }
+
 }
 
 @Composable

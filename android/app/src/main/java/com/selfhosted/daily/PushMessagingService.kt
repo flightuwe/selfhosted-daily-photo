@@ -46,7 +46,9 @@ class PushMessagingService : FirebaseMessagingService() {
         val body = message.notification?.body ?: message.data["body"] ?: "Zeit fuer deinen taeglichen Moment."
 
         val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_LAUNCH_ACTION, message.data["action"]?.trim().orEmpty())
+            putExtra(EXTRA_LAUNCH_TYPE, type)
         }
         val pending = PendingIntent.getActivity(
             this,
@@ -129,7 +131,7 @@ class PushMessagingService : FirebaseMessagingService() {
             val channelId = ensurePromptChannel(context, tone)
 
             val intent = Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             }
             val pending = PendingIntent.getActivity(
                 context,
