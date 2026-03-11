@@ -281,23 +281,23 @@ export function App() {
     }
   }
 
-  async function onDownloadUserLogs() {
+  async function onDownloadUserLogs(hours: 1 | 12 | 24) {
     if (debugUserFilter <= 0) {
       setMessage("Bitte erst einen Nutzer auswaehlen.");
       return;
     }
     try {
-      await downloadDebugLogs(token, { userId: debugUserFilter, sinceHours: 24, format: "csv" });
-      setMessage("Nutzer-Logs (24h) wurden heruntergeladen.");
+      await downloadDebugLogs(token, { userId: debugUserFilter, sinceHours: hours, format: "csv" });
+      setMessage(`Nutzer-Logs (${hours}h) wurden heruntergeladen.`);
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
-  async function onDownloadAllLogs24h() {
+  async function onDownloadAllLogs(hours: 1 | 12 | 24) {
     try {
-      await downloadDebugLogs(token, { sinceHours: 24, format: "csv" });
-      setMessage("Gesamte Logs (24h) wurden heruntergeladen.");
+      await downloadDebugLogs(token, { sinceHours: hours, format: "csv" });
+      setMessage(`Gesamte Logs (${hours}h) wurden heruntergeladen.`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1134,10 +1134,21 @@ export function App() {
                   ))}
                 </select>
                 <button onClick={() => loadDebugLogs(token, debugUserFilter)}>Aktualisieren</button>
-                <button onClick={onDownloadUserLogs}>Nutzer-Logs 24h downloaden</button>
-                <button onClick={onDownloadAllLogs24h}>Alle Logs 24h downloaden</button>
               </div>
             </div>
+            <div className="row">
+              <span className="small"><strong>Nutzer-Export:</strong></span>
+              <button onClick={() => onDownloadUserLogs(1)}>1h</button>
+              <button onClick={() => onDownloadUserLogs(12)}>12h</button>
+              <button onClick={() => onDownloadUserLogs(24)}>24h</button>
+              <span className="small"><strong>Gesamt:</strong></span>
+              <button onClick={() => onDownloadAllLogs(1)}>1h</button>
+              <button onClick={() => onDownloadAllLogs(12)}>12h</button>
+              <button onClick={() => onDownloadAllLogs(24)}>24h</button>
+            </div>
+            <p className="small">
+              Nutzer-Export nutzt den aktuell ausgewaehlten Nutzer oben. Gesamt exportiert alle Debug-Logs im gewaehlten Zeitraum.
+            </p>
             {debugLogs.length === 0 && <p>Keine Debug-Eintraege vorhanden.</p>}
             <table className="table">
               <thead>
