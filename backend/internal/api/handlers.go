@@ -1663,11 +1663,12 @@ func (s *Server) handleAdminDebugLogsExport(c *gin.Context) {
     }
 
     filename := fmt.Sprintf("debug-logs-%s-last-%dh-%s.csv", nameScope, sinceHours, ts)
-    c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-    c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	c.Header("Content-Type", "text/csv; charset=utf-8")
 
-    var buf bytes.Buffer
-    writer := csv.NewWriter(&buf)
+	var buf bytes.Buffer
+	buf.Write([]byte{0xEF, 0xBB, 0xBF})
+	writer := csv.NewWriter(&buf)
     _ = writer.Write([]string{
         "id", "created_at", "user_id", "username", "device_name", "app_version", "type", "message", "meta",
     })

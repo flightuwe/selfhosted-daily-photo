@@ -95,6 +95,14 @@ const emptyCommandDraft: CommandDraft = {
   cooldownSecond: 0,
 };
 
+function debugMetaHint(meta: string): string {
+  const normalized = meta.toLowerCase();
+  if (normalized.includes("network=dns")) return "DNS-Problem";
+  if (normalized.includes("network=connect")) return "Verbindungsproblem";
+  if (normalized.includes("network=timeout")) return "Timeout";
+  return "";
+}
+
 export function App() {
   const [token, setToken] = useState<string>(() => localStorage.getItem("admin-token") || "");
   const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem("admin-dark-mode") === "1");
@@ -1171,7 +1179,10 @@ export function App() {
                     <td>{row.appVersion || "-"}</td>
                     <td><code>{row.type}</code></td>
                     <td>{row.message}</td>
-                    <td className="small">{row.meta || "-"}</td>
+                    <td className="small">
+                      {debugMetaHint(row.meta || "") ? <strong>{debugMetaHint(row.meta || "")}: </strong> : null}
+                      {row.meta || "-"}
+                    </td>
                   </tr>
                 ))}
               </tbody>

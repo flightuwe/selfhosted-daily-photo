@@ -130,6 +130,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.tasks.await
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -160,6 +161,9 @@ import retrofit2.http.Query
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.UUID
 import java.time.LocalDate
 import java.time.OffsetDateTime
@@ -1361,8 +1365,13 @@ data class DashboardData(
 class MainVm(private val repo: AppRepo) : ViewModel() {
     private val chatSendMutex = Mutex()
     private val profileSaveMutex = Mutex()
+    private val refreshAllMutex = Mutex()
     private val pendingChatBodies = mutableMapOf<String, Long>()
+    private val recentDashboardFailureAt = mutableMapOf<String, Long>()
     private val pendingChatWindowMs = 4_000L
+    private val refreshAllCooldownMs = 2_000L
+    private val dashboardFailureDedupMs = 5 * 60 * 1000L
+    private var lastRefreshAllStartedAt = 0L
     private val profileSectionIds = listOf(
         "display",
         "notifications",
@@ -1407,6 +1416,54 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 it.remove()
             }
         }
+    }
+
+    private fun rootCause(throwable: Throwable): Throwable {
+        var current = throwable
+        while (current.cause != null && current.cause !== current) {
+            current = current.cause!!
+        }
+        return current
+    }
+
+    private fun isBenignCancellation(throwable: Throwable): Boolean {
+        if (throwable is CancellationException) return true
+        return throwable::class.java.simpleName.contains("LeftCompositionCancellationException")
+    }
+
+    private fun networkFailureKind(throwable: Throwable): String? {
+        return when (rootCause(throwable)) {
+            is UnknownHostException -> "dns"
+            is ConnectException -> "connect"
+            is SocketTimeoutException -> "timeout"
+            else -> null
+        }
+    }
+
+    private fun debugFailureMessage(throwable: Throwable): String {
+        return when (networkFailureKind(throwable)) {
+            "dns" -> "Servername konnte nicht aufgeloest werden"
+            "connect" -> "Verbindung zum Server fehlgeschlagen"
+            "timeout" -> "Server antwortet zu langsam"
+            else -> throwable.message ?: "request failed"
+        }
+    }
+
+    private fun shouldLogDashboardFailure(endpoint: String, throwable: Throwable): Boolean {
+        val kind = networkFailureKind(throwable) ?: throwable::class.java.simpleName
+        val key = "$endpoint|$kind"
+        val now = System.currentTimeMillis()
+        val it = recentDashboardFailureAt.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            if (now - entry.value > dashboardFailureDedupMs) {
+                it.remove()
+            }
+        }
+        val last = recentDashboardFailureAt[key] ?: 0L
+        if (now - last < dashboardFailureDedupMs) return false
+        recentDashboardFailureAt[key] = now
+        return true
     }
 
     private suspend fun fetchChangelogLinesFresh(): List<String> {
@@ -1563,10 +1620,20 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private suspend fun logApiFailure(type: String, endpoint: String, throwable: Throwable, extraMeta: String = "") {
+        if (isBenignCancellation(throwable)) return
+        if (type == "dashboard_load_failed" && !shouldLogDashboardFailure(endpoint, throwable)) return
         val code = (throwable as? HttpException)?.code()
-        val base = "endpoint=$endpoint;http=${code ?: -1};error=${throwable::class.java.simpleName}"
+        val network = networkFailureKind(throwable)
+        val base = buildString {
+            append("endpoint=").append(endpoint)
+            append(";http=").append(code ?: -1)
+            append(";error=").append(throwable::class.java.simpleName)
+            if (network != null) {
+                append(";network=").append(network)
+            }
+        }
         val meta = if (extraMeta.isBlank()) base else "$base;$extraMeta"
-        repo.logDebug(type = type, message = throwable.message ?: "request failed", meta = meta)
+        repo.logDebug(type = type, message = debugFailureMessage(throwable), meta = meta)
         if (state.diagnosticsUploadEnabled) {
             try {
                 repo.uploadRecentDebugLogs()
@@ -1734,8 +1801,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun refreshAll() {
         if (repo.token().isBlank()) return
+        val now = System.currentTimeMillis()
+        if (!refreshAllMutex.tryLock()) return
+        if (now - lastRefreshAllStartedAt < refreshAllCooldownMs) {
+            refreshAllMutex.unlock()
+            return
+        }
+        lastRefreshAllStartedAt = now
         state = state.copy(loading = true, communityStatsLoading = true)
-        runCatching {
+        try {
             repo.syncDeviceTokenIfNeeded()
             val meResp = repo.me()
             val me = meResp.user
@@ -1748,8 +1822,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val feedDays = repo.feedDays()
             val dayStats = runCatching { repo.feedDayStats() }.getOrDefault(emptyList())
             val communityStats = runCatching { repo.communityStats() }.getOrNull()
-            DashboardData(me, meResp.dailyMomentCount, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats, communityStats)
-        }.onSuccess { payload ->
+            val payload = DashboardData(me, meResp.dailyMomentCount, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats, communityStats)
             val me = payload.me
             val dailyMomentCount = payload.dailyMomentCount
             val inviteCode = payload.inviteCode
@@ -1813,9 +1886,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val focus = state.feedFocusDay
             val anchor = if (focus != null && calendarDays.contains(focus)) focus else prompt.day
             loadFeedWindow(anchor, around = 3)
-        }.onFailure {
-            state = state.copy(loading = false, communityStatsLoading = false, message = apiError(it, "Laden fehlgeschlagen"))
-            logApiFailure("dashboard_load_failed", "refresh_all", it)
+        } catch (t: Throwable) {
+            if (isBenignCancellation(t)) {
+                state = state.copy(loading = false, communityStatsLoading = false)
+                return
+            }
+            state = state.copy(loading = false, communityStatsLoading = false, message = apiError(t, "Laden fehlgeschlagen"))
+            logApiFailure("dashboard_load_failed", "refresh_all", t)
+        } finally {
+            refreshAllMutex.unlock()
         }
     }
 
@@ -6000,7 +6079,13 @@ private fun apiError(t: Throwable, fallback: String): String {
             else -> fallback
         }
     }
-    return t.message ?: fallback
+    val root = generateSequence(t) { it.cause }.last()
+    return when (root) {
+        is UnknownHostException -> "Servername konnte nicht aufgeloest werden."
+        is ConnectException -> "Server ist aktuell nicht erreichbar."
+        is SocketTimeoutException -> "Server antwortet zu langsam."
+        else -> t.message ?: fallback
+    }
 }
 
 private fun createTempImageUri(context: Context): Uri {
