@@ -4841,27 +4841,61 @@ private fun CollapsibleSection(
     subtitle: String? = null,
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
+    headerBrush: Brush? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .then(
+                        if (headerBrush != null) {
+                            Modifier.background(headerBrush, shape = MaterialTheme.shapes.medium)
+                        } else {
+                            Modifier
+                        }
+                    )
                     .clickable { onExpandedChange(!expanded) },
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    if (!subtitle.isNullOrBlank()) {
-                        Text(subtitle, color = Color.Gray, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            title,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (headerBrush != null) Color.White else MaterialTheme.colorScheme.onSurface
+                        )
+                        if (!subtitle.isNullOrBlank()) {
+                            Text(
+                                subtitle,
+                                color = if (headerBrush != null) Color.White.copy(alpha = 0.92f) else Color.Gray,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
+                    Text(
+                        if (expanded) "v" else ">",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = if (headerBrush != null) Color.White else MaterialTheme.colorScheme.onSurface
+                    )
                 }
-                Text(if (expanded) "v" else ">", style = MaterialTheme.typography.titleMedium)
             }
             if (expanded) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+                Column(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    content = content
+                )
             }
         }
     }
@@ -4971,9 +5005,12 @@ fun ProfileTab(
     val context = LocalContext.current
     val appPrefs = remember(context) { context.getSharedPreferences("app", Context.MODE_PRIVATE) }
     val expiryPresetKey = remember(username) { "status_expiry_preset_${username.lowercase(Locale.ROOT)}" }
+    val advancedSettingsKey = remember(username) { "profile_advanced_visible_${username.lowercase(Locale.ROOT)}" }
     var showColorPicker by remember { mutableStateOf(false) }
+    var showLogoutConfirm by remember { mutableStateOf(false) }
     var pickerHsv by remember(editableColor) { mutableStateOf(hexToHsv(normalizeHexColor(editableColor))) }
     var themeSliderValue by remember(themeMode) { mutableStateOf(themeMode.toFloat()) }
+    var advancedSettingsVisible by remember(username) { mutableStateOf(appPrefs.getBoolean(advancedSettingsKey, false)) }
     var deleteCandidate by remember { mutableStateOf<PromptPhoto?>(null) }
     var showAllowDownloadWarning by remember { mutableStateOf(false) }
     var updatePulseTick by remember { mutableStateOf(0) }
@@ -5081,27 +5118,17 @@ fun ProfileTab(
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.Top
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            Text("@$username", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                            Text(
-                                "Dein Hub fuer Konto, Hilfe und Updates",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Column(
-                            horizontalAlignment = Alignment.End,
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text("🔥 $streakDays", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Text("🌈 $dailyMomentCount", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        }
+                        Text("@$username", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                        Text("🔥 $streakDays", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text("🌈 $dailyMomentCount", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     }
+                    Text(
+                        "Dein Hub fuer Konto, Hilfe und Updates",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -5122,49 +5149,35 @@ fun ProfileTab(
                         Button(onClick = onShowChangelog, modifier = Modifier.widthIn(min = 56.dp)) { Text("!") }
                         Button(onClick = onShowHelp, modifier = Modifier.widthIn(min = 96.dp)) { Text("Hilfe") }
                     }
-                    val setupTransition = rememberInfiniteTransition(label = "setup-rainbow")
-                    val setupHue by setupTransition.animateFloat(
-                        initialValue = 0f,
-                        targetValue = 360f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 14000, easing = LinearEasing),
-                            repeatMode = RepeatMode.Restart
-                        ),
-                        label = "setup-rainbow-hue"
-                    )
-                    val setupBrush = Brush.horizontalGradient(
-                        listOf(
-                            rainbowColor(setupHue + 0f),
-                            rainbowColor(setupHue + 80f),
-                            rainbowColor(setupHue + 160f),
-                            rainbowColor(setupHue + 240f)
-                        )
-                    )
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(setupBrush, shape = MaterialTheme.shapes.medium),
-                        colors = CardDefaults.cardColors(containerColor = Color.Transparent)
-                    ) {
-                        Button(
-                            onClick = onOpenSetupGuide,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color.Transparent,
-                                contentColor = Color.White
-                            )
-                        ) { Text("Profil-Setup Assistent") }
-                    }
-                    Button(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { Text("Abmelden") }
+                    Button(onClick = { showLogoutConfirm = true }, modifier = Modifier.fillMaxWidth()) { Text("Abmelden") }
                 }
             }
         }
         item {
+            val accountTransition = rememberInfiniteTransition(label = "profile-account-rainbow")
+            val accountHue by accountTransition.animateFloat(
+                initialValue = 0f,
+                targetValue = 360f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 18000, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "profile-account-hue"
+            )
+            val accountBrush = Brush.horizontalGradient(
+                listOf(
+                    rainbowColor(accountHue + 0f),
+                    rainbowColor(accountHue + 75f),
+                    rainbowColor(accountHue + 150f),
+                    rainbowColor(accountHue + 225f)
+                )
+            )
             CollapsibleSection(
                 title = "Profil & Konto",
                 subtitle = "Konto, persoenliche Angaben und Privatsphaere",
                 expanded = sectionExpanded("profile_account"),
-                onExpandedChange = { onProfileSectionExpandedChange("profile_account", it) }
+                onExpandedChange = { onProfileSectionExpandedChange("profile_account", it) },
+                headerBrush = accountBrush
             ) {
                 Column(
                     modifier = Modifier
@@ -5699,178 +5712,189 @@ fun ProfileTab(
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Light", color = if (themeSliderValue < 0.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Dark", color = if (themeSliderValue in 0.5f..1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("OLED", color = if (themeSliderValue > 1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-        item {
-            CollapsibleSection(
-                title = "Upload-Komprimierung",
-                subtitle = "Qualitaet vs. Geschwindigkeit",
-                expanded = sectionExpanded("upload_quality"),
-                onExpandedChange = { onProfileSectionExpandedChange("upload_quality", it) }
-            ) {
-                Card {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("JPEG-Qualitaet: $uploadQuality%")
-                        Slider(
-                            value = uploadQuality.toFloat(),
-                            onValueChange = { onUploadQualityChange(it.toInt()) },
-                            valueRange = 20f..100f
-                        )
-                        Text("Weniger Qualitaet = kleiner und schnellerer Upload")
-                    }
-                }
-            }
-        }
-        item {
-            CollapsibleSection(
-                title = "Moment-Bedingungen",
-                subtitle = "Aktuelle Regeln vom Server",
-                expanded = sectionExpanded("moment_rules"),
-                onExpandedChange = { onProfileSectionExpandedChange("moment_rules", it) }
-            ) {
-                Card {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (promptRules == null) {
-                            Text("Bedingungen werden geladen ...")
-                        } else {
-                            Text("Prompt-Fenster: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
-                            Text("Upload-Fenster: ${promptRules.uploadWindowMinutes} Minuten")
-                            Text("Max Upload: ${if (promptRules.maxUploadBytes <= 0) "Unbegrenzt" else formatBytes(promptRules.maxUploadBytes.toDouble())}")
-                            Text("Zeitzone: ${promptRules.timezone}")
-                        }
-                    }
-                }
-            }
-        }
-        item {
-            CollapsibleSection(
-                title = "App & Verbindung",
-                subtitle = "Versionen und Serverstatus",
-                expanded = sectionExpanded("app_connection"),
-                onExpandedChange = { onProfileSectionExpandedChange("app_connection", it) }
-            ) {
-                Card {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Status: ${if (serverConnected) "Verbunden" else "Nicht verbunden"}")
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("App-Version: $appVersion")
-                            Text(
-                                text = if (updateAvailable) "(nicht aktuell)" else "(aktuell)",
-                                color = if (updateAvailable) Color(0xFFD32F2F) else Color(0xFF2E7D32),
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                        Text("Server-Version: $serverVersion")
-                        Text("Push-Provider: $pushProvider")
-                        Text("Letzter Ping: ${lastPingMs?.let { "${it} ms" } ?: "-"}")
-                        Text("API: $apiBaseUrl")
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
-                    }
-                }
-            }
-        }
-        item {
-            CollapsibleSection(
-                title = "Community-Stats",
-                subtitle = "Heute + letzte 7 Tage",
-                expanded = sectionExpanded("community_stats"),
-                onExpandedChange = { onProfileSectionExpandedChange("community_stats", it) }
-            ) {
-                Card {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (communityStatsLoading && communityStats == null) {
-                            Text("Community-Stats werden geladen ...")
-                        } else if (communityStats == null) {
-                            Text("Noch keine Daten vorhanden")
-                        } else {
-                            Text("Registrierte Nutzer: ${communityStats.registeredUsers}")
-                            Text("Heute aktiv: ${communityStats.activeUsersToday}")
-                            val latest = communityStats.latestActiveUser
-                            Text(
-                                if (latest == null) {
-                                    "Zuletzt aktiv: -"
-                                } else {
-                                    "Zuletzt aktiv: @${latest.username} · ${formatMomentTime(latest.createdAt)}"
-                                }
-                            )
-                            Text("Posts heute: ${communityStats.postsToday}")
-                            Text("Chat-Nachrichten heute: ${communityStats.chatMessagesToday}")
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("Top 5 Reaktionen (7 Tage)", fontWeight = FontWeight.SemiBold)
-                            if (communityStats.topReactions7d.isEmpty()) {
-                                Text("Noch keine Reaktionen in den letzten 7 Tagen")
-                            } else {
-                                communityStats.topReactions7d.take(5).forEachIndexed { index, item ->
-                                    Text("${index + 1}. ${item.emoji}  ${item.count}")
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            val dm = communityStats.dailyMomentParticipation7d
-                            Text("Daily-Moment-Quote (7 Tage): ${dm.participants}/${dm.totalUsers} Nutzer (${dm.percent}%)")
-                        }
-                    }
-                }
-            }
-        }
-        item {
-            CollapsibleSection(
-                title = "Debug & Diagnose",
-                subtitle = "Fehlerlogs lokal speichern, exportieren und optional hochladen",
-                expanded = sectionExpanded("debug_diagnose"),
-                onExpandedChange = { onProfileSectionExpandedChange("debug_diagnose", it) }
-            ) {
-                SettingsSubsection(
-                    title = "Diagnose",
-                    subtitle = "Nur wenn du Probleme nachvollziehen oder uns Logs schicken willst."
-                ) {
-                    SettingsToggleRow(
-                        label = "Diagnose-Upload aktivieren",
-                        checked = diagnosticsUploadEnabled,
-                        onCheckedChange = onDiagnosticsUploadEnabledChange,
-                        supportingText = "Wenn aktiviert, werden Diagnose-Logs bei App-Start und bei neuen Fehlern automatisch an den Server geschickt."
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(onClick = onRefreshDebugLogs, modifier = Modifier.weight(1f)) { Text("Letzte Fehler") }
-                        Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) { Text("Diagnose exportieren") }
-                    }
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier.padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            if (debugLogs.isEmpty()) {
-                                Text("Keine lokalen Fehlereintraege vorhanden")
-                            } else {
-                                debugLogs.take(8).forEach { row ->
-                                    Text("[${row.createdAt.take(16)}] ${row.type}", fontWeight = FontWeight.SemiBold)
-                                    Text(row.message, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    if (row.meta.isNotBlank()) {
-                                        Text(
-                                            row.meta,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+                  ) {
+                      Text("Light", color = if (themeSliderValue < 0.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                      Text("Dark", color = if (themeSliderValue in 0.5f..1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                      Text("OLED", color = if (themeSliderValue > 1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                  }
+                  SettingsToggleRow(
+                      label = "Erweiterte Einstellungen anzeigen",
+                      checked = advancedSettingsVisible,
+                      onCheckedChange = {
+                          advancedSettingsVisible = it
+                          appPrefs.edit().putBoolean(advancedSettingsKey, it).apply()
+                      },
+                      supportingText = "Zeigt technische und selten benoetigte Bereiche wie Upload, Verbindung, Community-Stats und Diagnose."
+                  )
+              }
+          }
+          if (advancedSettingsVisible) {
+              item {
+                  CollapsibleSection(
+                      title = "Upload-Komprimierung",
+                      subtitle = "Qualitaet vs. Geschwindigkeit",
+                      expanded = sectionExpanded("upload_quality"),
+                      onExpandedChange = { onProfileSectionExpandedChange("upload_quality", it) }
+                  ) {
+                      Card {
+                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                              Text("JPEG-Qualitaet: $uploadQuality%")
+                              Slider(
+                                  value = uploadQuality.toFloat(),
+                                  onValueChange = { onUploadQualityChange(it.toInt()) },
+                                  valueRange = 20f..100f
+                              )
+                              Text("Weniger Qualitaet = kleiner und schnellerer Upload")
+                          }
+                      }
+                  }
+              }
+              item {
+                  CollapsibleSection(
+                      title = "Moment-Bedingungen",
+                      subtitle = "Aktuelle Regeln vom Server",
+                      expanded = sectionExpanded("moment_rules"),
+                      onExpandedChange = { onProfileSectionExpandedChange("moment_rules", it) }
+                  ) {
+                      Card {
+                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                              if (promptRules == null) {
+                                  Text("Bedingungen werden geladen ...")
+                              } else {
+                                  Text("Prompt-Fenster: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
+                                  Text("Upload-Fenster: ${promptRules.uploadWindowMinutes} Minuten")
+                                  Text("Max Upload: ${if (promptRules.maxUploadBytes <= 0) "Unbegrenzt" else formatBytes(promptRules.maxUploadBytes.toDouble())}")
+                                  Text("Zeitzone: ${promptRules.timezone}")
+                              }
+                          }
+                      }
+                  }
+              }
+              item {
+                  CollapsibleSection(
+                      title = "App & Verbindung",
+                      subtitle = "Versionen und Serverstatus",
+                      expanded = sectionExpanded("app_connection"),
+                      onExpandedChange = { onProfileSectionExpandedChange("app_connection", it) }
+                  ) {
+                      Card {
+                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                              Text("Status: ${if (serverConnected) "Verbunden" else "Nicht verbunden"}")
+                              Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                  Text("App-Version: $appVersion")
+                                  Text(
+                                      text = if (updateAvailable) "(nicht aktuell)" else "(aktuell)",
+                                      color = if (updateAvailable) Color(0xFFD32F2F) else Color(0xFF2E7D32),
+                                      fontWeight = FontWeight.SemiBold
+                                  )
+                              }
+                              Text("Server-Version: $serverVersion")
+                              Text("Push-Provider: $pushProvider")
+                              Text("Letzter Ping: ${lastPingMs?.let { "${it} ms" } ?: "-"}")
+                              Text("API: $apiBaseUrl")
+                              Spacer(modifier = Modifier.height(6.dp))
+                              Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
+                          }
+                      }
+                  }
+              }
+              item {
+                  CollapsibleSection(
+                      title = "Community-Stats",
+                      subtitle = "Heute + letzte 7 Tage",
+                      expanded = sectionExpanded("community_stats"),
+                      onExpandedChange = { onProfileSectionExpandedChange("community_stats", it) }
+                  ) {
+                      Card {
+                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                              if (communityStatsLoading && communityStats == null) {
+                                  Text("Community-Stats werden geladen ...")
+                              } else if (communityStats == null) {
+                                  Text("Noch keine Daten vorhanden")
+                              } else {
+                                  Text("Registrierte Nutzer: ${communityStats.registeredUsers}")
+                                  Text("Heute aktiv: ${communityStats.activeUsersToday}")
+                                  val latest = communityStats.latestActiveUser
+                                  Text(
+                                      if (latest == null) {
+                                          "Zuletzt aktiv: -"
+                                      } else {
+                                          "Zuletzt aktiv: @${latest.username} - ${formatMomentTime(latest.createdAt)}"
+                                      }
+                                  )
+                                  Text("Posts heute: ${communityStats.postsToday}")
+                                  Text("Chat-Nachrichten heute: ${communityStats.chatMessagesToday}")
+                                  Spacer(modifier = Modifier.height(4.dp))
+                                  Text("Top 5 Reaktionen (7 Tage)", fontWeight = FontWeight.SemiBold)
+                                  if (communityStats.topReactions7d.isEmpty()) {
+                                      Text("Noch keine Reaktionen in den letzten 7 Tagen")
+                                  } else {
+                                      communityStats.topReactions7d.take(5).forEachIndexed { index, item ->
+                                          Text("${index + 1}. ${item.emoji}  ${item.count}")
+                                      }
+                                  }
+                                  Spacer(modifier = Modifier.height(4.dp))
+                                  val dm = communityStats.dailyMomentParticipation7d
+                                  Text("Daily-Moment-Quote (7 Tage): ${dm.participants}/${dm.totalUsers} Nutzer (${dm.percent}%)")
+                              }
+                          }
+                      }
+                  }
+              }
+              item {
+                  CollapsibleSection(
+                      title = "Debug & Diagnose",
+                      subtitle = "Fehlerlogs lokal speichern, exportieren und optional hochladen",
+                      expanded = sectionExpanded("debug_diagnose"),
+                      onExpandedChange = { onProfileSectionExpandedChange("debug_diagnose", it) }
+                  ) {
+                      SettingsSubsection(
+                          title = "Diagnose",
+                          subtitle = "Nur wenn du Probleme nachvollziehen oder uns Logs schicken willst."
+                      ) {
+                          SettingsToggleRow(
+                              label = "Diagnose-Upload aktivieren",
+                              checked = diagnosticsUploadEnabled,
+                              onCheckedChange = onDiagnosticsUploadEnabledChange,
+                              supportingText = "Wenn aktiviert, werden Diagnose-Logs bei App-Start und bei neuen Fehlern automatisch an den Server geschickt."
+                          )
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.spacedBy(8.dp)
+                          ) {
+                              Button(onClick = onRefreshDebugLogs, modifier = Modifier.weight(1f)) { Text("Letzte Fehler") }
+                              Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) { Text("Diagnose exportieren") }
+                          }
+                          Card(modifier = Modifier.fillMaxWidth()) {
+                              Column(
+                                  modifier = Modifier.padding(10.dp),
+                                  verticalArrangement = Arrangement.spacedBy(6.dp)
+                              ) {
+                                  if (debugLogs.isEmpty()) {
+                                      Text("Keine lokalen Fehlereintraege vorhanden")
+                                  } else {
+                                      debugLogs.take(8).forEach { row ->
+                                          Text("[${row.createdAt.take(16)}] ${row.type}", fontWeight = FontWeight.SemiBold)
+                                          Text(row.message, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                          if (row.meta.isNotBlank()) {
+                                              Text(
+                                                  row.meta,
+                                                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                  maxLines = 1,
+                                                  overflow = TextOverflow.Ellipsis
+                                              )
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+      }
 
-    if (showColorPicker) {
+      if (showColorPicker) {
         AlertDialog(
             onDismissRequest = { showColorPicker = false },
             confirmButton = {
@@ -5942,8 +5966,8 @@ fun ProfileTab(
         )
     }
 
-    if (showAllowDownloadWarning) {
-        AlertDialog(
+      if (showAllowDownloadWarning) {
+          AlertDialog(
             onDismissRequest = { showAllowDownloadWarning = false },
             confirmButton = {
                 TextButton(
@@ -5960,8 +5984,26 @@ fun ProfileTab(
             text = {
                 Text("Wenn du das aktivierst, koennen andere Benutzer deine Bilder herunterladen.")
             }
-        )
-    }
+          )
+      }
+      if (showLogoutConfirm) {
+          AlertDialog(
+              onDismissRequest = { showLogoutConfirm = false },
+              confirmButton = {
+                  TextButton(
+                      onClick = {
+                          showLogoutConfirm = false
+                          onLogout()
+                      }
+                  ) { Text("Abmelden") }
+              },
+              dismissButton = {
+                  TextButton(onClick = { showLogoutConfirm = false }) { Text("Abbrechen") }
+              },
+              title = { Text("Wirklich abmelden?") },
+              text = { Text("Willst du dich wirklich abmelden?") }
+          )
+      }
 }
 
 private fun formatDayLabel(day: String): String {
