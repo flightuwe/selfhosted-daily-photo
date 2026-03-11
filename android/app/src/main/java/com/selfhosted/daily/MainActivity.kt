@@ -3214,6 +3214,7 @@ fun AppScreen(vm: MainVm) {
                     editableUsername = profileUsername,
                     editableColor = profileColor,
                     appVersion = BuildConfig.VERSION_NAME,
+                    updateAvailable = state.updateAvailable,
                     serverVersion = state.serverVersion,
                     pushProvider = state.pushProvider,
                     apiBaseUrl = BuildConfig.API_BASE_URL,
@@ -4375,6 +4376,7 @@ fun ProfileTab(
     editableUsername: String,
     editableColor: String,
     appVersion: String,
+    updateAvailable: Boolean,
     serverVersion: String,
     pushProvider: String,
     apiBaseUrl: String,
@@ -5152,7 +5154,14 @@ fun ProfileTab(
                 Card {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("Status: ${if (serverConnected) "Verbunden" else "Nicht verbunden"}")
-                        Text("App-Version: $appVersion")
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("App-Version: $appVersion")
+                            Text(
+                                text = if (updateAvailable) "(nicht aktuell)" else "(aktuell)",
+                                color = if (updateAvailable) Color(0xFFD32F2F) else Color(0xFF2E7D32),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         Text("Server-Version: $serverVersion")
                         Text("Push-Provider: $pushProvider")
                         Text("Letzter Ping: ${lastPingMs?.let { "${it} ms" } ?: "-"}")
