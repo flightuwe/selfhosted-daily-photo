@@ -281,6 +281,7 @@ data class FeedItem(
     val isEarly: Boolean = false,
     val isLate: Boolean = false,
     val capsuleLocked: Boolean = false,
+    val capsuleReleased: Boolean = false,
     val photo: PromptPhoto,
     val user: User,
     val reactions: List<ReactionCount>? = null,
@@ -4139,7 +4140,7 @@ fun FeedTab(
             .map { it.day to it.item }
             .filter { (day, item) ->
                 day != todayDay &&
-                    !item.photo.capsuleMode.isNullOrBlank()
+                    item.capsuleReleased
             }
             .map { (day, item) -> day to item.photo.id }
             .distinct()

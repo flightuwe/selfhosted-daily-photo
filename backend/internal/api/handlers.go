@@ -1059,6 +1059,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
     now := time.Now().In(s.Location)
 	for _, p := range photos {
         capsuleLocked := p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt)
+        capsuleReleased := strings.TrimSpace(p.CapsuleMode) != "" && !capsuleLocked
 		isEarly := false
 		isLate := false
 		if prompt.TriggeredAt != nil && p.CreatedAt.Before(*prompt.TriggeredAt) {
@@ -1079,6 +1080,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 			"isEarly": isEarly,
 			"isLate":  isLate,
             "capsuleLocked": capsuleLocked,
+            "capsuleReleased": capsuleReleased,
 			"photo":   s.photoJSON(p),
 			"user": s.userPublicJSON(adminUser.ID, p.User),
 			"reactions":       reactions,
@@ -1146,6 +1148,7 @@ func (s *Server) handleFeed(c *gin.Context) {
     now := time.Now().In(s.Location)
 	for _, p := range photos {
         capsuleLocked := p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt)
+        capsuleReleased := strings.TrimSpace(p.CapsuleMode) != "" && !capsuleLocked
         if p.CapsulePrivate && p.UserID != user.ID {
             continue
         }
@@ -1169,6 +1172,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 			"isEarly":    isEarly,
 			"isLate":     isLate,
             "capsuleLocked": capsuleLocked,
+            "capsuleReleased": capsuleReleased,
 			"photo":      s.photoJSON(p),
 			"user":      s.userPublicJSON(user.ID, p.User),
 			"reactions":      reactions,
