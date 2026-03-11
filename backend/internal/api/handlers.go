@@ -90,7 +90,8 @@ func (s *Server) Router() *gin.Engine {
             protected.GET("/feed/day-stats", s.handleFeedDayStats)
             protected.GET("/community/stats", s.handleCommunityStats)
             protected.GET("/chat", s.handleChatList)
-			protected.POST("/chat", s.handleChatCreate)
+            protected.POST("/chat", s.handleChatCreate)
+            protected.DELETE("/chat/:id", s.handleDeleteChatMessage)
 			protected.GET("/photos/:id/interactions", s.handlePhotoInteractions)
 			protected.POST("/photos/:id/reaction", s.handlePhotoReaction)
 			protected.POST("/photos/:id/comments", s.handlePhotoComment)
@@ -2357,6 +2358,41 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
 		out = append(out, item)
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) handleDeleteChatMessage(c *gin.Context) {
+    user, _ := userFromContext(c)
+    chatID, err := parseUintParam(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid chat id"})
+        return
+    }
+
+    var msg models.ChatMessage
+    if err := s.DB.First(&msg, chatID).Error; err != nil {
+        if errors.Is(err, gorm.ErrRecordNotFound) {
+            c.JSON(http.StatusNotFound, gin.H{"error": "message not found"})
+            return
+        }
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+
+    if msg.UserID != user.ID {
+        c.JSON(http.StatusForbidden, gin.H{"error": "not allowed"})
+        return
+    }
+    if defaultIfBlank(strings.TrimSpace(msg.Source), "user") != "user" {
+        c.JSON(http.StatusForbidden, gin.H{"error": "message cannot be deleted"})
+        return
+    }
+
+    if err := s.DB.Delete(&msg).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"ok": true, "deletedId": msg.ID})
 }
 
 func (s *Server) handleCommunityStats(c *gin.Context) {

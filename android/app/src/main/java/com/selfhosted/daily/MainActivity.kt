@@ -247,6 +247,10 @@ data class ChatSendResponse(
     val reportStatus: String? = null,
     val message: String? = null
 )
+data class DeleteChatResponse(
+    val ok: Boolean = false,
+    val deletedId: Long? = null
+)
 data class PromptPhoto(
     val id: Long,
     val day: String,
@@ -539,6 +543,9 @@ interface Api {
 
     @POST("chat")
     suspend fun sendChat(@Header("Authorization") token: String, @Body body: ChatMessageRequest): ChatSendResponse
+
+    @DELETE("chat/{id}")
+    suspend fun deleteChatMessage(@Header("Authorization") token: String, @Path("id") id: Long): DeleteChatResponse
 
     @POST("debug/client-log")
     suspend fun uploadClientDebugLog(
@@ -1010,6 +1017,9 @@ class AppRepo(private val api: Api, private val context: Context) {
             ChatMessageRequest(body = body, clientMessageId = clientMessageId)
         )
     }
+
+    suspend fun deleteChatMessage(id: Long): DeleteChatResponse =
+        api.deleteChatMessage("Bearer ${token()}", id)
 
     suspend fun photoInteractions(photoId: Long): PhotoInteractionsResponse =
         api.photoInteractions("Bearer ${token()}", photoId)
@@ -2159,6 +2169,30 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             state = state.copy(chatSending = false)
             chatSendMutex.unlock()
         }
+    }
+
+    suspend fun deleteChatMessage(id: Long): Boolean {
+        if (id <= 0L) return false
+        return runCatching { repo.deleteChatMessage(id) }
+            .map {
+                val deletedId = it.deletedId ?: id
+                val updatedChat = state.chat.filterNot { item -> item.id == deletedId }
+                val meId = state.user?.id
+                val latestOtherChat = latestOtherChatMillis(updatedChat, meId)
+                val seenChat = repo.lastSeenOtherChatMillis()
+                state = state.copy(
+                    chat = updatedChat,
+                    chatHasOtherMessages = meId != null && updatedChat.any { item -> item.user.id != meId },
+                    chatHasUnreadMessages = latestOtherChat > seenChat,
+                    message = "Nachricht geloescht"
+                )
+                true
+            }
+            .getOrElse {
+                state = state.copy(message = apiError(it, "Nachricht loeschen fehlgeschlagen"))
+                logApiFailure("chat_delete_failed", "/api/chat/:id", it, "chatId=$id")
+                false
+            }
     }
 
     suspend fun loadPhotoInteractions(photoId: Long) {
@@ -3385,10 +3419,14 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
 
                 AppTab.CHAT -> ChatTab(
                     items = state.chat,
+                    meId = state.user?.id,
                     input = chatInput,
                     sending = state.chatSending,
                     onInput = { chatInput = it },
                     onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
+                    onDeleteMessage = { messageId ->
+                        scope.launch { vm.deleteChatMessage(messageId) }
+                    },
                     onSend = {
                         val body = chatInput
                         if (body.isNotBlank() && !state.chatSending) {
@@ -4491,13 +4529,16 @@ fun CalendarTab(
 @Composable
 fun ChatTab(
     items: List<ChatItem>,
+    meId: Long?,
     input: String,
     sending: Boolean,
     onInput: (String) -> Unit,
     onOpenUserProfile: (Long) -> Unit,
+    onDeleteMessage: (Long) -> Unit,
     onSend: () -> Unit
 ) {
     val listState = rememberLazyListState()
+    var deleteCandidate by remember { mutableStateOf<ChatItem?>(null) }
     val rows = remember(items) {
         buildList<ChatRow> {
             var lastDay = ""
@@ -4539,7 +4580,34 @@ fun ChatTab(
                     }
                     is ChatRow.MessageItem -> {
                         val item = row.item
-                        Card {
+                        val canDelete = meId != null && item.user.id == meId && item.source == "user"
+                        val holdModifier = if (canDelete) {
+                            Modifier.pointerInput(item.id) {
+                                detectTapGestures(
+                                    onPress = {
+                                        kotlinx.coroutines.coroutineScope {
+                                            var longPressTriggered = false
+                                            val holdJob = launch {
+                                                delay(3000)
+                                                longPressTriggered = true
+                                                deleteCandidate = item
+                                            }
+                                            try {
+                                                tryAwaitRelease()
+                                            } finally {
+                                                holdJob.cancel()
+                                            }
+                                            if (longPressTriggered) {
+                                                return@coroutineScope
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        } else {
+                            Modifier
+                        }
+                        Card(modifier = holdModifier) {
                             Column(modifier = Modifier.padding(10.dp)) {
                                 Text(
                                     item.user.username,
@@ -4553,6 +4621,28 @@ fun ChatTab(
                     }
                 }
             }
+        }
+        deleteCandidate?.let { candidate ->
+            AlertDialog(
+                onDismissRequest = { deleteCandidate = null },
+                title = { Text("Nachricht loeschen?") },
+                text = { Text("Willst du diese Nachricht wirklich loeschen?") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            deleteCandidate = null
+                            onDeleteMessage(candidate.id)
+                        }
+                    ) {
+                        Text("Loeschen")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deleteCandidate = null }) {
+                        Text("Abbrechen")
+                    }
+                }
+            )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedTextField(
