@@ -10,6 +10,8 @@ type User struct {
     FavoriteColor string   `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
     ChatPushEnabled bool   `gorm:"default:false" json:"chatPushEnabled"`
     InviteRegistrationPushEnabled bool `gorm:"default:false" json:"inviteRegistrationPushEnabled"`
+    PhotoReactionPushEnabled bool `gorm:"default:false" json:"photoReactionPushEnabled"`
+    PhotoCommentPushEnabled bool `gorm:"default:false" json:"photoCommentPushEnabled"`
     AllowPhotoDownload bool `gorm:"default:false" json:"allowPhotoDownload"`
     AvatarPath   string    `gorm:"size:255" json:"avatarUrl"`
     Bio          string    `gorm:"size:280" json:"bio"`

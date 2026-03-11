@@ -538,6 +538,8 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
     var req struct {
         ChatPushEnabled               *bool `json:"chatPushEnabled"`
         InviteRegistrationPushEnabled *bool `json:"inviteRegistrationPushEnabled"`
+        PhotoReactionPushEnabled      *bool `json:"photoReactionPushEnabled"`
+        PhotoCommentPushEnabled       *bool `json:"photoCommentPushEnabled"`
         AllowPhotoDownload            *bool `json:"allowPhotoDownload"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
@@ -550,6 +552,12 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
     }
     if req.InviteRegistrationPushEnabled != nil {
         updates["invite_registration_push_enabled"] = *req.InviteRegistrationPushEnabled
+    }
+    if req.PhotoReactionPushEnabled != nil {
+        updates["photo_reaction_push_enabled"] = *req.PhotoReactionPushEnabled
+    }
+    if req.PhotoCommentPushEnabled != nil {
+        updates["photo_comment_push_enabled"] = *req.PhotoCommentPushEnabled
     }
     if req.AllowPhotoDownload != nil {
         updates["allow_photo_download"] = *req.AllowPhotoDownload
@@ -3240,6 +3248,7 @@ func (s *Server) handlePhotoReaction(c *gin.Context) {
 
 	var existing models.PhotoReaction
 	findErr := s.DB.Where("photo_id = ? AND user_id = ?", photoID, user.ID).First(&existing).Error
+    shouldNotify := false
 	if findErr == nil {
 		if existing.Emoji == emoji {
 			if err := s.DB.Delete(&existing).Error; err != nil {
@@ -3251,6 +3260,7 @@ func (s *Server) handlePhotoReaction(c *gin.Context) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "reaction update failed"})
 				return
 			}
+            shouldNotify = true
 		}
 	} else if errors.Is(findErr, gorm.ErrRecordNotFound) {
 		row := models.PhotoReaction{
@@ -3262,6 +3272,7 @@ func (s *Server) handlePhotoReaction(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "reaction create failed"})
 			return
 		}
+        shouldNotify = true
 	} else {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reaction query failed"})
 		return
@@ -3272,6 +3283,9 @@ func (s *Server) handlePhotoReaction(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
+    if shouldNotify {
+        s.notifyPhotoReaction(user, photo)
+    }
 	c.JSON(http.StatusOK, out)
 }
 
@@ -3320,6 +3334,7 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
+    s.notifyPhotoComment(user, photo)
 	c.JSON(http.StatusCreated, out)
 }
 
@@ -3537,54 +3552,58 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
     if strings.TrimSpace(u.AvatarPath) != "" {
         avatarURL = s.avatarURL(u.AvatarPath)
     }
-    return gin.H{
-        "id":                 u.ID,
-        "username":           u.Username,
-        "isAdmin":            u.IsAdmin,
-        "favoriteColor":      defaultColor(u.FavoriteColor),
-        "chatPushEnabled":    u.ChatPushEnabled,
-        "inviteRegistrationPushEnabled": u.InviteRegistrationPushEnabled,
-        "allowPhotoDownload": u.AllowPhotoDownload,
-        "avatarUrl":          avatarURL,
-        "bio":                strings.TrimSpace(u.Bio),
-        "statusText":         strings.TrimSpace(u.StatusText),
-        "statusEmoji":        strings.TrimSpace(u.StatusEmoji),
-        "statusExpiresAt":    u.StatusExpiresAt,
-        "profileVisible":     u.ProfileVisible,
-        "avatarVisible":      u.AvatarVisible,
-        "bioVisible":         u.BioVisible,
-        "statusVisible":      u.StatusVisible,
-        "quietHoursEnabled":  u.QuietHoursEnabled,
-        "quietHoursStart":    defaultIfBlank(u.QuietHoursStart, "22:00"),
-        "quietHoursEnd":      defaultIfBlank(u.QuietHoursEnd, "07:00"),
-        "createdAt":          u.CreatedAt,
-    }
+	return gin.H{
+		"id":                            u.ID,
+		"username":                      u.Username,
+		"isAdmin":                       u.IsAdmin,
+		"favoriteColor":                 defaultColor(u.FavoriteColor),
+		"chatPushEnabled":               u.ChatPushEnabled,
+		"inviteRegistrationPushEnabled": u.InviteRegistrationPushEnabled,
+		"photoReactionPushEnabled":      u.PhotoReactionPushEnabled,
+		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
+		"allowPhotoDownload":            u.AllowPhotoDownload,
+		"avatarUrl":                     avatarURL,
+		"bio":                           strings.TrimSpace(u.Bio),
+		"statusText":                    strings.TrimSpace(u.StatusText),
+		"statusEmoji":                   strings.TrimSpace(u.StatusEmoji),
+		"statusExpiresAt":               u.StatusExpiresAt,
+		"profileVisible":                u.ProfileVisible,
+		"avatarVisible":                 u.AvatarVisible,
+		"bioVisible":                    u.BioVisible,
+		"statusVisible":                 u.StatusVisible,
+		"quietHoursEnabled":             u.QuietHoursEnabled,
+		"quietHoursStart":               defaultIfBlank(u.QuietHoursStart, "22:00"),
+		"quietHoursEnd":                 defaultIfBlank(u.QuietHoursEnd, "07:00"),
+		"createdAt":                     u.CreatedAt,
+	}
 }
 
 func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
     own := viewerID == u.ID
-    out := gin.H{
-        "id":                          u.ID,
-        "username":                    u.Username,
-        "isAdmin":                     u.IsAdmin,
-        "favoriteColor":               defaultColor(u.FavoriteColor),
-        "chatPushEnabled":             false,
-        "inviteRegistrationPushEnabled": false,
-        "allowPhotoDownload":          u.AllowPhotoDownload,
-        "avatarUrl":                   "",
-        "bio":                         "",
-        "statusText":                  "",
-        "statusEmoji":                 "",
-        "statusExpiresAt":             nil,
-        "profileVisible":              false,
-        "avatarVisible":               false,
-        "bioVisible":                  false,
-        "statusVisible":               false,
-        "quietHoursEnabled":           false,
-        "quietHoursStart":             "22:00",
-        "quietHoursEnd":               "07:00",
-        "createdAt":                   u.CreatedAt,
-    }
+	out := gin.H{
+		"id":                            u.ID,
+		"username":                      u.Username,
+		"isAdmin":                       u.IsAdmin,
+		"favoriteColor":                 defaultColor(u.FavoriteColor),
+		"chatPushEnabled":               false,
+		"inviteRegistrationPushEnabled": false,
+		"photoReactionPushEnabled":      false,
+		"photoCommentPushEnabled":       false,
+		"allowPhotoDownload":            u.AllowPhotoDownload,
+		"avatarUrl":                     "",
+		"bio":                           "",
+		"statusText":                    "",
+		"statusEmoji":                   "",
+		"statusExpiresAt":               nil,
+		"profileVisible":                false,
+		"avatarVisible":                 false,
+		"bioVisible":                    false,
+		"statusVisible":                 false,
+		"quietHoursEnabled":             false,
+		"quietHoursStart":               "22:00",
+		"quietHoursEnd":                 "07:00",
+		"createdAt":                     u.CreatedAt,
+	}
     now := time.Now().In(s.Location)
     if own {
         for k, v := range s.userOwnJSON(u) {
@@ -4013,6 +4032,80 @@ func (s *Server) notifyPostCreated(author models.User, photo models.Photo) {
         Title:  "Neuer Beitrag",
         Body:   body,
         Type:   "post",
+        Action: "open_feed",
+    })
+	s.recordPushResult(sendResult, sendErr)
+	s.removeInvalidTokens(sendResult.InvalidTokens)
+}
+
+func (s *Server) reactionNotificationTokens(ownerID, actorID uint) []string {
+    var rows []models.DeviceToken
+    _ = s.DB.Table("device_tokens").
+        Select("device_tokens.token").
+        Joins("JOIN users ON users.id = device_tokens.user_id").
+        Where("users.id = ? AND users.photo_reaction_push_enabled = ? AND users.id <> ?", ownerID, true, actorID).
+        Find(&rows).Error
+    tokens := make([]string, 0, len(rows))
+    for _, t := range rows {
+        tokens = append(tokens, t.Token)
+    }
+    return tokens
+}
+
+func (s *Server) commentNotificationTokens(ownerID, actorID uint) []string {
+    var rows []models.DeviceToken
+    _ = s.DB.Table("device_tokens").
+        Select("device_tokens.token").
+        Joins("JOIN users ON users.id = device_tokens.user_id").
+        Where("users.id = ? AND users.photo_comment_push_enabled = ? AND users.id <> ?", ownerID, true, actorID).
+        Find(&rows).Error
+    tokens := make([]string, 0, len(rows))
+    for _, t := range rows {
+        tokens = append(tokens, t.Token)
+    }
+    return tokens
+}
+
+func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
+    if photo.UserID == 0 || photo.UserID == actor.ID {
+        return
+    }
+    now := time.Now().In(s.Location)
+    if photo.CapsulePrivate || (photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt)) {
+        return
+    }
+    tokens := s.reactionNotificationTokens(photo.UserID, actor.ID)
+    if len(tokens) == 0 {
+        return
+    }
+    body := fmt.Sprintf("%s hat auf deinen Beitrag reagiert", actor.Username)
+    sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+        Title:  "Neue Reaktion",
+        Body:   body,
+        Type:   "photo_reaction",
+        Action: "open_feed",
+    })
+    s.recordPushResult(sendResult, sendErr)
+    s.removeInvalidTokens(sendResult.InvalidTokens)
+}
+
+func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo) {
+    if photo.UserID == 0 || photo.UserID == actor.ID {
+        return
+    }
+    now := time.Now().In(s.Location)
+    if photo.CapsulePrivate || (photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt)) {
+        return
+    }
+    tokens := s.commentNotificationTokens(photo.UserID, actor.ID)
+    if len(tokens) == 0 {
+        return
+    }
+    body := fmt.Sprintf("%s hat deinen Beitrag kommentiert", actor.Username)
+    sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+        Title:  "Neuer Kommentar",
+        Body:   body,
+        Type:   "photo_comment",
         Action: "open_feed",
     })
     s.recordPushResult(sendResult, sendErr)
