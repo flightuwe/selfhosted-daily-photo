@@ -82,6 +82,8 @@ func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
 	if action == "" {
 		action = "open_app"
 	}
+	day := strings.TrimSpace(message.Day)
+	photoID := message.PhotoID
 	workers := 8
 	if len(cleaned) < workers {
 		workers = len(cleaned)
@@ -92,6 +94,17 @@ func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
 	var wg sync.WaitGroup
 
 	sendOne := func(t string) (bool, error) {
+		data := map[string]string{
+			"type":   msgType,
+			"action": action,
+			"body":   body,
+		}
+		if day != "" {
+			data["day"] = day
+		}
+		if photoID > 0 {
+			data["photoId"] = fmt.Sprintf("%d", photoID)
+		}
 		payload := map[string]any{
 			"message": map[string]any{
 				"token": t,
@@ -99,11 +112,7 @@ func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
 					"title": title,
 					"body":  body,
 				},
-				"data": map[string]string{
-					"type":   msgType,
-					"action": action,
-					"body":   body,
-				},
+				"data":   data,
 				"android": map[string]any{
 					"priority": "HIGH",
 				},

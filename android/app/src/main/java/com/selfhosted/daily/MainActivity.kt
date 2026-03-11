@@ -60,6 +60,9 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.pullrefresh.PullRefreshIndicator
 import androidx.compose.material.pullrefresh.pullRefresh
@@ -71,6 +74,8 @@ import androidx.compose.material3.BottomSheetScaffold
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -94,6 +99,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -114,6 +120,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
@@ -178,9 +186,18 @@ import kotlin.random.Random
 
 const val EXTRA_LAUNCH_ACTION = "daily_launch_action"
 const val EXTRA_LAUNCH_TYPE = "daily_launch_type"
+const val EXTRA_LAUNCH_DAY = "daily_launch_day"
+const val EXTRA_LAUNCH_PHOTO_ID = "daily_launch_photo_id"
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 enum class AuthMode { LOGIN, REGISTER }
+
+data class PendingLaunch(
+    val action: String = "",
+    val type: String = "",
+    val targetDay: String = "",
+    val targetPhotoId: Long? = null
+)
 
 data class User(
     val id: Long,
@@ -908,21 +925,36 @@ class AppRepo(private val api: Api, private val context: Context) {
     fun captureLaunchIntent(intent: Intent?) {
         val action = intent?.getStringExtra(EXTRA_LAUNCH_ACTION)?.trim().orEmpty()
         val type = intent?.getStringExtra(EXTRA_LAUNCH_TYPE)?.trim().orEmpty()
-        if (action.isBlank() && type.isBlank()) return
+        val day = intent?.getStringExtra(EXTRA_LAUNCH_DAY)?.trim().orEmpty()
+        val photoId = intent?.extras?.let { extras ->
+            when {
+                extras.containsKey(EXTRA_LAUNCH_PHOTO_ID) -> runCatching { extras.getLong(EXTRA_LAUNCH_PHOTO_ID) }.getOrNull()
+                else -> null
+            }
+        }?.takeIf { it > 0L }
+        if (action.isBlank() && type.isBlank() && day.isBlank() && photoId == null) return
         prefs.edit()
             .putString("pending_launch_action", action)
             .putString("pending_launch_type", type)
+            .putString("pending_launch_day", day)
+            .apply {
+                if (photoId != null) putLong("pending_launch_photo_id", photoId) else remove("pending_launch_photo_id")
+            }
             .apply()
     }
 
-    fun consumePendingLaunchAction(): Pair<String, String> {
+    fun consumePendingLaunchAction(): PendingLaunch {
         val action = prefs.getString("pending_launch_action", "").orEmpty()
         val type = prefs.getString("pending_launch_type", "").orEmpty()
+        val day = prefs.getString("pending_launch_day", "").orEmpty()
+        val photoId = if (prefs.contains("pending_launch_photo_id")) prefs.getLong("pending_launch_photo_id", 0L).takeIf { it > 0L } else null
         prefs.edit()
             .remove("pending_launch_action")
             .remove("pending_launch_type")
+            .remove("pending_launch_day")
+            .remove("pending_launch_photo_id")
             .apply()
-        return action to type
+        return PendingLaunch(action = action, type = type, targetDay = day, targetPhotoId = photoId)
     }
 
     fun randomStartupChatLine(chatItems: List<ChatItem>): String {
@@ -2776,6 +2808,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
+    fun setMessage(message: String) {
+        state = state.copy(message = message)
+    }
+
     private fun latestOtherChatMillis(items: List<ChatItem>, meId: Long?): Long {
         if (meId == null) return 0L
         var latest = 0L
@@ -2804,28 +2840,56 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private suspend fun applyPendingLaunchNavigation(prompt: PromptResponse, availableDays: List<String>) {
-        val (actionRaw, typeRaw) = repo.consumePendingLaunchAction()
-        val action = actionRaw.trim().lowercase()
-        val type = typeRaw.trim().lowercase()
-        if (action.isBlank() && type.isBlank()) return
+        val pending = repo.consumePendingLaunchAction()
+        val action = pending.action.trim().lowercase()
+        val type = pending.type.trim().lowercase()
+        val targetDay = pending.targetDay.trim()
+        val targetPhotoId = pending.targetPhotoId
+        if (action.isBlank() && type.isBlank() && targetDay.isBlank() && targetPhotoId == null) return
 
-        if (isActiveMomentWindow(prompt)) {
-            state = state.copy(activeTab = AppTab.CAMERA)
-            return
+        fun openCamera(message: String? = null) {
+            state = state.copy(
+                activeTab = AppTab.CAMERA,
+                message = message ?: state.message
+            )
+        }
+
+        fun resolveFeedDay(): String? {
+            if (targetDay.isNotBlank() && availableDays.contains(targetDay)) return targetDay
+            if (targetDay == prompt.day && !prompt.hasPosted) return null
+            if (prompt.hasPosted && availableDays.contains(prompt.day)) return prompt.day
+            return availableDays.firstOrNull()
         }
 
         when {
-            action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" -> {
-                if (prompt.hasPosted) {
-                    val day = if (availableDays.contains(prompt.day)) prompt.day else (availableDays.firstOrNull() ?: prompt.day)
-                    state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = null)
+            action == "open_chat" || type == "chat" || type == "chat_message" || type == "invite_registered" || type == "invite_registration" -> {
+                setTab(AppTab.CHAT)
+            }
+
+            action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" || type == "photo_reaction" || type == "photo_comment" || targetDay.isNotBlank() || targetPhotoId != null -> {
+                val targetIsTodayHidden = targetDay == prompt.day && !prompt.hasPosted && !availableDays.contains(targetDay)
+                if (targetIsTodayHidden) {
+                    openCamera("Der heutige Feed wird sichtbar, sobald du selbst gepostet hast.")
+                    return
                 }
+                val day = resolveFeedDay()
+                if (day == null) {
+                    openCamera()
+                    return
+                }
+                state = state.copy(
+                    activeTab = AppTab.FEED,
+                    feedFocusDay = day,
+                    feedFocusPhotoId = targetPhotoId
+                )
             }
-            action == "open_chat" || type == "chat" || type == "chat_message" -> {
-                state = state.copy(activeTab = AppTab.CHAT)
-            }
+
             action == "open_camera" || type == "daily_prompt" || type == "daily_moment" || type == "special_moment" || type == "special_request" -> {
-                state = state.copy(activeTab = AppTab.CAMERA)
+                openCamera()
+            }
+
+            else -> {
+                openCamera()
             }
         }
     }
@@ -3380,13 +3444,33 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     }
 
     if (state.token.isBlank()) {
+        var loginPasswordVisible by rememberSaveable { mutableStateOf(false) }
+        var registerPasswordVisible by rememberSaveable { mutableStateOf(false) }
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically)
         ) {
-            Text("Daily", style = MaterialTheme.typography.headlineSmall)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Daily",
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.weight(1f)
+                )
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("App-Version: ${BuildConfig.VERSION_NAME}")
+                    Text(
+                        text = if (state.updateAvailable) "(nicht aktuell)" else "(aktuell)",
+                        color = if (state.updateAvailable) Color(0xFFD32F2F) else Color(0xFF2E7D32),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(
                     onClick = {
@@ -3404,8 +3488,27 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
 
             if (authMode == AuthMode.LOGIN) {
                 OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Username") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Passwort") }, modifier = Modifier.fillMaxWidth())
-                Button(onClick = { scope.launch { vm.login(username, password) } }, modifier = Modifier.fillMaxWidth()) { Text("Einloggen") }
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("Passwort") },
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = if (loginPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { loginPasswordVisible = !loginPasswordVisible }) {
+                            Icon(
+                                imageVector = if (loginPasswordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (loginPasswordVisible) "Passwort verbergen" else "Passwort anzeigen"
+                            )
+                        }
+                    }
+                )
+                SpecialMomentActionButton(
+                    text = "Einloggen",
+                    onClick = { scope.launch { vm.login(username, password) } },
+                    enabled = !state.loading,
+                    modifier = Modifier.fillMaxWidth()
+                )
             } else {
                 OutlinedTextField(
                     value = inviteCodeInput,
@@ -3413,10 +3516,12 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     label = { Text("Invite-Code") },
                     modifier = Modifier.fillMaxWidth()
                 )
-                Button(
+                SpecialMomentActionButton(
+                    text = "Code pruefen",
                     onClick = { scope.launch { vm.previewInvite(inviteCodeInput) } },
+                    enabled = !state.loading,
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("Code pruefen") }
+                )
 
                 state.invitePreview?.let { preview ->
                     Card(modifier = Modifier.fillMaxWidth()) {
@@ -3431,12 +3536,38 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 }
 
                 if (inviteConfirmed) {
+                    val registerPasswordInvalid = password.isNotBlank() && !isPasswordValid(password)
                     OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Neuer Benutzername") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Passwort") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = { Text("Passwort") },
+                        modifier = Modifier.fillMaxWidth(),
+                        isError = registerPasswordInvalid,
+                        visualTransformation = if (registerPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { registerPasswordVisible = !registerPasswordVisible }) {
+                                Icon(
+                                    imageVector = if (registerPasswordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = if (registerPasswordVisible) "Passwort verbergen" else "Passwort anzeigen"
+                                )
+                            }
+                        },
+                        supportingText = {
+                            Text(
+                                passwordRequirementText,
+                                color = if (registerPasswordInvalid) Color(0xFFD32F2F) else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    )
                     Button(
                         onClick = {
-                            scope.launch {
-                                vm.registerWithInvite(inviteCodeInput, username, password)
+                            if (!isPasswordValid(password)) {
+                                vm.setMessage("Das Passwort muss mindestens 6 Zeichen haben.")
+                            } else {
+                                scope.launch {
+                                    vm.registerWithInvite(inviteCodeInput, username, password)
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -3718,7 +3849,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onCurrentPasswordChange = { pwCurrent = it },
                     onNewPasswordChange = { pwNext = it },
                     onChangePassword = {
-                        if (pwCurrent.isNotBlank() && pwNext.isNotBlank()) {
+                        if (!isPasswordValid(pwNext)) {
+                            vm.setMessage("Das Passwort muss mindestens 6 Zeichen haben.")
+                        } else if (pwCurrent.isNotBlank() && pwNext.isNotBlank()) {
                             scope.launch {
                                 vm.changePassword(pwCurrent, pwNext)
                                 pwCurrent = ""
@@ -3984,7 +4117,15 @@ fun CameraTab(
         }
 
         if (hasPosted) {
-            Text("Du hast heute gepostet.", fontWeight = FontWeight.Bold)
+            if (canUpload) {
+                Text("Daily-Moment gerade aktiv.", fontWeight = FontWeight.Bold)
+                Text(
+                    "Du kannst jetzt noch einmal fuer den aktiven Moment aufnehmen.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Text("Du hast heute gepostet.", fontWeight = FontWeight.Bold)
+            }
             val ownUrls = listOfNotNull(prompt?.ownPhoto?.url, prompt?.ownPhoto?.secondUrl)
             if (ownUrls.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -4001,7 +4142,18 @@ fun CameraTab(
                     }
                 }
             }
-            Button(onClick = { onCaptureExtra(CapsuleUploadOptions()) }, modifier = Modifier.fillMaxWidth()) { Text("Weitere Bilder hinzufuegen") }
+            if (canUpload) {
+                DailyMomentActionButton(
+                    onClick = onCapturePrompt,
+                    blink = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                Button(
+                    onClick = { onCaptureExtra(CapsuleUploadOptions()) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Weitere Bilder hinzufuegen") }
+            }
             if (!canUpload) {
                 TextButton(
                     onClick = { showCapsuleDialog = true },
@@ -4026,7 +4178,7 @@ fun CameraTab(
             if (prompt?.triggered.isNullOrBlank()) {
                 Text("Der Moment ist noch nicht gestartet. Du kannst trotzdem schon posten.")
             } else if (canUpload) {
-                Text("Momentfenster gerade aktiv.")
+                Text("Daily-Moment gerade aktiv.", fontWeight = FontWeight.Bold)
             } else {
                 Text("Momentfenster vorbei. Du kannst trotzdem spaet posten.")
             }
@@ -4191,29 +4343,24 @@ private fun DailyMomentActionButton(
     blink: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val transition = rememberInfiniteTransition(label = "daily-moment-blink")
-    val phase by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1700, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "daily-moment-blink-phase"
-    )
-    val normal = MaterialTheme.colorScheme.primary
-    val redA = Color(0xFFD32F2F)
-    val redB = Color(0xFF8E1B1B)
-    val pulseColor = lerp(redA, redB, phase)
-    Button(
-        onClick = onClick,
-        modifier = modifier,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (blink) pulseColor else normal,
-            contentColor = Color.White
+    if (blink) {
+        SpecialMomentActionButton(
+            text = "Daily-Moment posten",
+            onClick = onClick,
+            enabled = true,
+            modifier = modifier
         )
-    ) {
-        Text("Daily-Moment posten")
+    } else {
+        Button(
+            onClick = onClick,
+            modifier = modifier,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = Color.White
+            )
+        ) {
+            Text("Daily-Moment posten")
+        }
     }
 }
 
@@ -5221,13 +5368,25 @@ fun ProfileTab(
                             label = { Text("Aktuelles Passwort") },
                             modifier = Modifier.fillMaxWidth()
                         )
+                        val newPasswordInvalid = newPassword.isNotBlank() && !isPasswordValid(newPassword)
                         OutlinedTextField(
                             value = newPassword,
                             onValueChange = onNewPasswordChange,
                             label = { Text("Neues Passwort") },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
+                            isError = newPasswordInvalid,
+                            supportingText = {
+                                Text(
+                                    "Neues Passwort: $passwordRequirementText",
+                                    color = if (newPasswordInvalid) Color(0xFFD32F2F) else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         )
-                        Button(onClick = onChangePassword, modifier = Modifier.fillMaxWidth()) { Text("Passwort speichern") }
+                        Button(
+                            onClick = onChangePassword,
+                            enabled = currentPassword.isNotBlank() && isPasswordValid(newPassword),
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Passwort speichern") }
                     }
 
                     SettingsSubsection("Persoenlich", "Bio, Status und Farbe fuer dein Profil") {
@@ -6014,6 +6173,10 @@ private fun formatDayLabel(day: String): String {
         day
     }
 }
+
+private const val passwordRequirementText = "Mindestens 6 Zeichen"
+
+private fun isPasswordValid(password: String): Boolean = password.trim().length >= 6
 
 private fun formatDayWithWeekday(day: String): String {
     return try {

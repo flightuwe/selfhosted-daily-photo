@@ -53,6 +53,10 @@ class PushMessagingService : FirebaseMessagingService() {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(EXTRA_LAUNCH_ACTION, message.data["action"]?.trim().orEmpty())
             putExtra(EXTRA_LAUNCH_TYPE, type)
+            putExtra(EXTRA_LAUNCH_DAY, message.data["day"]?.trim().orEmpty())
+            message.data["photoId"]?.trim()?.toLongOrNull()?.takeIf { it > 0L }?.let {
+                putExtra(EXTRA_LAUNCH_PHOTO_ID, it)
+            }
         }
         val pending = PendingIntent.getActivity(
             this,

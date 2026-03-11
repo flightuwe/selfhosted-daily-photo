@@ -850,7 +850,12 @@ func (s *Server) handleSpecialMomentRequest(c *gin.Context) {
 
     pushBody := fmt.Sprintf("Sondermoment von %s angefordert! Du hast %d Minuten Zeit.", user.Username, settings.UploadWindowMinutes)
     tokens := s.allDeviceTokens()
-    sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, pushBody)
+    sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+        Title:  "Sondermoment",
+        Body:   pushBody,
+        Type:   "special_request",
+        Action: "open_camera",
+    })
     s.recordPushResult(sendResult, sendErr)
     removed := s.removeInvalidTokens(sendResult.InvalidTokens)
 
@@ -4036,6 +4041,8 @@ func (s *Server) notifyPostCreated(author models.User, photo models.Photo) {
         Body:   body,
         Type:   "post",
         Action: "open_feed",
+        Day:    photo.Day,
+        PhotoID: photo.ID,
     })
 	s.recordPushResult(sendResult, sendErr)
 	s.removeInvalidTokens(sendResult.InvalidTokens)
@@ -4087,6 +4094,8 @@ func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
         Body:   body,
         Type:   "photo_reaction",
         Action: "open_feed",
+        Day:    photo.Day,
+        PhotoID: photo.ID,
     })
     s.recordPushResult(sendResult, sendErr)
     s.removeInvalidTokens(sendResult.InvalidTokens)
@@ -4110,6 +4119,8 @@ func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo) {
         Body:   body,
         Type:   "photo_comment",
         Action: "open_feed",
+        Day:    photo.Day,
+        PhotoID: photo.ID,
     })
     s.recordPushResult(sendResult, sendErr)
     s.removeInvalidTokens(sendResult.InvalidTokens)

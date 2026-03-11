@@ -10,10 +10,12 @@ type SendResult struct {
 }
 
 type Message struct {
-    Title  string
-    Body   string
-    Type   string
-    Action string
+    Title   string
+    Body    string
+    Type    string
+    Action  string
+    Day     string
+    PhotoID int64
 }
 
 type Sender interface {
@@ -27,7 +29,7 @@ type NoopSender struct{}
 func NewNoop() *NoopSender { return &NoopSender{} }
 
 func (n *NoopSender) Send(tokens []string, message Message) (SendResult, error) {
-    log.Printf("noop notify: %d tokens, type=%q title=%q body=%q", len(tokens), message.Type, message.Title, message.Body)
+    log.Printf("noop notify: %d tokens, type=%q action=%q day=%q photoId=%d title=%q body=%q", len(tokens), message.Type, message.Action, message.Day, message.PhotoID, message.Title, message.Body)
     return SendResult{
         Requested: len(tokens),
         Sent:      len(tokens),
