@@ -57,6 +57,18 @@ export type DebugLogItem = {
   user: { id: number; username: string };
 };
 
+export type AdminReportItem = {
+  id: number;
+  type: "bug" | "idea";
+  body: string;
+  source: string;
+  status: "open" | "in_review" | "done" | "rejected";
+  githubIssueNumber?: number | null;
+  createdAt: string;
+  updatedAt: string;
+  user: { id: number; username: string; favoriteColor?: string };
+};
+
 export type FeedPhoto = {
   id: number;
   day: string;
@@ -93,6 +105,18 @@ export type ChatItem = {
   body: string;
   createdAt: string;
   user: { id: number; username: string };
+};
+
+export type ChatSendResult = {
+  id?: number;
+  body?: string;
+  source?: string;
+  command?: boolean;
+  report?: boolean;
+  reportId?: number;
+  reportType?: string;
+  reportStatus?: string;
+  message?: string;
 };
 
 export type CalendarItem = {
@@ -343,7 +367,7 @@ export async function getChat(token: string): Promise<ChatItem[]> {
   return data.items;
 }
 
-export async function sendChat(token: string, body: string): Promise<void> {
+export async function sendChat(token: string, body: string): Promise<ChatSendResult> {
   const res = await fetch(`${apiBase}/chat`, {
     method: "POST",
     headers: {
@@ -352,7 +376,7 @@ export async function sendChat(token: string, body: string): Promise<void> {
     },
     body: JSON.stringify({ body }),
   });
-  await parse(res);
+  return parse<ChatSendResult>(res);
 }
 
 export async function clearChat(token: string): Promise<void> {
@@ -473,4 +497,36 @@ export async function downloadDebugLogs(
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+export async function getReports(
+  token: string,
+  opts?: { userId?: number; type?: "" | "bug" | "idea"; status?: "" | "open" | "in_review" | "done" | "rejected"; limit?: number }
+): Promise<AdminReportItem[]> {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(opts?.limit ?? 200));
+  if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
+  if (opts?.type) qs.set("type", opts.type);
+  if (opts?.status) qs.set("status", opts.status);
+  const res = await fetch(`${apiBase}/admin/reports?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: AdminReportItem[] }>(res);
+  return data.items || [];
+}
+
+export async function updateReport(
+  token: string,
+  id: number,
+  payload: { status: "open" | "in_review" | "done" | "rejected"; githubIssueNumber?: number | null }
+): Promise<AdminReportItem> {
+  const res = await fetch(`${apiBase}/admin/reports/${id}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  return parse<AdminReportItem>(res);
 }

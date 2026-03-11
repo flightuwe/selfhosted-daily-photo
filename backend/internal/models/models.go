@@ -167,3 +167,16 @@ type ClientDebugLog struct {
     Meta       string    `gorm:"size:4000" json:"meta"`
     CreatedAt  time.Time `gorm:"index" json:"createdAt"`
 }
+
+type UserReport struct {
+    ID                uint      `gorm:"primaryKey" json:"id"`
+    UserID            uint      `gorm:"index;not null" json:"userId"`
+    User              User      `json:"user"`
+    Type              string    `gorm:"size:16;index;not null" json:"type"`
+    Body              string    `gorm:"size:1000;not null" json:"body"`
+    Source            string    `gorm:"size:32;not null;default:'chat_prefix'" json:"source"`
+    Status            string    `gorm:"size:16;index;not null;default:'open'" json:"status"`
+    GithubIssueNumber *int      `json:"githubIssueNumber"`
+    CreatedAt         time.Time `gorm:"index" json:"createdAt"`
+    UpdatedAt         time.Time `json:"updatedAt"`
+}

@@ -35,6 +35,7 @@ func Connect(path string) (*gorm.DB, error) {
         &models.ChatCommand{},
         &models.SpecialMomentRequest{},
         &models.ClientDebugLog{},
+        &models.UserReport{},
 	); err != nil {
         return nil, fmt.Errorf("automigrate: %w", err)
     }

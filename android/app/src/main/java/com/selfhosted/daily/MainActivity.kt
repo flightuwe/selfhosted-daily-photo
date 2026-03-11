@@ -227,6 +227,18 @@ data class ChatMessageRequest(
     val body: String,
     val clientMessageId: String? = null
 )
+data class ChatSendResponse(
+    val id: Long? = null,
+    val body: String? = null,
+    val source: String? = null,
+    val createdAt: String? = null,
+    val command: Boolean = false,
+    val report: Boolean = false,
+    val reportId: Long? = null,
+    val reportType: String? = null,
+    val reportStatus: String? = null,
+    val message: String? = null
+)
 data class PromptPhoto(
     val id: Long,
     val day: String,
@@ -502,7 +514,7 @@ interface Api {
     suspend fun chat(@Header("Authorization") token: String): ChatResponse
 
     @POST("chat")
-    suspend fun sendChat(@Header("Authorization") token: String, @Body body: ChatMessageRequest)
+    suspend fun sendChat(@Header("Authorization") token: String, @Body body: ChatMessageRequest): ChatSendResponse
 
     @POST("debug/client-log")
     suspend fun uploadClientDebugLog(
@@ -948,8 +960,8 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     suspend fun listChat(): List<ChatItem> = api.chat("Bearer ${token()}").items
 
-    suspend fun sendChat(body: String, clientMessageId: String) {
-        api.sendChat(
+    suspend fun sendChat(body: String, clientMessageId: String): ChatSendResponse {
+        return api.sendChat(
             "Bearer ${token()}",
             ChatMessageRequest(body = body, clientMessageId = clientMessageId)
         )
@@ -1984,7 +1996,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(chatSending = true)
         return try {
             runCatching { repo.sendChat(trimmed, clientMessageId) }
-                .onSuccess { refreshAll() }
+                .onSuccess { response ->
+                    val localMessage = response.message?.trim().orEmpty()
+                    if (response.report) {
+                        state = state.copy(message = if (localMessage.isNotBlank()) localMessage else "Meldung wurde an den Server geschickt.")
+                    } else {
+                        refreshAll()
+                        if (localMessage.isNotBlank()) {
+                            state = state.copy(message = localMessage)
+                        }
+                    }
+                }
                 .onFailure {
                     pendingChatBodies.remove(normalized)
                     state = state.copy(message = apiError(it, "Chat senden fehlgeschlagen"))

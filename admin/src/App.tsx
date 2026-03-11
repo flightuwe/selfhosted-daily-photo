@@ -12,6 +12,7 @@ import {
   getChatCommands,
   getDebugLogs,
   downloadDebugLogs,
+  getReports,
   getSystemHealth,
   getSettings,
   getStats,
@@ -23,8 +24,10 @@ import {
   triggerPrompt,
   updateCalendarDay,
   updateChatCommand,
+  updateReport,
   updateSettings,
   updateUser,
+  type AdminReportItem,
   type AdminStats,
   type ChatCommand,
   type AdminUser,
@@ -37,7 +40,7 @@ import {
   type SystemHealth,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "debug" | "settings";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "reports" | "debug" | "settings";
 
 const DEFAULT_SETTINGS: Settings = {
   promptWindowStartHour: 8,
@@ -111,6 +114,10 @@ export function App() {
   const [commandDraft, setCommandDraft] = useState<CommandDraft>(emptyCommandDraft);
   const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
   const [calendarDrafts, setCalendarDrafts] = useState<Record<string, string>>({});
+  const [reports, setReports] = useState<AdminReportItem[]>([]);
+  const [reportUserFilter, setReportUserFilter] = useState<number>(0);
+  const [reportTypeFilter, setReportTypeFilter] = useState<"" | "bug" | "idea">("");
+  const [reportStatusFilter, setReportStatusFilter] = useState<"" | "open" | "in_review" | "done" | "rejected">("");
   const [debugLogs, setDebugLogs] = useState<DebugLogItem[]>([]);
   const [debugUserFilter, setDebugUserFilter] = useState<number>(0);
   const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -150,6 +157,9 @@ export function App() {
     if (activeTab === "calendar") {
       void loadCalendar(token);
     }
+    if (activeTab === "reports") {
+      void loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
+    }
     if (activeTab === "commands") {
       void loadCommands(token);
     }
@@ -159,7 +169,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter);
     }
-  }, [token, activeTab, feedDay, debugUserFilter]);
+  }, [token, activeTab, feedDay, debugUserFilter, reportUserFilter, reportTypeFilter, reportStatusFilter]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -238,6 +248,39 @@ export function App() {
     }
   }
 
+  async function loadReports(
+    authToken: string,
+    userId?: number,
+    type: "" | "bug" | "idea" = "",
+    status: "" | "open" | "in_review" | "done" | "rejected" = ""
+  ) {
+    try {
+      const items = await getReports(authToken, {
+        userId: userId && userId > 0 ? userId : undefined,
+        type,
+        status,
+        limit: 200,
+      });
+      setReports(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onUpdateReportStatus(
+    id: number,
+    status: "open" | "in_review" | "done" | "rejected",
+    githubIssueNumber?: number | null
+  ) {
+    try {
+      const updated = await updateReport(token, id, { status, githubIssueNumber: githubIssueNumber ?? null });
+      setReports((prev) => prev.map((item) => (item.id === id ? updated : item)));
+      setMessage("Report aktualisiert.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function onDownloadUserLogs() {
     if (debugUserFilter <= 0) {
       setMessage("Bitte erst einen Nutzer auswaehlen.");
@@ -278,10 +321,15 @@ export function App() {
     if (!text) return;
     setMessage("");
     try {
-      await sendChat(token, text);
+      const result = await sendChat(token, text);
       setChatDraft("");
-      await loadChat(token);
-      setMessage("Nachricht in Chat gesendet.");
+      if (result.report) {
+        await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
+        setMessage(result.message || "Report wurde an den Server geschickt.");
+      } else {
+        await loadChat(token);
+        setMessage(result.message || "Nachricht in Chat gesendet.");
+      }
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -308,6 +356,7 @@ export function App() {
     if (activeTab === "feed") await loadFeed(token, feedDay);
     if (activeTab === "chat") await loadChat(token);
     if (activeTab === "calendar") await loadCalendar(token);
+    if (activeTab === "reports") await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
     if (activeTab === "commands") await loadCommands(token);
     if (activeTab === "system") await loadSystemHealth(token);
   }
@@ -602,6 +651,7 @@ export function App() {
           <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => setActiveTab("feed")}>Feed</button>
           <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => setActiveTab("chat")}>Chat</button>
           <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => setActiveTab("calendar")}>Kalender</button>
+          <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => setActiveTab("reports")}>Reports</button>
           <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => setActiveTab("debug")}>Debug</button>
           <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => setActiveTab("settings")}>Einstellungen</button>
         </div>
@@ -1105,6 +1155,76 @@ export function App() {
                     <td><code>{row.type}</code></td>
                     <td>{row.message}</td>
                     <td className="small">{row.meta || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {activeTab === "reports" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Reports</h2>
+              <div className="row">
+                <select value={reportUserFilter} onChange={(e) => setReportUserFilter(Number(e.target.value))}>
+                  <option value={0}>Alle Nutzer</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>@{u.username}</option>
+                  ))}
+                </select>
+                <select value={reportTypeFilter} onChange={(e) => setReportTypeFilter(e.target.value as "" | "bug" | "idea")}>
+                  <option value="">Alle Typen</option>
+                  <option value="bug">Bug</option>
+                  <option value="idea">Idee</option>
+                </select>
+                <select value={reportStatusFilter} onChange={(e) => setReportStatusFilter(e.target.value as "" | "open" | "in_review" | "done" | "rejected")}>
+                  <option value="">Alle Status</option>
+                  <option value="open">Offen</option>
+                  <option value="in_review">In Bearbeitung</option>
+                  <option value="done">Erledigt</option>
+                  <option value="rejected">Abgelehnt</option>
+                </select>
+                <button onClick={() => loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter)}>Aktualisieren</button>
+              </div>
+            </div>
+            {reports.length === 0 && <p>Keine Reports vorhanden.</p>}
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Zeit</th>
+                  <th>Nutzer</th>
+                  <th>Typ</th>
+                  <th>Text</th>
+                  <th>Status</th>
+                  <th>GitHub</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reports.map((row) => (
+                  <tr key={row.id}>
+                    <td>{formatDateTime(row.createdAt)}</td>
+                    <td>@{row.user?.username || "-"}</td>
+                    <td>{row.type === "bug" ? "Bug" : "Idee"}</td>
+                    <td>{row.body}</td>
+                    <td>
+                      <select
+                        value={row.status}
+                        onChange={(e) =>
+                          void onUpdateReportStatus(
+                            row.id,
+                            e.target.value as "open" | "in_review" | "done" | "rejected",
+                            row.githubIssueNumber ?? null
+                          )
+                        }
+                      >
+                        <option value="open">Offen</option>
+                        <option value="in_review">In Bearbeitung</option>
+                        <option value="done">Erledigt</option>
+                        <option value="rejected">Abgelehnt</option>
+                      </select>
+                    </td>
+                    <td>{row.githubIssueNumber ? `#${row.githubIssueNumber}` : "-"}</td>
                   </tr>
                 ))}
               </tbody>

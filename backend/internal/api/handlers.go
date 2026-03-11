@@ -115,6 +115,8 @@ func (s *Server) Router() *gin.Engine {
             admin.POST("/chat/commands", s.handleAdminCreateChatCommand)
             admin.PUT("/chat/commands/:id", s.handleAdminUpdateChatCommand)
             admin.DELETE("/chat/commands/:id", s.handleAdminDeleteChatCommand)
+            admin.GET("/reports", s.handleAdminListReports)
+            admin.PUT("/reports/:id", s.handleAdminUpdateReport)
             admin.GET("/debug/logs", s.handleAdminDebugLogs)
             admin.GET("/debug/logs/export", s.handleAdminDebugLogsExport)
             admin.GET("/system/health", s.handleAdminSystemHealth)
@@ -1664,6 +1666,112 @@ func (s *Server) handleAdminDebugLogsExport(c *gin.Context) {
     c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
 }
 
+func (s *Server) handleAdminListReports(c *gin.Context) {
+    limit := 200
+    if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+        if n, err := strconv.Atoi(raw); err == nil {
+            if n < 10 {
+                n = 10
+            }
+            if n > 500 {
+                n = 500
+            }
+            limit = n
+        }
+    }
+
+    userID := uint(0)
+    if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+        parsed, err := parseUintParam(raw)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+            return
+        }
+        userID = parsed
+    }
+
+    reportType := strings.ToLower(strings.TrimSpace(c.Query("type")))
+    if reportType != "" && reportType != "bug" && reportType != "idea" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid report type"})
+        return
+    }
+
+    status := strings.ToLower(strings.TrimSpace(c.Query("status")))
+    if status != "" && !isValidUserReportStatus(status) {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid report status"})
+        return
+    }
+
+    q := s.DB.Preload("User").Order("created_at desc").Limit(limit)
+    if userID != 0 {
+        q = q.Where("user_id = ?", userID)
+    }
+    if reportType != "" {
+        q = q.Where("type = ?", reportType)
+    }
+    if status != "" {
+        q = q.Where("status = ?", status)
+    }
+
+    var rows []models.UserReport
+    if err := q.Find(&rows).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+
+    items := make([]gin.H, 0, len(rows))
+    for _, row := range rows {
+        items = append(items, userReportJSON(row))
+    }
+    c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) handleAdminUpdateReport(c *gin.Context) {
+    id, err := parseUintParam(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid report id"})
+        return
+    }
+
+    var req struct {
+        Status            string `json:"status"`
+        GithubIssueNumber *int   `json:"githubIssueNumber"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+        return
+    }
+
+    status := strings.ToLower(strings.TrimSpace(req.Status))
+    if !isValidUserReportStatus(status) {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid report status"})
+        return
+    }
+    if req.GithubIssueNumber != nil && *req.GithubIssueNumber <= 0 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid github issue number"})
+        return
+    }
+
+    var report models.UserReport
+    if err := s.DB.Preload("User").First(&report, id).Error; err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "report not found"})
+        return
+    }
+
+    report.Status = status
+    report.GithubIssueNumber = req.GithubIssueNumber
+    if err := s.DB.Save(&report).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+        return
+    }
+    if err := s.DB.Preload("User").First(&report, id).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "reload failed"})
+        return
+    }
+
+    c.JSON(http.StatusOK, userReportJSON(report))
+}
+
 func (s *Server) handleAdminUpdateUser(c *gin.Context) {
     id, err := parseUintParam(c.Param("id"))
     if err != nil {
@@ -2098,6 +2206,10 @@ func (s *Server) handleChatCreate(c *gin.Context) {
         c.JSON(http.StatusBadRequest, gin.H{"error": "message empty"})
         return
     }
+    if reportType, reportBody, ok := parseUserReportPrefix(body); ok {
+        s.handleUserReportFromChat(c, user, reportType, reportBody)
+        return
+    }
     clientMessageID := strings.TrimSpace(req.ClientMessageID)
     if clientMessageID != "" {
         var existing models.ChatMessage
@@ -2227,6 +2339,119 @@ func normalizeChatBodyForDedupe(v string) string {
 		return ""
 	}
 	return strings.ToLower(strings.Join(parts, " "))
+}
+
+func parseUserReportPrefix(body string) (string, string, bool) {
+    trimmed := strings.TrimSpace(body)
+    lowered := strings.ToLower(trimmed)
+    switch {
+    case strings.HasPrefix(lowered, "bug:"):
+        return "bug", strings.TrimSpace(trimmed[4:]), true
+    case strings.HasPrefix(lowered, "idee:"):
+        return "idea", strings.TrimSpace(trimmed[5:]), true
+    default:
+        return "", "", false
+    }
+}
+
+func isValidUserReportStatus(v string) bool {
+    switch strings.ToLower(strings.TrimSpace(v)) {
+    case "open", "in_review", "done", "rejected":
+        return true
+    default:
+        return false
+    }
+}
+
+func userReportJSON(row models.UserReport) gin.H {
+    return gin.H{
+        "id":                row.ID,
+        "type":              strings.TrimSpace(row.Type),
+        "body":              row.Body,
+        "source":            defaultIfBlank(strings.TrimSpace(row.Source), "chat_prefix"),
+        "status":            defaultIfBlank(strings.TrimSpace(row.Status), "open"),
+        "githubIssueNumber": row.GithubIssueNumber,
+        "createdAt":         row.CreatedAt,
+        "updatedAt":         row.UpdatedAt,
+        "user": gin.H{
+            "id":            row.User.ID,
+            "username":      row.User.Username,
+            "favoriteColor": defaultColor(row.User.FavoriteColor),
+        },
+    }
+}
+
+func (s *Server) findRecentDuplicateUserReport(userID uint, reportType string, body string, window time.Duration) (models.UserReport, bool, error) {
+    normalizedBody := normalizeChatBodyForDedupe(body)
+    if normalizedBody == "" {
+        return models.UserReport{}, false, nil
+    }
+    cutoff := time.Now().Add(-window)
+    var recent []models.UserReport
+    if err := s.DB.Preload("User").
+        Where("user_id = ? AND type = ? AND created_at >= ?", userID, reportType, cutoff).
+        Order("created_at desc, id desc").
+        Limit(20).
+        Find(&recent).Error; err != nil {
+        return models.UserReport{}, false, err
+    }
+    for _, row := range recent {
+        if normalizeChatBodyForDedupe(row.Body) == normalizedBody {
+            return row, true, nil
+        }
+    }
+    return models.UserReport{}, false, nil
+}
+
+func (s *Server) handleUserReportFromChat(c *gin.Context, user models.User, reportType string, body string) {
+    if strings.TrimSpace(body) == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "report empty"})
+        return
+    }
+    if existing, ok, err := s.findRecentDuplicateUserReport(user.ID, reportType, body, 10*time.Second); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "report dedupe lookup failed"})
+        return
+    } else if ok {
+        msg := "Meldung wurde bereits an den Server geschickt."
+        if reportType == "bug" {
+            msg = "Bugreport wurde bereits an den Server geschickt."
+        } else if reportType == "idea" {
+            msg = "Idee wurde bereits an den Server geschickt."
+        }
+        c.JSON(http.StatusOK, gin.H{
+            "report":       true,
+            "reportId":     existing.ID,
+            "reportType":   reportType,
+            "reportStatus": existing.Status,
+            "message":      msg,
+        })
+        return
+    }
+
+    report := models.UserReport{
+        UserID: user.ID,
+        Type:   reportType,
+        Body:   body,
+        Source: "chat_prefix",
+        Status: "open",
+    }
+    if err := s.DB.Create(&report).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "report save failed"})
+        return
+    }
+    successMessage := "Meldung wurde an den Server geschickt."
+    if reportType == "bug" {
+        successMessage = "Bugreport wurde an den Server geschickt."
+    } else if reportType == "idea" {
+        successMessage = "Idee wurde an den Server geschickt."
+    }
+    c.JSON(http.StatusCreated, gin.H{
+        "report":       true,
+        "reportId":     report.ID,
+        "reportType":   report.Type,
+        "reportStatus": report.Status,
+        "message":      successMessage,
+    })
 }
 
 func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body string) (bool, error) {
