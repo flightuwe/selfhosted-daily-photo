@@ -123,6 +123,7 @@ import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.google.firebase.messaging.FirebaseMessaging
@@ -1567,7 +1568,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val meta = if (extraMeta.isBlank()) base else "$base;$extraMeta"
         repo.logDebug(type = type, message = throwable.message ?: "request failed", meta = meta)
         if (state.diagnosticsUploadEnabled) {
-            runCatching { repo.uploadRecentDebugLogs() }
+            try {
+                repo.uploadRecentDebugLogs()
+            } catch (_: Throwable) {
+            }
         }
     }
 
@@ -1576,12 +1580,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(diagnosticsUploadEnabled = enabled, message = if (enabled) "Diagnose-Upload aktiviert" else "Diagnose-Upload deaktiviert")
         if (enabled) {
             viewModelScope.launch {
-                runCatching { repo.uploadRecentDebugLogs(force = true) }
-                    .onSuccess { sent ->
-                        if (sent > 0) {
-                            state = state.copy(message = "Diagnose-Upload aktiviert, $sent Eintraege hochgeladen")
-                        }
+                try {
+                    val sent = repo.uploadRecentDebugLogs(force = true)
+                    if (sent > 0) {
+                        state = state.copy(message = "Diagnose-Upload aktiviert, $sent Eintraege hochgeladen")
                     }
+                } catch (_: Throwable) {
+                    // Keep the toggle enabled even if the first upload attempt fails.
+                }
             }
         }
     }
@@ -1592,7 +1598,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun autoUploadDebugLogsIfEnabled() {
         if (!state.diagnosticsUploadEnabled) return
-        runCatching { repo.uploadRecentDebugLogs() }
+        try {
+            repo.uploadRecentDebugLogs()
+        } catch (_: Throwable) {
+        }
     }
 
     fun exportDebugLogsForShare(): Uri? {
