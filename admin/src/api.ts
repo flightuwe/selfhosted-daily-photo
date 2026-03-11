@@ -40,6 +40,7 @@ export type AdminUser = {
   photoCount: number;
   deviceCount: number;
   deviceNames?: string[];
+  deviceDetails?: Array<{ name: string; appVersion?: string }>;
   lastAppVersion?: string;
   lastError?: string;
   lastErrorAt?: string;

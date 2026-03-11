@@ -939,7 +939,13 @@ export function App() {
                     <td>
                       <div className="stack">
                         <strong>{u.deviceCount}</strong>
-                        {u.deviceNames && u.deviceNames.length > 0 ? (
+                        {u.deviceDetails && u.deviceDetails.length > 0 ? (
+                          u.deviceDetails.map((device, idx) => (
+                            <span key={`${u.id}-${idx}`} className="small">
+                              {device.name} ({device.appVersion || "unknown"})
+                            </span>
+                          ))
+                        ) : u.deviceNames && u.deviceNames.length > 0 ? (
                           <span className="small">{u.deviceNames.join(", ")}</span>
                         ) : (
                           <span className="small">Keine Geraetenamen gemeldet</span>

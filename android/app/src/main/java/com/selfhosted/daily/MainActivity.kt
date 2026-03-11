@@ -221,7 +221,7 @@ data class InviteRegisterRequest(val inviteCode: String, val username: String, v
 data class InviteOwner(val id: Long, val username: String, val favoriteColor: String = "#1F5FBF")
 data class InvitePreviewResponse(val inviteCode: String, val inviter: InviteOwner)
 data class InviteCodeResponse(val inviteCode: String)
-data class DeviceTokenRequest(val token: String, val deviceName: String = "")
+data class DeviceTokenRequest(val token: String, val deviceName: String = "", val appVersion: String = BuildConfig.VERSION_NAME)
 data class PasswordChangeRequest(val currentPassword: String, val newPassword: String)
 data class ChatMessageRequest(
     val body: String,

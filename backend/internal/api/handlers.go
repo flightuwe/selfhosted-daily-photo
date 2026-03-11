@@ -638,6 +638,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 type deviceRequest struct {
     Token      string `json:"token" binding:"required,max=255"`
     DeviceName string `json:"deviceName" binding:"max=120"`
+    AppVersion string `json:"appVersion" binding:"max=40"`
 }
 
 func (s *Server) handleDevice(c *gin.Context) {
@@ -652,6 +653,10 @@ func (s *Server) handleDevice(c *gin.Context) {
         Token:      req.Token,
         UserID:     user.ID,
         DeviceName: strings.TrimSpace(req.DeviceName),
+        AppVersion: strings.TrimSpace(req.AppVersion),
+    }
+    if d.AppVersion == "" {
+        d.AppVersion = "unknown"
     }
     _ = s.DB.Where("token = ?", req.Token).Assign(d).FirstOrCreate(&d).Error
     c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -1375,7 +1380,7 @@ func (s *Server) handleAdminCreateUser(c *gin.Context) {
         return
     }
 
-    c.JSON(http.StatusCreated, toAdminUser(user, 0, 0, nil, 0, "", nil, "", "", nil, nil))
+    c.JSON(http.StatusCreated, toAdminUser(user, 0, 0, nil, nil, 0, "", nil, "", "", nil, nil))
 }
 
 func (s *Server) handleAdminListUsers(c *gin.Context) {
@@ -1443,29 +1448,50 @@ func (s *Server) handleAdminListUsers(c *gin.Context) {
         _ = s.DB.Where("user_id = ?", u.ID).Find(&tokenRows).Error
         tokenCount := int64(len(tokenRows))
         deviceNames := make([]string, 0, len(tokenRows))
+        deviceDetails := make([]gin.H, 0, len(tokenRows))
         seenNames := make(map[string]struct{}, len(tokenRows))
+        latestDeviceVersion := ""
         for _, row := range tokenRows {
             name := strings.TrimSpace(row.DeviceName)
             if name == "" {
-                continue
+                name = "Unbekanntes Geraet"
             }
             if _, exists := seenNames[name]; exists {
+                if latestDeviceVersion == "" && strings.TrimSpace(row.AppVersion) != "" {
+                    latestDeviceVersion = strings.TrimSpace(row.AppVersion)
+                }
                 continue
             }
             seenNames[name] = struct{}{}
             deviceNames = append(deviceNames, name)
+            appVersion := strings.TrimSpace(row.AppVersion)
+            if appVersion == "" {
+                appVersion = "unknown"
+            }
+            if latestDeviceVersion == "" || (strings.EqualFold(latestDeviceVersion, "unknown") && !strings.EqualFold(appVersion, "unknown")) {
+                latestDeviceVersion = appVersion
+            }
+            deviceDetails = append(deviceDetails, gin.H{
+                "name":       name,
+                "appVersion": appVersion,
+            })
         }
         invite := inviteByUserID[u.ID]
         dbg := debugByUserID[u.ID]
+        lastAppVersion := strings.TrimSpace(dbg.AppVersion)
+        if lastAppVersion == "" || strings.EqualFold(lastAppVersion, "unknown") {
+            lastAppVersion = latestDeviceVersion
+        }
         out = append(out, toAdminUser(
             u,
             photoCount,
             tokenCount,
             deviceNames,
+            deviceDetails,
             invite.InvitedByID,
             invite.InvitedByName,
             invite.InvitedAt,
-            dbg.AppVersion,
+            lastAppVersion,
             dbg.Message,
             func() *time.Time {
                 if dbg.CreatedAt.IsZero() {
@@ -1821,7 +1847,7 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
     _ = s.DB.Model(&models.Photo{}).Where("user_id = ?", user.ID).Count(&photoCount).Error
     _ = s.DB.Model(&models.DeviceToken{}).Where("user_id = ?", user.ID).Count(&tokenCount).Error
 
-    c.JSON(http.StatusOK, toAdminUser(user, photoCount, tokenCount, nil, 0, "", nil, "", "", nil, nil))
+    c.JSON(http.StatusOK, toAdminUser(user, photoCount, tokenCount, nil, nil, 0, "", nil, "", "", nil, nil))
 }
 
 func (s *Server) handleAdminDeleteUser(c *gin.Context) {
@@ -3340,6 +3366,7 @@ func toAdminUser(
     u models.User,
     photoCount, tokenCount int64,
     deviceNames []string,
+    deviceDetails []gin.H,
     invitedByID uint,
     invitedBy string,
     invitedAt *time.Time,
@@ -3356,6 +3383,7 @@ func toAdminUser(
         "photoCount":      photoCount,
         "deviceCount":     tokenCount,
         "deviceNames":     deviceNames,
+        "deviceDetails":   deviceDetails,
         "lastAppVersion":  strings.TrimSpace(lastAppVersion),
         "lastError":       strings.TrimSpace(lastError),
         "lastErrorAt":     lastErrorAt,
