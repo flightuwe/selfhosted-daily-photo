@@ -26,3 +26,14 @@ Dieses Projekt nutzt Release-gebundene Changelogs.
 
 Der Workflow erzeugt den Inhalt aus Commit-Titeln seit dem letzten `v*`-Tag
 (mit Deduplizierung und Begrenzung), damit jede Version konsistente Release-Infos hat.
+
+## Manuelle Release-Overrides
+
+Wenn fuer eine Version ausnahmsweise ausfuehrlichere Release-Infos gewuenscht sind, koennen diese direkt im Repo
+hinterlegt werden:
+
+- `.github/release-notes/vX.Y.Z.md`
+- `.github/release-notes/vX.Y.Z.json`
+
+Wenn diese Dateien fuer ein Tag vorhanden sind, verwendet der Android-Release-Workflow sie vorrangig vor der
+automatischen Commit-Zusammenfassung.

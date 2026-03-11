@@ -126,6 +126,16 @@ jobs:
           CURRENT_TAG="${GITHUB_REF_NAME}"
           [[ "$CURRENT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || (echo "::error::Expected semantic tag like v0.3.41" && exit 1)
 
+          MANUAL_MD=".github/release-notes/${CURRENT_TAG}.md"
+          MANUAL_JSON=".github/release-notes/${CURRENT_TAG}.json"
+          if [[ -f "$MANUAL_MD" ]]; then
+            cp "$MANUAL_MD" release-notes.md
+            if [[ -f "$MANUAL_JSON" ]]; then
+              cp "$MANUAL_JSON" dist/changelog.json
+              exit 0
+            fi
+          fi
+
           git fetch --tags --force >/dev/null 2>&1 || true
           PREV_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -vx "$CURRENT_TAG" | head -n 1 || true)"
 

@@ -1,0 +1,19 @@
+{
+  "version": "0.4.1",
+  "releasedAt": "2026-03-11T00:00:00Z",
+  "highlights": [
+    "Neue Push-Benachrichtigungen fuer Reaktionen auf eigene Beitraege.",
+    "Neue Push-Benachrichtigungen fuer Kommentare auf eigene Beitraege.",
+    "Eigene Chat-Nachrichten koennen jetzt per 3-Sekunden-Hold geloescht werden.",
+    "Kalender mit Best-of-Vorschau und Interaktionsfokus pro Tag.",
+    "Time-Capsules bleiben im eigenen Profil bis zum Unlock verborgen.",
+    "Neuer Admin-Reiter fuer gesperrte Time-Capsules.",
+    "Streak wird serverseitig stabil berechnet und morgens korrekt angezeigt.",
+    "Debug-Logs und Netzwerkfehler wurden robuster und uebersichtlicher gemacht."
+  ],
+  "details": [
+    "Das Admin-Panel-Debug wurde visuell ueberarbeitet und unterstuetzt gefiltertes Loeschen sowie Export nach Zeitraum.",
+    "Der Feed zeigt Time-Capsules nur noch dann als verfuegbar an, wenn sie wirklich freigeschaltet sind.",
+    "Die Release-Pipeline kann ab jetzt versionsspezifische Release-Notes und Changelog-Assets direkt aus dem Repo uebernehmen."
+  ]
+}
