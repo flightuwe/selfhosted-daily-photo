@@ -104,6 +104,7 @@ func (s *Server) Router() *gin.Engine {
             admin.GET("/stats", s.handleAdminStats)
             admin.GET("/feed", s.handleAdminFeed)
             admin.GET("/calendar", s.handleAdminCalendar)
+            admin.GET("/time-capsules", s.handleAdminTimeCapsules)
             admin.PUT("/calendar/:day", s.handleAdminCalendarDay)
 
             admin.POST("/prompt/trigger", s.handleTriggerPrompt)
@@ -1003,6 +1004,46 @@ func (s *Server) handleAdminCalendar(c *gin.Context) {
     }
 
     c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+func (s *Server) handleAdminTimeCapsules(c *gin.Context) {
+    now := time.Now().In(s.Location)
+
+    var photos []models.Photo
+    if err := s.DB.Preload("User").
+        Where("capsule_visible_at IS NOT NULL").
+        Where("capsule_visible_at > ?", now).
+        Order("capsule_visible_at asc, created_at asc").
+        Limit(200).
+        Find(&photos).Error; err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+        return
+    }
+
+    items := make([]gin.H, 0, len(photos))
+    for _, p := range photos {
+        items = append(items, gin.H{
+            "photoId":          p.ID,
+            "day":              p.Day,
+            "capsuleMode":      p.CapsuleMode,
+            "capsuledAt":       p.CreatedAt,
+            "unlocksAt":        p.CapsuleVisibleAt,
+            "previewUrl":       fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
+            "secondPreviewUrl": func() string {
+                if strings.TrimSpace(p.SecondPath) == "" {
+                    return ""
+                }
+                return fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
+            }(),
+            "user": gin.H{
+                "id":            p.User.ID,
+                "username":      p.User.Username,
+                "favoriteColor": defaultColor(p.User.FavoriteColor),
+            },
+        })
+    }
+
+    c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 func (s *Server) handleAdminCalendarDay(c *gin.Context) {
@@ -3017,6 +3058,7 @@ func (s *Server) handleHealth(c *gin.Context) {
 
 func (s *Server) handleMyPhotos(c *gin.Context) {
     user, _ := userFromContext(c)
+    now := time.Now().In(s.Location)
 
     var photos []models.Photo
     if err := s.DB.Where("user_id = ?", user.ID).Order("created_at desc").Limit(120).Find(&photos).Error; err != nil {
@@ -3048,6 +3090,9 @@ func (s *Server) handleMyPhotos(c *gin.Context) {
 
     out := make([]gin.H, 0, len(photos))
     for _, p := range photos {
+        if p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt) {
+            continue
+        }
         row := s.photoJSON(p)
         dailyMoment := false
         if prompt, ok := promptByDay[p.Day]; ok && prompt.TriggeredAt != nil && prompt.UploadUntil != nil {

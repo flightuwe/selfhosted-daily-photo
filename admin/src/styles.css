@@ -456,6 +456,21 @@ button.danger {
   gap: 0.75rem;
 }
 
+.capsule-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 0.9rem;
+}
+
+.capsule-card {
+  border: 1px solid var(--table-border);
+  border-radius: 14px;
+  padding: 0.82rem;
+  background: var(--soft-card);
+  display: grid;
+  gap: 0.7rem;
+}
+
 .feed-card {
   border: 1px solid var(--table-border);
   border-radius: 14px;

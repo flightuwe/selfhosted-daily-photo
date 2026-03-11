@@ -131,6 +131,17 @@ export type CalendarItem = {
   requestedByUser?: string;
 };
 
+export type AdminTimeCapsuleItem = {
+  photoId: number;
+  day: string;
+  capsuleMode?: string;
+  capsuledAt: string;
+  unlocksAt?: string | null;
+  previewUrl: string;
+  secondPreviewUrl?: string;
+  user: { id: number; username: string; favoriteColor?: string };
+};
+
 export type ChatCommand = {
   id: number;
   name: string;
@@ -434,6 +445,14 @@ export async function getCalendar(token: string, days = 7): Promise<CalendarItem
   });
   const data = await parse<{ items: CalendarItem[] }>(res);
   return data.items;
+}
+
+export async function getAdminTimeCapsules(token: string): Promise<AdminTimeCapsuleItem[]> {
+  const res = await fetch(`${apiBase}/admin/time-capsules`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: AdminTimeCapsuleItem[] }>(res);
+  return data.items || [];
 }
 
 export async function updateCalendarDay(token: string, day: string, plannedAt: string): Promise<CalendarItem> {

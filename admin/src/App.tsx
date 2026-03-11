@@ -8,6 +8,7 @@ import {
   deleteChatCommand,
   deleteUser,
   getAdminFeed,
+  getAdminTimeCapsules,
   getCalendar,
   getChat,
   getChatCommands,
@@ -34,6 +35,7 @@ import {
   type AdminUser,
   type ChatItem,
   type CalendarItem,
+  type AdminTimeCapsuleItem,
   type FeedItem,
   type DebugLogItem,
   type MonthlyRecap,
@@ -41,7 +43,7 @@ import {
   type SystemHealth,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "reports" | "debug" | "settings";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "time_capsule" | "reports" | "debug" | "settings";
 
 const DEFAULT_SETTINGS: Settings = {
   promptWindowStartHour: 8,
@@ -123,6 +125,7 @@ export function App() {
   const [commandDraft, setCommandDraft] = useState<CommandDraft>(emptyCommandDraft);
   const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
   const [calendarDrafts, setCalendarDrafts] = useState<Record<string, string>>({});
+  const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
   const [reportTypeFilter, setReportTypeFilter] = useState<"" | "bug" | "idea">("");
@@ -181,6 +184,9 @@ export function App() {
     }
     if (activeTab === "calendar") {
       void loadCalendar(token);
+    }
+    if (activeTab === "time_capsule") {
+      void loadTimeCapsules(token);
     }
     if (activeTab === "reports") {
       void loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
@@ -392,6 +398,15 @@ export function App() {
           return acc;
         }, {})
       );
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function loadTimeCapsules(authToken: string) {
+    try {
+      const items = await getAdminTimeCapsules(authToken);
+      setTimeCapsuleItems(items);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -698,6 +713,7 @@ export function App() {
           <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => setActiveTab("feed")}>Feed</button>
           <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => setActiveTab("chat")}>Chat</button>
           <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => setActiveTab("calendar")}>Kalender</button>
+          <button className={activeTab === "time_capsule" ? "tab active" : "tab"} onClick={() => setActiveTab("time_capsule")}>Time-Capsule</button>
           <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => setActiveTab("reports")}>Reports</button>
           <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => setActiveTab("debug")}>Debug</button>
           <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => setActiveTab("settings")}>Einstellungen</button>
@@ -1166,6 +1182,50 @@ export function App() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {activeTab === "time_capsule" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Gesperrte Time-Capsules</h2>
+              <button onClick={() => loadTimeCapsules(token)}>Aktualisieren</button>
+            </div>
+            <div className="grid4">
+              <CardStat title="Gesperrte Capsules" value={timeCapsuleItems.length} />
+              <CardStat
+                title="Naechster Unlock"
+                value={timeCapsuleItems[0]?.unlocksAt ? formatDateTime(timeCapsuleItems[0].unlocksAt) : "-"}
+              />
+            </div>
+            {timeCapsuleItems.length === 0 && <p>Keine gesperrten Time-Capsules vorhanden.</p>}
+            {timeCapsuleItems.length > 0 && (
+              <div className="capsule-grid">
+                {timeCapsuleItems.map((item) => (
+                  <article key={item.photoId} className="capsule-card">
+                    <div className="row">
+                      <strong style={{ color: item.user.favoriteColor || undefined }}>{item.user.username}</strong>
+                      <span className="small">{item.capsuleMode || "capsule"}</span>
+                    </div>
+                    <div className="photo-grid">
+                      <a href={item.previewUrl} target="_blank" rel="noreferrer">
+                        <img src={item.previewUrl} alt={`${item.user.username} capsule`} />
+                      </a>
+                      {item.secondPreviewUrl && (
+                        <a href={item.secondPreviewUrl} target="_blank" rel="noreferrer">
+                          <img src={item.secondPreviewUrl} alt={`${item.user.username} capsule second`} />
+                        </a>
+                      )}
+                    </div>
+                    <div className="settings-grid">
+                      <p><strong>Tag:</strong> {new Date(`${item.day}T00:00:00`).toLocaleDateString()}</p>
+                      <p><strong>Gecapsuled:</strong> {formatDateTime(item.capsuledAt)}</p>
+                      <p><strong>Unlock:</strong> {item.unlocksAt ? formatDateTime(item.unlocksAt) : "-"}</p>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
