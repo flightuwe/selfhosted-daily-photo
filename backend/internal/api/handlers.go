@@ -317,10 +317,13 @@ func (s *Server) handleMe(c *gin.Context) {
     // may undercount even though a post is inside the prompt window.
     var photos []models.Photo
     dailyMomentCount := int64(0)
+    streakDays := int64(0)
     if err := s.DB.Where("user_id = ?", user.ID).Order("created_at desc").Limit(500).Find(&photos).Error; err == nil {
         days := make([]string, 0, len(photos))
         daySeen := make(map[string]struct{}, len(photos))
+        postedDaySet := make(map[string]struct{}, len(photos))
         for _, p := range photos {
+            postedDaySet[p.Day] = struct{}{}
             if _, exists := daySeen[p.Day]; exists {
                 continue
             }
@@ -352,11 +355,36 @@ func (s *Server) handleMe(c *gin.Context) {
                 countedDays[p.Day] = struct{}{}
             }
         }
+
+        today := time.Now().In(s.Location).Format("2006-01-02")
+        anchor := ""
+        if _, ok := postedDaySet[today]; ok {
+            anchor = today
+        } else {
+            yesterday := time.Now().In(s.Location).AddDate(0, 0, -1).Format("2006-01-02")
+            if _, ok := postedDaySet[yesterday]; ok {
+                anchor = yesterday
+            }
+        }
+        if anchor != "" {
+            dayCursor, err := time.ParseInLocation("2006-01-02", anchor, s.Location)
+            if err == nil {
+                for {
+                    dayKey := dayCursor.Format("2006-01-02")
+                    if _, ok := postedDaySet[dayKey]; !ok {
+                        break
+                    }
+                    streakDays++
+                    dayCursor = dayCursor.AddDate(0, 0, -1)
+                }
+            }
+        }
     }
 
     c.JSON(http.StatusOK, gin.H{
         "user":             s.userOwnJSON(user),
         "dailyMomentCount": dailyMomentCount,
+        "streakDays":       streakDays,
     })
 }
 

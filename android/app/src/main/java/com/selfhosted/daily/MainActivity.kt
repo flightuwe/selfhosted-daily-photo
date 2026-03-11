@@ -201,7 +201,7 @@ data class User(
     val quietHoursStart: String = "22:00",
     val quietHoursEnd: String = "07:00"
 )
-data class MeResponse(val user: User, val dailyMomentCount: Int = 0)
+data class MeResponse(val user: User, val dailyMomentCount: Int = 0, val streakDays: Int = 0)
 data class ProfileUpdateRequest(
     val username: String,
     val favoriteColor: String,
@@ -1318,6 +1318,7 @@ data class UiState(
     val chatHasOtherMessages: Boolean = true,
     val chatHasUnreadMessages: Boolean = false,
     val photos: List<PromptPhoto> = emptyList(),
+    val streakDays: Int = 0,
     val dailyMomentCount: Int = 0,
     val chat: List<ChatItem> = emptyList(),
     val uploadQueue: List<QueuedUploadItem> = emptyList(),
@@ -1366,6 +1367,7 @@ data class UiState(
 
 data class DashboardData(
     val me: User,
+    val streakDays: Int,
     val dailyMomentCount: Int,
     val inviteCode: String,
     val prompt: PromptResponse,
@@ -1838,8 +1840,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val feedDays = repo.feedDays()
             val dayStats = runCatching { repo.feedDayStats() }.getOrDefault(emptyList())
             val communityStats = runCatching { repo.communityStats() }.getOrNull()
-            val payload = DashboardData(me, meResp.dailyMomentCount, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats, communityStats)
+            val payload = DashboardData(me, meResp.streakDays, meResp.dailyMomentCount, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats, communityStats)
             val me = payload.me
+            val streakDays = payload.streakDays
             val dailyMomentCount = payload.dailyMomentCount
             val inviteCode = payload.inviteCode
             val prompt = payload.prompt
@@ -1877,6 +1880,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 promptRules = rules,
                 specialMomentStatus = special,
                 photos = photos,
+                streakDays = streakDays,
                 dailyMomentCount = dailyMomentCount,
                 chat = chat,
                 chatHasOtherMessages = true,
@@ -3399,7 +3403,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 AppTab.PROFILE -> ProfileTab(
                     username = state.user?.username ?: "",
                     inviteCode = state.myInviteCode,
-                    streakDays = computePostingStreak(state.photos),
+                    streakDays = state.streakDays,
                     dailyMomentCount = state.dailyMomentCount,
                     promptRules = state.promptRules,
                     photos = state.photos,
@@ -6056,24 +6060,6 @@ private fun formatBytes(bytes: Double): String {
     }
     val shown = if (idx == 0) "%.0f".format(value) else "%.2f".format(value)
     return "$shown ${units[idx]}"
-}
-
-private fun computePostingStreak(photos: List<PromptPhoto>): Int {
-    if (photos.isEmpty()) return 0
-    val postedDays = photos
-        .asSequence()
-        .filter { it.promptOnly }
-        .mapNotNull { runCatching { LocalDate.parse(it.day) }.getOrNull() }
-        .toSet()
-    if (postedDays.isEmpty()) return 0
-
-    var streak = 0
-    var day = LocalDate.now()
-    while (postedDays.contains(day)) {
-        streak++
-        day = day.minusDays(1)
-    }
-    return streak
 }
 
 private fun normalizeHexColor(input: String): String {
