@@ -3097,6 +3097,9 @@ func (s *Server) handleHealth(c *gin.Context) {
 		"ok":       true,
 		"version":  s.Config.AppVersion,
 		"provider": s.Notifier.Name(),
+		"features": gin.H{
+			"chatDelete": true,
+		},
 	})
 }
 

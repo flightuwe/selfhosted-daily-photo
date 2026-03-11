@@ -405,7 +405,13 @@ data class SpecialMomentStatus(
     val lastRequestedAt: String? = null
 )
 data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
-data class HealthResponse(val ok: Boolean, val version: String = "unknown", val provider: String = "unknown")
+data class HealthFeatures(val chatDelete: Boolean = false)
+data class HealthResponse(
+    val ok: Boolean,
+    val version: String = "unknown",
+    val provider: String = "unknown",
+    val features: HealthFeatures = HealthFeatures()
+)
 data class PromptRulesResponse(
     val promptWindowStartHour: Int,
     val promptWindowEndHour: Int,
@@ -1365,6 +1371,7 @@ data class UiState(
     val serverConnected: Boolean = false,
     val serverVersion: String = "unbekannt",
     val pushProvider: String = "unknown",
+    val chatDeleteSupported: Boolean = false,
     val lastPingMs: Long? = null,
     val showPromptDialog: Boolean = false,
     val showProfileSetupPrompt: Boolean = false,
@@ -1568,7 +1575,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 startupQuote = startupQuote,
                 serverConnected = true,
                 serverVersion = health?.version ?: "nicht erreichbar",
-                pushProvider = health?.provider ?: "unknown"
+                pushProvider = health?.provider ?: "unknown",
+                chatDeleteSupported = health?.features?.chatDelete == true
             )
             delay(1300)
         }
@@ -1578,6 +1586,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverConnected = healthOk,
             serverVersion = health?.version ?: "nicht erreichbar",
             pushProvider = health?.provider ?: "unknown",
+            chatDeleteSupported = health?.features?.chatDelete == true,
             showChangelogDialog = showChangelog,
             changelogLines = changelogLines,
             uploadQueue = repo.uploadQueue(),
@@ -2224,8 +2233,19 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 true
             }
             .getOrElse {
-                state = state.copy(message = apiError(it, "Nachricht loeschen fehlgeschlagen"))
-                logApiFailure("chat_delete_failed", "/api/chat/:id", it, "chatId=$id")
+                val httpCode = (it as? HttpException)?.code()
+                val extraMeta = buildString {
+                    append("chatId=").append(id)
+                    if (httpCode == 404) append(";serverFeature=chatDeleteUnsupportedOrMissing")
+                }
+                state = state.copy(
+                    message = if (httpCode == 404) {
+                        "Nachrichten-Loeschen wird vom Server noch nicht unterstuetzt"
+                    } else {
+                        apiError(it, "Nachricht loeschen fehlgeschlagen")
+                    }
+                )
+                logApiFailure("chat_delete_failed", "/api/chat/:id", it, extraMeta)
                 false
             }
     }
@@ -2320,6 +2340,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     serverConnected = health.ok,
                     serverVersion = health.version,
                     pushProvider = health.provider,
+                    chatDeleteSupported = health.features.chatDelete,
                     lastPingMs = pingMs,
                     message = if (health.ok) "Verbindung erfolgreich geprueft" else "Server nicht erreichbar"
                 )
@@ -2328,6 +2349,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state = state.copy(
                     loading = false,
                     serverConnected = false,
+                    chatDeleteSupported = false,
                     lastPingMs = null,
                     message = apiError(it, "Verbindung pruefen fehlgeschlagen")
                 )
@@ -3561,6 +3583,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 AppTab.CHAT -> ChatTab(
                     items = state.chat,
                     meId = state.user?.id,
+                    chatDeleteSupported = state.chatDeleteSupported,
                     input = chatInput,
                     sending = state.chatSending,
                     onInput = { chatInput = it },
@@ -4675,6 +4698,7 @@ fun CalendarTab(
 fun ChatTab(
     items: List<ChatItem>,
     meId: Long?,
+    chatDeleteSupported: Boolean,
     input: String,
     sending: Boolean,
     onInput: (String) -> Unit,
@@ -4725,7 +4749,7 @@ fun ChatTab(
                     }
                     is ChatRow.MessageItem -> {
                         val item = row.item
-                        val canDelete = meId != null && item.user.id == meId && item.source == "user"
+                        val canDelete = chatDeleteSupported && meId != null && item.user.id == meId && item.source == "user"
                         val holdModifier = if (canDelete) {
                             Modifier.pointerInput(item.id) {
                                 detectTapGestures(
