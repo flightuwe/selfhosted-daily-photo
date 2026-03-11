@@ -281,6 +281,175 @@ button.danger {
   background: color-mix(in srgb, var(--soft-card) 72%, transparent);
 }
 
+.debug-toolbar {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--table-border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--soft-card) 95%, transparent), var(--soft-card));
+}
+
+.debug-toolbar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.debug-actions {
+  display: flex;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.debug-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  gap: 1rem;
+  align-items: end;
+}
+
+.debug-range {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.debug-range-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.debug-range-buttons button {
+  background: var(--tab-bg);
+  color: var(--tab-fg);
+}
+
+.debug-range-buttons button.active {
+  background: var(--tab-active);
+  color: #fff;
+}
+
+.debug-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+
+.debug-export-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 0.75rem;
+}
+
+.debug-export-card {
+  border: 1px solid var(--table-border);
+  border-radius: 14px;
+  padding: 0.9rem;
+  background: var(--soft-card);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.debug-table-wrap {
+  border: 1px solid var(--table-border);
+  border-radius: 16px;
+  overflow: auto;
+  background: color-mix(in srgb, var(--soft-card) 88%, transparent);
+}
+
+.debug-table {
+  min-width: 1080px;
+}
+
+.debug-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--glass-bg) 92%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.debug-time-cell,
+.debug-user-cell {
+  white-space: nowrap;
+}
+
+.debug-device,
+.debug-type-stack,
+.debug-meta-cell {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.debug-message-cell {
+  max-width: 380px;
+  min-width: 260px;
+  line-height: 1.4;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.debug-meta-cell {
+  min-width: 320px;
+}
+
+.debug-meta-cell code,
+.debug-type-code {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  color: var(--small);
+  background: color-mix(in srgb, var(--glass-bg) 72%, transparent);
+  border: 1px solid var(--table-border);
+  border-radius: 10px;
+  padding: 0.45rem 0.55rem;
+}
+
+.debug-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 0.26rem 0.6rem;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.debug-chip.neutral {
+  background: color-mix(in srgb, var(--tab-bg) 88%, transparent);
+  color: var(--tab-fg);
+}
+
+.debug-chip.ok {
+  background: rgba(45, 178, 116, 0.16);
+  color: #1d8b58;
+}
+
+.debug-chip.warn {
+  background: rgba(214, 147, 42, 0.16);
+  color: #a86712;
+}
+
+.debug-chip.error {
+  background: rgba(216, 76, 76, 0.16);
+  color: #b63c45;
+}
+
+.debug-chip.info {
+  background: rgba(61, 122, 255, 0.16);
+  color: #2c63cc;
+}
+
 .feed-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -418,6 +587,12 @@ button.danger {
 
   .grid4 {
     grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  .debug-filters,
+  .debug-summary-grid,
+  .debug-export-grid {
+    grid-template-columns: 1fr;
   }
 
   .table {

@@ -455,15 +455,30 @@ export async function getSystemHealth(token: string): Promise<SystemHealth> {
   return parse<SystemHealth>(res);
 }
 
-export async function getDebugLogs(token: string, userId?: number, limit = 150): Promise<DebugLogItem[]> {
+export async function getDebugLogs(token: string, userId?: number, limit = 150, sinceHours = 24): Promise<DebugLogItem[]> {
   const qs = new URLSearchParams();
   qs.set("limit", String(limit));
+  qs.set("sinceHours", String(sinceHours));
   if (userId && userId > 0) qs.set("userId", String(userId));
   const res = await fetch(`${apiBase}/admin/debug/logs?${qs.toString()}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const data = await parse<{ items: DebugLogItem[] }>(res);
   return data.items || [];
+}
+
+export async function deleteDebugLogs(
+  token: string,
+  opts?: { userId?: number; sinceHours?: number }
+): Promise<{ deletedCount: number; userId: number; sinceHours: number }> {
+  const qs = new URLSearchParams();
+  if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
+  qs.set("sinceHours", String(opts?.sinceHours ?? 24));
+  const res = await fetch(`${apiBase}/admin/debug/logs?${qs.toString()}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<{ deletedCount: number; userId: number; sinceHours: number }>(res);
 }
 
 export async function downloadDebugLogs(

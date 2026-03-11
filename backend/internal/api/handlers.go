@@ -118,6 +118,7 @@ func (s *Server) Router() *gin.Engine {
             admin.GET("/reports", s.handleAdminListReports)
             admin.PUT("/reports/:id", s.handleAdminUpdateReport)
             admin.GET("/debug/logs", s.handleAdminDebugLogs)
+            admin.DELETE("/debug/logs", s.handleAdminDeleteDebugLogs)
             admin.GET("/debug/logs/export", s.handleAdminDebugLogsExport)
             admin.GET("/system/health", s.handleAdminSystemHealth)
 
@@ -1562,7 +1563,24 @@ func (s *Server) handleAdminDebugLogs(c *gin.Context) {
         userID = parsed
     }
 
-    q := s.DB.Preload("User").Order("created_at desc").Limit(limit)
+    sinceHours := 24
+    if raw := strings.TrimSpace(c.Query("sinceHours")); raw != "" {
+        n, err := strconv.Atoi(raw)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
+            return
+        }
+        if n < 1 {
+            n = 1
+        }
+        if n > 168 {
+            n = 168
+        }
+        sinceHours = n
+    }
+
+    since := time.Now().In(s.Location).Add(-time.Duration(sinceHours) * time.Hour)
+    q := s.DB.Preload("User").Where("created_at >= ?", since).Order("created_at desc").Limit(limit)
     if userID != 0 {
         q = q.Where("user_id = ?", userID)
     }
@@ -1590,6 +1608,51 @@ func (s *Server) handleAdminDebugLogs(c *gin.Context) {
     }
 
     c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) handleAdminDeleteDebugLogs(c *gin.Context) {
+    userID := uint(0)
+    if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+        parsed, err := parseUintParam(raw)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+            return
+        }
+        userID = parsed
+    }
+
+    sinceHours := 24
+    if raw := strings.TrimSpace(c.Query("sinceHours")); raw != "" {
+        n, err := strconv.Atoi(raw)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
+            return
+        }
+        if n < 1 {
+            n = 1
+        }
+        if n > 168 {
+            n = 168
+        }
+        sinceHours = n
+    }
+
+    since := time.Now().In(s.Location).Add(-time.Duration(sinceHours) * time.Hour)
+    q := s.DB.Where("created_at >= ?", since)
+    if userID != 0 {
+        q = q.Where("user_id = ?", userID)
+    }
+    result := q.Delete(&models.ClientDebugLog{})
+    if result.Error != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "deletedCount": result.RowsAffected,
+        "userId":       userID,
+        "sinceHours":   sinceHours,
+    })
 }
 
 func (s *Server) handleAdminDebugLogsExport(c *gin.Context) {

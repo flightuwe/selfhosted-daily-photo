@@ -4,6 +4,7 @@ import {
   createChatCommand,
   clearChat,
   createUser,
+  deleteDebugLogs,
   deleteChatCommand,
   deleteUser,
   getAdminFeed,
@@ -128,6 +129,7 @@ export function App() {
   const [reportStatusFilter, setReportStatusFilter] = useState<"" | "open" | "in_review" | "done" | "rejected">("");
   const [debugLogs, setDebugLogs] = useState<DebugLogItem[]>([]);
   const [debugUserFilter, setDebugUserFilter] = useState<number>(0);
+  const [debugSinceHours, setDebugSinceHours] = useState<1 | 12 | 24>(24);
   const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [message, setMessage] = useState("");
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
@@ -148,6 +150,21 @@ export function App() {
     if (!q) return users;
     return users.filter((u) => u.username.toLowerCase().includes(q));
   }, [users, targetUserSearch]);
+  const debugSummary = useMemo(() => {
+    const uniqueUsers = new Set(debugLogs.map((row) => row.user?.id).filter(Boolean)).size;
+    const typeCounts = debugLogs.reduce<Record<string, number>>((acc, row) => {
+      const key = row.type || "unknown";
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    const topType = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "-";
+    return {
+      total: debugLogs.length,
+      uniqueUsers,
+      topType,
+      newestAt: debugLogs[0]?.createdAt || "",
+    };
+  }, [debugLogs]);
 
   useEffect(() => {
     if (!token) return;
@@ -175,9 +192,9 @@ export function App() {
       void loadSystemHealth(token);
     }
     if (activeTab === "debug") {
-      void loadDebugLogs(token, debugUserFilter);
+      void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, debugUserFilter, reportUserFilter, reportTypeFilter, reportStatusFilter]);
+  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -247,9 +264,9 @@ export function App() {
     }
   }
 
-  async function loadDebugLogs(authToken: string, userId?: number) {
+  async function loadDebugLogs(authToken: string, userId?: number, sinceHours: 1 | 12 | 24 = 24) {
     try {
-      const items = await getDebugLogs(authToken, userId && userId > 0 ? userId : undefined, 200);
+      const items = await getDebugLogs(authToken, userId && userId > 0 ? userId : undefined, 200, sinceHours);
       setDebugLogs(items);
     } catch (err) {
       setMessage((err as Error).message);
@@ -306,6 +323,28 @@ export function App() {
     try {
       await downloadDebugLogs(token, { sinceHours: hours, format: "csv" });
       setMessage(`Gesamte Logs (${hours}h) wurden heruntergeladen.`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDeleteDebugLogs() {
+    const scopeLabel =
+      debugUserFilter > 0
+        ? `@${users.find((u) => u.id === debugUserFilter)?.username || `User ${debugUserFilter}`}`
+        : "alle Nutzer";
+    const confirmed = window.confirm(
+      `Willst du wirklich die aktuell gefilterten Debug-Logs der letzten ${debugSinceHours}h fuer ${scopeLabel} loeschen?`
+    );
+    if (!confirmed) return;
+    setMessage("");
+    try {
+      const result = await deleteDebugLogs(token, {
+        userId: debugUserFilter > 0 ? debugUserFilter : undefined,
+        sinceHours: debugSinceHours,
+      });
+      await loadDebugLogs(token, debugUserFilter, debugSinceHours);
+      setMessage(`${result.deletedCount} Debug-Logs geloescht.`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1132,61 +1171,122 @@ export function App() {
 
         {activeTab === "debug" && (
           <div className="stack">
-            <div className="row">
-              <h2>Debug-Logs</h2>
-              <div className="row">
-                <select value={debugUserFilter} onChange={(e) => setDebugUserFilter(Number(e.target.value))}>
-                  <option value={0}>Alle Nutzer</option>
-                  {users.map((u) => (
-                    <option key={u.id} value={u.id}>@{u.username}</option>
-                  ))}
-                </select>
-                <button onClick={() => loadDebugLogs(token, debugUserFilter)}>Aktualisieren</button>
+            <div className="debug-toolbar">
+              <div className="debug-toolbar-head">
+                <div className="stack" style={{ marginBottom: 0 }}>
+                  <h2>Debug-Logs</h2>
+                  <p className="small">Filter, Export und Loeschen arbeiten immer auf demselben Zeitraum.</p>
+                </div>
+                <div className="debug-actions">
+                  <button onClick={() => loadDebugLogs(token, debugUserFilter, debugSinceHours)}>Aktualisieren</button>
+                  <button className="danger" onClick={onDeleteDebugLogs}>Logs loeschen</button>
+                </div>
+              </div>
+              <div className="debug-filters">
+                <label>
+                  Nutzer
+                  <select value={debugUserFilter} onChange={(e) => setDebugUserFilter(Number(e.target.value))}>
+                    <option value={0}>Alle Nutzer</option>
+                    {users.map((u) => (
+                      <option key={u.id} value={u.id}>@{u.username}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="debug-range">
+                  <span className="small"><strong>Zeitraum</strong></span>
+                  <div className="debug-range-buttons">
+                    {[1, 12, 24].map((hours) => (
+                      <button
+                        key={hours}
+                        type="button"
+                        className={debugSinceHours === hours ? "active" : ""}
+                        onClick={() => setDebugSinceHours(hours as 1 | 12 | 24)}
+                      >
+                        {hours}h
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="debug-summary-grid">
+                <CardStat title="Logs im Filter" value={debugSummary.total} />
+                <CardStat title="Betroffene Nutzer" value={debugSummary.uniqueUsers} />
+                <CardStat title="Haeufigster Typ" value={debugTypeLabel(debugSummary.topType)} />
+                <CardStat title="Juengster Eintrag" value={debugSummary.newestAt ? formatDateTime(debugSummary.newestAt) : "-"} />
+              </div>
+              <div className="debug-export-grid">
+                <article className="debug-export-card">
+                  <div className="stack" style={{ marginBottom: 0 }}>
+                    <strong>Nutzer-Export</strong>
+                    <span className="small">Exportiert den aktuell ausgewaehlten Nutzer im aktiven Zeitraum.</span>
+                  </div>
+                  <button
+                    onClick={() => onDownloadUserLogs(debugSinceHours)}
+                    disabled={debugUserFilter <= 0}
+                  >
+                    CSV herunterladen
+                  </button>
+                </article>
+                <article className="debug-export-card">
+                  <div className="stack" style={{ marginBottom: 0 }}>
+                    <strong>Gesamt-Export</strong>
+                    <span className="small">Exportiert alle Debug-Logs im aktiven Zeitraum.</span>
+                  </div>
+                  <button className="accent" onClick={() => onDownloadAllLogs(debugSinceHours)}>
+                    CSV herunterladen
+                  </button>
+                </article>
               </div>
             </div>
-            <div className="row">
-              <span className="small"><strong>Nutzer-Export:</strong></span>
-              <button onClick={() => onDownloadUserLogs(1)}>1h</button>
-              <button onClick={() => onDownloadUserLogs(12)}>12h</button>
-              <button onClick={() => onDownloadUserLogs(24)}>24h</button>
-              <span className="small"><strong>Gesamt:</strong></span>
-              <button onClick={() => onDownloadAllLogs(1)}>1h</button>
-              <button onClick={() => onDownloadAllLogs(12)}>12h</button>
-              <button onClick={() => onDownloadAllLogs(24)}>24h</button>
-            </div>
-            <p className="small">
-              Nutzer-Export nutzt den aktuell ausgewaehlten Nutzer oben. Gesamt exportiert alle Debug-Logs im gewaehlten Zeitraum.
-            </p>
             {debugLogs.length === 0 && <p>Keine Debug-Eintraege vorhanden.</p>}
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Zeit</th>
-                  <th>Nutzer</th>
-                  <th>Geraet</th>
-                  <th>App</th>
-                  <th>Typ</th>
-                  <th>Nachricht</th>
-                  <th>Meta</th>
-                </tr>
-              </thead>
-              <tbody>
-                {debugLogs.map((row) => (
-                  <tr key={row.id}>
-                    <td>{formatDateTime(row.createdAt)}</td>
-                    <td>@{row.user?.username || "-"}</td>
-                    <td>{row.deviceName || "-"}</td>
-                    <td>{row.appVersion || "-"}</td>
-                    <td><code>{row.type}</code></td>
-                    <td>{row.message}</td>
-                    <td className="small">
-                      {debugMetaHint(row.meta || "") ? <strong>{debugMetaHint(row.meta || "")}: </strong> : null}
-                      {row.meta || "-"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {debugLogs.length > 0 && (
+              <div className="debug-table-wrap">
+                <table className="table debug-table">
+                  <thead>
+                    <tr>
+                      <th>Zeit</th>
+                      <th>Nutzer</th>
+                      <th>Geraet / App</th>
+                      <th>Typ</th>
+                      <th>Nachricht</th>
+                      <th>Meta</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {debugLogs.map((row) => {
+                      const metaHint = debugMetaHint(row.meta || "");
+                      return (
+                        <tr key={row.id}>
+                          <td className="debug-time-cell">{formatDateTime(row.createdAt)}</td>
+                          <td className="debug-user-cell">@{row.user?.username || "-"}</td>
+                          <td>
+                            <div className="debug-device">
+                              <strong>{row.deviceName || "-"}</strong>
+                              <span className="small">{row.appVersion || "-"}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="debug-type-stack">
+                              <span className={`debug-chip ${debugTypeClass(row.type)}`}>{debugTypeLabel(row.type)}</span>
+                              <code className="debug-type-code">{row.type}</code>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="debug-message-cell">{row.message || "-"}</div>
+                          </td>
+                          <td>
+                            <div className="debug-meta-cell">
+                              {metaHint ? <span className="debug-chip info">{metaHint}</span> : null}
+                              <code>{row.meta || "-"}</code>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 
@@ -1391,6 +1491,35 @@ function truncateText(value: string, maxLen = 80) {
   const text = (value || "").trim();
   if (text.length <= maxLen) return text;
   return `${text.slice(0, maxLen - 1)}…`;
+}
+
+function debugTypeLabel(value: string) {
+  switch (value) {
+    case "dashboard_load_failed":
+      return "Dashboard";
+    case "profile_open_failed":
+      return "Profil Fehler";
+    case "crash_unhandled":
+      return "Crash";
+    case "profile_open_ok":
+      return "Profil OK";
+    default:
+      return value || "Unbekannt";
+  }
+}
+
+function debugTypeClass(value: string) {
+  switch (value) {
+    case "dashboard_load_failed":
+      return "warn";
+    case "profile_open_failed":
+    case "crash_unhandled":
+      return "error";
+    case "profile_open_ok":
+      return "ok";
+    default:
+      return "neutral";
+  }
 }
 
 function CardStat({ title, value }: { title: string; value: number | string }) {
