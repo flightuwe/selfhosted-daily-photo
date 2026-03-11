@@ -1866,17 +1866,20 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         try {
             repo.syncDeviceTokenIfNeeded()
             val meResp = repo.me()
-            val me = meResp.user
-            val inviteCode = repo.myInviteCode()
-            val prompt = repo.prompt()
-            val rules = repo.promptRules()
-            val special = repo.specialMomentStatus()
-            val photos = repo.myPhotos()
-            val chat = repo.listChat()
-            val feedDays = repo.feedDays()
-            val dayStats = runCatching { repo.feedDayStats() }.getOrDefault(emptyList())
-            val communityStats = runCatching { repo.communityStats() }.getOrNull()
-            val payload = DashboardData(me, meResp.streakDays, meResp.dailyMomentCount, inviteCode, prompt, rules, special, photos, chat, feedDays, dayStats, communityStats)
+            val payload = DashboardData(
+                me = meResp.user,
+                streakDays = meResp.streakDays,
+                dailyMomentCount = meResp.dailyMomentCount,
+                inviteCode = repo.myInviteCode(),
+                prompt = repo.prompt(),
+                rules = repo.promptRules(),
+                special = repo.specialMomentStatus(),
+                photos = repo.myPhotos(),
+                chat = repo.listChat(),
+                feedDays = repo.feedDays(),
+                dayStats = runCatching { repo.feedDayStats() }.getOrDefault(emptyList()),
+                communityStats = runCatching { repo.communityStats() }.getOrNull()
+            )
             val me = payload.me
             val streakDays = payload.streakDays
             val dailyMomentCount = payload.dailyMomentCount
@@ -1901,8 +1904,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setChatPushLocalEnabled(me.chatPushEnabled)
             repo.setInviteRegistrationPushLocalEnabled(me.inviteRegistrationPushEnabled)
             repo.syncQuietHoursFromUser(me)
-            repo.setChatPushLocalEnabled(me.chatPushEnabled)
-            repo.setInviteRegistrationPushLocalEnabled(me.inviteRegistrationPushEnabled)
             repo.setPhotoReactionPushLocalEnabled(me.photoReactionPushEnabled)
             repo.setPhotoCommentPushLocalEnabled(me.photoCommentPushEnabled)
             val notificationMaster = repo.notificationMasterEnabled()
