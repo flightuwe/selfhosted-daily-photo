@@ -1,4 +1,4 @@
-﻿package com.selfhosted.daily
+package com.selfhosted.daily
 
 import android.Manifest
 import android.app.Activity
@@ -50,6 +50,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
@@ -4459,7 +4461,7 @@ fun FeedTab(
                                         onClick = { onJumpToCapsule(day, photoId) },
                                         contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)
                                     ) {
-                                        Text("↪ Capsule vom ${formatDayWithWeekday(day)} oeffnen", color = Color.Black)
+                                        Text("Capsule vom ${formatDayWithWeekday(day)} oeffnen", color = Color.Black)
                                     }
                                 }
                             }
@@ -4856,7 +4858,7 @@ private fun CollapsibleSection(
                         Text(subtitle, color = Color.Gray, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                 }
-                Text(if (expanded) "▾" else "▸", style = MaterialTheme.typography.titleMedium)
+                Text(if (expanded) "v" else ">", style = MaterialTheme.typography.titleMedium)
             }
             if (expanded) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
@@ -5072,99 +5074,381 @@ fun ProfileTab(
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxSize()) {
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("@$username", style = MaterialTheme.typography.titleLarge)
-                Text("🔥 $streakDays", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text("🌈 $dailyMomentCount", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        updatePulseTick += 1
-                        updateChecked = true
-                        onCheckUpdate()
-                    },
-                    modifier = Modifier.graphicsLayer {
-                        scaleX = updateButtonScale.value
-                        scaleY = updateButtonScale.value
-                    }
-                ) { Text(if (updateChecked) "Update geprueft" else "Update pruefen") }
-                Button(onClick = onShowChangelog) { Text("!") }
-                Button(onClick = onShowHelp) { Text("Hilfe") }
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            val setupTransition = rememberInfiniteTransition(label = "setup-rainbow")
-            val setupHue by setupTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = 360f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(durationMillis = 14000, easing = LinearEasing),
-                    repeatMode = RepeatMode.Restart
-                ),
-                label = "setup-rainbow-hue"
-            )
-            val setupBrush = Brush.horizontalGradient(
-                listOf(
-                    rainbowColor(setupHue + 0f),
-                    rainbowColor(setupHue + 80f),
-                    rainbowColor(setupHue + 160f),
-                    rainbowColor(setupHue + 240f)
-                )
-            )
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(setupBrush, shape = MaterialTheme.shapes.medium),
-                colors = CardDefaults.cardColors(containerColor = Color.Transparent)
-            ) {
-                Button(
-                    onClick = onOpenSetupGuide,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.Transparent,
-                        contentColor = Color.White
-                    )
-                ) { Text("Profil-Setup Assistent") }
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onLogout) { Text("Abmelden") }
-            }
-        }
-
-        item {
-            CollapsibleSection(
-                title = "Anzeige",
-                subtitle = "Design und Theme",
-                expanded = sectionExpanded("display"),
-                onExpandedChange = { onProfileSectionExpandedChange("display", it) }
-            ) {
-                Text("Darstellung: ${themeModeLabel(themeSliderValue.toInt())}")
-                Slider(
-                    value = themeSliderValue,
-                    onValueChange = {
-                        themeSliderValue = it.coerceIn(0f, 2f)
-                    },
-                    valueRange = 0f..2f,
-                    steps = 1,
-                    onValueChangeFinished = {
-                        val selected = themeSliderValue.toInt().coerceIn(0, 2)
-                        themeSliderValue = selected.toFloat()
-                        onThemeModeChange(selected)
-                    }
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("Light", color = if (themeSliderValue < 0.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Dark", color = if (themeSliderValue in 0.5f..1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("OLED", color = if (themeSliderValue > 1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text("@$username", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                            Text(
+                                "Dein Hub fuer Konto, Hilfe und Updates",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Column(
+                            horizontalAlignment = Alignment.End,
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text("🔥 $streakDays", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text("🌈 $dailyMomentCount", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                updatePulseTick += 1
+                                updateChecked = true
+                                onCheckUpdate()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .graphicsLayer {
+                                    scaleX = updateButtonScale.value
+                                    scaleY = updateButtonScale.value
+                                }
+                        ) { Text(if (updateChecked) "Update geprueft" else "Update pruefen") }
+                        Button(onClick = onShowChangelog, modifier = Modifier.widthIn(min = 56.dp)) { Text("!") }
+                        Button(onClick = onShowHelp, modifier = Modifier.widthIn(min = 96.dp)) { Text("Hilfe") }
+                    }
+                    val setupTransition = rememberInfiniteTransition(label = "setup-rainbow")
+                    val setupHue by setupTransition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = 360f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(durationMillis = 14000, easing = LinearEasing),
+                            repeatMode = RepeatMode.Restart
+                        ),
+                        label = "setup-rainbow-hue"
+                    )
+                    val setupBrush = Brush.horizontalGradient(
+                        listOf(
+                            rainbowColor(setupHue + 0f),
+                            rainbowColor(setupHue + 80f),
+                            rainbowColor(setupHue + 160f),
+                            rainbowColor(setupHue + 240f)
+                        )
+                    )
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(setupBrush, shape = MaterialTheme.shapes.medium),
+                        colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+                    ) {
+                        Button(
+                            onClick = onOpenSetupGuide,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.Transparent,
+                                contentColor = Color.White
+                            )
+                        ) { Text("Profil-Setup Assistent") }
+                    }
+                    Button(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { Text("Abmelden") }
                 }
             }
         }
+        item {
+            CollapsibleSection(
+                title = "Profil & Konto",
+                subtitle = "Konto, persoenliche Angaben und Privatsphaere",
+                expanded = sectionExpanded("profile_account"),
+                onExpandedChange = { onProfileSectionExpandedChange("profile_account", it) }
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .bringIntoViewRequester(accountBringRequester),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    SettingsSubsection("Konto", "Profilbild, Benutzername und Passwort") {
+                        if (avatarUrl.isNotBlank()) {
+                            AsyncImage(
+                                model = avatarUrl,
+                                contentDescription = "Profilbild",
+                                modifier = Modifier
+                                    .size(96.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                            )
+                        }
+                        Button(
+                            onClick = { avatarPickerLauncher.launch("image/*") },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Profilbild hochladen") }
+                        OutlinedTextField(
+                            value = editableUsername,
+                            onValueChange = {
+                                usernameDirty = true
+                                onEditableUsernameChange(it)
+                            },
+                            label = { Text("Benutzername") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged {
+                                    if (!it.isFocused && usernameDirty) {
+                                        usernameDirty = false
+                                        triggerProfileAutosave(debounced = true)
+                                    }
+                                }
+                        )
+                        OutlinedTextField(
+                            value = currentPassword,
+                            onValueChange = onCurrentPasswordChange,
+                            label = { Text("Aktuelles Passwort") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = newPassword,
+                            onValueChange = onNewPasswordChange,
+                            label = { Text("Neues Passwort") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Button(onClick = onChangePassword, modifier = Modifier.fillMaxWidth()) { Text("Passwort speichern") }
+                    }
 
+                    SettingsSubsection("Persoenlich", "Bio, Status und Farbe fuer dein Profil") {
+                        OutlinedTextField(
+                            value = bioValue,
+                            onValueChange = {
+                                bioDirty = true
+                                bioValue = it.take(280)
+                            },
+                            label = { Text("Kurzbeschreibung") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged {
+                                    if (!it.isFocused && bioDirty) {
+                                        bioDirty = false
+                                        triggerProfileAutosave(debounced = true)
+                                    }
+                                }
+                        )
+                        OutlinedTextField(
+                            value = statusTextValue,
+                            onValueChange = {
+                                statusTextDirty = true
+                                statusTextValue = it.take(120)
+                            },
+                            label = { Text("Status-Text") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged {
+                                    if (!it.isFocused && statusTextDirty) {
+                                        statusTextDirty = false
+                                        triggerProfileAutosave(debounced = true)
+                                    }
+                                }
+                        )
+                        OutlinedTextField(
+                            value = statusEmojiValue,
+                            onValueChange = {
+                                statusEmojiDirty = true
+                                statusEmojiValue = it.take(8)
+                            },
+                            label = { Text("Status-Emoji") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged {
+                                    if (!it.isFocused && statusEmojiDirty) {
+                                        statusEmojiDirty = false
+                                        triggerProfileAutosave(debounced = true)
+                                    }
+                                }
+                        )
+                        val expiryTransition = rememberInfiniteTransition(label = "status-expiry-rainbow")
+                        val expiryHue by expiryTransition.animateFloat(
+                            initialValue = 0f,
+                            targetValue = 360f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(durationMillis = 16000, easing = LinearEasing),
+                                repeatMode = RepeatMode.Restart
+                            ),
+                            label = "status-expiry-hue"
+                        )
+                        val expiryBrush = Brush.horizontalGradient(
+                            listOf(
+                                rainbowColor(expiryHue + 0f),
+                                rainbowColor(expiryHue + 90f),
+                                rainbowColor(expiryHue + 180f),
+                                rainbowColor(expiryHue + 270f)
+                            )
+                        )
+                        val expiryLabel = when (statusExpiryPreset) {
+                            "24h" -> "24 Stunden"
+                            "72h" -> "72 Stunden"
+                            "7d" -> "7 Tage"
+                            "none" -> "Kein Verfallsdatum"
+                            else -> if (statusExpiresAtValue.isNotBlank()) "Bis ${formatCapsuleOpenAt(statusExpiresAtValue)}" else "Kein Verfallsdatum"
+                        }
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(expiryBrush, shape = MaterialTheme.shapes.small),
+                            colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+                        ) {
+                            Text(
+                                text = "Verfallsdatum: $expiryLabel",
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Button(onClick = {
+                                statusExpiresAtValue = OffsetDateTime.now().plusHours(24).toString()
+                                statusExpiryPreset = "24h"
+                                appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                                triggerProfileAutosave(debounced = false)
+                            }, modifier = Modifier.weight(1f)) { Text("24h") }
+                            Button(onClick = {
+                                statusExpiresAtValue = OffsetDateTime.now().plusHours(72).toString()
+                                statusExpiryPreset = "72h"
+                                appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                                triggerProfileAutosave(debounced = false)
+                            }, modifier = Modifier.weight(1f)) { Text("72h") }
+                            Button(onClick = {
+                                statusExpiresAtValue = OffsetDateTime.now().plusDays(7).toString()
+                                statusExpiryPreset = "7d"
+                                appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                                triggerProfileAutosave(debounced = false)
+                            }, modifier = Modifier.weight(1f)) { Text("7d") }
+                            Button(onClick = {
+                                statusExpiresAtValue = ""
+                                statusExpiryPreset = "none"
+                                appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
+                                triggerProfileAutosave(debounced = false)
+                            }, modifier = Modifier.weight(1f)) { Text("Nie") }
+                        }
+                        Text("Aktuelle Lieblingsfarbe: ${normalizeHexColor(editableColor)}")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(28.dp)
+                                .background(parseUserColor(editableColor))
+                        ) {}
+                        Button(onClick = { showColorPicker = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Lieblingsfarbe waehlen")
+                        }
+                        Text(
+                            text = "Vorschau Name",
+                            color = parseUserColor(editableColor),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    SettingsSubsection(
+                        title = "Privatsphaere",
+                        subtitle = "Sichtbarkeit, Download-Freigabe und Ruhezeiten"
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .bringIntoViewRequester(privacyBringRequester),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            SettingsToggleRow(
+                                label = "Download der eigenen Bilder fuer andere Benutzer zulassen",
+                                checked = allowPhotoDownload,
+                                onCheckedChange = { checked ->
+                                    if (checked && !allowPhotoDownload) {
+                                        showAllowDownloadWarning = true
+                                    } else if (!checked && allowPhotoDownload) {
+                                        onAllowPhotoDownloadChange(false)
+                                    }
+                                },
+                                supportingText = "Nur wenn du das aktiv einschaltest, erscheint im Bildbetrachter ein Download-Button."
+                            )
+                            SettingsToggleRow(
+                                label = "Profil aufrufbar",
+                                checked = profileVisibleValue,
+                                onCheckedChange = {
+                                    profileVisibleValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                }
+                            )
+                            SettingsToggleRow(
+                                label = "Profilbild sichtbar",
+                                checked = avatarVisibleValue,
+                                onCheckedChange = {
+                                    avatarVisibleValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                }
+                            )
+                            SettingsToggleRow(
+                                label = "Kurzbeschreibung sichtbar",
+                                checked = bioVisibleValue,
+                                onCheckedChange = {
+                                    bioVisibleValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                }
+                            )
+                            SettingsToggleRow(
+                                label = "Status sichtbar",
+                                checked = statusVisibleValue,
+                                onCheckedChange = {
+                                    statusVisibleValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                }
+                            )
+                            SettingsToggleRow(
+                                label = "Ruhezeit aktiv",
+                                checked = quietHoursEnabledValue,
+                                onCheckedChange = {
+                                    quietHoursEnabledValue = it
+                                    triggerProfileAutosave(debounced = false)
+                                },
+                                supportingText = "Ausnahmen: Daily-Moment und Sondermoment bleiben aktiv."
+                            )
+                            if (quietHoursEnabledValue) {
+                                OutlinedTextField(
+                                    value = quietHoursStartValue,
+                                    onValueChange = {
+                                        quietStartDirty = true
+                                        quietHoursStartValue = it.take(5)
+                                    },
+                                    label = { Text("Ruhezeit Start (HH:mm)") },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .onFocusChanged {
+                                            if (!it.isFocused && quietStartDirty) {
+                                                quietStartDirty = false
+                                                triggerProfileAutosave(debounced = true)
+                                            }
+                                        }
+                                )
+                                OutlinedTextField(
+                                    value = quietHoursEndValue,
+                                    onValueChange = {
+                                        quietEndDirty = true
+                                        quietHoursEndValue = it.take(5)
+                                    },
+                                    label = { Text("Ruhezeit Ende (HH:mm)") },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .onFocusChanged {
+                                            if (!it.isFocused && quietEndDirty) {
+                                                quietEndDirty = false
+                                                triggerProfileAutosave(debounced = true)
+                                            }
+                                        }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
         item {
             val transition = rememberInfiniteTransition(label = "notif-master-rainbow")
             val hueShift by transition.animateFloat(
@@ -5200,14 +5484,20 @@ fun ProfileTab(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            "Alle Benachrichtigungen",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                "Alle Benachrichtigungen",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "Schaltet alle optionalen Push-Nachrichten gemeinsam ein oder aus.",
+                                color = Color.White.copy(alpha = 0.92f)
+                            )
+                        }
                         Switch(
                             checked = notificationMasterEnabled,
                             onCheckedChange = onNotificationMasterEnabledChange,
@@ -5220,625 +5510,72 @@ fun ProfileTab(
                         )
                     }
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Auto-Update-Suche (10 Min)")
-                    Switch(checked = autoUpdateEnabled, onCheckedChange = onAutoUpdateEnabledChange)
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Chat Push bei neuen Nachrichten")
-                    Switch(checked = chatPushEnabled, onCheckedChange = onChatPushEnabledChange)
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Push bei Posts anderer Nutzer")
-                    Switch(checked = feedPostPushEnabled, onCheckedChange = onFeedPostPushEnabledChange)
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Push bei neuen Mitgliedern")
-                    Switch(
+                SettingsSubsection("Allgemein", "Alles, was den Alltag in der Gruppe betrifft") {
+                    SettingsToggleRow(
+                        label = "Auto-Update-Suche (10 Min)",
+                        checked = autoUpdateEnabled,
+                        onCheckedChange = onAutoUpdateEnabledChange
+                    )
+                    SettingsToggleRow(
+                        label = "Chat Push bei neuen Nachrichten",
+                        checked = chatPushEnabled,
+                        onCheckedChange = onChatPushEnabledChange
+                    )
+                    SettingsToggleRow(
+                        label = "Push bei Posts anderer Nutzer",
+                        checked = feedPostPushEnabled,
+                        onCheckedChange = onFeedPostPushEnabledChange
+                    )
+                    SettingsToggleRow(
+                        label = "Push bei neuen Mitgliedern",
                         checked = inviteRegistrationPushEnabled,
                         onCheckedChange = onInviteRegistrationPushEnabledChange
                     )
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Push bei Reaktionen auf meine Beitraege")
-                    Switch(
+                SettingsSubsection("Meine Beitraege", "Benachrichtigungen zu Interaktionen auf deine Posts") {
+                    SettingsToggleRow(
+                        label = "Push bei Reaktionen auf meine Beitraege",
                         checked = photoReactionPushEnabled,
                         onCheckedChange = onPhotoReactionPushEnabledChange
                     )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Push bei Kommentaren auf meine Beitraege")
-                    Switch(
+                    SettingsToggleRow(
+                        label = "Push bei Kommentaren auf meine Beitraege",
                         checked = photoCommentPushEnabled,
                         onCheckedChange = onPhotoCommentPushEnabledChange
                     )
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Custom-Benachrichtigungston")
-                    Switch(
+                SettingsSubsection("Ton", "Klingelton und Test fuer deine Push-Benachrichtigungen") {
+                    SettingsToggleRow(
+                        label = "Custom-Benachrichtigungston",
                         checked = customNotificationToneEnabled,
                         onCheckedChange = onCustomNotificationToneEnabledChange
                     )
-                }
-                if (customNotificationToneEnabled) {
-                    val toneLabel = remember(customNotificationToneUri) {
-                        resolveNotificationToneTitle(context, customNotificationToneUri)
-                    }
-                    Text(
-                        "Ausgewaehlter Ton: ${if (toneLabel.isBlank()) "System-Standard" else toneLabel}",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Button(onClick = onPickCustomNotificationTone, modifier = Modifier.weight(1f)) {
-                            Text("Ton auswaehlen")
+                    if (customNotificationToneEnabled) {
+                        val toneLabel = remember(customNotificationToneUri) {
+                            resolveNotificationToneTitle(context, customNotificationToneUri)
                         }
-                        Button(onClick = onClearCustomNotificationTone, modifier = Modifier.weight(1f)) {
-                            Text("Zuruecksetzen")
-                        }
-                    }
-                    Button(
-                        onClick = onTestCustomNotificationTone,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Test-Benachrichtigungston + Push")
-                    }
-                }
-            }
-        }
-
-        item {
-            CollapsibleSection(
-                title = "Invite-Code",
-                subtitle = "Code teilen oder erneuern",
-                expanded = sectionExpanded("invite"),
-                onExpandedChange = { onProfileSectionExpandedChange("invite", it) }
-            ) {
-                Text(inviteCode.ifBlank { "wird geladen ..." }, fontWeight = FontWeight.SemiBold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = onRollInviteCode, modifier = Modifier.weight(1f)) { Text("Erneuern") }
-                    Button(onClick = onShareInviteCode, modifier = Modifier.weight(1f)) { Text("Teilen") }
-                }
-                Text("Jeder Code ist einmal gueltig. Nach Nutzung wird automatisch ein neuer Code erzeugt.")
-            }
-        }
-
-        item {
-            CollapsibleSection(
-                title = "Profil & Konto",
-                subtitle = "Konto, persoenliche Angaben und Privatsphaere",
-                expanded = sectionExpanded("profile_account"),
-                onExpandedChange = { onProfileSectionExpandedChange("profile_account", it) }
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .bringIntoViewRequester(accountBringRequester),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("Konto", fontWeight = FontWeight.SemiBold)
-                    if (avatarUrl.isNotBlank()) {
-                        AsyncImage(
-                            model = avatarUrl,
-                            contentDescription = "Profilbild",
-                            modifier = Modifier
-                                .size(96.dp)
-                                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                        Text(
+                            "Ausgewaehlter Ton: ${if (toneLabel.isBlank()) "System-Standard" else toneLabel}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    }
-                    Button(
-                        onClick = { avatarPickerLauncher.launch("image/*") },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Profilbild hochladen") }
-                    OutlinedTextField(
-                        value = editableUsername,
-                        onValueChange = {
-                            usernameDirty = true
-                            onEditableUsernameChange(it)
-                        },
-                        label = { Text("Benutzername") },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .onFocusChanged {
-                                if (!it.isFocused && usernameDirty) {
-                                    usernameDirty = false
-                                    triggerProfileAutosave(debounced = true)
-                                }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Button(onClick = onPickCustomNotificationTone, modifier = Modifier.weight(1f)) {
+                                Text("Ton auswaehlen")
                             }
-                    )
-                }
-
-                Text("Persoenlich", fontWeight = FontWeight.SemiBold)
-                OutlinedTextField(
-                    value = bioValue,
-                    onValueChange = {
-                        bioDirty = true
-                        bioValue = it.take(280)
-                    },
-                    label = { Text("Kurzbeschreibung") },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onFocusChanged {
-                            if (!it.isFocused && bioDirty) {
-                                bioDirty = false
-                                triggerProfileAutosave(debounced = true)
+                            Button(onClick = onClearCustomNotificationTone, modifier = Modifier.weight(1f)) {
+                                Text("Zuruecksetzen")
                             }
                         }
-                )
-                OutlinedTextField(
-                    value = statusTextValue,
-                    onValueChange = {
-                        statusTextDirty = true
-                        statusTextValue = it.take(120)
-                    },
-                    label = { Text("Status-Text") },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onFocusChanged {
-                            if (!it.isFocused && statusTextDirty) {
-                                statusTextDirty = false
-                                triggerProfileAutosave(debounced = true)
-                            }
-                        }
-                )
-                OutlinedTextField(
-                    value = statusEmojiValue,
-                    onValueChange = {
-                        statusEmojiDirty = true
-                        statusEmojiValue = it.take(8)
-                    },
-                    label = { Text("Status-Emoji") },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onFocusChanged {
-                            if (!it.isFocused && statusEmojiDirty) {
-                                statusEmojiDirty = false
-                                triggerProfileAutosave(debounced = true)
-                            }
-                        }
-                )
-                val expiryTransition = rememberInfiniteTransition(label = "status-expiry-rainbow")
-                val expiryHue by expiryTransition.animateFloat(
-                    initialValue = 0f,
-                    targetValue = 360f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(durationMillis = 16000, easing = LinearEasing),
-                        repeatMode = RepeatMode.Restart
-                    ),
-                    label = "status-expiry-hue"
-                )
-                val expiryBrush = Brush.horizontalGradient(
-                    listOf(
-                        rainbowColor(expiryHue + 0f),
-                        rainbowColor(expiryHue + 90f),
-                        rainbowColor(expiryHue + 180f),
-                        rainbowColor(expiryHue + 270f)
-                    )
-                )
-                val expiryLabel = when (statusExpiryPreset) {
-                    "24h" -> "24 Stunden"
-                    "72h" -> "72 Stunden"
-                    "7d" -> "7 Tage"
-                    "none" -> "Kein Verfallsdatum"
-                    else -> if (statusExpiresAtValue.isNotBlank()) "Bis ${formatCapsuleOpenAt(statusExpiresAtValue)}" else "Kein Verfallsdatum"
-                }
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(expiryBrush, shape = MaterialTheme.shapes.small),
-                    colors = CardDefaults.cardColors(containerColor = Color.Transparent)
-                ) {
-                    Text(
-                        text = "Verfallsdatum: $expiryLabel",
-                        color = Color.White,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = {
-                        statusExpiresAtValue = OffsetDateTime.now().plusHours(24).toString()
-                        statusExpiryPreset = "24h"
-                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
-                        triggerProfileAutosave(debounced = false)
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("24h")
-                    }
-                    Button(onClick = {
-                        statusExpiresAtValue = OffsetDateTime.now().plusHours(72).toString()
-                        statusExpiryPreset = "72h"
-                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
-                        triggerProfileAutosave(debounced = false)
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("72h")
-                    }
-                    Button(onClick = {
-                        statusExpiresAtValue = OffsetDateTime.now().plusDays(7).toString()
-                        statusExpiryPreset = "7d"
-                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
-                        triggerProfileAutosave(debounced = false)
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("7d")
-                    }
-                    Button(onClick = {
-                        statusExpiresAtValue = ""
-                        statusExpiryPreset = "none"
-                        appPrefs.edit().putString(expiryPresetKey, statusExpiryPreset).apply()
-                        triggerProfileAutosave(debounced = false)
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("∞")
-                    }
-                }
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Aktuelle Lieblingsfarbe: ${normalizeHexColor(editableColor)}")
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(28.dp)
-                                .background(parseUserColor(editableColor))
-                        ) {}
-                        Button(onClick = { showColorPicker = true }, modifier = Modifier.fillMaxWidth()) {
-                            Text("Lieblingsfarbe waehlen")
-                        }
-                    }
-                }
-                Text(
-                    text = "Vorschau Name",
-                    color = parseUserColor(editableColor),
-                    fontWeight = FontWeight.Bold
-                )
-
-                CollapsibleSection(
-                    title = "Privatsphaere",
-                    subtitle = "Sichtbarkeit, Download und Ruhezeit",
-                    expanded = sectionExpanded("profile_privacy"),
-                    onExpandedChange = { onProfileSectionExpandedChange("profile_privacy", it) }
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .bringIntoViewRequester(privacyBringRequester),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        Button(
+                            onClick = onTestCustomNotificationTone,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                "Download der eigenen Bilder fuer andere Benutzer zulassen",
-                                modifier = Modifier.weight(1f)
-                            )
-                            Switch(
-                                checked = allowPhotoDownload,
-                                onCheckedChange = { checked ->
-                                    if (checked && !allowPhotoDownload) {
-                                        showAllowDownloadWarning = true
-                                    } else if (!checked && allowPhotoDownload) {
-                                        onAllowPhotoDownloadChange(false)
-                                    }
-                                }
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Profil aufrufbar")
-                            Switch(
-                                checked = profileVisibleValue,
-                                onCheckedChange = {
-                                    profileVisibleValue = it
-                                    triggerProfileAutosave(debounced = false)
-                                }
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Profilbild sichtbar")
-                            Switch(
-                                checked = avatarVisibleValue,
-                                onCheckedChange = {
-                                    avatarVisibleValue = it
-                                    triggerProfileAutosave(debounced = false)
-                                }
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Kurzbeschreibung sichtbar")
-                            Switch(
-                                checked = bioVisibleValue,
-                                onCheckedChange = {
-                                    bioVisibleValue = it
-                                    triggerProfileAutosave(debounced = false)
-                                }
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Status sichtbar")
-                            Switch(
-                                checked = statusVisibleValue,
-                                onCheckedChange = {
-                                    statusVisibleValue = it
-                                    triggerProfileAutosave(debounced = false)
-                                }
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Ruhezeit aktiv")
-                            Switch(
-                                checked = quietHoursEnabledValue,
-                                onCheckedChange = {
-                                    quietHoursEnabledValue = it
-                                    triggerProfileAutosave(debounced = false)
-                                }
-                            )
-                        }
-                        if (quietHoursEnabledValue) {
-                            OutlinedTextField(
-                                value = quietHoursStartValue,
-                                onValueChange = {
-                                    quietStartDirty = true
-                                    quietHoursStartValue = it.take(5)
-                                },
-                                label = { Text("Ruhezeit Start (HH:mm)") },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .onFocusChanged {
-                                        if (!it.isFocused && quietStartDirty) {
-                                            quietStartDirty = false
-                                            triggerProfileAutosave(debounced = true)
-                                        }
-                                    }
-                            )
-                            OutlinedTextField(
-                                value = quietHoursEndValue,
-                                onValueChange = {
-                                    quietEndDirty = true
-                                    quietHoursEndValue = it.take(5)
-                                },
-                                label = { Text("Ruhezeit Ende (HH:mm)") },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .onFocusChanged {
-                                        if (!it.isFocused && quietEndDirty) {
-                                            quietEndDirty = false
-                                            triggerProfileAutosave(debounced = true)
-                                        }
-                                    }
-                            )
-                            Text("Ausnahmen: Daily-Moment und Sondermoment bleiben aktiv.")
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-                OutlinedTextField(
-                    value = currentPassword,
-                    onValueChange = onCurrentPasswordChange,
-                    label = { Text("Aktuelles Passwort") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = newPassword,
-                    onValueChange = onNewPasswordChange,
-                    label = { Text("Neues Passwort") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Button(onClick = onChangePassword, modifier = Modifier.fillMaxWidth()) { Text("Passwort speichern") }
-            }
-        }
-
-        item {
-            CollapsibleSection(
-                title = "App & Verbindung",
-                subtitle = "Versionen und Serverstatus",
-                expanded = sectionExpanded("app_connection"),
-                onExpandedChange = { onProfileSectionExpandedChange("app_connection", it) }
-            ) {
-                Card {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Status: ${if (serverConnected) "Verbunden" else "Nicht verbunden"}")
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("App-Version: $appVersion")
-                            Text(
-                                text = if (updateAvailable) "(nicht aktuell)" else "(aktuell)",
-                                color = if (updateAvailable) Color(0xFFD32F2F) else Color(0xFF2E7D32),
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                        Text("Server-Version: $serverVersion")
-                        Text("Push-Provider: $pushProvider")
-                        Text("Letzter Ping: ${lastPingMs?.let { "${it} ms" } ?: "-"}")
-                        Text("API: $apiBaseUrl")
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
-                    }
-                }
-            }
-        }
-
-        item {
-            CollapsibleSection(
-                title = "Debug & Diagnose",
-                subtitle = "Fehlerlogs lokal speichern, exportieren und optional hochladen",
-                expanded = sectionExpanded("debug_diagnose"),
-                onExpandedChange = { onProfileSectionExpandedChange("debug_diagnose", it) }
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Diagnose-Upload aktivieren")
-                    Switch(
-                        checked = diagnosticsUploadEnabled,
-                        onCheckedChange = onDiagnosticsUploadEnabledChange
-                    )
-                }
-                Text(
-                    "Wenn aktiviert, werden Diagnose-Logs bei App-Start und bei neuen Fehlern automatisch an den Server geschickt.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(onClick = onRefreshDebugLogs, modifier = Modifier.weight(1f)) { Text("Letzte Fehler") }
-                    Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) { Text("Diagnose exportieren") }
-                }
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        if (debugLogs.isEmpty()) {
-                            Text("Keine lokalen Fehlereintraege vorhanden")
-                        } else {
-                            debugLogs.take(12).forEach { row ->
-                                Text("[${row.createdAt.take(16)}] ${row.type}", fontWeight = FontWeight.SemiBold)
-                                Text(row.message, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                if (row.meta.isNotBlank()) {
-                                    Text(row.meta, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
+                            Text("Test-Benachrichtigungston + Push")
                         }
                     }
                 }
             }
         }
-
-        item {
-            CollapsibleSection(
-                title = "Community-Stats",
-                subtitle = "Heute + letzte 7 Tage",
-                expanded = sectionExpanded("community_stats"),
-                onExpandedChange = { onProfileSectionExpandedChange("community_stats", it) }
-            ) {
-                Card {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (communityStatsLoading && communityStats == null) {
-                            Text("Community-Stats werden geladen ...")
-                        } else if (communityStats == null) {
-                            Text("Noch keine Daten vorhanden")
-                        } else {
-                            Text("👥 Registrierte Nutzer: ${communityStats.registeredUsers}")
-                            Text("✅ Heute aktiv: ${communityStats.activeUsersToday}")
-                            val latest = communityStats.latestActiveUser
-                            Text(
-                                if (latest == null) {
-                                    "🕒 Zuletzt aktiv: -"
-                                } else {
-                                    "🕒 Zuletzt aktiv: @${latest.username} · ${formatMomentTime(latest.createdAt)}"
-                                }
-                            )
-                            Text("📸 Posts heute: ${communityStats.postsToday}")
-                            Text("💬 Chat-Nachrichten heute: ${communityStats.chatMessagesToday}")
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("🏆 Top 5 Reaktionen (7 Tage)", fontWeight = FontWeight.SemiBold)
-                            if (communityStats.topReactions7d.isEmpty()) {
-                                Text("Noch keine Reaktionen in den letzten 7 Tagen")
-                            } else {
-                                communityStats.topReactions7d.take(5).forEachIndexed { index, item ->
-                                    Text("${index + 1}. ${item.emoji}  ${item.count}")
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            val dm = communityStats.dailyMomentParticipation7d
-                            Text("🌈 Daily-Moment-Quote (7 Tage): ${dm.participants}/${dm.totalUsers} Nutzer (${dm.percent}%)")
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            CollapsibleSection(
-                title = "Moment-Bedingungen",
-                subtitle = "Aktuelle Regeln vom Server",
-                expanded = sectionExpanded("moment_rules"),
-                onExpandedChange = { onProfileSectionExpandedChange("moment_rules", it) }
-            ) {
-                Card {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (promptRules == null) {
-                            Text("Bedingungen werden geladen ...")
-                        } else {
-                            Text("Prompt-Fenster: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
-                            Text("Upload-Fenster: ${promptRules.uploadWindowMinutes} Minuten")
-                            Text("Max Upload: ${if (promptRules.maxUploadBytes <= 0) "Unbegrenzt" else formatBytes(promptRules.maxUploadBytes.toDouble())}")
-                            Text("Zeitzone: ${promptRules.timezone}")
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            CollapsibleSection(
-                title = "Upload-Komprimierung",
-                subtitle = "Qualitaet vs. Geschwindigkeit",
-                expanded = sectionExpanded("upload_quality"),
-                onExpandedChange = { onProfileSectionExpandedChange("upload_quality", it) }
-            ) {
-                Card {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("JPEG-Qualitaet: $uploadQuality%")
-                        Slider(
-                            value = uploadQuality.toFloat(),
-                            onValueChange = { onUploadQualityChange(it.toInt()) },
-                            valueRange = 20f..100f
-                        )
-                        Text("Weniger Qualitaet = kleiner und schnellerer Upload")
-                    }
-                }
-            }
-        }
-
         item {
             CollapsibleSection(
                 title = "Vergangene Beitraege",
@@ -5913,8 +5650,216 @@ fun ProfileTab(
                                         if (photo.secondUrl != null) {
                                             Text("2 Bilder", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
-                                        Text("🕒 ${formatMomentTime(photo.createdAt)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text("Zeit ${formatMomentTime(photo.createdAt)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         Text(formatDayLabel(photo.day), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "Invite-Code",
+                subtitle = "Code teilen oder erneuern",
+                expanded = sectionExpanded("invite"),
+                onExpandedChange = { onProfileSectionExpandedChange("invite", it) }
+            ) {
+                Text(inviteCode.ifBlank { "wird geladen ..." }, fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = onRollInviteCode, modifier = Modifier.weight(1f)) { Text("Erneuern") }
+                    Button(onClick = onShareInviteCode, modifier = Modifier.weight(1f)) { Text("Teilen") }
+                }
+                Text("Jeder Code ist einmal gueltig. Nach Nutzung wird automatisch ein neuer Code erzeugt.")
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "Anzeige",
+                subtitle = "Design und Theme",
+                expanded = sectionExpanded("display"),
+                onExpandedChange = { onProfileSectionExpandedChange("display", it) }
+            ) {
+                Text("Darstellung: ${themeModeLabel(themeSliderValue.toInt())}")
+                Slider(
+                    value = themeSliderValue,
+                    onValueChange = {
+                        themeSliderValue = it.coerceIn(0f, 2f)
+                    },
+                    valueRange = 0f..2f,
+                    steps = 1,
+                    onValueChangeFinished = {
+                        val selected = themeSliderValue.toInt().coerceIn(0, 2)
+                        themeSliderValue = selected.toFloat()
+                        onThemeModeChange(selected)
+                    }
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Light", color = if (themeSliderValue < 0.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Dark", color = if (themeSliderValue in 0.5f..1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("OLED", color = if (themeSliderValue > 1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "Upload-Komprimierung",
+                subtitle = "Qualitaet vs. Geschwindigkeit",
+                expanded = sectionExpanded("upload_quality"),
+                onExpandedChange = { onProfileSectionExpandedChange("upload_quality", it) }
+            ) {
+                Card {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("JPEG-Qualitaet: $uploadQuality%")
+                        Slider(
+                            value = uploadQuality.toFloat(),
+                            onValueChange = { onUploadQualityChange(it.toInt()) },
+                            valueRange = 20f..100f
+                        )
+                        Text("Weniger Qualitaet = kleiner und schnellerer Upload")
+                    }
+                }
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "Moment-Bedingungen",
+                subtitle = "Aktuelle Regeln vom Server",
+                expanded = sectionExpanded("moment_rules"),
+                onExpandedChange = { onProfileSectionExpandedChange("moment_rules", it) }
+            ) {
+                Card {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (promptRules == null) {
+                            Text("Bedingungen werden geladen ...")
+                        } else {
+                            Text("Prompt-Fenster: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
+                            Text("Upload-Fenster: ${promptRules.uploadWindowMinutes} Minuten")
+                            Text("Max Upload: ${if (promptRules.maxUploadBytes <= 0) "Unbegrenzt" else formatBytes(promptRules.maxUploadBytes.toDouble())}")
+                            Text("Zeitzone: ${promptRules.timezone}")
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "App & Verbindung",
+                subtitle = "Versionen und Serverstatus",
+                expanded = sectionExpanded("app_connection"),
+                onExpandedChange = { onProfileSectionExpandedChange("app_connection", it) }
+            ) {
+                Card {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Status: ${if (serverConnected) "Verbunden" else "Nicht verbunden"}")
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("App-Version: $appVersion")
+                            Text(
+                                text = if (updateAvailable) "(nicht aktuell)" else "(aktuell)",
+                                color = if (updateAvailable) Color(0xFFD32F2F) else Color(0xFF2E7D32),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Text("Server-Version: $serverVersion")
+                        Text("Push-Provider: $pushProvider")
+                        Text("Letzter Ping: ${lastPingMs?.let { "${it} ms" } ?: "-"}")
+                        Text("API: $apiBaseUrl")
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
+                    }
+                }
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "Community-Stats",
+                subtitle = "Heute + letzte 7 Tage",
+                expanded = sectionExpanded("community_stats"),
+                onExpandedChange = { onProfileSectionExpandedChange("community_stats", it) }
+            ) {
+                Card {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (communityStatsLoading && communityStats == null) {
+                            Text("Community-Stats werden geladen ...")
+                        } else if (communityStats == null) {
+                            Text("Noch keine Daten vorhanden")
+                        } else {
+                            Text("Registrierte Nutzer: ${communityStats.registeredUsers}")
+                            Text("Heute aktiv: ${communityStats.activeUsersToday}")
+                            val latest = communityStats.latestActiveUser
+                            Text(
+                                if (latest == null) {
+                                    "Zuletzt aktiv: -"
+                                } else {
+                                    "Zuletzt aktiv: @${latest.username} · ${formatMomentTime(latest.createdAt)}"
+                                }
+                            )
+                            Text("Posts heute: ${communityStats.postsToday}")
+                            Text("Chat-Nachrichten heute: ${communityStats.chatMessagesToday}")
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("Top 5 Reaktionen (7 Tage)", fontWeight = FontWeight.SemiBold)
+                            if (communityStats.topReactions7d.isEmpty()) {
+                                Text("Noch keine Reaktionen in den letzten 7 Tagen")
+                            } else {
+                                communityStats.topReactions7d.take(5).forEachIndexed { index, item ->
+                                    Text("${index + 1}. ${item.emoji}  ${item.count}")
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            val dm = communityStats.dailyMomentParticipation7d
+                            Text("Daily-Moment-Quote (7 Tage): ${dm.participants}/${dm.totalUsers} Nutzer (${dm.percent}%)")
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "Debug & Diagnose",
+                subtitle = "Fehlerlogs lokal speichern, exportieren und optional hochladen",
+                expanded = sectionExpanded("debug_diagnose"),
+                onExpandedChange = { onProfileSectionExpandedChange("debug_diagnose", it) }
+            ) {
+                SettingsSubsection(
+                    title = "Diagnose",
+                    subtitle = "Nur wenn du Probleme nachvollziehen oder uns Logs schicken willst."
+                ) {
+                    SettingsToggleRow(
+                        label = "Diagnose-Upload aktivieren",
+                        checked = diagnosticsUploadEnabled,
+                        onCheckedChange = onDiagnosticsUploadEnabledChange,
+                        supportingText = "Wenn aktiviert, werden Diagnose-Logs bei App-Start und bei neuen Fehlern automatisch an den Server geschickt."
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(onClick = onRefreshDebugLogs, modifier = Modifier.weight(1f)) { Text("Letzte Fehler") }
+                        Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) { Text("Diagnose exportieren") }
+                    }
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (debugLogs.isEmpty()) {
+                                Text("Keine lokalen Fehlereintraege vorhanden")
+                            } else {
+                                debugLogs.take(8).forEach { row ->
+                                    Text("[${row.createdAt.take(16)}] ${row.type}", fontWeight = FontWeight.SemiBold)
+                                    Text(row.message, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    if (row.meta.isNotBlank()) {
+                                        Text(
+                                            row.meta,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
                                 }
                             }
@@ -6195,6 +6140,56 @@ private fun DailyMomentStartOverlay(
     }
 }
 
+@Composable
+private fun SettingsSubsection(
+    title: String,
+    subtitle: String? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        if (!subtitle.isNullOrBlank()) {
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                content = content
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    supportingText: String? = null
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = 52.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label)
+            if (!supportingText.isNullOrBlank()) {
+                Text(supportingText, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Box(
+            modifier = Modifier.widthIn(min = 56.dp),
+            contentAlignment = Alignment.CenterEnd
+        ) {
+            Switch(checked = checked, onCheckedChange = onCheckedChange)
+        }
+    }
+}
+
 private fun isWithinDailyMomentWindow(createdAtRaw: String?, triggeredAtRaw: String?, uploadUntilRaw: String?): Boolean {
     val created = parseOffsetOrLocalDateTime(createdAtRaw) ?: return false
     val triggered = parseOffsetOrLocalDateTime(triggeredAtRaw) ?: return false
@@ -6254,9 +6249,9 @@ private fun themeModeLabel(mode: Int): String {
 private fun momentReasonLine(triggerSource: String?, requestedByUser: String?): String? {
     val src = triggerSource?.trim().orEmpty().lowercase()
     return if (src == "special_request" || src == "chat_command") {
-        if (!requestedByUser.isNullOrBlank()) "⭐ Sondermoment von $requestedByUser" else "⭐ Sondermoment"
+        if (!requestedByUser.isNullOrBlank()) "Sondermoment von $requestedByUser" else "Sondermoment"
     } else if (src.isNotBlank()) {
-        "⏳ Daily-Moment"
+        "Daily-Moment"
     } else {
         null
     }
@@ -6320,7 +6315,7 @@ private fun DailyMomentBadge() {
             .background(rainbowBrush, shape = MaterialTheme.shapes.small)
             .padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
-        Text("⏳ Daily-Moment", color = Color.White, fontWeight = FontWeight.SemiBold)
+        Text("Daily-Moment", color = Color.White, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -6658,7 +6653,7 @@ private fun ViewerInteractionSheet(
                     modifier = Modifier.weight(1f)
                 ) {
                     val count = countByEmoji[emoji] ?: 0L
-                    Text("${if (selected) "✓" else ""}$emoji $count")
+                    Text("${if (selected) "+ " else ""}$emoji $count")
                 }
             }
         }
