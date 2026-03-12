@@ -5,11 +5,19 @@
 Private, selfhosted Daily-Moment App (Android + Admin Web + Go Backend) fuer kleine Gruppen.
 
 ## Inhalt
-- Ein Foto-Moment pro Tag
-- Feed-Sperre bis zum eigenen Tagesmoment
-- Extra-Bilder, Kalender, Chat, Sondermoment
-- Admin-Panel fuer Nutzer, Events, Commands, Systemzustand
+- Sichtbarer Tagespost entsperrt den heutigen Feed
+- Ausserhalb des Daily-Fensters postest du ein `Extra`
+- Im aktiven Daily-Fenster gibt es genau ein echtes `Daily-Moment`
+- Time Capsules bleiben bis zum Unlock fuer alle verborgen
+- Kalender, Chat, Sondermoment und Admin-Panel fuer kleine Gruppen
 - Vollstaendig selfhosted auf Synology/Portainer moeglich
+
+## Produktlogik kurz erklaert
+- `Extra`: normaler sichtbarer Post ausserhalb des aktiven Daily-Fensters
+- `Daily-Moment`: der echte Tagesmoment im aktiven Daily-Fenster
+- `Time Capsule`: bewusst gesperrter Post, der erst zum Unlock sichtbar wird
+- Der heutige Feed entsperrt sich erst, wenn du heute einen sichtbaren Post gesetzt hast
+- Eine private oder noch gesperrte Capsule entsperrt den heutigen Feed nicht
 
 ## Architektur
 - `backend/` Go API + SQLite + Upload-Speicher
@@ -72,9 +80,9 @@ Dann erreichbar:
 ## GitHub Setup (CI/CD)
 
 ### Workflows
-- `ci.yml`: Backend Tests + Admin Build
-- `publish-images.yml`: baut/pusht Server-Images bei Push auf `main`
-- `release-android.yml`: baut signierte APK bei Tag `v*`
+- `CI`: Backend-Tests, Admin-Build und Android-Debug-Build fuer Pushes auf `main` und Pull Requests
+- `Publish Server Images`: baut und pusht Backend- und Admin-Images nach GHCR bei Push auf `main`
+- `Release Android APK`: baut die signierte APK bei semantischen Tags `v*` und erstellt das GitHub Release
 
 ### Server-Image Tags
 Beim Push auf `main`:
@@ -100,6 +108,11 @@ Diese 5 Secrets muessen gesetzt sein:
 - In Portainer Registry hinterlegen (GitHub PAT mit `read:packages`)
 - Name/Passwort dann in Portainer, nicht zwingend als GitHub Secret
 
+### Fuer den laufenden Betrieb
+- Laufende Backend-/Push-Konfiguration liegt nicht in GitHub Actions, sondern in `deploy/` und den Umgebungsvariablen des Servers
+- Relevante Betriebswerte wie `JWT_SECRET`, `PUBLIC_BASE_URL`, `FCM_PROJECT_ID` und `APP_VERSION` werden auf dem Zielsystem gesetzt
+- GitHub Actions braucht nur die Secrets, die wirklich fuer Release oder Registry-Zugriff noetig sind
+
 ## Android Build/Release
 
 ### Neue App-Version releasen
@@ -112,20 +125,25 @@ Diese 5 Secrets muessen gesetzt sein:
    - `git push origin vX.Y.Z`
 4. APK liegt danach im GitHub Release als `app-release.apk`
 5. Changelog wird automatisch erzeugt:
-   - Release-Body aus `release-notes.md`
+   - Release-Body aus `.github/release-notes/vX.Y.Z.md`
    - Asset `changelog.json` fuer die App
+6. Wenn keine manuellen Release-Notes vorliegen, faellt der Workflow auf deduplizierte Commit-Highlights zurueck
 
 Hinweis:
 - Der Android-Release-Workflow ist absichtlich **tag-only** und akzeptiert nur semantische Tags `vX.Y.Z`.
-- Falls `release-notes.md`, `changelog.json` oder APK fehlen, bricht der Workflow mit Fehler ab.
+- Manuelle Release-Notes bestehen immer aus einem Paar:
+  - `.github/release-notes/vX.Y.Z.md`
+  - `.github/release-notes/vX.Y.Z.json`
+- Details zur Policy stehen in `.github/release-notes/README.md`
 
 ## Erste Inbetriebnahme testen
 1. `https://daily.deine-domain.tld/api/health` -> `ok: true`
 2. Admin Login mit Bootstrap-Admin
 3. Testnutzer anlegen
-4. Event manuell triggern
-5. Android App installieren und einloggen
-6. Tagesmoment posten, Feed/Kalender/Chat pruefen
+4. Android App installieren und einloggen
+5. Ausserhalb eines Daily-Fensters ein sichtbares `Extra` posten und pruefen, dass der heutige Feed danach entsperrt ist
+6. Danach ein Daily-Fenster manuell triggern und im aktiven Zeitraum ein echtes `Daily-Moment` posten
+7. Optional eine `Time Capsule` anlegen und pruefen, dass sie vor dem Unlock noch nicht im heutigen Feed auftaucht
 
 ## Updates ohne Portainer-Klickorgie
 Option A (manuell, schnell):
@@ -179,7 +197,13 @@ Siehe `backend/.env.example`:
 
 ### Android Release bricht ab
 - Einer der 5 Android-Secrets fehlt/falsch
-- Workflow `release-android` Log pruefen
+- Workflow `Release Android APK` Log pruefen
+
+## Feedback und Triage
+- In-App-Feedback und Fehler landen zuerst als Reports im Admin-Panel
+- GitHub Issues sind die kuratierte technische Nachverfolgung, nicht der einzige Eingangskanal
+- Fuer oeffentliche Releases sollten Changelogs immer Problem, Fix und Nutzerwirkung kurz benennen
+- Admin-Reports und GitHub-Issues sollten inhaltlich aufeinander referenzieren, aber nicht doppelt gepflegt werden
 
 ## Sicherheit (kurz)
 - Starkes `JWT_SECRET`

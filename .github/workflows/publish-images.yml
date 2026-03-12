@@ -1,4 +1,4 @@
-name: publish-server-images
+name: Publish Server Images
 
 on:
   push:

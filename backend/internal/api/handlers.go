@@ -105,6 +105,7 @@ func (s *Server) Router() *gin.Engine {
 			admin.GET("/stats", s.handleAdminStats)
 			admin.GET("/feed", s.handleAdminFeed)
 			admin.GET("/calendar", s.handleAdminCalendar)
+			admin.GET("/history", s.handleAdminHistory)
 			admin.GET("/time-capsules", s.handleAdminTimeCapsules)
 			admin.PUT("/calendar/:day", s.handleAdminCalendarDay)
 
@@ -2130,6 +2131,231 @@ WHERE created_at IS NOT NULL
 		"totalImages":  totalImages,
 		"runningDays":  runningDays,
 		"storageBytes": storageBytes,
+	})
+}
+
+func (s *Server) handleAdminHistory(c *gin.Context) {
+	days := 30
+	if raw := strings.TrimSpace(c.Query("days")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			days = n
+		}
+	}
+	if days < 1 {
+		days = 1
+	}
+	if days > 120 {
+		days = 120
+	}
+	offset := 0
+	if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	now := time.Now().In(s.Location)
+	startDayDate := now.AddDate(0, 0, -offset)
+	dayList := make([]string, 0, days)
+	for i := 0; i < days; i++ {
+		dayList = append(dayList, startDayDate.AddDate(0, 0, -i).Format("2006-01-02"))
+	}
+	oldest := dayList[len(dayList)-1]
+	newest := dayList[0]
+
+	var plans []models.PromptPlan
+	if err := s.DB.Where("day >= ? AND day <= ?", oldest, newest).Find(&plans).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "history query failed"})
+		return
+	}
+	planByDay := make(map[string]models.PromptPlan, len(plans))
+	for _, plan := range plans {
+		planByDay[plan.Day] = plan
+	}
+
+	var prompts []models.DailyPrompt
+	if err := s.DB.Where("day >= ? AND day <= ?", oldest, newest).Find(&prompts).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "history query failed"})
+		return
+	}
+	promptByDay := make(map[string]models.DailyPrompt, len(prompts))
+	for _, prompt := range prompts {
+		promptByDay[prompt.Day] = prompt
+	}
+
+	var photos []models.Photo
+	if err := s.DB.Where("day >= ? AND day <= ?", oldest, newest).Find(&photos).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "history query failed"})
+		return
+	}
+
+	dayStart := time.Date(startDayDate.AddDate(0, 0, -(days-1)).Year(), startDayDate.AddDate(0, 0, -(days-1)).Month(), startDayDate.AddDate(0, 0, -(days-1)).Day(), 0, 0, 0, 0, s.Location)
+	dayEnd := time.Date(startDayDate.Year(), startDayDate.Month(), startDayDate.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), s.Location)
+
+	var comments []models.PhotoComment
+	_ = s.DB.Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Find(&comments).Error
+	var reactions []models.PhotoReaction
+	_ = s.DB.Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Find(&reactions).Error
+	var chats []models.ChatMessage
+	_ = s.DB.Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Find(&chats).Error
+
+	var activities []models.DailyUserActivity
+	if err := s.DB.Preload("User").Where("day >= ? AND day <= ?", oldest, newest).Order("day desc, first_seen_at asc").Find(&activities).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "history query failed"})
+		return
+	}
+
+	var firstTrackedActivity models.DailyUserActivity
+	trackingAvailableFrom := ""
+	if err := s.DB.Order("day asc").First(&firstTrackedActivity).Error; err == nil {
+		trackingAvailableFrom = firstTrackedActivity.Day
+	}
+
+	type dayMetrics struct {
+		postedUsers       map[uint]struct{}
+		promptUsers       map[uint]struct{}
+		extraUsers        map[uint]struct{}
+		photoCount        int
+		dailyMomentPhotos int
+		extraPhotos       int
+		timeCapsules      int
+		privateCapsules   int
+		commentCount      int
+		reactionCount     int
+		chatMessageCount  int
+		onlineUsers       map[uint]struct{}
+		userActivity      []gin.H
+	}
+
+	metricsByDay := make(map[string]*dayMetrics, len(dayList))
+	getMetrics := func(day string) *dayMetrics {
+		if existing, ok := metricsByDay[day]; ok {
+			return existing
+		}
+		created := &dayMetrics{
+			postedUsers: make(map[uint]struct{}),
+			promptUsers: make(map[uint]struct{}),
+			extraUsers:  make(map[uint]struct{}),
+			onlineUsers: make(map[uint]struct{}),
+		}
+		metricsByDay[day] = created
+		return created
+	}
+
+	for _, photo := range photos {
+		metrics := getMetrics(photo.Day)
+		metrics.photoCount++
+		metrics.postedUsers[photo.UserID] = struct{}{}
+		if strings.TrimSpace(photo.CapsuleMode) != "" {
+			metrics.timeCapsules++
+		}
+		if photo.CapsulePrivate {
+			metrics.privateCapsules++
+		}
+		if prompt, ok := promptByDay[photo.Day]; ok && prompt.TriggeredAt != nil && prompt.UploadUntil != nil &&
+			!photo.CreatedAt.Before(*prompt.TriggeredAt) && !photo.CreatedAt.After(*prompt.UploadUntil) {
+			metrics.dailyMomentPhotos++
+			metrics.promptUsers[photo.UserID] = struct{}{}
+		} else {
+			metrics.extraPhotos++
+			metrics.extraUsers[photo.UserID] = struct{}{}
+		}
+	}
+	for _, row := range comments {
+		metrics := getMetrics(row.CreatedAt.In(s.Location).Format("2006-01-02"))
+		metrics.commentCount++
+	}
+	for _, row := range reactions {
+		metrics := getMetrics(row.CreatedAt.In(s.Location).Format("2006-01-02"))
+		metrics.reactionCount++
+	}
+	for _, row := range chats {
+		metrics := getMetrics(row.CreatedAt.In(s.Location).Format("2006-01-02"))
+		metrics.chatMessageCount++
+	}
+	for _, row := range activities {
+		metrics := getMetrics(row.Day)
+		metrics.onlineUsers[row.UserID] = struct{}{}
+		metrics.userActivity = append(metrics.userActivity, gin.H{
+			"userId":       row.UserID,
+			"username":     row.User.Username,
+			"firstSeenAt":  row.FirstSeenAt,
+			"lastSeenAt":   row.LastSeenAt,
+			"requestCount": row.RequestCount,
+			"posted":       false,
+			"postedPrompt": false,
+			"postedExtra":  false,
+		})
+	}
+
+	for _, day := range dayList {
+		metrics := getMetrics(day)
+		if len(metrics.userActivity) == 0 {
+			continue
+		}
+		for i := range metrics.userActivity {
+			userID, _ := metrics.userActivity[i]["userId"].(uint)
+			_, posted := metrics.postedUsers[userID]
+			_, postedPrompt := metrics.promptUsers[userID]
+			_, postedExtra := metrics.extraUsers[userID]
+			metrics.userActivity[i]["posted"] = posted
+			metrics.userActivity[i]["postedPrompt"] = postedPrompt
+			metrics.userActivity[i]["postedExtra"] = postedExtra
+		}
+	}
+
+	items := make([]gin.H, 0, len(dayList))
+	for _, day := range dayList {
+		metrics := getMetrics(day)
+		plan, hasPlan := planByDay[day]
+		prompt, hasPrompt := promptByDay[day]
+		onlineTrackingAvailable := trackingAvailableFrom != "" && day >= trackingAvailableFrom
+		row := gin.H{
+			"day":                     day,
+			"plannedAt":               nil,
+			"triggeredAt":             nil,
+			"uploadUntil":             nil,
+			"source":                  "auto",
+			"triggerSource":           "",
+			"requestedByUser":         "",
+			"onlineUsersCount":        nil,
+			"postedUsersCount":        len(metrics.postedUsers),
+			"dailyMomentUsersCount":   len(metrics.promptUsers),
+			"extraUsersCount":         len(metrics.extraUsers),
+			"photoCount":              metrics.photoCount,
+			"dailyMomentPhotoCount":   metrics.dailyMomentPhotos,
+			"extraPhotoCount":         metrics.extraPhotos,
+			"timeCapsuleCount":        metrics.timeCapsules,
+			"privateCapsuleCount":     metrics.privateCapsules,
+			"commentCount":            metrics.commentCount,
+			"reactionCount":           metrics.reactionCount,
+			"chatMessageCount":        metrics.chatMessageCount,
+			"onlineTrackingAvailable": onlineTrackingAvailable,
+			"userActivity":            metrics.userActivity,
+		}
+		if hasPlan {
+			row["plannedAt"] = plan.PlannedAt
+			if plan.IsManual {
+				row["source"] = "manual"
+			}
+		}
+		if hasPrompt {
+			row["triggeredAt"] = prompt.TriggeredAt
+			row["uploadUntil"] = prompt.UploadUntil
+			row["triggerSource"] = prompt.TriggerSource
+			row["requestedByUser"] = prompt.RequestedBy
+		}
+		if onlineTrackingAvailable {
+			row["onlineUsersCount"] = len(metrics.onlineUsers)
+		}
+		items = append(items, row)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":               items,
+		"days":                days,
+		"offset":              offset,
+		"onlineTrackingSince": trackingAvailableFrom,
 	})
 }
 

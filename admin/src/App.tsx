@@ -4,10 +4,13 @@ import {
   createChatCommand,
   clearChat,
   createUser,
+  deleteReport,
+  deleteReports,
   deleteDebugLogs,
   deleteChatCommand,
   deleteUser,
   getAdminFeed,
+  getAdminHistory,
   getAdminTimeCapsules,
   getCalendar,
   getChat,
@@ -31,6 +34,7 @@ import {
   updateUser,
   type AdminReportItem,
   type AdminStats,
+  type AdminHistoryDay,
   type ChatCommand,
   type AdminUser,
   type ChatItem,
@@ -38,12 +42,13 @@ import {
   type AdminTimeCapsuleItem,
   type FeedItem,
   type DebugLogItem,
+  type DebugLogsResponse,
   type MonthlyRecap,
   type Settings,
   type SystemHealth,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "time_capsule" | "reports" | "debug" | "settings";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "history" | "time_capsule" | "reports" | "debug" | "settings";
 
 const DEFAULT_SETTINGS: Settings = {
   promptWindowStartHour: 8,
@@ -125,12 +130,22 @@ export function App() {
   const [commandDraft, setCommandDraft] = useState<CommandDraft>(emptyCommandDraft);
   const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
   const [calendarDrafts, setCalendarDrafts] = useState<Record<string, string>>({});
+  const [historyItems, setHistoryItems] = useState<AdminHistoryDay[]>([]);
+  const [historyDays, setHistoryDays] = useState<number>(30);
+  const [historyOffset, setHistoryOffset] = useState<number>(0);
+  const [historyTrackingSince, setHistoryTrackingSince] = useState("");
+  const [expandedHistoryDays, setExpandedHistoryDays] = useState<Record<string, boolean>>({});
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
   const [reportTypeFilter, setReportTypeFilter] = useState<"" | "bug" | "idea">("");
   const [reportStatusFilter, setReportStatusFilter] = useState<"" | "open" | "in_review" | "done" | "rejected">("");
   const [debugLogs, setDebugLogs] = useState<DebugLogItem[]>([]);
+  const [debugFilterInfo, setDebugFilterInfo] = useState<{ since: string; serverNow: string; sinceHours: number }>({
+    since: "",
+    serverNow: "",
+    sinceHours: 24,
+  });
   const [debugUserFilter, setDebugUserFilter] = useState<number>(0);
   const [debugSinceHours, setDebugSinceHours] = useState<1 | 12 | 24>(24);
   const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -153,6 +168,7 @@ export function App() {
     if (!q) return users;
     return users.filter((u) => u.username.toLowerCase().includes(q));
   }, [users, targetUserSearch]);
+  const hasReportDeleteFilter = reportUserFilter > 0 || reportTypeFilter !== "" || reportStatusFilter !== "";
   const debugSummary = useMemo(() => {
     const uniqueUsers = new Set(debugLogs.map((row) => row.user?.id).filter(Boolean)).size;
     const typeCounts = debugLogs.reduce<Record<string, number>>((acc, row) => {
@@ -185,6 +201,9 @@ export function App() {
     if (activeTab === "calendar") {
       void loadCalendar(token);
     }
+    if (activeTab === "history") {
+      void loadHistory(token, historyDays, historyOffset);
+    }
     if (activeTab === "time_capsule") {
       void loadTimeCapsules(token);
     }
@@ -200,7 +219,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter]);
+  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -272,8 +291,13 @@ export function App() {
 
   async function loadDebugLogs(authToken: string, userId?: number, sinceHours: 1 | 12 | 24 = 24) {
     try {
-      const items = await getDebugLogs(authToken, userId && userId > 0 ? userId : undefined, 200, sinceHours);
-      setDebugLogs(items);
+      const response: DebugLogsResponse = await getDebugLogs(authToken, userId && userId > 0 ? userId : undefined, 200, sinceHours);
+      setDebugLogs(response.items);
+      setDebugFilterInfo({
+        since: response.since,
+        serverNow: response.serverNow,
+        sinceHours: response.sinceHours,
+      });
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -307,6 +331,57 @@ export function App() {
       const updated = await updateReport(token, id, { status, githubIssueNumber: githubIssueNumber ?? null });
       setReports((prev) => prev.map((item) => (item.id === id ? updated : item)));
       setMessage("Report aktualisiert.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDeleteReport(id: number) {
+    const confirmed = window.confirm("Diesen Report wirklich loeschen?");
+    if (!confirmed) return;
+    setMessage("");
+    try {
+      await deleteReport(token, id);
+      await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
+      setMessage("Report geloescht.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDeleteFilteredReports() {
+    if (!hasReportDeleteFilter) {
+      setMessage("Bitte erst mindestens einen Report-Filter setzen.");
+      return;
+    }
+    const scopeParts: string[] = [];
+    if (reportTypeFilter) scopeParts.push(reportTypeFilter === "bug" ? "Bug-Reports" : "Ideen");
+    if (reportStatusFilter) {
+      const label =
+        reportStatusFilter === "open"
+          ? "Status offen"
+          : reportStatusFilter === "in_review"
+            ? "Status in Bearbeitung"
+            : reportStatusFilter === "done"
+              ? "Status erledigt"
+              : "Status abgelehnt";
+      scopeParts.push(label);
+    }
+    if (reportUserFilter > 0) {
+      scopeParts.push(`@${users.find((u) => u.id === reportUserFilter)?.username || `User ${reportUserFilter}`}`);
+    }
+    const scopeLabel = scopeParts.join(", ");
+    const confirmed = window.confirm(`Wirklich alle Reports mit diesem Filter loeschen: ${scopeLabel}?`);
+    if (!confirmed) return;
+    setMessage("");
+    try {
+      const result = await deleteReports(token, {
+        userId: reportUserFilter > 0 ? reportUserFilter : undefined,
+        type: reportTypeFilter,
+        status: reportStatusFilter,
+      });
+      await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
+      setMessage(`${result.deletedCount} Reports geloescht.`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -403,6 +478,16 @@ export function App() {
     }
   }
 
+  async function loadHistory(authToken: string, days = 30, offset = 0) {
+    try {
+      const data = await getAdminHistory(authToken, days, offset);
+      setHistoryItems(data.items || []);
+      setHistoryTrackingSince(data.onlineTrackingSince || "");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function loadTimeCapsules(authToken: string) {
     try {
       const items = await getAdminTimeCapsules(authToken);
@@ -418,6 +503,7 @@ export function App() {
     if (activeTab === "feed") await loadFeed(token, feedDay);
     if (activeTab === "chat") await loadChat(token);
     if (activeTab === "calendar") await loadCalendar(token);
+    if (activeTab === "history") await loadHistory(token, historyDays, historyOffset);
     if (activeTab === "reports") await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
     if (activeTab === "commands") await loadCommands(token);
     if (activeTab === "system") await loadSystemHealth(token);
@@ -713,6 +799,7 @@ export function App() {
           <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => setActiveTab("feed")}>Feed</button>
           <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => setActiveTab("chat")}>Chat</button>
           <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => setActiveTab("calendar")}>Kalender</button>
+          <button className={activeTab === "history" ? "tab active" : "tab"} onClick={() => setActiveTab("history")}>Historie</button>
           <button className={activeTab === "time_capsule" ? "tab active" : "tab"} onClick={() => setActiveTab("time_capsule")}>Time-Capsule</button>
           <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => setActiveTab("reports")}>Reports</button>
           <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => setActiveTab("debug")}>Debug</button>
@@ -1185,6 +1272,155 @@ export function App() {
           </div>
         )}
 
+        {activeTab === "history" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Vergangene Daily-Tage</h2>
+              <div className="row">
+                <label>
+                  Tage
+                  <select value={historyDays} onChange={(e) => setHistoryDays(Number(e.target.value))}>
+                    <option value={14}>14</option>
+                    <option value={30}>30</option>
+                    <option value={60}>60</option>
+                  </select>
+                </label>
+                <label>
+                  Offset
+                  <input
+                    type="number"
+                    min={0}
+                    value={historyOffset}
+                    onChange={(e) => setHistoryOffset(Math.max(0, Number(e.target.value) || 0))}
+                    style={{ width: 90 }}
+                  />
+                </label>
+                <button onClick={() => loadHistory(token, historyDays, historyOffset)}>Aktualisieren</button>
+              </div>
+            </div>
+            <div className="grid4">
+              <CardStat title="Tage im Blick" value={historyItems.length} />
+              <CardStat
+                title="Tracking seit"
+                value={historyTrackingSince ? new Date(`${historyTrackingSince}T00:00:00`).toLocaleDateString() : "-"}
+              />
+              <CardStat
+                title="Ø Poster"
+                value={historyItems.length > 0 ? (historyItems.reduce((acc, row) => acc + row.postedUsersCount, 0) / historyItems.length).toFixed(1) : "-"}
+              />
+              <CardStat
+                title="Ø Daily-Poster"
+                value={historyItems.length > 0 ? (historyItems.reduce((acc, row) => acc + row.dailyMomentUsersCount, 0) / historyItems.length).toFixed(1) : "-"}
+              />
+            </div>
+            <p className="small">
+              Online-Zeiten stammen aus serverseitigem Activity-Tracking. Tage vor dem Tracking-Rollout zeigen bewusst kein geschaetztes Online-Ergebnis.
+            </p>
+            {historyItems.length === 0 && <p>Keine Historie vorhanden.</p>}
+            {historyItems.length > 0 && (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Tag</th>
+                    <th>Geplant</th>
+                    <th>Ausgeloest</th>
+                    <th>Quelle</th>
+                    <th>Online</th>
+                    <th>Poster</th>
+                    <th>Daily</th>
+                    <th>Extras</th>
+                    <th>Fotos</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {historyItems.flatMap((item) => {
+                    const expanded = !!expandedHistoryDays[item.day];
+                    const sourceLabel =
+                      (item.triggerSource === "chat_command" || item.triggerSource === "special_request") && item.requestedByUser
+                        ? `Sondermoment (${item.requestedByUser})`
+                        : item.triggerSource === "admin_manual"
+                          ? "Admin"
+                          : item.triggerSource === "admin_reset"
+                            ? "Admin Reset"
+                            : item.source === "manual"
+                              ? "Manuell"
+                              : "Scheduler";
+                    const rows = [
+                      <tr key={item.day}>
+                        <td>{new Date(`${item.day}T00:00:00`).toLocaleDateString()}</td>
+                        <td>{item.plannedAt ? formatDateTime(item.plannedAt) : "-"}</td>
+                        <td>{item.triggeredAt ? formatDateTime(item.triggeredAt) : "-"}</td>
+                        <td>{sourceLabel}</td>
+                        <td>{item.onlineTrackingAvailable ? Number(item.onlineUsersCount || 0) : "-"}</td>
+                        <td>{item.postedUsersCount}</td>
+                        <td>{item.dailyMomentUsersCount}</td>
+                        <td>{item.extraUsersCount}</td>
+                        <td>{item.photoCount}</td>
+                        <td>
+                          <button
+                            onClick={() => setExpandedHistoryDays((prev) => ({ ...prev, [item.day]: !expanded }))}
+                          >
+                            {expanded ? "Weniger" : "Mehr"}
+                          </button>
+                        </td>
+                      </tr>,
+                    ];
+                    if (expanded) {
+                      rows.push(
+                        <tr key={`${item.day}-details`}>
+                          <td colSpan={10}>
+                            <div className="stack">
+                              <div className="grid4">
+                                <CardStat title="Kommentare" value={item.commentCount} />
+                                <CardStat title="Reaktionen" value={item.reactionCount} />
+                                <CardStat title="Chat" value={item.chatMessageCount} />
+                                <CardStat title="Capsules" value={`${item.timeCapsuleCount} / privat ${item.privateCapsuleCount}`} />
+                              </div>
+                              {!item.onlineTrackingAvailable && (
+                                <p className="small">Exakte Online-Zeiten sind fuer diesen Tag noch nicht verfuegbar.</p>
+                              )}
+                              {item.userActivity.length === 0 ? (
+                                <p className="small">Keine Nutzeraktivitaet fuer diesen Tag gespeichert.</p>
+                              ) : (
+                                <table className="table">
+                                  <thead>
+                                    <tr>
+                                      <th>Nutzer</th>
+                                      <th>Erstes Online</th>
+                                      <th>Letztes Online</th>
+                                      <th>Requests</th>
+                                      <th>Status</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {item.userActivity.map((userRow) => (
+                                      <tr key={`${item.day}-${userRow.userId}`}>
+                                        <td>@{userRow.username}</td>
+                                        <td>{userRow.firstSeenAt ? formatDateTime(userRow.firstSeenAt) : "-"}</td>
+                                        <td>{userRow.lastSeenAt ? formatDateTime(userRow.lastSeenAt) : "-"}</td>
+                                        <td>{userRow.requestCount}</td>
+                                        <td>
+                                          {userRow.postedPrompt ? "Prompt" : userRow.postedExtra ? "Extra" : userRow.posted ? "Post" : "kein Post"}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              )}
+                            </div>
+                          </td>
+                        </tr>,
+                      );
+                    }
+                    return rows;
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
         {activeTab === "time_capsule" && (
           <div className="stack">
             <div className="row">
@@ -1274,6 +1510,11 @@ export function App() {
                 <CardStat title="Haeufigster Typ" value={debugTypeLabel(debugSummary.topType)} />
                 <CardStat title="Juengster Eintrag" value={debugSummary.newestAt ? formatDateTime(debugSummary.newestAt) : "-"} />
               </div>
+              <p className="small">
+                {debugFilterInfo.since
+                  ? `Zeige Logs seit ${formatDateTime(debugFilterInfo.since)} (Serverzeit).`
+                  : `Zeige Logs fuer die letzten ${debugSinceHours}h.`}
+              </p>
               <div className="debug-export-grid">
                 <article className="debug-export-card">
                   <div className="stack" style={{ marginBottom: 0 }}>
@@ -1374,8 +1615,12 @@ export function App() {
                   <option value="rejected">Abgelehnt</option>
                 </select>
                 <button onClick={() => loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter)}>Aktualisieren</button>
+                <button className="danger" disabled={!hasReportDeleteFilter} onClick={() => void onDeleteFilteredReports()}>
+                  Gefilterte Reports loeschen
+                </button>
               </div>
             </div>
+            <p className="small">Bulk-Loeschen wirkt auf alle Reports, die zum gesetzten Filter passen, nicht nur auf die aktuell geladene Tabelle.</p>
             {reports.length === 0 && <p>Keine Reports vorhanden.</p>}
             <table className="table">
               <thead>
@@ -1386,6 +1631,7 @@ export function App() {
                   <th>Text</th>
                   <th>Status</th>
                   <th>GitHub</th>
+                  <th>Aktion</th>
                 </tr>
               </thead>
               <tbody>
@@ -1413,6 +1659,9 @@ export function App() {
                       </select>
                     </td>
                     <td>{row.githubIssueNumber ? `#${row.githubIssueNumber}` : "-"}</td>
+                    <td>
+                      <button className="danger" onClick={() => void onDeleteReport(row.id)}>Loeschen</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

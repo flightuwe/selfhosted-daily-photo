@@ -58,6 +58,13 @@ export type DebugLogItem = {
   user: { id: number; username: string };
 };
 
+export type DebugLogsResponse = {
+  items: DebugLogItem[];
+  sinceHours: number;
+  since: string;
+  serverNow: string;
+};
+
 export type AdminReportItem = {
   id: number;
   type: "bug" | "idea";
@@ -129,6 +136,48 @@ export type CalendarItem = {
   uploadUntil?: string | null;
   triggerSource?: string;
   requestedByUser?: string;
+};
+
+export type AdminHistoryUserActivity = {
+  userId: number;
+  username: string;
+  firstSeenAt?: string | null;
+  lastSeenAt?: string | null;
+  requestCount: number;
+  posted: boolean;
+  postedPrompt: boolean;
+  postedExtra: boolean;
+};
+
+export type AdminHistoryDay = {
+  day: string;
+  plannedAt?: string | null;
+  triggeredAt?: string | null;
+  uploadUntil?: string | null;
+  source: "auto" | "manual";
+  triggerSource?: string;
+  requestedByUser?: string;
+  onlineUsersCount?: number | null;
+  postedUsersCount: number;
+  dailyMomentUsersCount: number;
+  extraUsersCount: number;
+  photoCount: number;
+  dailyMomentPhotoCount: number;
+  extraPhotoCount: number;
+  timeCapsuleCount: number;
+  privateCapsuleCount: number;
+  commentCount: number;
+  reactionCount: number;
+  chatMessageCount: number;
+  onlineTrackingAvailable: boolean;
+  userActivity: AdminHistoryUserActivity[];
+};
+
+export type AdminHistoryResponse = {
+  items: AdminHistoryDay[];
+  days: number;
+  offset: number;
+  onlineTrackingSince?: string;
 };
 
 export type AdminTimeCapsuleItem = {
@@ -447,6 +496,22 @@ export async function getCalendar(token: string, days = 7): Promise<CalendarItem
   return data.items;
 }
 
+export async function getAdminHistory(token: string, days = 30, offset = 0): Promise<AdminHistoryResponse> {
+  const qs = new URLSearchParams();
+  qs.set("days", String(days));
+  qs.set("offset", String(offset));
+  const res = await fetch(`${apiBase}/admin/history?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminHistoryResponse>(res);
+  return {
+    items: data.items || [],
+    days: data.days ?? days,
+    offset: data.offset ?? offset,
+    onlineTrackingSince: data.onlineTrackingSince || "",
+  };
+}
+
 export async function getAdminTimeCapsules(token: string): Promise<AdminTimeCapsuleItem[]> {
   const res = await fetch(`${apiBase}/admin/time-capsules`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -474,7 +539,7 @@ export async function getSystemHealth(token: string): Promise<SystemHealth> {
   return parse<SystemHealth>(res);
 }
 
-export async function getDebugLogs(token: string, userId?: number, limit = 150, sinceHours = 24): Promise<DebugLogItem[]> {
+export async function getDebugLogs(token: string, userId?: number, limit = 150, sinceHours = 24): Promise<DebugLogsResponse> {
   const qs = new URLSearchParams();
   qs.set("limit", String(limit));
   qs.set("sinceHours", String(sinceHours));
@@ -482,8 +547,13 @@ export async function getDebugLogs(token: string, userId?: number, limit = 150, 
   const res = await fetch(`${apiBase}/admin/debug/logs?${qs.toString()}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  const data = await parse<{ items: DebugLogItem[] }>(res);
-  return data.items || [];
+  const data = await parse<DebugLogsResponse>(res);
+  return {
+    items: data.items || [],
+    sinceHours: data.sinceHours ?? sinceHours,
+    since: data.since || "",
+    serverNow: data.serverNow || "",
+  };
 }
 
 export async function deleteDebugLogs(
@@ -564,4 +634,30 @@ export async function updateReport(
     body: JSON.stringify(payload),
   });
   return parse<AdminReportItem>(res);
+}
+
+export async function deleteReport(
+  token: string,
+  id: number
+): Promise<{ ok: boolean; deletedId: number }> {
+  const res = await fetch(`${apiBase}/admin/reports/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<{ ok: boolean; deletedId: number }>(res);
+}
+
+export async function deleteReports(
+  token: string,
+  opts?: { userId?: number; type?: "" | "bug" | "idea"; status?: "" | "open" | "in_review" | "done" | "rejected" }
+): Promise<{ ok: boolean; deletedCount: number }> {
+  const qs = new URLSearchParams();
+  if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
+  if (opts?.type) qs.set("type", opts.type);
+  if (opts?.status) qs.set("status", opts.status);
+  const res = await fetch(`${apiBase}/admin/reports?${qs.toString()}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<{ ok: boolean; deletedCount: number }>(res);
 }

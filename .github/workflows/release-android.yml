@@ -1,4 +1,4 @@
-name: release-android
+name: Release Android APK
 
 on:
   push:
