@@ -4197,7 +4197,7 @@ func (s *Server) notifyPostCreated(author models.User, photo models.Photo) {
         Type:   "post",
         Action: "open_feed",
         Day:    photo.Day,
-        PhotoID: photo.ID,
+        PhotoID: int64(photo.ID),
     })
 	s.recordPushResult(sendResult, sendErr)
 	s.removeInvalidTokens(sendResult.InvalidTokens)
@@ -4250,7 +4250,7 @@ func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
         Type:   "photo_reaction",
         Action: "open_feed",
         Day:    photo.Day,
-        PhotoID: photo.ID,
+        PhotoID: int64(photo.ID),
     })
     s.recordPushResult(sendResult, sendErr)
     s.removeInvalidTokens(sendResult.InvalidTokens)
@@ -4275,7 +4275,7 @@ func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo) {
         Type:   "photo_comment",
         Action: "open_feed",
         Day:    photo.Day,
-        PhotoID: photo.ID,
+        PhotoID: int64(photo.ID),
     })
     s.recordPushResult(sendResult, sendErr)
     s.removeInvalidTokens(sendResult.InvalidTokens)
