@@ -66,6 +66,11 @@ func main() {
         Location: location,
         Monitor:  monitor,
     }
+    if fixed, cleanupErr := server.CleanupInvalidPromptOnlyPhotosRecent(14); cleanupErr != nil {
+        log.Printf("prompt cleanup failed: %v", cleanupErr)
+    } else if fixed > 0 {
+        log.Printf("prompt cleanup fixed invalid prompt_only rows: %d", fixed)
+    }
 
     promptService.Start(cfg.SchedulerEnabled, func(_ models.DailyPrompt, settings models.AppSettings) {
         var rows []models.DeviceToken

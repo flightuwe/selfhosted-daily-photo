@@ -1,0 +1,16 @@
+{
+  "version": "0.4.5",
+  "releasedAt": "2026-03-12T00:00:00Z",
+  "highlights": [
+    "Fix fuer das Daily-Moment-Posting: fruehe Posts ausserhalb des Daily-Zeitfensters blockieren das echte Daily-Moment spaeter am Tag nicht mehr.",
+    "Heute-Feed wird jetzt sichtbar, sobald du selbst heute etwas gepostet hast, egal ob Extra oder echtes Daily-Moment.",
+    "Extras koennen jetzt jederzeit gepostet werden; waehrend eines aktiven Daily-Moments kannst du zusaetzlich noch dein echtes Daily-Moment posten.",
+    "Upload-Queue verbessert: fehlgeschlagene Eintraege koennen als Extra neu geplant oder direkt per rotem Muelleimer entfernt werden.",
+    "Diagnose verbessert: Queue-Fehler enthalten jetzt genauere Gruende wie prompt_inactive oder already_posted."
+  ],
+  "details": [
+    "Frueher konnten Posts ausserhalb des Daily-Fensters faelschlich als Tagesmoment gespeichert werden.",
+    "Dadurch entstand spaeter beim echten Daily-Moment ein HTTP-409-Konflikt fuer betroffene Nutzer.",
+    "Die Backend-Logik trennt jetzt sauber zwischen Extra und echtem Daily-Moment und bereinigt alte Fehlklassifikationen."
+  ]
+}

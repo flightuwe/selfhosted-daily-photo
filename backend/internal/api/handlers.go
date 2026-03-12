@@ -119,6 +119,8 @@ func (s *Server) Router() *gin.Engine {
             admin.DELETE("/chat/commands/:id", s.handleAdminDeleteChatCommand)
             admin.GET("/reports", s.handleAdminListReports)
             admin.PUT("/reports/:id", s.handleAdminUpdateReport)
+            admin.DELETE("/reports/:id", s.handleAdminDeleteReport)
+            admin.DELETE("/reports", s.handleAdminDeleteReports)
             admin.GET("/debug/logs", s.handleAdminDebugLogs)
             admin.DELETE("/debug/logs", s.handleAdminDeleteDebugLogs)
             admin.GET("/debug/logs/export", s.handleAdminDebugLogsExport)
@@ -759,10 +761,11 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
         return
     }
 
-    canUpload := prompt.UploadUntil != nil && now.Before(*prompt.UploadUntil)
-    hasPosted, _ := s.userHasPostedForDay(user.ID, day)
+    canUpload := isPromptWindowActive(prompt, now)
+    hasPromptPosted, _ := s.userHasPostedForDay(user.ID, day)
+    hasAnyPost, _ := s.userHasAnyPhotoForDay(user.ID, day)
     var ownPhoto gin.H
-    if hasPosted {
+    if hasPromptPosted {
         var p models.Photo
         if err := s.DB.Where("user_id = ? AND day = ? AND prompt_only = ?", user.ID, day, true).Order("created_at desc").First(&p).Error; err == nil {
             ownPhoto = s.photoJSON(p)
@@ -774,7 +777,9 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
         "triggered":       prompt.TriggeredAt,
         "uploadUntil":     prompt.UploadUntil,
         "canUpload":       canUpload,
-        "hasPosted":       hasPosted,
+        "hasPosted":       hasPromptPosted,
+        "hasPromptPostedToday": hasPromptPosted,
+        "hasAnyPostToday": hasAnyPost,
         "ownPhoto":        ownPhoto,
         "triggerSource":   prompt.TriggerSource,
         "requestedByUser": prompt.RequestedBy,
@@ -906,30 +911,30 @@ func (s *Server) handleUpload(c *gin.Context) {
     }
 
 	day := time.Now().In(s.Location).Format("2006-01-02")
-    now := time.Now().In(s.Location)
-    todayWindowActive := s.isDailyWindowActive(day, now)
+	now := time.Now().In(s.Location)
+	todayWindowActive := s.isDailyWindowActive(day, now)
 
-    hasPosted, err := s.userHasPostedForDay(user.ID, day)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-        return
-    }
+	if _, err := s.cleanupInvalidPromptOnlyPhotosForDay(day); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	hasPromptPosted, err := s.userHasPostedForDay(user.ID, day)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
 
 	if kind == "prompt" {
-		if hasPosted {
+		if !s.isPromptUploadAllowed(day, now) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
+			return
+		}
+		if hasPromptPosted {
 			c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
 			return
 		}
-		if _, err := s.ensurePromptForPostingDay(day); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "prompt prepare failed"})
-			return
-		}
-	} else {
-		if !hasPosted {
-			c.JSON(http.StatusForbidden, gin.H{"error": "poste zuerst dein Tagesmoment"})
-			return
-		}
-    }
+	}
 
     capsuleMode, capsuleVisibleAt, capsulePrivate, capsuleGroupRemind, capsuleErr := parseCapsuleForm(c, kind, todayWindowActive, now)
     if capsuleErr != nil {
@@ -1195,7 +1200,7 @@ func (s *Server) handleFeed(c *gin.Context) {
     }
     today := time.Now().In(s.Location).Format("2006-01-02")
     if day == today {
-        hasPosted, err := s.userHasPostedForDay(user.ID, day)
+        hasPosted, err := s.userHasAnyPhotoForDay(user.ID, day)
         if err != nil {
             c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
             return
@@ -1618,23 +1623,13 @@ func (s *Server) handleAdminDebugLogs(c *gin.Context) {
         userID = parsed
     }
 
-    sinceHours := 24
-    if raw := strings.TrimSpace(c.Query("sinceHours")); raw != "" {
-        n, err := strconv.Atoi(raw)
-        if err != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
-            return
-        }
-        if n < 1 {
-            n = 1
-        }
-        if n > 168 {
-            n = 168
-        }
-        sinceHours = n
+    sinceHours, err := parseAdminSinceHours(c.Query("sinceHours"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
+        return
     }
-
-    since := time.Now().In(s.Location).Add(-time.Duration(sinceHours) * time.Hour)
+    serverNow := time.Now().UTC()
+    since := adminSinceCutoff(serverNow, sinceHours)
     q := s.DB.Preload("User").Where("created_at >= ?", since).Order("created_at desc").Limit(limit)
     if userID != 0 {
         q = q.Where("user_id = ?", userID)
@@ -1662,7 +1657,12 @@ func (s *Server) handleAdminDebugLogs(c *gin.Context) {
         })
     }
 
-    c.JSON(http.StatusOK, gin.H{"items": items})
+    c.JSON(http.StatusOK, gin.H{
+        "items":      items,
+        "sinceHours": sinceHours,
+        "since":      since.In(s.Location),
+        "serverNow":  serverNow.In(s.Location),
+    })
 }
 
 func (s *Server) handleAdminDeleteDebugLogs(c *gin.Context) {
@@ -1676,23 +1676,12 @@ func (s *Server) handleAdminDeleteDebugLogs(c *gin.Context) {
         userID = parsed
     }
 
-    sinceHours := 24
-    if raw := strings.TrimSpace(c.Query("sinceHours")); raw != "" {
-        n, err := strconv.Atoi(raw)
-        if err != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
-            return
-        }
-        if n < 1 {
-            n = 1
-        }
-        if n > 168 {
-            n = 168
-        }
-        sinceHours = n
+    sinceHours, err := parseAdminSinceHours(c.Query("sinceHours"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
+        return
     }
-
-    since := time.Now().In(s.Location).Add(-time.Duration(sinceHours) * time.Hour)
+    since := adminSinceCutoff(time.Now().UTC(), sinceHours)
     q := s.DB.Where("created_at >= ?", since)
     if userID != 0 {
         q = q.Where("user_id = ?", userID)
@@ -1721,20 +1710,10 @@ func (s *Server) handleAdminDebugLogsExport(c *gin.Context) {
         userID = parsed
     }
 
-    sinceHours := 24
-    if raw := strings.TrimSpace(c.Query("sinceHours")); raw != "" {
-        n, err := strconv.Atoi(raw)
-        if err != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
-            return
-        }
-        if n < 1 {
-            n = 1
-        }
-        if n > 168 {
-            n = 168
-        }
-        sinceHours = n
+    sinceHours, err := parseAdminSinceHours(c.Query("sinceHours"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
+        return
     }
 
     format := strings.ToLower(strings.TrimSpace(c.Query("format")))
@@ -1762,7 +1741,7 @@ func (s *Server) handleAdminDebugLogsExport(c *gin.Context) {
         limit = n
     }
 
-    since := time.Now().In(s.Location).Add(-time.Duration(sinceHours) * time.Hour)
+    since := adminSinceCutoff(time.Now().UTC(), sinceHours)
     q := s.DB.Preload("User").Where("created_at >= ?", since).Order("created_at desc").Limit(limit)
     if userID != 0 {
         q = q.Where("user_id = ?", userID)
@@ -1901,6 +1880,72 @@ func (s *Server) handleAdminListReports(c *gin.Context) {
         items = append(items, userReportJSON(row))
     }
     c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) handleAdminDeleteReport(c *gin.Context) {
+    id, err := parseUintParam(c.Param("id"))
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid report id"})
+        return
+    }
+
+    result := s.DB.Delete(&models.UserReport{}, id)
+    if result.Error != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+        return
+    }
+    if result.RowsAffected == 0 {
+        c.JSON(http.StatusNotFound, gin.H{"error": "report not found"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"ok": true, "deletedId": id})
+}
+
+func (s *Server) handleAdminDeleteReports(c *gin.Context) {
+    userID := uint(0)
+    if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+        parsed, err := parseUintParam(raw)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+            return
+        }
+        userID = parsed
+    }
+
+    reportType := strings.ToLower(strings.TrimSpace(c.Query("type")))
+    if reportType != "" && reportType != "bug" && reportType != "idea" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid report type"})
+        return
+    }
+
+    status := strings.ToLower(strings.TrimSpace(c.Query("status")))
+    if status != "" && !isValidUserReportStatus(status) {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid report status"})
+        return
+    }
+
+    q := s.DB.Model(&models.UserReport{})
+    if userID != 0 {
+        q = q.Where("user_id = ?", userID)
+    }
+    if reportType != "" {
+        q = q.Where("type = ?", reportType)
+    }
+    if status != "" {
+        q = q.Where("status = ?", status)
+    }
+
+    result := q.Delete(&models.UserReport{})
+    if result.Error != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "ok":           true,
+        "deletedCount": result.RowsAffected,
+    })
 }
 
 func (s *Server) handleAdminUpdateReport(c *gin.Context) {
@@ -2206,7 +2251,7 @@ func (s *Server) handleFeedDays(c *gin.Context) {
         return
     }
     today := time.Now().In(s.Location).Format("2006-01-02")
-    hasPostedToday, err := s.userHasPostedForDay(user.ID, today)
+    hasPostedToday, err := s.userHasAnyPhotoForDay(user.ID, today)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
         return
@@ -2243,7 +2288,7 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
 		return
 	}
 	today := time.Now().In(s.Location).Format("2006-01-02")
-	hasPostedToday, err := s.userHasPostedForDay(user.ID, today)
+	hasPostedToday, err := s.userHasAnyPhotoForDay(user.ID, today)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -2692,6 +2737,29 @@ func isValidUserReportStatus(v string) bool {
     }
 }
 
+func parseAdminSinceHours(raw string) (int, error) {
+    sinceHours := 24
+    raw = strings.TrimSpace(raw)
+    if raw == "" {
+        return sinceHours, nil
+    }
+    n, err := strconv.Atoi(raw)
+    if err != nil {
+        return 0, err
+    }
+    if n < 1 {
+        n = 1
+    }
+    if n > 168 {
+        n = 168
+    }
+    return n, nil
+}
+
+func adminSinceCutoff(now time.Time, sinceHours int) time.Time {
+    return now.UTC().Add(-time.Duration(sinceHours) * time.Hour)
+}
+
 func userReportJSON(row models.UserReport) gin.H {
     return gin.H{
         "id":                row.ID,
@@ -3033,31 +3101,31 @@ func (s *Server) handleDualUpload(c *gin.Context) {
         return
     }
 
-    now := time.Now().In(s.Location)
-    day := now.Format("2006-01-02")
-    todayWindowActive := s.isDailyWindowActive(day, now)
+	now := time.Now().In(s.Location)
+	day := now.Format("2006-01-02")
+	todayWindowActive := s.isDailyWindowActive(day, now)
 
-    hasPosted, err := s.userHasPostedForDay(user.ID, day)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-        return
-    }
+	if _, err := s.cleanupInvalidPromptOnlyPhotosForDay(day); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	hasPromptPosted, err := s.userHasPostedForDay(user.ID, day)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
 
 	if kind == "prompt" {
-		if hasPosted {
+		if !s.isPromptUploadAllowed(day, now) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
+			return
+		}
+		if hasPromptPosted {
 			c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
 			return
 		}
-		if _, err := s.ensurePromptForPostingDay(day); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "prompt prepare failed"})
-			return
-		}
-	} else {
-		if !hasPosted {
-			c.JSON(http.StatusForbidden, gin.H{"error": "poste zuerst dein Tagesmoment"})
-			return
-		}
-    }
+	}
 
     capsuleMode, capsuleVisibleAt, capsulePrivate, capsuleGroupRemind, capsuleErr := parseCapsuleForm(c, kind, todayWindowActive, now)
     if capsuleErr != nil {
@@ -3728,6 +3796,14 @@ func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {
 	return count > 0, nil
 }
 
+func (s *Server) userHasAnyPhotoForDay(userID uint, day string) (bool, error) {
+	var count int64
+	if err := s.DB.Model(&models.Photo{}).Where("user_id = ? AND day = ?", userID, day).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 type photoReactionCountRow struct {
 	Emoji string
 	Count int64
@@ -3824,7 +3900,7 @@ func (s *Server) ensurePhotoVisibleToUser(userID uint, photo models.Photo) (bool
 	if photo.UserID == userID {
 		return true, ""
 	}
-	hasPosted, err := s.userHasPostedForDay(userID, today)
+	hasPosted, err := s.userHasAnyPhotoForDay(userID, today)
 	if err != nil {
 		return false, "query failed"
 	}
@@ -3835,11 +3911,90 @@ func (s *Server) ensurePhotoVisibleToUser(userID uint, photo models.Photo) (bool
 }
 
 func (s *Server) isDailyWindowActive(day string, now time.Time) bool {
-    var prompt models.DailyPrompt
-    if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
-        return false
-    }
-    return prompt.UploadUntil != nil && now.Before(*prompt.UploadUntil)
+	var prompt models.DailyPrompt
+	if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
+		return false
+	}
+	return isPromptWindowActive(prompt, now)
+}
+
+func (s *Server) isPromptUploadAllowed(day string, now time.Time) bool {
+	var prompt models.DailyPrompt
+	if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
+		return false
+	}
+	return isPromptWindowActive(prompt, now)
+}
+
+func isPromptWindowActive(prompt models.DailyPrompt, now time.Time) bool {
+	if prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
+		return false
+	}
+	return !now.Before(*prompt.TriggeredAt) && !now.After(*prompt.UploadUntil)
+}
+
+func invalidPromptOnlyPhotoIDs(photos []models.Photo, promptByDay map[string]models.DailyPrompt) []uint {
+	ids := make([]uint, 0)
+	for _, photo := range photos {
+		prompt, ok := promptByDay[photo.Day]
+		if !ok || !isPromptWindowActive(prompt, photo.CreatedAt) {
+			ids = append(ids, photo.ID)
+		}
+	}
+	return ids
+}
+
+func (s *Server) cleanupInvalidPromptOnlyPhotosForDay(day string) (int64, error) {
+	return s.cleanupInvalidPromptOnlyPhotosSinceDay(day)
+}
+
+func (s *Server) CleanupInvalidPromptOnlyPhotosRecent(days int) (int64, error) {
+	if days < 1 {
+		days = 1
+	}
+	startDay := time.Now().In(s.Location).AddDate(0, 0, -(days - 1)).Format("2006-01-02")
+	return s.cleanupInvalidPromptOnlyPhotosSinceDay(startDay)
+}
+
+func (s *Server) cleanupInvalidPromptOnlyPhotosSinceDay(startDay string) (int64, error) {
+	var photos []models.Photo
+	if err := s.DB.
+		Where("prompt_only = ? AND day >= ?", true, startDay).
+		Find(&photos).Error; err != nil {
+		return 0, err
+	}
+	if len(photos) == 0 {
+		return 0, nil
+	}
+
+	daySet := make(map[string]struct{}, len(photos))
+	for _, photo := range photos {
+		daySet[photo.Day] = struct{}{}
+	}
+	days := make([]string, 0, len(daySet))
+	for day := range daySet {
+		days = append(days, day)
+	}
+
+	var prompts []models.DailyPrompt
+	if err := s.DB.Where("day IN ?", days).Find(&prompts).Error; err != nil {
+		return 0, err
+	}
+	promptByDay := make(map[string]models.DailyPrompt, len(prompts))
+	for _, prompt := range prompts {
+		promptByDay[prompt.Day] = prompt
+	}
+
+	invalidIDs := invalidPromptOnlyPhotoIDs(photos, promptByDay)
+	if len(invalidIDs) == 0 {
+		return 0, nil
+	}
+
+	result := s.DB.Model(&models.Photo{}).Where("id IN ?", invalidIDs).Update("prompt_only", false)
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
 }
 
 func parseCapsuleForm(c *gin.Context, kind string, dailyWindowActive bool, now time.Time) (string, *time.Time, bool, bool, error) {

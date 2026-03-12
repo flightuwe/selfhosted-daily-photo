@@ -61,6 +61,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.ExperimentalMaterialApi
@@ -293,6 +294,8 @@ data class PromptResponse(
     val canUpload: Boolean,
     val triggered: String? = null,
     val hasPosted: Boolean = false,
+    val hasPromptPostedToday: Boolean = false,
+    val hasAnyPostToday: Boolean = false,
     val ownPhoto: PromptPhoto? = null,
     val triggerSource: String? = null,
     val requestedByUser: String? = null
@@ -754,6 +757,15 @@ class AppRepo(private val api: Api, private val context: Context) {
         if (ok) UploadQueueScheduler.enqueueNow(context)
         return ok
     }
+
+    fun retryUploadQueueItemAsExtra(id: String): Boolean {
+        val ok = UploadQueueManager.convertToExtraAndRetry(context, id)
+        if (ok) UploadQueueScheduler.enqueueNow(context)
+        return ok
+    }
+
+    fun removeUploadQueueItem(id: String): Boolean =
+        UploadQueueManager.remove(context, id)
 
     fun isDarkMode(): Boolean = prefs.getBoolean("dark_mode", false)
 
@@ -1942,7 +1954,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 hasUnreadChat = false
             }
             val marker = "${prompt.day}:${prompt.triggered ?: ""}"
-            val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && !prompt.hasPosted && marker != repo.seenPromptMarker()
+            val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && !prompt.hasPromptPostedToday && marker != repo.seenPromptMarker()
             if (shouldPopup) repo.setSeenPromptMarker(marker)
             repo.setChatPushLocalEnabled(me.chatPushEnabled)
             repo.setInviteRegistrationPushLocalEnabled(me.inviteRegistrationPushEnabled)
@@ -2095,7 +2107,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 monthRecapByDay = emptyMap(),
                 promptMetaByDay = emptyMap(),
                 feed = emptyList(),
-                feedTodayLocked = state.prompt?.hasPosted == false,
+                feedTodayLocked = state.prompt?.hasAnyPostToday == false,
                 feedFocusDay = state.prompt?.day,
                 feedFocusPhotoId = null
             )
@@ -2116,7 +2128,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             fetched.monthRecap?.let { monthRecapMap[day] = it }
         }
         val today = state.prompt?.day ?: LocalDate.now().toString()
-        val postedToday = state.prompt?.hasPosted == true
+        val postedToday = state.prompt?.hasAnyPostToday == true
         val hasVisibleTodayFeed = map[today].orEmpty().isNotEmpty()
         val todayLocked = !postedToday && !hasVisibleTodayFeed
         state = state.copy(
@@ -2200,6 +2212,20 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val ok = repo.retryUploadQueueItem(id)
         if (ok) {
             state = state.copy(uploadQueue = repo.uploadQueue(), message = "Upload erneut geplant")
+        }
+    }
+
+    fun retryQueuedUploadAsExtra(id: String) {
+        val ok = repo.retryUploadQueueItemAsExtra(id)
+        if (ok) {
+            state = state.copy(uploadQueue = repo.uploadQueue(), message = "Upload als Extra neu geplant")
+        }
+    }
+
+    fun removeQueuedUpload(id: String) {
+        val ok = repo.removeUploadQueueItem(id)
+        if (ok) {
+            state = state.copy(uploadQueue = repo.uploadQueue(), message = "Upload aus Warteschlange entfernt")
         }
     }
 
@@ -2856,8 +2882,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
         fun resolveFeedDay(): String? {
             if (targetDay.isNotBlank() && availableDays.contains(targetDay)) return targetDay
-            if (targetDay == prompt.day && !prompt.hasPosted) return null
-            if (prompt.hasPosted && availableDays.contains(prompt.day)) return prompt.day
+            if (targetDay == prompt.day && !prompt.hasAnyPostToday) return null
+            if (prompt.hasAnyPostToday && availableDays.contains(prompt.day)) return prompt.day
             return availableDays.firstOrNull()
         }
 
@@ -2867,7 +2893,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
 
             action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" || type == "photo_reaction" || type == "photo_comment" || targetDay.isNotBlank() || targetPhotoId != null -> {
-                val targetIsTodayHidden = targetDay == prompt.day && !prompt.hasPosted && !availableDays.contains(targetDay)
+                val targetIsTodayHidden = targetDay == prompt.day && !prompt.hasAnyPostToday && !availableDays.contains(targetDay)
                 if (targetIsTodayHidden) {
                     openCamera("Der heutige Feed wird sichtbar, sobald du selbst gepostet hast.")
                     return
@@ -3665,6 +3691,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     uploadError = cameraUploadError,
                     uploadQueue = state.uploadQueue,
                     onRetryQueued = { id -> vm.retryQueuedUpload(id) },
+                    onRetryQueuedAsExtra = { id -> vm.retryQueuedUploadAsExtra(id) },
+                    onRemoveQueued = { id -> vm.removeQueuedUpload(id) },
                     onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
                         viewerIndex = 0
@@ -4038,9 +4066,12 @@ fun CameraTab(
     uploadError: String,
     uploadQueue: List<QueuedUploadItem>,
     onRetryQueued: (String) -> Unit,
+    onRetryQueuedAsExtra: (String) -> Unit,
+    onRemoveQueued: (String) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
-    val hasPosted = prompt?.hasPosted == true
+    val hasPromptPosted = prompt?.hasPromptPostedToday == true
+    val hasAnyPosted = prompt?.hasAnyPostToday == true
     val canUpload = prompt?.canUpload == true
     val canSpecial = specialMomentStatus?.canRequest == true
     var showCapsuleDialog by remember { mutableStateOf(false) }
@@ -4116,17 +4147,18 @@ fun CameraTab(
             Text("Zeitfenster heute: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
         }
 
-        if (hasPosted) {
+        if (hasAnyPosted) {
             if (canUpload) {
                 Text("Daily-Moment gerade aktiv.", fontWeight = FontWeight.Bold)
                 Text(
-                    "Du kannst jetzt noch einmal fuer den aktiven Moment aufnehmen.",
+                    if (hasPromptPosted) "Du hast dein Daily-Moment heute schon gepostet."
+                    else "Du kannst jetzt noch dein echtes Daily-Moment fuer den aktiven Moment aufnehmen.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
                 Text("Du hast heute gepostet.", fontWeight = FontWeight.Bold)
             }
-            val ownUrls = listOfNotNull(prompt?.ownPhoto?.url, prompt?.ownPhoto?.secondUrl)
+            val ownUrls = if (hasPromptPosted) listOfNotNull(prompt?.ownPhoto?.url, prompt?.ownPhoto?.secondUrl) else emptyList()
             if (ownUrls.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     ownUrls.forEach { url ->
@@ -4142,12 +4174,16 @@ fun CameraTab(
                     }
                 }
             }
-            if (canUpload) {
+            if (canUpload && !hasPromptPosted) {
                 DailyMomentActionButton(
                     onClick = onCapturePrompt,
                     blink = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                Button(
+                    onClick = { onCaptureExtra(CapsuleUploadOptions()) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Stattdessen als Extra posten") }
             } else {
                 Button(
                     onClick = { onCaptureExtra(CapsuleUploadOptions()) },
@@ -4176,19 +4212,30 @@ fun CameraTab(
         } else {
             Text("Heute sind zwei Fotos noetig: Rueckkamera und Frontkamera.")
             if (prompt?.triggered.isNullOrBlank()) {
-                Text("Der Moment ist noch nicht gestartet. Du kannst trotzdem schon posten.")
+                Text("Der Moment ist noch nicht gestartet. Du kannst jetzt schon ein Extra posten.")
             } else if (canUpload) {
                 Text("Daily-Moment gerade aktiv.", fontWeight = FontWeight.Bold)
             } else {
-                Text("Momentfenster vorbei. Du kannst trotzdem spaet posten.")
+                Text("Momentfenster vorbei. Du kannst trotzdem ein Extra posten.")
             }
 
             if (backPreviewUri == null) {
-                DailyMomentActionButton(
-                    onClick = onCapturePrompt,
-                    blink = canUpload,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (canUpload) {
+                    DailyMomentActionButton(
+                        onClick = onCapturePrompt,
+                        blink = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        onClick = { onCaptureExtra(CapsuleUploadOptions()) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Oder als Extra posten") }
+                } else {
+                    Button(
+                        onClick = { onCaptureExtra(CapsuleUploadOptions()) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Extra posten") }
+                }
                 if (!canUpload) {
                     SpecialMomentActionButton(
                         text = specialLabel,
@@ -4264,6 +4311,29 @@ fun CameraTab(
                         if (item.status == UploadQueueStatus.FAILED) {
                             Button(onClick = { onRetryQueued(item.id) }, modifier = Modifier.fillMaxWidth()) {
                                 Text("Erneut versuchen")
+                            }
+                            if (item.isPrompt) {
+                                Button(onClick = { onRetryQueuedAsExtra(item.id) }, modifier = Modifier.fillMaxWidth()) {
+                                    Text("Als Extra posten")
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                IconButton(
+                                    onClick = { onRemoveQueued(item.id) },
+                                    modifier = Modifier.background(
+                                        color = Color(0xFFD32F2F),
+                                        shape = CircleShape
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Delete,
+                                        contentDescription = "Upload entfernen",
+                                        tint = Color.White
+                                    )
+                                }
                             }
                         }
                     }
@@ -4562,7 +4632,7 @@ fun FeedTab(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (todayLocked && prompt?.hasPosted == false) {
+            if (todayLocked && prompt?.hasAnyPostToday == false) {
                 item("today-locked") {
                     Card {
                         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
