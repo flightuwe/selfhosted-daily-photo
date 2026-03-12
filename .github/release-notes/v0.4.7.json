@@ -1,0 +1,14 @@
+{
+  "version": "0.4.7",
+  "releasedAt": "2026-03-12T00:00:00Z",
+  "highlights": [
+    "Historie 2.0 im Admin-Panel mit animierten Diagrammen (Trend, Composition, Conversion, Trigger-Quality, Leaderboards, Anomalien, Cohorts).",
+    "Backend-Historie um additive Analysefelder erweitert: timeseries, distribution, conversion, reliability, cohorts.",
+    "Stabilisierung der Historie-Details inklusive robuster Null-/Leerdatenbehandlung und besserer Diagnosewerte."
+  ],
+  "details": [
+    "Recharts-basierte Visualisierungen mit konsistenter Farbsemantik fuer Daily-Moment, Extra, Capsule und Warnungen.",
+    "Bessere Performance/UX durch kompakte Uebersicht plus Drilldown.",
+    "Reduced-Motion-Unterstuetzung fuer bessere Accessibility."
+  ]
+}
