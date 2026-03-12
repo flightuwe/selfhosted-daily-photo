@@ -2373,6 +2373,22 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 
 	items := make([]gin.H, 0, len(dayList))
 	anomalies := make([]gin.H, 0, len(dayList))
+	timeseries := make([]gin.H, 0, len(dayList))
+	conversion := make([]gin.H, 0, len(dayList))
+	totalPhotos := 0
+	totalPromptPhotos := 0
+	totalExtraPhotos := 0
+	totalCapsulePhotos := 0
+	totalPostedUsers := 0
+	totalPromptUsers := 0
+	totalExtraUsers := 0
+	totalOnlineUsers := 0
+	totalDebugErrors := 0
+	totalDaysWithPosts := 0
+	totalDaysOnTime := 0
+	totalDaysWithTriggerPerformance := 0
+	totalTriggerDelayAbs := 0
+	totalRequestsAllDays := 0
 	for _, day := range dayList {
 		metrics := getMetrics(day)
 		plan, hasPlan := planByDay[day]
@@ -2483,6 +2499,47 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			row["onlineUsersCount"] = onlineUsersCount
 		}
 		items = append(items, row)
+		timeseries = append(timeseries, gin.H{
+			"day":               day,
+			"onlineUsers":       onlineUsersCount,
+			"postedUsers":       len(metrics.postedUsers),
+			"dailyMomentUsers":  len(metrics.promptUsers),
+			"extraUsers":        len(metrics.extraUsers),
+			"photoCount":        metrics.photoCount,
+			"dailyMomentPhotos": metrics.dailyMomentPhotos,
+			"extraPhotos":       metrics.extraPhotos,
+			"capsulePhotos":     metrics.timeCapsules,
+			"debugErrors":       metrics.debugErrorCount,
+			"triggerDelayMin":   triggerDelayMinutes,
+			"onTimeTrigger":     onTime,
+		})
+		conversion = append(conversion, gin.H{
+			"day":              day,
+			"onlineUsers":      onlineUsersCount,
+			"postedUsers":      len(metrics.postedUsers),
+			"dailyMomentUsers": len(metrics.promptUsers),
+			"extraUsers":       len(metrics.extraUsers),
+		})
+		totalPhotos += metrics.photoCount
+		totalPromptPhotos += metrics.dailyMomentPhotos
+		totalExtraPhotos += metrics.extraPhotos
+		totalCapsulePhotos += metrics.timeCapsules
+		totalPostedUsers += len(metrics.postedUsers)
+		totalPromptUsers += len(metrics.promptUsers)
+		totalExtraUsers += len(metrics.extraUsers)
+		totalOnlineUsers += onlineUsersCount
+		totalDebugErrors += metrics.debugErrorCount
+		totalRequestsAllDays += totalRequests
+		if metrics.photoCount > 0 {
+			totalDaysWithPosts++
+		}
+		if hasPlan && hasPrompt && prompt.TriggeredAt != nil {
+			totalDaysWithTriggerPerformance++
+			if onTime {
+				totalDaysOnTime++
+			}
+			totalTriggerDelayAbs += int(math.Abs(float64(triggerDelayMinutes)))
+		}
 		if len(metrics.postedUsers) <= 1 && onlineUsersCount >= 4 {
 			anomalies = append(anomalies, gin.H{
 				"day":      day,
@@ -2516,6 +2573,12 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			})
 		}
 	}
+	sort.Slice(timeseries, func(i, j int) bool {
+		return fmt.Sprint(timeseries[i]["day"]) < fmt.Sprint(timeseries[j]["day"])
+	})
+	sort.Slice(conversion, func(i, j int) bool {
+		return fmt.Sprint(conversion[i]["day"]) < fmt.Sprint(conversion[j]["day"])
+	})
 
 	type boardRow struct {
 		UserID             uint
@@ -2604,6 +2667,58 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			"extraBiasScore": row.ExtraBiasScore,
 		})
 	}
+	sort.Slice(leaderboardRaw, func(i, j int) bool {
+		return leaderboardRaw[i].Participation7d > leaderboardRaw[j].Participation7d
+	})
+	cohorts := make([]gin.H, 0, len(leaderboardRaw))
+	for _, row := range leaderboardRaw {
+		cohorts = append(cohorts, gin.H{
+			"userId":             row.UserID,
+			"username":           row.Username,
+			"postedDays":         row.PostedDays,
+			"promptDays":         row.PromptDays,
+			"extraDays":          row.ExtraDays,
+			"participation7d":    row.Participation7d,
+			"participation30d":   row.Participation30d,
+			"participationDelta": row.ParticipationDelta,
+		})
+	}
+	avgPostedUsersPerDay := safeRatio(totalPostedUsers, maxInt(1, len(items)))
+	avgOnlineUsersPerDay := safeRatio(totalOnlineUsers, maxInt(1, len(items)))
+	avgRequestsPerOnlineUser := safeRatio(totalRequestsAllDays, maxInt(1, totalOnlineUsers))
+	avgAbsoluteTriggerDelay := safeRatio(totalTriggerDelayAbs, maxInt(1, totalDaysWithTriggerPerformance))
+	distribution := gin.H{
+		"photoMix": gin.H{
+			"promptRatio":  safeRatio(totalPromptPhotos, maxInt(1, totalPhotos)),
+			"extraRatio":   safeRatio(totalExtraPhotos, maxInt(1, totalPhotos)),
+			"capsuleRatio": safeRatio(totalCapsulePhotos, maxInt(1, totalPhotos)),
+		},
+		"userMix": gin.H{
+			"promptRatio": safeRatio(totalPromptUsers, maxInt(1, totalPostedUsers)),
+			"extraRatio":  safeRatio(totalExtraUsers, maxInt(1, totalPostedUsers)),
+		},
+		"rawTotals": gin.H{
+			"photos":            totalPhotos,
+			"dailyMomentPhotos": totalPromptPhotos,
+			"extraPhotos":       totalExtraPhotos,
+			"capsulePhotos":     totalCapsulePhotos,
+			"postedUsersSum":    totalPostedUsers,
+			"onlineUsersSum":    totalOnlineUsers,
+		},
+	}
+	reliability := gin.H{
+		"daysAnalyzed":                   len(items),
+		"daysWithPosts":                  totalDaysWithPosts,
+		"daysWithTriggerPerformance":     totalDaysWithTriggerPerformance,
+		"onTimeTriggerDays":              totalDaysOnTime,
+		"onTimeTriggerRate":              safeRatio(totalDaysOnTime, maxInt(1, totalDaysWithTriggerPerformance)),
+		"avgAbsoluteTriggerDelayMinutes": avgAbsoluteTriggerDelay,
+		"debugErrorIndicators":           totalDebugErrors,
+		"errorIndicatorRatePerDay":       safeRatio(totalDebugErrors, maxInt(1, len(items))),
+		"avgPostedUsersPerDay":           avgPostedUsersPerDay,
+		"avgOnlineUsersPerDay":           avgOnlineUsersPerDay,
+		"avgRequestsPerOnlineUser":       avgRequestsPerOnlineUser,
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"items":               items,
@@ -2615,6 +2730,15 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			"reliableTop":   reliableTop,
 			"extraHeavyTop": extraHeavyTop,
 		},
+		"timeseries": timeseries,
+		"distribution": gin.H{
+			"photoMix": distribution["photoMix"],
+			"userMix":  distribution["userMix"],
+			"rawTotals": distribution["rawTotals"],
+		},
+		"conversion": conversion,
+		"reliability": reliability,
+		"cohorts":     cohorts,
 		"anomalies": anomalies,
 	})
 }

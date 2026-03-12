@@ -1,5 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import {
   broadcastNotification,
   createChatCommand,
   clearChat,
@@ -36,7 +55,12 @@ import {
   type AdminStats,
   type AdminHistoryDay,
   type AdminHistoryAnomaly,
+  type AdminHistoryCohortEntry,
+  type AdminHistoryConversionPoint,
+  type AdminHistoryDistribution,
   type AdminHistoryLeaderboardEntry,
+  type AdminHistoryReliability,
+  type AdminHistoryTimeSeriesPoint,
   type ChatCommand,
   type AdminUser,
   type ChatItem,
@@ -140,6 +164,34 @@ export function App() {
   const [historyReliableTop, setHistoryReliableTop] = useState<AdminHistoryLeaderboardEntry[]>([]);
   const [historyExtraHeavyTop, setHistoryExtraHeavyTop] = useState<AdminHistoryLeaderboardEntry[]>([]);
   const [historyAnomalies, setHistoryAnomalies] = useState<AdminHistoryAnomaly[]>([]);
+  const [historyTimeseries, setHistoryTimeseries] = useState<AdminHistoryTimeSeriesPoint[]>([]);
+  const [historyDistribution, setHistoryDistribution] = useState<AdminHistoryDistribution>({
+    photoMix: { promptRatio: 0, extraRatio: 0, capsuleRatio: 0 },
+    userMix: { promptRatio: 0, extraRatio: 0 },
+    rawTotals: {
+      photos: 0,
+      dailyMomentPhotos: 0,
+      extraPhotos: 0,
+      capsulePhotos: 0,
+      postedUsersSum: 0,
+      onlineUsersSum: 0,
+    },
+  });
+  const [historyConversion, setHistoryConversion] = useState<AdminHistoryConversionPoint[]>([]);
+  const [historyReliability, setHistoryReliability] = useState<AdminHistoryReliability>({
+    daysAnalyzed: 0,
+    daysWithPosts: 0,
+    daysWithTriggerPerformance: 0,
+    onTimeTriggerDays: 0,
+    onTimeTriggerRate: 0,
+    avgAbsoluteTriggerDelayMinutes: 0,
+    debugErrorIndicators: 0,
+    errorIndicatorRatePerDay: 0,
+    avgPostedUsersPerDay: 0,
+    avgOnlineUsersPerDay: 0,
+    avgRequestsPerOnlineUser: 0,
+  });
+  const [historyCohorts, setHistoryCohorts] = useState<AdminHistoryCohortEntry[]>([]);
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
@@ -189,6 +241,89 @@ export function App() {
       newestAt: debugLogs[0]?.createdAt || "",
     };
   }, [debugLogs]);
+  const reduceMotion = useMemo(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }, []);
+  const historyTrendChartData = useMemo(
+    () =>
+      historyTimeseries.map((row) => ({
+        ...row,
+        dayLabel: formatDateShort(row.day),
+      })),
+    [historyTimeseries]
+  );
+  const historyCompositionChartData = useMemo(
+    () =>
+      historyTimeseries.map((row) => ({
+        dayLabel: formatDateShort(row.day),
+        dailyMomentPhotos: row.dailyMomentPhotos,
+        extraPhotos: row.extraPhotos,
+        capsulePhotos: row.capsulePhotos,
+      })),
+    [historyTimeseries]
+  );
+  const historyConversionChartData = useMemo(
+    () =>
+      historyConversion.map((row) => ({
+        ...row,
+        dayLabel: formatDateShort(row.day),
+      })),
+    [historyConversion]
+  );
+  const historyScatterData = useMemo(
+    () =>
+      historyTimeseries.map((row) => ({
+        x: row.triggerDelayMin,
+        y: row.postedUsers,
+        dayLabel: formatDateShort(row.day),
+      })),
+    [historyTimeseries]
+  );
+  const historyPhotoMixPieData = useMemo(
+    () => [
+      { name: "Daily-Moment", value: ratioPercent(historyDistribution.photoMix.promptRatio) },
+      { name: "Extra", value: ratioPercent(historyDistribution.photoMix.extraRatio) },
+      { name: "Capsule", value: ratioPercent(historyDistribution.photoMix.capsuleRatio) },
+    ],
+    [historyDistribution]
+  );
+  const historyReliableChartData = useMemo(
+    () =>
+      historyReliableTop.map((row) => ({
+        username: row.username,
+        scorePercent: ratioPercent(row.reliabilityScore || 0),
+      })),
+    [historyReliableTop]
+  );
+  const historyExtraHeavyChartData = useMemo(
+    () =>
+      historyExtraHeavyTop.map((row) => ({
+        username: row.username,
+        scorePercent: ratioPercent(row.extraBiasScore || 0),
+      })),
+    [historyExtraHeavyTop]
+  );
+  const historyAnomalyTimelineData = useMemo(
+    () =>
+      historyAnomalies.map((row) => ({
+        day: row.day,
+        dayLabel: formatDateShort(row.day),
+        severityScore: row.severity === "high" ? 3 : row.severity === "medium" ? 2 : 1,
+        severity: row.severity,
+        reason: row.reason,
+      })),
+    [historyAnomalies]
+  );
+  const historyCohortTrendData = useMemo(
+    () =>
+      historyCohorts.slice(0, 12).map((row) => ({
+        username: row.username,
+        participation7d: ratioPercent(row.participation7d),
+        participation30d: ratioPercent(row.participation30d),
+      })),
+    [historyCohorts]
+  );
 
   useEffect(() => {
     if (!token) return;
@@ -491,6 +626,38 @@ export function App() {
       setHistoryReliableTop(data.leaderboard?.reliableTop || []);
       setHistoryExtraHeavyTop(data.leaderboard?.extraHeavyTop || []);
       setHistoryAnomalies(data.anomalies || []);
+      setHistoryTimeseries(data.timeseries || []);
+      setHistoryDistribution(
+        data.distribution || {
+          photoMix: { promptRatio: 0, extraRatio: 0, capsuleRatio: 0 },
+          userMix: { promptRatio: 0, extraRatio: 0 },
+          rawTotals: {
+            photos: 0,
+            dailyMomentPhotos: 0,
+            extraPhotos: 0,
+            capsulePhotos: 0,
+            postedUsersSum: 0,
+            onlineUsersSum: 0,
+          },
+        }
+      );
+      setHistoryConversion(data.conversion || []);
+      setHistoryReliability(
+        data.reliability || {
+          daysAnalyzed: 0,
+          daysWithPosts: 0,
+          daysWithTriggerPerformance: 0,
+          onTimeTriggerDays: 0,
+          onTimeTriggerRate: 0,
+          avgAbsoluteTriggerDelayMinutes: 0,
+          debugErrorIndicators: 0,
+          errorIndicatorRatePerDay: 0,
+          avgPostedUsersPerDay: 0,
+          avgOnlineUsersPerDay: 0,
+          avgRequestsPerOnlineUser: 0,
+        }
+      );
+      setHistoryCohorts(data.cohorts || []);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1326,6 +1493,152 @@ export function App() {
             <p className="small">
               Online-Zeiten stammen aus serverseitigem Activity-Tracking. Tage vor dem Tracking-Rollout zeigen bewusst kein geschaetztes Online-Ergebnis.
             </p>
+            <div className="history-chart-grid">
+              <article className="history-chart-card">
+                <h3>Trend: Online vs Posting</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <LineChart data={historyTrendChartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="dayLabel" />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip />
+                      <Legend />
+                      <Line type="monotone" dataKey="onlineUsers" name="Online" stroke="#386dff" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={550} />
+                      <Line type="monotone" dataKey="postedUsers" name="Poster" stroke="#18a188" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={550} />
+                      <Line type="monotone" dataKey="dailyMomentUsers" name="Daily-Moment" stroke="#31bf62" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={550} />
+                      <Line type="monotone" dataKey="extraUsers" name="Extras" stroke="#f0872f" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={550} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Composition: Daily / Extra / Capsule</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={historyCompositionChartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="dayLabel" />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip />
+                      <Legend />
+                      <Bar dataKey="dailyMomentPhotos" name="Daily-Moment" stackId="a" fill="#33ba67" isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Bar dataKey="extraPhotos" name="Extra" stackId="a" fill="#f0872f" isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Bar dataKey="capsulePhotos" name="Capsule" stackId="a" fill="#7861d8" isAnimationActive={!reduceMotion} animationDuration={520} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Conversion-Funnel pro Tag</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <AreaChart data={historyConversionChartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="dayLabel" />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip />
+                      <Legend />
+                      <Area type="monotone" dataKey="onlineUsers" name="Online" fill="#4f87ff" stroke="#386dff" fillOpacity={0.28} isAnimationActive={!reduceMotion} animationDuration={500} />
+                      <Area type="monotone" dataKey="postedUsers" name="Gepostet" fill="#1cb39a" stroke="#18a188" fillOpacity={0.3} isAnimationActive={!reduceMotion} animationDuration={500} />
+                      <Area type="monotone" dataKey="dailyMomentUsers" name="Daily-Moment" fill="#53c773" stroke="#32b85b" fillOpacity={0.34} isAnimationActive={!reduceMotion} animationDuration={500} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Trigger Quality (Delay vs Poster)</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <ScatterChart>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="x" name="Trigger Delay (min)" />
+                      <YAxis dataKey="y" name="Poster" allowDecimals={false} />
+                      <Tooltip cursor={{ strokeDasharray: "4 4" }} formatter={(v) => v} />
+                      <Scatter data={historyScatterData} fill="#3f79ff" isAnimationActive={!reduceMotion} animationDuration={500} />
+                    </ScatterChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Photo-Mix (Anteil)</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <PieChart>
+                      <Tooltip formatter={(value) => `${value}%`} />
+                      <Legend />
+                      <Pie data={historyPhotoMixPieData} dataKey="value" nameKey="name" outerRadius={84} innerRadius={45} isAnimationActive={!reduceMotion} animationDuration={520}>
+                        {historyPhotoMixPieData.map((entry, index) => (
+                          <Cell key={`${entry.name}-${index}`} fill={index === 0 ? "#33ba67" : index === 1 ? "#f0872f" : "#7861d8"} />
+                        ))}
+                      </Pie>
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Zuverlaessigste Nutzer</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={historyReliableChartData} layout="vertical">
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis type="number" domain={[0, 100]} />
+                      <YAxis type="category" dataKey="username" width={90} />
+                      <Tooltip formatter={(value) => `${value}%`} />
+                      <Bar dataKey="scorePercent" name="Reliability %" fill="#2cb280" isAnimationActive={!reduceMotion} animationDuration={520} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Extra-Lastige Nutzer</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={historyExtraHeavyChartData} layout="vertical">
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis type="number" domain={[0, 100]} />
+                      <YAxis type="category" dataKey="username" width={90} />
+                      <Tooltip formatter={(value) => `${value}%`} />
+                      <Bar dataKey="scorePercent" name="Extra %" fill="#f08a37" isAnimationActive={!reduceMotion} animationDuration={520} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Anomalie-Timeline</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <ScatterChart>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="dayLabel" name="Tag" />
+                      <YAxis dataKey="severityScore" name="Severity" domain={[0, 3]} ticks={[1, 2, 3]} />
+                      <Tooltip formatter={(value) => (Number(value) === 3 ? "high" : Number(value) === 2 ? "medium" : "low")} />
+                      <Scatter data={historyAnomalyTimelineData} isAnimationActive={!reduceMotion} animationDuration={500}>
+                        {historyAnomalyTimelineData.map((row, idx) => (
+                          <Cell key={`${row.day}-${idx}`} fill={row.severity === "high" ? "#de5151" : row.severity === "medium" ? "#e6a13f" : "#51a6df"} />
+                        ))}
+                      </Scatter>
+                    </ScatterChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Cohort Trend (7d vs 30d)</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={historyCohortTrendData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="username" />
+                      <YAxis domain={[0, 100]} />
+                      <Tooltip formatter={(value) => `${value}%`} />
+                      <Legend />
+                      <Bar dataKey="participation7d" name="7 Tage" fill="#3f76ff" isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Bar dataKey="participation30d" name="30 Tage" fill="#28b890" isAnimationActive={!reduceMotion} animationDuration={520} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+            </div>
             <div className="grid4">
               <article className="stat">
                 <h3>Zuverlaessig (Top 5)</h3>
@@ -1343,6 +1656,12 @@ export function App() {
                 <h3>Fehlerindikatoren</h3>
                 <p>{historyItems.reduce((acc, row) => acc + Number(row.debugErrorCount || 0), 0)}</p>
               </article>
+            </div>
+            <div className="grid4">
+              <CardStat title="On-Time Trigger" value={`${Math.round(historyReliability.onTimeTriggerRate * 100)}%`} />
+              <CardStat title="Avg Trigger Delay" value={`${historyReliability.avgAbsoluteTriggerDelayMinutes.toFixed(1)} min`} />
+              <CardStat title="Avg Aktivitaet/Online" value={historyReliability.avgRequestsPerOnlineUser.toFixed(2)} />
+              <CardStat title="Error Rate/Tag" value={historyReliability.errorIndicatorRatePerDay.toFixed(2)} />
             </div>
             {historyAnomalies.length > 0 && (
               <div className="stack">
@@ -1906,6 +2225,18 @@ function formatDateTime(iso: string) {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatDateShort(day: string) {
+  if (!day) return "-";
+  const d = new Date(`${day}T00:00:00`);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.`;
+}
+
+function ratioPercent(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value * 100);
 }
 
 function formatBytes(bytes: number) {

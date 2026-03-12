@@ -209,6 +209,74 @@ export type AdminHistoryAnomaly = {
   details?: string;
 };
 
+export type AdminHistoryTimeSeriesPoint = {
+  day: string;
+  onlineUsers: number;
+  postedUsers: number;
+  dailyMomentUsers: number;
+  extraUsers: number;
+  photoCount: number;
+  dailyMomentPhotos: number;
+  extraPhotos: number;
+  capsulePhotos: number;
+  debugErrors: number;
+  triggerDelayMin: number;
+  onTimeTrigger: boolean;
+};
+
+export type AdminHistoryConversionPoint = {
+  day: string;
+  onlineUsers: number;
+  postedUsers: number;
+  dailyMomentUsers: number;
+  extraUsers: number;
+};
+
+export type AdminHistoryDistribution = {
+  photoMix: {
+    promptRatio: number;
+    extraRatio: number;
+    capsuleRatio: number;
+  };
+  userMix: {
+    promptRatio: number;
+    extraRatio: number;
+  };
+  rawTotals: {
+    photos: number;
+    dailyMomentPhotos: number;
+    extraPhotos: number;
+    capsulePhotos: number;
+    postedUsersSum: number;
+    onlineUsersSum: number;
+  };
+};
+
+export type AdminHistoryReliability = {
+  daysAnalyzed: number;
+  daysWithPosts: number;
+  daysWithTriggerPerformance: number;
+  onTimeTriggerDays: number;
+  onTimeTriggerRate: number;
+  avgAbsoluteTriggerDelayMinutes: number;
+  debugErrorIndicators: number;
+  errorIndicatorRatePerDay: number;
+  avgPostedUsersPerDay: number;
+  avgOnlineUsersPerDay: number;
+  avgRequestsPerOnlineUser: number;
+};
+
+export type AdminHistoryCohortEntry = {
+  userId: number;
+  username: string;
+  postedDays: number;
+  promptDays: number;
+  extraDays: number;
+  participation7d: number;
+  participation30d: number;
+  participationDelta: number;
+};
+
 export type AdminHistoryResponse = {
   items: AdminHistoryDay[];
   days: number;
@@ -219,6 +287,11 @@ export type AdminHistoryResponse = {
     reliableTop?: AdminHistoryLeaderboardEntry[];
     extraHeavyTop?: AdminHistoryLeaderboardEntry[];
   };
+  timeseries?: AdminHistoryTimeSeriesPoint[];
+  distribution?: AdminHistoryDistribution;
+  conversion?: AdminHistoryConversionPoint[];
+  reliability?: AdminHistoryReliability;
+  cohorts?: AdminHistoryCohortEntry[];
   anomalies?: AdminHistoryAnomaly[];
 };
 
@@ -560,6 +633,34 @@ export async function getAdminHistory(token: string, days = 30, offset = 0, excl
       reliableTop: data.leaderboard?.reliableTop || [],
       extraHeavyTop: data.leaderboard?.extraHeavyTop || [],
     },
+    timeseries: data.timeseries || [],
+    distribution: data.distribution || {
+      photoMix: { promptRatio: 0, extraRatio: 0, capsuleRatio: 0 },
+      userMix: { promptRatio: 0, extraRatio: 0 },
+      rawTotals: {
+        photos: 0,
+        dailyMomentPhotos: 0,
+        extraPhotos: 0,
+        capsulePhotos: 0,
+        postedUsersSum: 0,
+        onlineUsersSum: 0,
+      },
+    },
+    conversion: data.conversion || [],
+    reliability: data.reliability || {
+      daysAnalyzed: 0,
+      daysWithPosts: 0,
+      daysWithTriggerPerformance: 0,
+      onTimeTriggerDays: 0,
+      onTimeTriggerRate: 0,
+      avgAbsoluteTriggerDelayMinutes: 0,
+      debugErrorIndicators: 0,
+      errorIndicatorRatePerDay: 0,
+      avgPostedUsersPerDay: 0,
+      avgOnlineUsersPerDay: 0,
+      avgRequestsPerOnlineUser: 0,
+    },
+    cohorts: data.cohorts || [],
     anomalies: data.anomalies || [],
   };
 }
