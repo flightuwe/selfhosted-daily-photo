@@ -60,7 +60,7 @@ func TestInvalidPromptOnlyPhotoIDs(t *testing.T) {
 	}
 
 	got := invalidPromptOnlyPhotoIDs(photos, promptByDay)
-	if len(got) != 2 || got[0] != 2 || got[1] != 3 {
+	if len(got) != 2 || got[0] != uint(2) || got[1] != uint(3) {
 		t.Fatalf("invalidPromptOnlyPhotoIDs() = %v, want [2 3]", got)
 	}
 }
