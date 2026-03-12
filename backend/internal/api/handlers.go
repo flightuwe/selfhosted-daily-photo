@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -2147,6 +2148,12 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 	if days > 120 {
 		days = 120
 	}
+	excludeEmpty := true
+	if raw := strings.TrimSpace(c.Query("excludeEmpty")); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			excludeEmpty = parsed
+		}
+	}
 	offset := 0
 	if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
@@ -2188,6 +2195,10 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "history query failed"})
 		return
 	}
+	photoUserIDs := make(map[uint]struct{}, len(photos))
+	for _, p := range photos {
+		photoUserIDs[p.UserID] = struct{}{}
+	}
 
 	dayStart := time.Date(startDayDate.AddDate(0, 0, -(days-1)).Year(), startDayDate.AddDate(0, 0, -(days-1)).Month(), startDayDate.AddDate(0, 0, -(days-1)).Day(), 0, 0, 0, 0, s.Location)
 	dayEnd := time.Date(startDayDate.Year(), startDayDate.Month(), startDayDate.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), s.Location)
@@ -2198,6 +2209,8 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 	_ = s.DB.Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Find(&reactions).Error
 	var chats []models.ChatMessage
 	_ = s.DB.Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Find(&chats).Error
+	var debugLogs []models.ClientDebugLog
+	_ = s.DB.Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Find(&debugLogs).Error
 
 	var activities []models.DailyUserActivity
 	if err := s.DB.Preload("User").Where("day >= ? AND day <= ?", oldest, newest).Order("day desc, first_seen_at asc").Find(&activities).Error; err != nil {
@@ -2209,6 +2222,29 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 	trackingAvailableFrom := ""
 	if err := s.DB.Order("day asc").First(&firstTrackedActivity).Error; err == nil {
 		trackingAvailableFrom = firstTrackedActivity.Day
+	}
+	usernameByID := make(map[uint]string)
+	userIDs := make([]uint, 0, len(photoUserIDs))
+	for userID := range photoUserIDs {
+		userIDs = append(userIDs, userID)
+	}
+	for _, row := range activities {
+		if row.UserID == 0 {
+			continue
+		}
+		if _, ok := photoUserIDs[row.UserID]; !ok {
+			userIDs = append(userIDs, row.UserID)
+		}
+		if name := strings.TrimSpace(row.User.Username); name != "" {
+			usernameByID[row.UserID] = name
+		}
+	}
+	if len(userIDs) > 0 {
+		var users []models.User
+		_ = s.DB.Where("id IN ?", userIDs).Find(&users).Error
+		for _, u := range users {
+			usernameByID[u.ID] = u.Username
+		}
 	}
 
 	type dayMetrics struct {
@@ -2223,8 +2259,9 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 		commentCount      int
 		reactionCount     int
 		chatMessageCount  int
+		debugErrorCount   int
 		onlineUsers       map[uint]struct{}
-		userActivity      []gin.H
+		userActivity      map[uint]gin.H
 	}
 
 	metricsByDay := make(map[string]*dayMetrics, len(dayList))
@@ -2237,6 +2274,7 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			promptUsers: make(map[uint]struct{}),
 			extraUsers:  make(map[uint]struct{}),
 			onlineUsers: make(map[uint]struct{}),
+			userActivity: make(map[uint]gin.H),
 		}
 		metricsByDay[day] = created
 		return created
@@ -2273,43 +2311,126 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 		metrics := getMetrics(row.CreatedAt.In(s.Location).Format("2006-01-02"))
 		metrics.chatMessageCount++
 	}
+	for _, row := range debugLogs {
+		kind := strings.ToLower(strings.TrimSpace(row.Type))
+		if strings.Contains(kind, "failed") || strings.Contains(kind, "error") || strings.Contains(kind, "crash") {
+			metrics := getMetrics(row.CreatedAt.In(s.Location).Format("2006-01-02"))
+			metrics.debugErrorCount++
+		}
+	}
 	for _, row := range activities {
 		metrics := getMetrics(row.Day)
 		metrics.onlineUsers[row.UserID] = struct{}{}
-		metrics.userActivity = append(metrics.userActivity, gin.H{
+		name := strings.TrimSpace(row.User.Username)
+		if name == "" {
+			name = strings.TrimSpace(usernameByID[row.UserID])
+		}
+		metrics.userActivity[row.UserID] = gin.H{
 			"userId":       row.UserID,
-			"username":     row.User.Username,
+			"username":     name,
 			"firstSeenAt":  row.FirstSeenAt,
 			"lastSeenAt":   row.LastSeenAt,
 			"requestCount": row.RequestCount,
 			"posted":       false,
 			"postedPrompt": false,
 			"postedExtra":  false,
-		})
+		}
 	}
 
+	userPostedDaySet := make(map[uint]map[string]bool)
+	userPromptDaySet := make(map[uint]map[string]bool)
+	userExtraDaySet := make(map[uint]map[string]bool)
 	for _, day := range dayList {
 		metrics := getMetrics(day)
-		if len(metrics.userActivity) == 0 {
-			continue
+		for userID := range metrics.postedUsers {
+			if _, ok := userPostedDaySet[userID]; !ok {
+				userPostedDaySet[userID] = make(map[string]bool)
+			}
+			userPostedDaySet[userID][day] = true
 		}
-		for i := range metrics.userActivity {
-			userID, _ := metrics.userActivity[i]["userId"].(uint)
+		for userID := range metrics.promptUsers {
+			if _, ok := userPromptDaySet[userID]; !ok {
+				userPromptDaySet[userID] = make(map[string]bool)
+			}
+			userPromptDaySet[userID][day] = true
+		}
+		for userID := range metrics.extraUsers {
+			if _, ok := userExtraDaySet[userID]; !ok {
+				userExtraDaySet[userID] = make(map[string]bool)
+			}
+			userExtraDaySet[userID][day] = true
+		}
+		for userID, row := range metrics.userActivity {
 			_, posted := metrics.postedUsers[userID]
 			_, postedPrompt := metrics.promptUsers[userID]
 			_, postedExtra := metrics.extraUsers[userID]
-			metrics.userActivity[i]["posted"] = posted
-			metrics.userActivity[i]["postedPrompt"] = postedPrompt
-			metrics.userActivity[i]["postedExtra"] = postedExtra
+			row["posted"] = posted
+			row["postedPrompt"] = postedPrompt
+			row["postedExtra"] = postedExtra
+			metrics.userActivity[userID] = row
 		}
 	}
 
 	items := make([]gin.H, 0, len(dayList))
+	anomalies := make([]gin.H, 0, len(dayList))
 	for _, day := range dayList {
 		metrics := getMetrics(day)
 		plan, hasPlan := planByDay[day]
 		prompt, hasPrompt := promptByDay[day]
 		onlineTrackingAvailable := trackingAvailableFrom != "" && day >= trackingAvailableFrom
+		onlineUsersCount := 0
+		if onlineTrackingAvailable {
+			onlineUsersCount = len(metrics.onlineUsers)
+		}
+		userActivityRows := make([]gin.H, 0, len(metrics.userActivity))
+		for _, row := range metrics.userActivity {
+			userActivityRows = append(userActivityRows, row)
+		}
+		sort.Slice(userActivityRows, func(i, j int) bool {
+			a := strings.ToLower(strings.TrimSpace(fmt.Sprint(userActivityRows[i]["username"])))
+			b := strings.ToLower(strings.TrimSpace(fmt.Sprint(userActivityRows[j]["username"])))
+			if a == b {
+				return fmt.Sprint(userActivityRows[i]["userId"]) < fmt.Sprint(userActivityRows[j]["userId"])
+			}
+			return a < b
+		})
+		triggerDelayMinutes := 0
+		onTime := false
+		if hasPlan && hasPrompt && prompt.TriggeredAt != nil {
+			triggerDelayMinutes = int(math.Round(prompt.TriggeredAt.Sub(plan.PlannedAt).Minutes()))
+			onTime = triggerDelayMinutes >= -2 && triggerDelayMinutes <= 2
+		}
+		promptPhotoRatio := 0.0
+		if metrics.photoCount > 0 {
+			promptPhotoRatio = float64(metrics.dailyMomentPhotos) / float64(metrics.photoCount)
+		}
+		extraPhotoRatio := 0.0
+		if metrics.photoCount > 0 {
+			extraPhotoRatio = float64(metrics.extraPhotos) / float64(metrics.photoCount)
+		}
+		capsulePhotoRatio := 0.0
+		if metrics.photoCount > 0 {
+			capsulePhotoRatio = float64(metrics.timeCapsules) / float64(metrics.photoCount)
+		}
+		avgRequestsPerOnlineUser := 0.0
+		totalRequests := 0
+		for _, row := range userActivityRows {
+			totalRequests += int(asInt64(row["requestCount"]))
+		}
+		if onlineUsersCount > 0 {
+			avgRequestsPerOnlineUser = float64(totalRequests) / float64(onlineUsersCount)
+		}
+		isEmptyDay := !hasPlan &&
+			!(hasPrompt && (prompt.TriggeredAt != nil || prompt.UploadUntil != nil)) &&
+			metrics.photoCount == 0 &&
+			metrics.commentCount == 0 &&
+			metrics.reactionCount == 0 &&
+			metrics.chatMessageCount == 0 &&
+			onlineUsersCount == 0 &&
+			metrics.debugErrorCount == 0
+		if excludeEmpty && isEmptyDay {
+			continue
+		}
 		row := gin.H{
 			"day":                     day,
 			"plannedAt":               nil,
@@ -2330,8 +2451,21 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			"commentCount":            metrics.commentCount,
 			"reactionCount":           metrics.reactionCount,
 			"chatMessageCount":        metrics.chatMessageCount,
+			"debugErrorCount":         metrics.debugErrorCount,
 			"onlineTrackingAvailable": onlineTrackingAvailable,
-			"userActivity":            metrics.userActivity,
+			"userActivity":            userActivityRows,
+			"analytics": gin.H{
+				"promptPhotoRatio":       promptPhotoRatio,
+				"extraPhotoRatio":        extraPhotoRatio,
+				"capsulePhotoRatio":      capsulePhotoRatio,
+				"promptUserRatio":        safeRatio(len(metrics.promptUsers), maxInt(1, len(metrics.postedUsers))),
+				"extraUserRatio":         safeRatio(len(metrics.extraUsers), maxInt(1, len(metrics.postedUsers))),
+				"avgRequestsPerOnline":   avgRequestsPerOnlineUser,
+				"triggerDelayMinutes":    triggerDelayMinutes,
+				"onTimeTrigger":          onTime,
+				"hasTriggerPerformance":  hasPlan && hasPrompt && prompt.TriggeredAt != nil,
+				"totalRequests":          totalRequests,
+			},
 		}
 		if hasPlan {
 			row["plannedAt"] = plan.PlannedAt
@@ -2346,17 +2480,213 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			row["requestedByUser"] = prompt.RequestedBy
 		}
 		if onlineTrackingAvailable {
-			row["onlineUsersCount"] = len(metrics.onlineUsers)
+			row["onlineUsersCount"] = onlineUsersCount
 		}
 		items = append(items, row)
+		if len(metrics.postedUsers) <= 1 && onlineUsersCount >= 4 {
+			anomalies = append(anomalies, gin.H{
+				"day":      day,
+				"severity": "high",
+				"reason":   "low participation despite activity",
+				"details":  fmt.Sprintf("online=%d posted=%d", onlineUsersCount, len(metrics.postedUsers)),
+			})
+		}
+		if metrics.extraPhotos >= 3 && metrics.dailyMomentPhotos == 0 {
+			anomalies = append(anomalies, gin.H{
+				"day":      day,
+				"severity": "medium",
+				"reason":   "extras dominate without daily moments",
+				"details":  fmt.Sprintf("extras=%d daily=%d", metrics.extraPhotos, metrics.dailyMomentPhotos),
+			})
+		}
+		if hasPlan && hasPrompt && prompt.TriggeredAt != nil && int(math.Abs(float64(triggerDelayMinutes))) >= 90 {
+			anomalies = append(anomalies, gin.H{
+				"day":      day,
+				"severity": "medium",
+				"reason":   "trigger shift is unusually large",
+				"details":  fmt.Sprintf("delay=%dmin", triggerDelayMinutes),
+			})
+		}
+		if metrics.debugErrorCount >= 5 {
+			anomalies = append(anomalies, gin.H{
+				"day":      day,
+				"severity": "high",
+				"reason":   "elevated error indicators",
+				"details":  fmt.Sprintf("debugErrorCount=%d", metrics.debugErrorCount),
+			})
+		}
+	}
+
+	type boardRow struct {
+		UserID             uint
+		Username           string
+		PostedDays         int
+		PromptDays         int
+		ExtraDays          int
+		OnlineDays         int
+		ReliabilityScore   float64
+		ExtraBiasScore     float64
+		Participation7d    float64
+		Participation30d   float64
+		ParticipationDelta float64
+	}
+	leaderboardRaw := make([]boardRow, 0)
+	for userID := range usernameByID {
+		postedDays := len(userPostedDaySet[userID])
+		promptDays := len(userPromptDaySet[userID])
+		extraDays := len(userExtraDaySet[userID])
+		onlineDays := 0
+		for _, day := range dayList {
+			if _, ok := metricsByDay[day]; !ok {
+				continue
+			}
+			if _, ok := metricsByDay[day].onlineUsers[userID]; ok {
+				onlineDays++
+			}
+		}
+		reliabilityScore := safeRatio(promptDays, maxInt(1, postedDays))
+		extraBias := safeRatio(extraDays, maxInt(1, postedDays))
+		participation7, participation30, participationDelta := computeParticipationTrend(userPostedDaySet[userID], dayList)
+		if postedDays == 0 && onlineDays == 0 {
+			continue
+		}
+		leaderboardRaw = append(leaderboardRaw, boardRow{
+			UserID:             userID,
+			Username:           usernameByID[userID],
+			PostedDays:         postedDays,
+			PromptDays:         promptDays,
+			ExtraDays:          extraDays,
+			OnlineDays:         onlineDays,
+			ReliabilityScore:   reliabilityScore,
+			ExtraBiasScore:     extraBias,
+			Participation7d:    participation7,
+			Participation30d:   participation30,
+			ParticipationDelta: participationDelta,
+		})
+	}
+	reliableTop := make([]gin.H, 0)
+	extraHeavyTop := make([]gin.H, 0)
+	sort.Slice(leaderboardRaw, func(i, j int) bool {
+		if leaderboardRaw[i].ReliabilityScore == leaderboardRaw[j].ReliabilityScore {
+			return leaderboardRaw[i].PromptDays > leaderboardRaw[j].PromptDays
+		}
+		return leaderboardRaw[i].ReliabilityScore > leaderboardRaw[j].ReliabilityScore
+	})
+	for i := 0; i < len(leaderboardRaw) && i < 5; i++ {
+		row := leaderboardRaw[i]
+		reliableTop = append(reliableTop, gin.H{
+			"userId":             row.UserID,
+			"username":           row.Username,
+			"postedDays":         row.PostedDays,
+			"promptDays":         row.PromptDays,
+			"extraDays":          row.ExtraDays,
+			"onlineDays":         row.OnlineDays,
+			"reliabilityScore":   row.ReliabilityScore,
+			"participation7d":    row.Participation7d,
+			"participation30d":   row.Participation30d,
+			"participationDelta": row.ParticipationDelta,
+		})
+	}
+	sort.Slice(leaderboardRaw, func(i, j int) bool {
+		if leaderboardRaw[i].ExtraBiasScore == leaderboardRaw[j].ExtraBiasScore {
+			return leaderboardRaw[i].ExtraDays > leaderboardRaw[j].ExtraDays
+		}
+		return leaderboardRaw[i].ExtraBiasScore > leaderboardRaw[j].ExtraBiasScore
+	})
+	for i := 0; i < len(leaderboardRaw) && i < 5; i++ {
+		row := leaderboardRaw[i]
+		extraHeavyTop = append(extraHeavyTop, gin.H{
+			"userId":         row.UserID,
+			"username":       row.Username,
+			"postedDays":     row.PostedDays,
+			"promptDays":     row.PromptDays,
+			"extraDays":      row.ExtraDays,
+			"extraBiasScore": row.ExtraBiasScore,
+		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"items":               items,
 		"days":                days,
 		"offset":              offset,
+		"excludeEmpty":        excludeEmpty,
 		"onlineTrackingSince": trackingAvailableFrom,
+		"leaderboard": gin.H{
+			"reliableTop":   reliableTop,
+			"extraHeavyTop": extraHeavyTop,
+		},
+		"anomalies": anomalies,
 	})
+}
+
+func safeRatio(numerator int, denominator int) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func asInt64(v any) int64 {
+	switch t := v.(type) {
+	case int:
+		return int64(t)
+	case int64:
+		return t
+	case int32:
+		return int64(t)
+	case float64:
+		return int64(t)
+	default:
+		return 0
+	}
+}
+
+func computeParticipationTrend(userDays map[string]bool, orderedDays []string) (float64, float64, float64) {
+	if len(orderedDays) == 0 {
+		return 0, 0, 0
+	}
+	last7Window := minInt(7, len(orderedDays))
+	last30Window := minInt(30, len(orderedDays))
+	last7 := 0
+	last30 := 0
+	prev7 := 0
+	prev7Window := minInt(last7Window, maxInt(0, len(orderedDays)-last7Window))
+	for i := 0; i < last7Window; i++ {
+		if userDays[orderedDays[i]] {
+			last7++
+		}
+	}
+	for i := 0; i < last30Window; i++ {
+		if userDays[orderedDays[i]] {
+			last30++
+		}
+	}
+	for i := last7Window; i < last7Window+prev7Window; i++ {
+		if i >= len(orderedDays) {
+			break
+		}
+		if userDays[orderedDays[i]] {
+			prev7++
+		}
+	}
+	recent7 := safeRatio(last7, maxInt(1, last7Window))
+	recent30 := safeRatio(last30, maxInt(1, last30Window))
+	prev7Ratio := safeRatio(prev7, maxInt(1, prev7Window))
+	return recent7, recent30, recent7 - prev7Ratio
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (s *Server) handleBroadcastNotification(c *gin.Context) {

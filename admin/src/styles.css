@@ -223,6 +223,12 @@ button.danger {
   gap: 0.75rem;
 }
 
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
 .stat {
   border: 1px solid var(--table-border);
   border-radius: 14px;
@@ -602,6 +608,10 @@ button.danger {
 
   .grid4 {
     grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  .grid2 {
+    grid-template-columns: 1fr;
   }
 
   .debug-filters,

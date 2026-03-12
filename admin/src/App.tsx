@@ -35,6 +35,8 @@ import {
   type AdminReportItem,
   type AdminStats,
   type AdminHistoryDay,
+  type AdminHistoryAnomaly,
+  type AdminHistoryLeaderboardEntry,
   type ChatCommand,
   type AdminUser,
   type ChatItem,
@@ -135,6 +137,9 @@ export function App() {
   const [historyOffset, setHistoryOffset] = useState<number>(0);
   const [historyTrackingSince, setHistoryTrackingSince] = useState("");
   const [expandedHistoryDays, setExpandedHistoryDays] = useState<Record<string, boolean>>({});
+  const [historyReliableTop, setHistoryReliableTop] = useState<AdminHistoryLeaderboardEntry[]>([]);
+  const [historyExtraHeavyTop, setHistoryExtraHeavyTop] = useState<AdminHistoryLeaderboardEntry[]>([]);
+  const [historyAnomalies, setHistoryAnomalies] = useState<AdminHistoryAnomaly[]>([]);
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
@@ -483,6 +488,9 @@ export function App() {
       const data = await getAdminHistory(authToken, days, offset);
       setHistoryItems(data.items || []);
       setHistoryTrackingSince(data.onlineTrackingSince || "");
+      setHistoryReliableTop(data.leaderboard?.reliableTop || []);
+      setHistoryExtraHeavyTop(data.leaderboard?.extraHeavyTop || []);
+      setHistoryAnomalies(data.anomalies || []);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1280,6 +1288,8 @@ export function App() {
                 <label>
                   Tage
                   <select value={historyDays} onChange={(e) => setHistoryDays(Number(e.target.value))}>
+                    <option value={1}>Letzter Tag</option>
+                    <option value={7}>7</option>
                     <option value={14}>14</option>
                     <option value={30}>30</option>
                     <option value={60}>60</option>
@@ -1316,6 +1326,113 @@ export function App() {
             <p className="small">
               Online-Zeiten stammen aus serverseitigem Activity-Tracking. Tage vor dem Tracking-Rollout zeigen bewusst kein geschaetztes Online-Ergebnis.
             </p>
+            <div className="grid4">
+              <article className="stat">
+                <h3>Zuverlaessig (Top 5)</h3>
+                <p>{historyReliableTop.length}</p>
+              </article>
+              <article className="stat">
+                <h3>Extra-lastig (Top 5)</h3>
+                <p>{historyExtraHeavyTop.length}</p>
+              </article>
+              <article className="stat">
+                <h3>Warnungen</h3>
+                <p>{historyAnomalies.length}</p>
+              </article>
+              <article className="stat">
+                <h3>Fehlerindikatoren</h3>
+                <p>{historyItems.reduce((acc, row) => acc + Number(row.debugErrorCount || 0), 0)}</p>
+              </article>
+            </div>
+            {historyAnomalies.length > 0 && (
+              <div className="stack">
+                <h3>Warnungen</h3>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Tag</th>
+                      <th>Schwere</th>
+                      <th>Grund</th>
+                      <th>Details</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {historyAnomalies.map((row, idx) => (
+                      <tr key={`${row.day}-${row.reason}-${idx}`}>
+                        <td>{new Date(`${row.day}T00:00:00`).toLocaleDateString()}</td>
+                        <td>{row.severity}</td>
+                        <td>{row.reason}</td>
+                        <td>{row.details || "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {(historyReliableTop.length > 0 || historyExtraHeavyTop.length > 0) && (
+              <div className="grid2">
+                <div className="stack">
+                  <h3>Zuverlaessig</h3>
+                  {historyReliableTop.length === 0 ? (
+                    <p className="small">Keine Daten im Zeitraum.</p>
+                  ) : (
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>Nutzer</th>
+                          <th>Prompt-Tage</th>
+                          <th>Post-Tage</th>
+                          <th>Score</th>
+                          <th>Trend (7d/30d)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {historyReliableTop.map((row) => (
+                          <tr key={`reliable-${row.userId}`}>
+                            <td>@{row.username}</td>
+                            <td>{row.promptDays}</td>
+                            <td>{row.postedDays}</td>
+                            <td>{typeof row.reliabilityScore === "number" ? `${Math.round(row.reliabilityScore * 100)}%` : "-"}</td>
+                            <td>
+                              {typeof row.participation7d === "number" && typeof row.participation30d === "number"
+                                ? `${Math.round(row.participation7d * 100)}% / ${Math.round(row.participation30d * 100)}%`
+                                : "-"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+                <div className="stack">
+                  <h3>Extra-lastig</h3>
+                  {historyExtraHeavyTop.length === 0 ? (
+                    <p className="small">Keine Daten im Zeitraum.</p>
+                  ) : (
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>Nutzer</th>
+                          <th>Extra-Tage</th>
+                          <th>Post-Tage</th>
+                          <th>Extra-Score</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {historyExtraHeavyTop.map((row) => (
+                          <tr key={`extra-heavy-${row.userId}`}>
+                            <td>@{row.username}</td>
+                            <td>{row.extraDays}</td>
+                            <td>{row.postedDays}</td>
+                            <td>{typeof row.extraBiasScore === "number" ? `${Math.round(row.extraBiasScore * 100)}%` : "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            )}
             {historyItems.length === 0 && <p>Keine Historie vorhanden.</p>}
             {historyItems.length > 0 && (
               <table className="table">
@@ -1336,6 +1453,8 @@ export function App() {
                 <tbody>
                   {historyItems.flatMap((item) => {
                     const expanded = !!expandedHistoryDays[item.day];
+                    const userRows = item.userActivity ?? [];
+                    const hasDetails = !!item.analytics || userRows.length > 0 || !item.onlineTrackingAvailable || item.commentCount > 0 || item.reactionCount > 0 || item.chatMessageCount > 0 || item.timeCapsuleCount > 0;
                     const sourceLabel =
                       (item.triggerSource === "chat_command" || item.triggerSource === "special_request") && item.requestedByUser
                         ? `Sondermoment (${item.requestedByUser})`
@@ -1358,11 +1477,15 @@ export function App() {
                         <td>{item.extraUsersCount}</td>
                         <td>{item.photoCount}</td>
                         <td>
-                          <button
-                            onClick={() => setExpandedHistoryDays((prev) => ({ ...prev, [item.day]: !expanded }))}
-                          >
-                            {expanded ? "Weniger" : "Mehr"}
-                          </button>
+                          {hasDetails ? (
+                            <button
+                              onClick={() => setExpandedHistoryDays((prev) => ({ ...prev, [item.day]: !expanded }))}
+                            >
+                              {expanded ? "Weniger" : "Mehr"}
+                            </button>
+                          ) : (
+                            <span className="small">-</span>
+                          )}
                         </td>
                       </tr>,
                     ];
@@ -1377,10 +1500,21 @@ export function App() {
                                 <CardStat title="Chat" value={item.chatMessageCount} />
                                 <CardStat title="Capsules" value={`${item.timeCapsuleCount} / privat ${item.privateCapsuleCount}`} />
                               </div>
+                              {item.analytics && (
+                                <div className="grid4">
+                                  <CardStat title="Prompt/Fotos" value={`${Math.round(item.analytics.promptPhotoRatio * 100)}%`} />
+                                  <CardStat title="Extra/Fotos" value={`${Math.round(item.analytics.extraPhotoRatio * 100)}%`} />
+                                  <CardStat title="Aktivitaet/Online" value={item.analytics.avgRequestsPerOnline.toFixed(1)} />
+                                  <CardStat
+                                    title="Trigger Delay"
+                                    value={item.analytics.hasTriggerPerformance ? `${item.analytics.triggerDelayMinutes} min` : "-"}
+                                  />
+                                </div>
+                              )}
                               {!item.onlineTrackingAvailable && (
                                 <p className="small">Exakte Online-Zeiten sind fuer diesen Tag noch nicht verfuegbar.</p>
                               )}
-                              {item.userActivity.length === 0 ? (
+                              {userRows.length === 0 ? (
                                 <p className="small">Keine Nutzeraktivitaet fuer diesen Tag gespeichert.</p>
                               ) : (
                                 <table className="table">
@@ -1394,7 +1528,7 @@ export function App() {
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {item.userActivity.map((userRow) => (
+                                    {userRows.map((userRow) => (
                                       <tr key={`${item.day}-${userRow.userId}`}>
                                         <td>@{userRow.username}</td>
                                         <td>{userRow.firstSeenAt ? formatDateTime(userRow.firstSeenAt) : "-"}</td>

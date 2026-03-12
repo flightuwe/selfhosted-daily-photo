@@ -149,6 +149,19 @@ export type AdminHistoryUserActivity = {
   postedExtra: boolean;
 };
 
+export type AdminHistoryAnalytics = {
+  promptPhotoRatio: number;
+  extraPhotoRatio: number;
+  capsulePhotoRatio: number;
+  promptUserRatio: number;
+  extraUserRatio: number;
+  avgRequestsPerOnline: number;
+  triggerDelayMinutes: number;
+  onTimeTrigger: boolean;
+  hasTriggerPerformance: boolean;
+  totalRequests: number;
+};
+
 export type AdminHistoryDay = {
   day: string;
   plannedAt?: string | null;
@@ -169,15 +182,44 @@ export type AdminHistoryDay = {
   commentCount: number;
   reactionCount: number;
   chatMessageCount: number;
+  debugErrorCount?: number;
   onlineTrackingAvailable: boolean;
-  userActivity: AdminHistoryUserActivity[];
+  userActivity?: AdminHistoryUserActivity[] | null;
+  analytics?: AdminHistoryAnalytics;
+};
+
+export type AdminHistoryLeaderboardEntry = {
+  userId: number;
+  username: string;
+  postedDays: number;
+  promptDays: number;
+  extraDays: number;
+  onlineDays?: number;
+  reliabilityScore?: number;
+  extraBiasScore?: number;
+  participation7d?: number;
+  participation30d?: number;
+  participationDelta?: number;
+};
+
+export type AdminHistoryAnomaly = {
+  day: string;
+  severity: "low" | "medium" | "high";
+  reason: string;
+  details?: string;
 };
 
 export type AdminHistoryResponse = {
   items: AdminHistoryDay[];
   days: number;
   offset: number;
+  excludeEmpty?: boolean;
   onlineTrackingSince?: string;
+  leaderboard?: {
+    reliableTop?: AdminHistoryLeaderboardEntry[];
+    extraHeavyTop?: AdminHistoryLeaderboardEntry[];
+  };
+  anomalies?: AdminHistoryAnomaly[];
 };
 
 export type AdminTimeCapsuleItem = {
@@ -496,19 +538,29 @@ export async function getCalendar(token: string, days = 7): Promise<CalendarItem
   return data.items;
 }
 
-export async function getAdminHistory(token: string, days = 30, offset = 0): Promise<AdminHistoryResponse> {
+export async function getAdminHistory(token: string, days = 30, offset = 0, excludeEmpty = true): Promise<AdminHistoryResponse> {
   const qs = new URLSearchParams();
   qs.set("days", String(days));
   qs.set("offset", String(offset));
+  qs.set("excludeEmpty", String(excludeEmpty));
   const res = await fetch(`${apiBase}/admin/history?${qs.toString()}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const data = await parse<AdminHistoryResponse>(res);
   return {
-    items: data.items || [],
+    items: (data.items || []).map((item) => ({
+      ...item,
+      userActivity: item.userActivity || [],
+    })),
     days: data.days ?? days,
     offset: data.offset ?? offset,
+    excludeEmpty: data.excludeEmpty ?? excludeEmpty,
     onlineTrackingSince: data.onlineTrackingSince || "",
+    leaderboard: {
+      reliableTop: data.leaderboard?.reliableTop || [],
+      extraHeavyTop: data.leaderboard?.extraHeavyTop || [],
+    },
+    anomalies: data.anomalies || [],
   };
 }
 
