@@ -1,0 +1,12 @@
+{
+  "version": "0.4.6",
+  "releasedAt": "2026-03-12T00:00:00Z",
+  "highlights": [
+    "Daily- und Extra-Logik jetzt konsistent: waehrend des aktiven Daily-Moments ist nur das echte Daily-Moment erlaubt, Extras bleiben davor und danach moeglich.",
+    "Der heutige Feed entsperrt sich nur noch durch einen sichtbaren heutigen Beitrag und nicht mehr durch private oder noch gesperrte Time-Capsules.",
+    "Kamera-Flow vereinfacht: ausserhalb des Fensters Extra posten, im aktiven Fenster nur Daily-Moment posten.",
+    "Upload-Queue klarer: Prompt-Retries koennen ausserhalb des Fensters als Extra neu geplant werden, und fehlgeschlagene Eintraege lassen sich weiter direkt entfernen.",
+    "API-Semantik bereinigt: /prompt/current trennt jetzt sauber zwischen hasPromptPostedToday, hasVisiblePostToday und hasAnyPostToday."
+  ],
+  "details": []
+}

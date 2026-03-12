@@ -64,3 +64,28 @@ func TestInvalidPromptOnlyPhotoIDs(t *testing.T) {
 		t.Fatalf("invalidPromptOnlyPhotoIDs() = %v, want [2 3]", got)
 	}
 }
+
+func TestPhotoVisibleToViewer(t *testing.T) {
+	now := time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)
+	future := now.Add(2 * time.Hour)
+
+	tests := []struct {
+		name   string
+		viewer uint
+		photo  models.Photo
+		want   bool
+	}{
+		{name: "own private photo remains visible", viewer: 7, photo: models.Photo{UserID: 7, CapsulePrivate: true}, want: true},
+		{name: "foreign private photo hidden", viewer: 7, photo: models.Photo{UserID: 8, CapsulePrivate: true}, want: false},
+		{name: "foreign locked capsule hidden", viewer: 7, photo: models.Photo{UserID: 8, CapsuleVisibleAt: &future}, want: false},
+		{name: "foreign released photo visible", viewer: 7, photo: models.Photo{UserID: 8}, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := photoVisibleToViewer(tc.viewer, tc.photo, now); got != tc.want {
+				t.Fatalf("photoVisibleToViewer() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

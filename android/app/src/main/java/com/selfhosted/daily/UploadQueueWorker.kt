@@ -494,6 +494,7 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
         val reason = when (throwable.code()) {
             403 -> when {
                 raw.contains("prompt inactive") -> "prompt_inactive"
+                raw.contains("extra unavailable during daily moment window") -> "extra_window_blocked"
                 raw.contains("upload window closed") -> "upload_window_closed"
                 raw.contains("poste zuerst dein tagesmoment") -> "daily_required"
                 else -> "forbidden"
@@ -504,6 +505,7 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
         val message = when (throwable.code()) {
             403 -> when {
                 raw.contains("prompt inactive") -> "Kein aktiver Daily-Moment mehr. Diesen Upload loeschen oder als Extra posten."
+                raw.contains("extra unavailable during daily moment window") -> "Waehrend des aktiven Daily-Moments sind Extras gesperrt."
                 raw.contains("upload window closed") -> "Upload-Zeitfenster ist geschlossen."
                 raw.contains("poste zuerst dein tagesmoment") -> "Poste zuerst dein Tagesmoment."
                 else -> "Aktion nicht erlaubt"

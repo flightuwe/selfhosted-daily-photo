@@ -295,6 +295,7 @@ data class PromptResponse(
     val triggered: String? = null,
     val hasPosted: Boolean = false,
     val hasPromptPostedToday: Boolean = false,
+    val hasVisiblePostToday: Boolean = false,
     val hasAnyPostToday: Boolean = false,
     val ownPhoto: PromptPhoto? = null,
     val triggerSource: String? = null,
@@ -2107,7 +2108,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 monthRecapByDay = emptyMap(),
                 promptMetaByDay = emptyMap(),
                 feed = emptyList(),
-                feedTodayLocked = state.prompt?.hasAnyPostToday == false,
+                feedTodayLocked = state.prompt?.hasVisiblePostToday == false,
                 feedFocusDay = state.prompt?.day,
                 feedFocusPhotoId = null
             )
@@ -2128,7 +2129,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             fetched.monthRecap?.let { monthRecapMap[day] = it }
         }
         val today = state.prompt?.day ?: LocalDate.now().toString()
-        val postedToday = state.prompt?.hasAnyPostToday == true
+        val postedToday = state.prompt?.hasVisiblePostToday == true
         val hasVisibleTodayFeed = map[today].orEmpty().isNotEmpty()
         val todayLocked = !postedToday && !hasVisibleTodayFeed
         state = state.copy(
@@ -2882,8 +2883,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
         fun resolveFeedDay(): String? {
             if (targetDay.isNotBlank() && availableDays.contains(targetDay)) return targetDay
-            if (targetDay == prompt.day && !prompt.hasAnyPostToday) return null
-            if (prompt.hasAnyPostToday && availableDays.contains(prompt.day)) return prompt.day
+            if (targetDay == prompt.day && !prompt.hasVisiblePostToday) return null
+            if (prompt.hasVisiblePostToday && availableDays.contains(prompt.day)) return prompt.day
             return availableDays.firstOrNull()
         }
 
@@ -2893,9 +2894,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
 
             action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" || type == "photo_reaction" || type == "photo_comment" || targetDay.isNotBlank() || targetPhotoId != null -> {
-                val targetIsTodayHidden = targetDay == prompt.day && !prompt.hasAnyPostToday && !availableDays.contains(targetDay)
+                val targetIsTodayHidden = targetDay == prompt.day && !prompt.hasVisiblePostToday && !availableDays.contains(targetDay)
                 if (targetIsTodayHidden) {
-                    openCamera("Der heutige Feed wird sichtbar, sobald du selbst gepostet hast.")
+                    openCamera("Der heutige Feed wird sichtbar, sobald du einen sichtbaren Beitrag gepostet hast.")
                     return
                 }
                 val day = resolveFeedDay()
@@ -4071,7 +4072,7 @@ fun CameraTab(
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     val hasPromptPosted = prompt?.hasPromptPostedToday == true
-    val hasAnyPosted = prompt?.hasAnyPostToday == true
+    val hasVisiblePosted = prompt?.hasVisiblePostToday == true
     val canUpload = prompt?.canUpload == true
     val canSpecial = specialMomentStatus?.canRequest == true
     var showCapsuleDialog by remember { mutableStateOf(false) }
@@ -4147,7 +4148,7 @@ fun CameraTab(
             Text("Zeitfenster heute: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
         }
 
-        if (hasAnyPosted) {
+        if (hasVisiblePosted) {
             if (canUpload) {
                 Text("Daily-Moment gerade aktiv.", fontWeight = FontWeight.Bold)
                 Text(
@@ -4156,7 +4157,7 @@ fun CameraTab(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
-                Text("Du hast heute gepostet.", fontWeight = FontWeight.Bold)
+                Text("Du hast heute schon einen sichtbaren Beitrag gepostet.", fontWeight = FontWeight.Bold)
             }
             val ownUrls = if (hasPromptPosted) listOfNotNull(prompt?.ownPhoto?.url, prompt?.ownPhoto?.secondUrl) else emptyList()
             if (ownUrls.isNotEmpty()) {
@@ -4180,15 +4181,11 @@ fun CameraTab(
                     blink = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Button(
-                    onClick = { onCaptureExtra(CapsuleUploadOptions()) },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Stattdessen als Extra posten") }
             } else {
                 Button(
                     onClick = { onCaptureExtra(CapsuleUploadOptions()) },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("Weitere Bilder hinzufuegen") }
+                ) { Text("Weiteres Extra posten") }
             }
             if (!canUpload) {
                 TextButton(
@@ -4226,10 +4223,6 @@ fun CameraTab(
                         blink = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Button(
-                        onClick = { onCaptureExtra(CapsuleUploadOptions()) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Oder als Extra posten") }
                 } else {
                     Button(
                         onClick = { onCaptureExtra(CapsuleUploadOptions()) },
@@ -4312,7 +4305,7 @@ fun CameraTab(
                             Button(onClick = { onRetryQueued(item.id) }, modifier = Modifier.fillMaxWidth()) {
                                 Text("Erneut versuchen")
                             }
-                            if (item.isPrompt) {
+                            if (item.isPrompt && !canUpload) {
                                 Button(onClick = { onRetryQueuedAsExtra(item.id) }, modifier = Modifier.fillMaxWidth()) {
                                     Text("Als Extra posten")
                                 }
@@ -4632,11 +4625,11 @@ fun FeedTab(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (todayLocked && prompt?.hasAnyPostToday == false) {
+            if (todayLocked && prompt?.hasVisiblePostToday == false) {
                 item("today-locked") {
                     Card {
                         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Heutiger Feed ist gesperrt, bis du dein heutiges Foto postest.")
+                            Text("Heutiger Feed ist gesperrt, bis du einen sichtbaren Beitrag gepostet hast.")
                             Button(onClick = onTakePhoto) { Text("Foto aufnehmen") }
                         }
                     }
@@ -6665,7 +6658,8 @@ private fun apiError(t: Throwable, fallback: String): String {
                 else -> fallback
             }
             403 -> when {
-                raw.contains("prompt inactive") -> "Heute ist kein aktiver Moment. Bitte im Admin-Panel Event ausloesen."
+                raw.contains("prompt inactive") -> "Heute ist gerade kein aktiver Daily-Moment."
+                raw.contains("extra unavailable during daily moment window") -> "Waehrend des aktiven Daily-Moments sind Extras gesperrt."
                 raw.contains("upload window closed") -> "Upload-Zeitfenster ist geschlossen."
                 raw.contains("poste zuerst dein tagesmoment") -> "Poste zuerst dein Tagesmoment."
                 else -> "Aktion nicht erlaubt"
