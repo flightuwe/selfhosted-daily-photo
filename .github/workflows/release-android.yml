@@ -16,6 +16,32 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Require successful main CI for this commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&branch=main&event=push&per_page=1"
+          RESP="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "$API_URL")"
+
+          COUNT="$(echo "$RESP" | jq -r '.total_count // 0')"
+          if [ "$COUNT" -lt 1 ]; then
+            echo "::error::No CI run found on main for commit ${GITHUB_SHA}. Tag release blocked."
+            exit 1
+          fi
+
+          STATUS="$(echo "$RESP" | jq -r '.workflow_runs[0].status // ""')"
+          CONCLUSION="$(echo "$RESP" | jq -r '.workflow_runs[0].conclusion // ""')"
+          URL="$(echo "$RESP" | jq -r '.workflow_runs[0].html_url // ""')"
+
+          if [ "$STATUS" != "completed" ] || [ "$CONCLUSION" != "success" ]; then
+            echo "::error::Main CI is not successful for ${GITHUB_SHA}. status=${STATUS} conclusion=${CONCLUSION} run=${URL}"
+            exit 1
+          fi
+
+          echo "Main CI gate passed: ${URL}"
       - name: Validate Android version against release tag
         shell: bash
         run: |

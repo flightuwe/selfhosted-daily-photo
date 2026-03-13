@@ -136,6 +136,14 @@ Hinweis:
   - `.github/release-notes/vX.Y.Z.json`
 - Details zur Policy stehen in `.github/release-notes/README.md`
 
+## E2E Testen vor Release
+- Vollstaendige Checkliste:
+  - `docs/testing/RELEASE_E2E_CHECKLIST.md`
+- Smoke-Skript:
+  - `pwsh scripts/test-e2e-smoke.ps1 -BaseUrl https://daily.teacloud.synology.me -AdminToken <token>`
+- Feed-Burst-Skript (Rate-Limit/5xx-Guard):
+  - `pwsh scripts/test-feed-rate-limit.ps1 -BaseUrl https://daily.teacloud.synology.me -UserToken <token> -Requests 80 -Concurrency 8`
+
 ## Erste Inbetriebnahme testen
 1. `https://daily.deine-domain.tld/api/health` -> `ok: true`
 2. Admin Login mit Bootstrap-Admin
