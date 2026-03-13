@@ -10,6 +10,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
 import android.graphics.Matrix
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -662,6 +664,14 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun token(): String = prefs.getString("token", "") ?: ""
 
+    fun hasUsableNetwork(): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        return hasInternet
+    }
+
     fun saveToken(token: String) {
         prefs.edit().putString("token", token).apply()
     }
@@ -803,6 +813,7 @@ class AppRepo(private val api: Api, private val context: Context) {
         rows.forEach { row ->
             runCatching {
                 val inferredRequestId = extractRequestIdFromMeta(row.meta)
+                val requestId = inferredRequestId.ifBlank { "dbg_${row.id}" }
                 api.uploadClientDebugLog(
                     "Bearer ${token()}",
                     ClientDebugLogUploadRequest(
@@ -812,7 +823,7 @@ class AppRepo(private val api: Api, private val context: Context) {
                         appVersion = BuildConfig.VERSION_NAME,
                         deviceName = currentDeviceName(),
                         sessionId = sessionId,
-                        requestId = inferredRequestId
+                        requestId = requestId
                     )
                 )
             }.onSuccess { sent += 1 }
@@ -1575,6 +1586,11 @@ data class DashboardData(
     val communityStats: CommunityStatsResponse?
 )
 
+private class RefreshStageException(
+    val failedCall: String,
+    cause: Throwable
+) : RuntimeException("refresh stage failed: $failedCall", cause)
+
 class MainVm(private val repo: AppRepo) : ViewModel() {
     private val chatSendMutex = Mutex()
     private val profileSaveMutex = Mutex()
@@ -1585,8 +1601,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val refreshAllCooldownMs = 2_000L
     private val feedAutoRefreshBaseMs = 25_000L
     private val feedAutoRefreshJitterMs = 15_000L
+    private val globalRefreshSuccessBaseMs = 20_000L
+    private val globalRefreshSuccessJitterMs = 8_000L
+    private val networkFailureBackoffStagesMs = longArrayOf(30_000L, 60_000L, 120_000L, 300_000L)
+    private val circuitBreakerActivationThreshold = 3
+    private val manualRefreshDuringNetworkFailureMinIntervalMs = 4_000L
     private val dashboardFailureDedupMs = 5 * 60 * 1000L
     private var lastRefreshAllStartedAt = 0L
+    private var lastManualRefreshAtMs = 0L
+    private var consecutiveNetworkRefreshFailures = 0
+    private var lastRefreshFailureClass: String = ""
+    private var refreshCircuitOpenUntilMs = 0L
     private var nextFeedScrollRequestId = 1L
     private var calendarStatsLoadedPrefix = 0
     private var calendarStatsLoading = false
@@ -1697,6 +1722,49 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private fun shouldSamplePerf(success: Boolean): Boolean {
         if (!success) return true
         return Random.nextInt(100) < 25
+    }
+
+    private fun isNetworkFailureClass(failureClass: String): Boolean =
+        failureClass == "dns" || failureClass == "connect" || failureClass == "timeout" || failureClass == "offline"
+
+    private fun classifyFailure(throwable: Throwable): String {
+        val network = networkFailureKind(throwable)
+        if (network != null) return network
+        val http = throwable as? HttpException
+        return if (http != null) "http_${http.code()}" else throwable::class.java.simpleName
+    }
+
+    private fun nextNetworkBackoffDelayMs(): Long {
+        val stageIndex = (consecutiveNetworkRefreshFailures - 1).coerceIn(0, networkFailureBackoffStagesMs.lastIndex)
+        val base = networkFailureBackoffStagesMs[stageIndex]
+        val jitter = Random.nextLong(0L, 8_001L)
+        return base + jitter
+    }
+
+    private fun markRefreshSuccess() {
+        consecutiveNetworkRefreshFailures = 0
+        lastRefreshFailureClass = ""
+        refreshCircuitOpenUntilMs = 0L
+    }
+
+    private fun markRefreshFailure(failureClass: String, nowMs: Long): Pair<Int, Long> {
+        lastRefreshFailureClass = failureClass
+        if (isNetworkFailureClass(failureClass)) {
+            consecutiveNetworkRefreshFailures += 1
+            val delayMs = nextNetworkBackoffDelayMs()
+            if (consecutiveNetworkRefreshFailures >= circuitBreakerActivationThreshold) {
+                refreshCircuitOpenUntilMs = nowMs + delayMs
+            }
+            return consecutiveNetworkRefreshFailures to delayMs
+        }
+        consecutiveNetworkRefreshFailures = 0
+        refreshCircuitOpenUntilMs = 0L
+        return 0 to globalRefreshSuccessBaseMs
+    }
+
+    private fun refreshCircuitOpenRemainingMs(nowMs: Long): Long {
+        val remaining = refreshCircuitOpenUntilMs - nowMs
+        return if (remaining > 0L) remaining else 0L
     }
 
     private fun logPerfEvent(event: String, durationMs: Long, success: Boolean, extra: String = "") {
@@ -2192,10 +2260,31 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         reason: String = "general",
         forceFeedReload: Boolean = false,
         bypassCooldown: Boolean = false,
-        showLoading: Boolean = true
+        showLoading: Boolean = true,
+        respectCircuitBreaker: Boolean = true
     ): Boolean {
         if (repo.token().isBlank()) return false
         val now = System.currentTimeMillis()
+        if (respectCircuitBreaker) {
+            val remaining = refreshCircuitOpenRemainingMs(now)
+            if (remaining > 0L) {
+                repo.logDebug(
+                    type = "refresh_skipped",
+                    message = "refresh circuit breaker open",
+                    meta = "reason=$reason;remainingMs=$remaining;failureClass=$lastRefreshFailureClass;backoffStage=$consecutiveNetworkRefreshFailures"
+                )
+                return false
+            }
+        }
+        if (!repo.hasUsableNetwork() && reason != "feed_pull") {
+            val (backoffStage, delayMs) = markRefreshFailure("offline", now)
+            repo.logDebug(
+                type = "refresh_skipped",
+                message = "no usable network",
+                meta = "reason=$reason;failureClass=offline;backoffStage=$backoffStage;nextDelayMs=$delayMs"
+            )
+            return false
+        }
         if (!refreshAllMutex.tryLock()) return false
         if (!bypassCooldown && now - lastRefreshAllStartedAt < refreshAllCooldownMs) {
             refreshAllMutex.unlock()
@@ -2209,21 +2298,71 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         var success = false
         var refreshedFeedDays = 0
+        var failedCall = "none"
         try {
             repo.syncDeviceTokenIfNeeded()
-            val meResp = repo.me()
+            val meResp = try {
+                repo.me()
+            } catch (t: Throwable) {
+                failedCall = "me"
+                throw RefreshStageException("me", t)
+            }
+            val inviteCode = runCatching { repo.myInviteCode() }.getOrElse {
+                failedCall = "inviteCode"
+                state.myInviteCode
+            }
+            val prompt = runCatching { repo.prompt() }.getOrElse {
+                failedCall = "prompt"
+                state.prompt ?: throw RefreshStageException("prompt", it)
+            }
+            val rules = runCatching { repo.promptRules() }.getOrElse {
+                failedCall = "promptRules"
+                state.promptRules ?: PromptRulesResponse(
+                    promptWindowStartHour = 8,
+                    promptWindowEndHour = 20,
+                    uploadWindowMinutes = 60,
+                    maxUploadBytes = 0,
+                    timezone = "UTC"
+                )
+            }
+            val special = runCatching { repo.specialMomentStatus() }.getOrElse {
+                failedCall = "specialMoment"
+                state.specialMomentStatus ?: SpecialMomentStatus(
+                    canRequest = false,
+                    requestedThisWeek = false,
+                    remainingSeconds = 0L,
+                    nextAllowedAt = null,
+                    lastRequestedAt = null
+                )
+            }
+            val photos = runCatching { repo.myPhotos() }.getOrElse {
+                failedCall = "myPhotos"
+                state.photos
+            }
+            val chat = runCatching { repo.listChat() }.getOrElse {
+                failedCall = "chat"
+                state.chat
+            }
+            val feedDays = runCatching { repo.feedDays() }.getOrElse {
+                failedCall = "feedDays"
+                state.calendarDays
+            }
+            val communityStats = runCatching { repo.communityStats() }.getOrElse {
+                failedCall = "communityStats"
+                state.communityStats
+            }
             val payload = DashboardData(
                 me = meResp.user,
                 streakDays = meResp.streakDays,
                 dailyMomentCount = meResp.dailyMomentCount,
-                inviteCode = repo.myInviteCode(),
-                prompt = repo.prompt(),
-                rules = repo.promptRules(),
-                special = repo.specialMomentStatus(),
-                photos = repo.myPhotos(),
-                chat = repo.listChat(),
-                feedDays = repo.feedDays(),
-                communityStats = runCatching { repo.communityStats() }.getOrNull()
+                inviteCode = inviteCode,
+                prompt = prompt,
+                rules = rules,
+                special = special,
+                photos = photos,
+                chat = chat,
+                feedDays = feedDays,
+                communityStats = communityStats
             )
             val me = payload.me
             val streakDays = payload.streakDays
@@ -2330,30 +2469,42 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             ensureCalendarStatsPrefix(2)
             success = true
+            markRefreshSuccess()
             if (reason == "feed_pull" || reason == "feed_auto" || forceFeedReload) {
                 val durationMs = System.currentTimeMillis() - now
                 repo.logDebug(
                     type = "feed_refresh",
                     message = "feed refresh ok",
-                    meta = "reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs"
+                    meta = "reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;refreshMode=full"
                 )
             }
         } catch (t: Throwable) {
+            val actual = if (t is RefreshStageException) t.cause ?: t else t
+            if (t is RefreshStageException) {
+                failedCall = t.failedCall
+            }
             if (isBenignCancellation(t)) {
                 state = state.copy(loading = if (showLoading) false else state.loading, communityStatsLoading = false)
                 return false
             }
+            val failureClass = classifyFailure(actual)
+            val (backoffStage, delayMs) = markRefreshFailure(failureClass, System.currentTimeMillis())
             state = state.copy(
                 loading = if (showLoading) false else state.loading,
                 communityStatsLoading = false,
-                message = apiError(t, "Laden fehlgeschlagen")
+                message = apiError(actual, "Laden fehlgeschlagen")
             )
-            logApiFailure("dashboard_load_failed", "refresh_all", t)
+            logApiFailure(
+                "dashboard_load_failed",
+                "refresh_all/$failedCall",
+                actual,
+                "failedCall=$failedCall;failureClass=$failureClass;refreshMode=full;backoffStage=$backoffStage;nextDelayMs=$delayMs"
+            )
             val durationMs = System.currentTimeMillis() - now
             repo.logDebug(
                 type = "feed_refresh_failed",
-                message = debugFailureMessage(t),
-                meta = "reason=$reason;forced=$forceFeedReload;durationMs=$durationMs;root=${rootCause(t)::class.java.simpleName}"
+                message = debugFailureMessage(actual),
+                meta = "reason=$reason;forced=$forceFeedReload;durationMs=$durationMs;failedCall=$failedCall;failureClass=$failureClass;refreshMode=full;backoffStage=$backoffStage;nextDelayMs=$delayMs;root=${rootCause(actual)::class.java.simpleName}"
             )
         } finally {
             refreshAllMutex.unlock()
@@ -2363,6 +2514,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun refreshFeed(reason: String = "feed_pull") {
         if (state.feedRefreshing) return
+        val now = System.currentTimeMillis()
+        val isManual = reason == "feed_pull"
+        if (isManual && isNetworkFailureClass(lastRefreshFailureClass) && now - lastManualRefreshAtMs < manualRefreshDuringNetworkFailureMinIntervalMs) {
+            val waitMs = manualRefreshDuringNetworkFailureMinIntervalMs - (now - lastManualRefreshAtMs)
+            state = state.copy(message = "Bitte kurz warten (${(waitMs / 1000L).coerceAtLeast(1L)}s), dann erneut aktualisieren.")
+            return
+        }
+        if (isManual) {
+            lastManualRefreshAtMs = now
+        }
         state = state.copy(feedRefreshing = true)
         val started = System.currentTimeMillis()
         var ok = false
@@ -2371,7 +2532,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 reason = reason,
                 forceFeedReload = true,
                 bypassCooldown = true,
-                showLoading = false
+                showLoading = false,
+                respectCircuitBreaker = !isManual
             )
         } finally {
             val elapsed = System.currentTimeMillis() - started
@@ -2825,6 +2987,23 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun feedAutoRefreshIntervalMs(): Long = feedAutoRefreshBaseMs + Random.nextLong(feedAutoRefreshJitterMs + 1L)
+
+    fun globalRefreshIntervalMs(): Long {
+        val now = System.currentTimeMillis()
+        val remaining = refreshCircuitOpenRemainingMs(now)
+        if (remaining > 0L) {
+            return remaining + Random.nextLong(0L, 2_001L)
+        }
+        if (isNetworkFailureClass(lastRefreshFailureClass) && consecutiveNetworkRefreshFailures > 0) {
+            return nextNetworkBackoffDelayMs()
+        }
+        return globalRefreshSuccessBaseMs + Random.nextLong(globalRefreshSuccessJitterMs + 1L)
+    }
+
+    fun shouldPauseFeedAutoRefresh(): Boolean {
+        val now = System.currentTimeMillis()
+        return refreshCircuitOpenRemainingMs(now) > 0L || isNetworkFailureClass(lastRefreshFailureClass)
+    }
 
     fun clearPhotoInteractions() {
         state = state.copy(photoInteractions = null, interactionsLoading = false)
@@ -3427,6 +3606,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val httpClient = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(25, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .addInterceptor { chain ->
                 val requestId = "req_${UUID.randomUUID()}"
                 val newReq = chain.request().newBuilder()
@@ -3618,7 +3802,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         if (state.token.isBlank()) return@LaunchedEffect
         while (true) {
             vm.refreshAll()
-            delay(20_000)
+            delay(vm.globalRefreshIntervalMs())
         }
     }
 
@@ -3642,7 +3826,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         while (true) {
             delay(vm.feedAutoRefreshIntervalMs())
             if (state.activeTab != AppTab.FEED) break
-            if (!state.feedRefreshing && !state.loading) {
+            if (!state.feedRefreshing && !state.loading && !vm.shouldPauseFeedAutoRefresh()) {
                 vm.refreshFeed(reason = "feed_auto")
             }
         }

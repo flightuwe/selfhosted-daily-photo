@@ -1333,10 +1333,17 @@ func (s *Server) handleFeed(c *gin.Context) {
 	today := time.Now().In(s.Location).Format("2006-01-02")
 	now := time.Now().In(s.Location)
 	if allow, retryAfter := s.allowFeedRead(user.ID, now); !allow {
+		if s.Monitor != nil {
+			s.Monitor.RecordThrottle("feed_spike_poll_guard")
+		}
 		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		c.Header("X-RateLimit-Policy", "soft")
+		c.Header("X-RateLimit-Reason", "feed_spike_poll_guard")
+		c.Header("X-RateLimit-Scope", "feed")
 		c.JSON(http.StatusTooManyRequests, gin.H{
 			"error":      "Zu viele Feed-Aktualisierungen in kurzer Zeit. Bitte gleich erneut versuchen.",
 			"code":       "feed_rate_limited",
+			"reasonTag":  "feed_spike_poll_guard",
 			"retryAfter": retryAfter,
 		})
 		return

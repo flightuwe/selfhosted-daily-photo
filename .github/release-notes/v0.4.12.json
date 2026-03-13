@@ -1,0 +1,15 @@
+{
+  "version": "0.4.12",
+  "releasedAt": "2026-03-13T00:00:00Z",
+  "highlights": [
+    "Feed-Refresh bei Lastspitzen stabilisiert und zuverlaessiger gemacht.",
+    "Performance-Metriken im Backend um Fehlerklassen und Throttle-Rate erweitert.",
+    "Admin-Performanceansicht fuer schnellere Bottleneck-Analyse verbessert."
+  ],
+  "details": [
+    "Android-Refresh-Flow fuer sichtbare Feed-Tage robuster gemacht (inklusive Backoff-/Fehlerpfad-Verbesserungen).",
+    "Performance-API liefert jetzt schemaVersion, errorClasses sowie throttleCount/throttleRate konsistent mit aus.",
+    "Performance-Export (JSON/CSV) wurde um uebersichtlichere Diagnosefelder erweitert.",
+    "App-Version auf 0.4.12 mit versionCode 63 aktualisiert."
+  ]
+}

@@ -456,19 +456,29 @@ export type AdminPerformanceSloState = {
 };
 
 export type AdminPerformanceOverview = {
+  schemaVersion?: string;
   from: string;
   to: string;
   bucket: "1m" | "5m";
   items: AdminPerformanceBucket[];
   system?: AdminPerformanceSystemBucket[];
   dbHotspots?: AdminPerformanceDbHotspot[];
+  errorClasses?: AdminPerformanceErrorClass[];
   slo?: AdminPerformanceSloState;
   summary?: {
     requests: number;
     errors: number;
     p95Peak: number;
     p99Peak: number;
+    throttleCount?: number;
+    throttleRate?: number;
   };
+};
+
+export type AdminPerformanceErrorClass = {
+  errorClass: string;
+  count: number;
+  ratio: number;
 };
 
 export type AdminPerformanceRouteHotspot = {
@@ -882,14 +892,16 @@ export async function getAdminPerformanceOverview(
   });
   const data = await parse<AdminPerformanceOverview>(res);
   return {
+    schemaVersion: data.schemaVersion || "1.0",
     from: data.from,
     to: data.to,
     bucket: data.bucket || "1m",
     items: data.items || [],
     system: data.system || [],
     dbHotspots: data.dbHotspots || [],
+    errorClasses: data.errorClasses || [],
     slo: data.slo,
-    summary: data.summary || { requests: 0, errors: 0, p95Peak: 0, p99Peak: 0 },
+    summary: data.summary || { requests: 0, errors: 0, p95Peak: 0, p99Peak: 0, throttleCount: 0, throttleRate: 0 },
   };
 }
 

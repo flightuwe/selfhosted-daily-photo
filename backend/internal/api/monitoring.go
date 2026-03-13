@@ -37,6 +37,8 @@ type Monitor struct {
 	PushFailed        int64
 	PushInvalidTokens int64
 	PushErrors        int64
+	ThrottleTotal     int64
+	ThrottleByReason  map[string]int64
 
 	minuteBuckets map[minuteBucketKey]*minuteBucket
 	dbQueryBuckets map[dbQueryBucketKey]*dbQueryBucket
@@ -111,6 +113,7 @@ func NewMonitor(database *gorm.DB, loc *time.Location) *Monitor {
 		RecentRequests:   make([]RequestMetric, 0, 300),
 		minuteBuckets:    make(map[minuteBucketKey]*minuteBucket),
 		dbQueryBuckets:   make(map[dbQueryBucketKey]*dbQueryBucket),
+		ThrottleByReason: make(map[string]int64, 4),
 	}
 }
 
@@ -456,6 +459,20 @@ func (m *Monitor) RecordPush(sent, failed, invalid int, hadError bool) {
 	}
 }
 
+func (m *Monitor) RecordThrottle(reason string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clean := strings.TrimSpace(reason)
+	if clean == "" {
+		clean = "unknown"
+	}
+	m.ThrottleTotal++
+	m.ThrottleByReason[clean]++
+}
+
 func (m *Monitor) MarkDailySpike(day string, triggerAt time.Time, window time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -509,6 +526,10 @@ func (m *Monitor) Snapshot() gin.H {
 
 	recent := make([]RequestMetric, len(m.RecentRequests))
 	copy(recent, m.RecentRequests)
+	throttleReasons := make(map[string]int64, len(m.ThrottleByReason))
+	for k, v := range m.ThrottleByReason {
+		throttleReasons[k] = v
+	}
 
 	var p95 float64
 	if len(recent) > 0 {
@@ -548,6 +569,10 @@ func (m *Monitor) Snapshot() gin.H {
 		"p95LatencyMs":      roundFloat(p95, 3),
 		"recentRequestsCnt": len(recent),
 		"spike":             spike,
+		"throttle": gin.H{
+			"total":    m.ThrottleTotal,
+			"byReason": throttleReasons,
+		},
 		"push": gin.H{
 			"sent":          m.PushSent,
 			"failed":        m.PushFailed,

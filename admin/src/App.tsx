@@ -2469,6 +2469,12 @@ export function App() {
               <CardStat title="P99 Peak" value={`${Number(performanceOverview?.summary?.p99Peak || 0).toFixed(1)} ms`} />
             </div>
             <div className="grid4">
+              <CardStat title="Throttle Events" value={Number(performanceOverview?.summary?.throttleCount || 0)} />
+              <CardStat title="Throttle Rate" value={`${(Number(performanceOverview?.summary?.throttleRate || 0) * 100).toFixed(2)}%`} />
+              <CardStat title="Schema" value={performanceOverview?.schemaVersion || "1.0"} />
+              <CardStat title="Error Classes" value={Number((performanceOverview?.errorClasses || []).length)} />
+            </div>
+            <div className="grid4">
               <CardStat title="SLO Status" value={performanceSlo?.status === "breach" ? "Breach" : "OK"} />
               <CardStat title="Feed P95" value={`${Number(performanceSlo?.metrics?.feedP95PeakMs || 0).toFixed(1)} ms`} />
               <CardStat title="5xx Rate" value={`${(Number(performanceSlo?.metrics?.global5xxRate || 0) * 100).toFixed(2)}%`} />
@@ -2597,6 +2603,32 @@ export function App() {
                       <td>{(Number(row.errorRate || 0) * 100).toFixed(2)}%</td>
                       <td>{Number(row.p95PeakMs || 0).toFixed(1)} ms</td>
                       <td>{Number(row.p99PeakMs || 0).toFixed(1)} ms</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+
+            <h3>Error-Class Mix</h3>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Error Class</th>
+                  <th>Count</th>
+                  <th>Ratio</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(performanceOverview?.errorClasses || []).length === 0 ? (
+                  <tr>
+                    <td colSpan={3}>Keine Error-Class Daten.</td>
+                  </tr>
+                ) : (
+                  (performanceOverview?.errorClasses || []).map((row, idx) => (
+                    <tr key={`${row.errorClass}-${idx}`}>
+                      <td><code>{row.errorClass}</code></td>
+                      <td>{row.count}</td>
+                      <td>{(Number(row.ratio || 0) * 100).toFixed(2)}%</td>
                     </tr>
                   ))
                 )}
