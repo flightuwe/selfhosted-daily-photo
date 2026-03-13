@@ -1024,16 +1024,20 @@ export function App() {
     try {
       const fromIso = fromInput ? new Date(fromInput).toISOString() : undefined;
       const toIso = toInput ? new Date(toInput).toISOString() : undefined;
-      const [overview, routes, spikes, slo] = await Promise.all([
+      const [overview, routes, spikes] = await Promise.all([
         getAdminPerformanceOverview(authToken, { bucket, from: fromIso, to: toIso }),
         getAdminPerformanceRoutes(authToken, { from: fromIso, to: toIso, top: 20 }),
         getAdminPerformanceSpikes(authToken, 14),
-        getAdminPerformanceSlo(authToken, 30),
       ]);
       setPerformanceOverview(overview);
       setPerformanceRoutes(routes.items || []);
       setPerformanceSpikes(spikes.items || []);
-      setPerformanceSlo(slo);
+      if (overview.slo) {
+        setPerformanceSlo(overview.slo);
+      } else {
+        const fallbackSlo = await getAdminPerformanceSlo(authToken, 30);
+        setPerformanceSlo(fallbackSlo);
+      }
     } catch (err) {
       setMessage((err as Error).message);
     }

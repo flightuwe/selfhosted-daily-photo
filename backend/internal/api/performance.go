@@ -322,9 +322,21 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 	var buf bytes.Buffer
 	buf.Write([]byte{0xEF, 0xBB, 0xBF})
 	writer := csv.NewWriter(&buf)
-	_ = writer.Write([]string{"section", "minute", "route", "method", "status_class", "count", "p50_latency_ms", "p95_latency_ms", "p99_latency_ms", "max_latency_ms", "bytes_in", "bytes_out", "query_group", "mem_alloc_bytes", "mem_sys_bytes", "goroutines", "gc_pause_total_ms", "last_gc_pause_ms", "db_open", "db_in_use", "db_idle", "db_wait_count", "db_wait_duration_ms", "spike_id", "day", "trigger_at", "window_start", "window_end", "push_sent", "upload_count", "feed_read_count", "error_count", "spike_p95_peak_ms", "finalized_at"})
+	header := []string{"section", "minute", "route", "method", "status_class", "count", "p50_latency_ms", "p95_latency_ms", "p99_latency_ms", "max_latency_ms", "bytes_in", "bytes_out", "query_group", "mem_alloc_bytes", "mem_sys_bytes", "goroutines", "gc_pause_total_ms", "last_gc_pause_ms", "db_open", "db_in_use", "db_idle", "db_wait_count", "db_wait_duration_ms", "spike_id", "day", "trigger_at", "window_start", "window_end", "push_sent", "upload_count", "feed_read_count", "error_count", "spike_p95_peak_ms", "finalized_at"}
+	_ = writer.Write(header)
+	writePerfRow := func(cols ...string) {
+		if len(cols) < len(header) {
+			padded := make([]string, len(header))
+			copy(padded, cols)
+			cols = padded
+		}
+		if len(cols) > len(header) {
+			cols = cols[:len(header)]
+		}
+		_ = writer.Write(cols)
+	}
 	for _, row := range rows {
-		_ = writer.Write([]string{
+		writePerfRow(
 			"minute_metric",
 			row.Minute.In(s.Location).Format(time.RFC3339),
 			row.Route,
@@ -339,10 +351,10 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 			strconv.FormatInt(row.BytesOut, 10),
 			"", "", "", "", "", "", "", "", "", "", "", "",
 			"", "", "", "", "", "", "", "", "", "", "",
-		})
+		)
 	}
 	for _, row := range dbRows {
-		_ = writer.Write([]string{
+		writePerfRow(
 			"db_query_metric",
 			row.Minute.In(s.Location).Format(time.RFC3339),
 			row.Route,
@@ -356,10 +368,10 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 			row.QueryGroup,
 			"", "", "", "", "", "", "", "", "", "",
 			"", "", "", "", "", "", "", "", "", "", "",
-		})
+		)
 	}
 	for _, row := range systemRows {
-		_ = writer.Write([]string{
+		writePerfRow(
 			"system_metric",
 			row.Minute.In(s.Location).Format(time.RFC3339),
 			"", "", "", "", "", "", "", "", "", "",
@@ -375,14 +387,14 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 			strconv.FormatInt(row.DBWaitCount, 10),
 			floatToString(row.DBWaitDurationMs),
 			"", "", "", "", "", "", "", "", "", "", "",
-		})
+		)
 	}
 	for _, spike := range spikes {
 		finalized := ""
 		if spike.FinalizedAt != nil {
 			finalized = spike.FinalizedAt.In(s.Location).Format(time.RFC3339)
 		}
-		_ = writer.Write([]string{
+		writePerfRow(
 			"spike_event",
 			"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
 			strconv.FormatUint(uint64(spike.ID), 10),
@@ -396,7 +408,7 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 			strconv.FormatInt(spike.ErrorCount, 10),
 			floatToString(spike.P95PeakMs),
 			finalized,
-		})
+		)
 	}
 	writer.Flush()
 	if err := writer.Error(); err != nil {
