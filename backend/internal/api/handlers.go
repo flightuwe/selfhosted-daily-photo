@@ -153,6 +153,9 @@ func (s *Server) Router() *gin.Engine {
 			admin.GET("/performance/spikes", s.handleAdminPerformanceSpikes)
 			admin.GET("/performance/slo", s.handleAdminPerformanceSLO)
 			admin.GET("/performance/export", s.handleAdminPerformanceExport)
+			admin.GET("/performance/tracking", s.handleAdminPerformanceTracking)
+			admin.PUT("/performance/tracking", s.handleAdminPerformanceTrackingUpdate)
+			admin.GET("/performance/tracking/export", s.handleAdminPerformanceTrackingExport)
 
 			admin.GET("/users", s.handleAdminListUsers)
 			admin.POST("/users", s.handleAdminCreateUser)
@@ -951,7 +954,7 @@ func (s *Server) handleSpecialMomentRequest(c *gin.Context) {
 		if prompt.TriggeredAt != nil {
 			triggerAt = prompt.TriggeredAt.In(s.Location)
 		}
-		s.Monitor.MarkDailySpike(prompt.Day, triggerAt, 30*time.Minute)
+		s.markDailySpikeIfEnabled(prompt.Day, triggerAt)
 	}
 
 	reqRow := models.SpecialMomentRequest{
@@ -1470,6 +1473,9 @@ type settingsRequest struct {
 	ChatCommandPushText     string           `json:"chatCommandPushText"`
 	ChatCommandEchoChat     bool             `json:"chatCommandEchoChat"`
 	ChatCommandEchoText     string           `json:"chatCommandEchoText"`
+	PerformanceTrackingEnabled       *bool            `json:"performanceTrackingEnabled"`
+	PerformanceTrackingWindowMinutes *int             `json:"performanceTrackingWindowMinutes"`
+	PerformanceTrackingOneShot       *bool            `json:"performanceTrackingOneShot"`
 	UserPromptRules         []userPromptRule `json:"userPromptRules"`
 }
 
@@ -1525,6 +1531,15 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	settings.ChatCommandPushText = req.ChatCommandPushText
 	settings.ChatCommandEchoChat = req.ChatCommandEchoChat
 	settings.ChatCommandEchoText = req.ChatCommandEchoText
+	if req.PerformanceTrackingEnabled != nil {
+		settings.PerformanceTrackingEnabled = *req.PerformanceTrackingEnabled
+	}
+	if req.PerformanceTrackingWindowMinutes != nil {
+		settings.PerformanceTrackingWindowMinutes = *req.PerformanceTrackingWindowMinutes
+	}
+	if req.PerformanceTrackingOneShot != nil {
+		settings.PerformanceTrackingOneShot = *req.PerformanceTrackingOneShot
+	}
 	if req.UserPromptRules != nil {
 		settings.UserPromptRulesJSON = encodeUserPromptRulesJSON(req.UserPromptRules)
 	}
@@ -1589,7 +1604,7 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 		if prompt.TriggeredAt != nil {
 			triggerAt = prompt.TriggeredAt.In(s.Location)
 		}
-		s.Monitor.MarkDailySpike(prompt.Day, triggerAt, 30*time.Minute)
+		s.markDailySpikeIfEnabled(prompt.Day, triggerAt)
 	}
 
 	mode := "broadcast_all"
@@ -1675,7 +1690,7 @@ func (s *Server) handleAdminResetToday(c *gin.Context) {
 	}
 	s.invalidateFeedDayCache(day)
 	if s.Monitor != nil {
-		s.Monitor.MarkDailySpike(day, now, 30*time.Minute)
+		s.markDailySpikeIfEnabled(day, now)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -4107,7 +4122,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
 			if prompt.TriggeredAt != nil {
 				triggerAt = prompt.TriggeredAt.In(s.Location)
 			}
-			s.Monitor.MarkDailySpike(prompt.Day, triggerAt, 30*time.Minute)
+			s.markDailySpikeIfEnabled(prompt.Day, triggerAt)
 		}
 		if cmd.SendPush {
 			pushText := renderCommandText(cmd.PushText, user.Username)
@@ -6088,6 +6103,12 @@ func normalizeSettings(settings models.AppSettings) models.AppSettings {
 	if settings.FeedCommentPreviewLimit > 50 {
 		settings.FeedCommentPreviewLimit = 50
 	}
+	if settings.PerformanceTrackingWindowMinutes < 5 {
+		settings.PerformanceTrackingWindowMinutes = 30
+	}
+	if settings.PerformanceTrackingWindowMinutes > 180 {
+		settings.PerformanceTrackingWindowMinutes = 180
+	}
 	settings.UserPromptRulesJSON = encodeUserPromptRulesJSON(parseUserPromptRulesJSON(settings.UserPromptRulesJSON))
 	return settings
 }
@@ -6108,11 +6129,66 @@ func settingsJSON(settings models.AppSettings) gin.H {
 		"chatCommandPushText":     settings.ChatCommandPushText,
 		"chatCommandEchoChat":     settings.ChatCommandEchoChat,
 		"chatCommandEchoText":     settings.ChatCommandEchoText,
+		"performanceTrackingEnabled":       settings.PerformanceTrackingEnabled,
+		"performanceTrackingWindowMinutes": settings.PerformanceTrackingWindowMinutes,
+		"performanceTrackingOneShot":       settings.PerformanceTrackingOneShot,
 		"userPromptRulesJson":     settings.UserPromptRulesJSON,
 		"userPromptRules":         parseUserPromptRulesJSON(settings.UserPromptRulesJSON),
 		"createdAt":               settings.CreatedAt,
 		"updatedAt":               settings.UpdatedAt,
 	}
+}
+
+func (s *Server) performanceTrackingConfig() (enabled bool, windowMinutes int) {
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err != nil {
+		return false, 30
+	}
+	settings = normalizeSettings(settings)
+	return settings.PerformanceTrackingEnabled, settings.PerformanceTrackingWindowMinutes
+}
+
+func (s *Server) performanceTrackingSettings() (models.AppSettings, error) {
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err != nil {
+		return models.AppSettings{}, err
+	}
+	return normalizeSettings(settings), nil
+}
+
+func (s *Server) markDailySpikeIfEnabled(day string, triggerAt time.Time) {
+	if s.Monitor == nil {
+		return
+	}
+	settings, err := s.performanceTrackingSettings()
+	if err != nil {
+		return
+	}
+	enabled := settings.PerformanceTrackingEnabled
+	windowMinutes := settings.PerformanceTrackingWindowMinutes
+	if !enabled {
+		return
+	}
+	if windowMinutes < 5 {
+		windowMinutes = 30
+	}
+	s.Monitor.MarkDailySpike(day, triggerAt, time.Duration(windowMinutes)*time.Minute)
+	if settings.PerformanceTrackingOneShot {
+		_ = s.DB.Model(&models.AppSettings{}).
+			Where("id = ?", settings.ID).
+			Updates(map[string]any{
+				"performance_tracking_enabled":  false,
+				"performance_tracking_one_shot": false,
+			}).Error
+	}
+}
+
+func (s *Server) TrackDailyPromptSpikeIfEnabled(prompt models.DailyPrompt) {
+	triggerAt := time.Now().In(s.Location)
+	if prompt.TriggeredAt != nil {
+		triggerAt = prompt.TriggeredAt.In(s.Location)
+	}
+	s.markDailySpikeIfEnabled(prompt.Day, triggerAt)
 }
 
 func normalizeCommandValue(v string) string {

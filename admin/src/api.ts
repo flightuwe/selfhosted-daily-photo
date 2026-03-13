@@ -20,6 +20,9 @@ export type Settings = {
   promptWindowEndHour: number;
   uploadWindowMinutes: number;
   feedCommentPreviewLimit: number;
+  performanceTrackingEnabled: boolean;
+  performanceTrackingWindowMinutes: number;
+  performanceTrackingOneShot: boolean;
   promptNotificationText: string;
   maxUploadBytes: number;
   chatCommandEnabled: boolean;
@@ -541,6 +544,15 @@ export type AdminPerformanceSpikesResponse = {
   items: AdminPerformanceSpikeWindow[];
 };
 
+export type AdminPerformanceTrackingState = {
+  enabled: boolean;
+  windowMinutes: number;
+  oneShot?: boolean;
+  activeSpike?: AdminPerformanceSpikeWindow | null;
+  latestSpike?: AdminPerformanceSpikeWindow | null;
+  serverNow?: string;
+};
+
 const apiBase = import.meta.env.VITE_API_BASE || "/api";
 
 const settingsDefaults: Settings = {
@@ -548,6 +560,9 @@ const settingsDefaults: Settings = {
   promptWindowEndHour: 20,
   uploadWindowMinutes: 10,
   feedCommentPreviewLimit: 10,
+  performanceTrackingEnabled: false,
+  performanceTrackingWindowMinutes: 30,
+  performanceTrackingOneShot: false,
   promptNotificationText: "Zeit fuer dein Daily Foto",
   maxUploadBytes: 0,
   chatCommandEnabled: false,
@@ -601,6 +616,9 @@ function normalizeSettings(raw: any): Settings {
     promptWindowEndHour: Number(raw?.promptWindowEndHour ?? raw?.PromptWindowEndHour ?? settingsDefaults.promptWindowEndHour),
     uploadWindowMinutes: Number(raw?.uploadWindowMinutes ?? raw?.UploadWindowMinutes ?? settingsDefaults.uploadWindowMinutes),
     feedCommentPreviewLimit: Number(raw?.feedCommentPreviewLimit ?? raw?.FeedCommentPreviewLimit ?? settingsDefaults.feedCommentPreviewLimit),
+    performanceTrackingEnabled: Boolean(raw?.performanceTrackingEnabled ?? raw?.PerformanceTrackingEnabled ?? settingsDefaults.performanceTrackingEnabled),
+    performanceTrackingWindowMinutes: Number(raw?.performanceTrackingWindowMinutes ?? raw?.PerformanceTrackingWindowMinutes ?? settingsDefaults.performanceTrackingWindowMinutes),
+    performanceTrackingOneShot: Boolean(raw?.performanceTrackingOneShot ?? raw?.PerformanceTrackingOneShot ?? settingsDefaults.performanceTrackingOneShot),
     promptNotificationText: String(raw?.promptNotificationText ?? raw?.PromptNotificationText ?? settingsDefaults.promptNotificationText),
     maxUploadBytes: Number(raw?.maxUploadBytes ?? raw?.MaxUploadBytes ?? settingsDefaults.maxUploadBytes),
     chatCommandEnabled: Boolean(raw?.chatCommandEnabled ?? raw?.ChatCommandEnabled ?? settingsDefaults.chatCommandEnabled),
@@ -1010,6 +1028,73 @@ export async function getAdminPerformanceSpikes(
     days: data.days || days,
     items: data.items || [],
   };
+}
+
+export async function getAdminPerformanceTracking(token: string): Promise<AdminPerformanceTrackingState> {
+  const res = await fetch(`${apiBase}/admin/performance/tracking`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminPerformanceTrackingState>(res);
+  return {
+    enabled: Boolean(data.enabled),
+    windowMinutes: Number(data.windowMinutes || 30),
+    oneShot: Boolean(data.oneShot),
+    activeSpike: data.activeSpike || null,
+    latestSpike: data.latestSpike || null,
+    serverNow: data.serverNow,
+  };
+}
+
+export async function updateAdminPerformanceTracking(
+  token: string,
+  payload: { enabled: boolean; windowMinutes: number; oneShot?: boolean }
+): Promise<AdminPerformanceTrackingState> {
+  const res = await fetch(`${apiBase}/admin/performance/tracking`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await parse<AdminPerformanceTrackingState>(res);
+  return {
+    enabled: Boolean(data.enabled),
+    windowMinutes: Number(data.windowMinutes || payload.windowMinutes || 30),
+    oneShot: Boolean(data.oneShot),
+    activeSpike: data.activeSpike || null,
+    latestSpike: data.latestSpike || null,
+    serverNow: data.serverNow,
+  };
+}
+
+export async function downloadPerformanceTrackingExport(
+  token: string,
+  opts?: { eventId?: number; day?: string; from?: string; to?: string; bucket?: "1m" | "5m" }
+): Promise<void> {
+  const qs = new URLSearchParams();
+  if (opts?.eventId && opts.eventId > 0) qs.set("eventId", String(opts.eventId));
+  if (opts?.day) qs.set("day", opts.day);
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  qs.set("bucket", opts?.bucket || "1m");
+  const res = await fetch(`${apiBase}/admin/performance/tracking/export?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    throw new Error(body.error || "Download fehlgeschlagen");
+  }
+  const blob = await res.blob();
+  const filename = `performance-tracking-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function downloadPerformanceExport(

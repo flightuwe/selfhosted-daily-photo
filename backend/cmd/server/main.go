@@ -74,9 +74,8 @@ func main() {
         log.Printf("prompt cleanup fixed invalid prompt_only rows: %d", fixed)
     }
 
-	promptService.Start(cfg.SchedulerEnabled, func(_ models.DailyPrompt, settings models.AppSettings) {
-		now := time.Now().In(location)
-		monitor.MarkDailySpike(now.Format("2006-01-02"), now, 30*time.Minute)
+	promptService.Start(cfg.SchedulerEnabled, func(prompt models.DailyPrompt, settings models.AppSettings) {
+		server.TrackDailyPromptSpikeIfEnabled(prompt)
 		var rows []models.DeviceToken
 		if err := database.Find(&rows).Error; err != nil {
 			log.Printf("device token query failed: %v", err)

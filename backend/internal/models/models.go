@@ -67,6 +67,9 @@ type AppSettings struct {
 	ChatCommandPushText     string    `gorm:"size:255;default:'{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.'" json:"chatCommandPushText"`
 	ChatCommandEchoChat     bool      `gorm:"default:true" json:"chatCommandEchoChat"`
 	ChatCommandEchoText     string    `gorm:"size:255;default:'Moment wurde von {user} angefordert.'" json:"chatCommandEchoText"`
+	PerformanceTrackingEnabled       bool      `gorm:"default:false" json:"performanceTrackingEnabled"`
+	PerformanceTrackingWindowMinutes int       `gorm:"default:30" json:"performanceTrackingWindowMinutes"`
+	PerformanceTrackingOneShot       bool      `gorm:"default:false" json:"performanceTrackingOneShot"`
 	UserPromptRulesJSON     string    `gorm:"type:text" json:"userPromptRulesJson"`
 	CreatedAt               time.Time `json:"createdAt"`
 	UpdatedAt               time.Time `json:"updatedAt"`

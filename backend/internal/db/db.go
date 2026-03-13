@@ -80,6 +80,9 @@ func ensureDefaultSettings(database *gorm.DB) error {
 		ChatCommandPushText:    "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
 		ChatCommandEchoChat:    true,
 		ChatCommandEchoText:    "Moment wurde von {user} angefordert.",
+		PerformanceTrackingEnabled: false,
+		PerformanceTrackingWindowMinutes: 30,
+		PerformanceTrackingOneShot: false,
 		UserPromptRulesJSON:    `[{"id":"diagnostics_consent_v1","enabled":true,"triggerType":"app_version","title":"Diagnose & Performance teilen?","body":"Wenn du zustimmst, sendet die App bei Problemen und Ladezeiten technische Diagnosedaten. Das hilft uns, Fehler und Engpaesse schneller zu finden. Du kannst das jederzeit im Profil widerrufen.","confirmLabel":"Zustimmen","declineLabel":"Nicht teilen","cooldownHours":0,"priority":10}]`,
 	}
 	return database.Create(&s).Error

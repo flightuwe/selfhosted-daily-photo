@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
+	"gorm.io/gorm"
 )
 
 type performanceBucketRow struct {
@@ -67,6 +69,237 @@ type performanceErrorClassRow struct {
 	ErrorClass string  `json:"errorClass"`
 	Count      int64   `json:"count"`
 	Ratio      float64 `json:"ratio"`
+}
+
+func (s *Server) handleAdminPerformanceTracking(c *gin.Context) {
+	settings, activeSpike, latestSpike, err := s.performanceTrackingState()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"enabled":       settings.PerformanceTrackingEnabled,
+		"windowMinutes": settings.PerformanceTrackingWindowMinutes,
+		"oneShot":       settings.PerformanceTrackingOneShot,
+		"activeSpike":   activeSpike,
+		"latestSpike":   latestSpike,
+		"serverNow":     time.Now().In(s.Location),
+	})
+}
+
+func (s *Server) handleAdminPerformanceTrackingUpdate(c *gin.Context) {
+	var req struct {
+		Enabled       bool `json:"enabled"`
+		WindowMinutes int  `json:"windowMinutes"`
+		OneShot       bool `json:"oneShot"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+		return
+	}
+	settings.PerformanceTrackingEnabled = req.Enabled
+	settings.PerformanceTrackingWindowMinutes = req.WindowMinutes
+	settings.PerformanceTrackingOneShot = req.OneShot && req.Enabled
+	settings = normalizeSettings(settings)
+	if err := s.DB.Save(&settings).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+		return
+	}
+
+	_, activeSpike, latestSpike, err := s.performanceTrackingState()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tracking state failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"enabled":       settings.PerformanceTrackingEnabled,
+		"windowMinutes": settings.PerformanceTrackingWindowMinutes,
+		"oneShot":       settings.PerformanceTrackingOneShot,
+		"activeSpike":   activeSpike,
+		"latestSpike":   latestSpike,
+		"serverNow":     time.Now().In(s.Location),
+	})
+}
+
+func (s *Server) handleAdminPerformanceTrackingExport(c *gin.Context) {
+	settings, activeSpike, latestSpike, err := s.performanceTrackingState()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings query failed"})
+		return
+	}
+
+	bucket := strings.ToLower(strings.TrimSpace(c.DefaultQuery("bucket", "1m")))
+	if bucket != "1m" && bucket != "5m" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid bucket (allowed: 1m, 5m)"})
+		return
+	}
+	step := time.Minute
+	if bucket == "5m" {
+		step = 5 * time.Minute
+	}
+
+	selectedSpike := activeSpike
+	if selectedSpike == nil {
+		selectedSpike = latestSpike
+	}
+	if rawEventID := strings.TrimSpace(c.Query("eventId")); rawEventID != "" {
+		id, parseErr := strconv.ParseUint(rawEventID, 10, 64)
+		if parseErr != nil || id == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid eventId"})
+			return
+		}
+		var row models.DailySpikeEvent
+		if err := s.DB.First(&row, id).Error; err != nil {
+			if errorsIsNotFound(err) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "spike event not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "spike query failed"})
+			return
+		}
+		selectedSpike = &row
+	} else if day := strings.TrimSpace(c.Query("day")); day != "" {
+		var row models.DailySpikeEvent
+		err := s.DB.Where("day = ?", day).Order("trigger_at desc").First(&row).Error
+		if err != nil {
+			if errorsIsNotFound(err) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "no spike event for day"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "spike query failed"})
+			return
+		}
+		selectedSpike = &row
+	}
+
+	var from time.Time
+	var to time.Time
+	if strings.TrimSpace(c.Query("from")) != "" || strings.TrimSpace(c.Query("to")) != "" {
+		var ok bool
+		from, to, ok = s.parsePerformanceRange(c)
+		if !ok {
+			return
+		}
+	} else if selectedSpike != nil {
+		from = selectedSpike.WindowStart.In(s.Location)
+		to = selectedSpike.WindowEnd.In(s.Location)
+	} else {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no spike window available"})
+		return
+	}
+
+	rows, err := s.loadMinuteMetrics(from, to, 120000)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	systemRows, err := s.loadSystemMinuteMetrics(from, to, 120000)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "system metrics query failed"})
+		return
+	}
+	dbRows, err := s.loadDBQueryMinuteMetrics(from, to, 120000)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db metrics query failed"})
+		return
+	}
+	var spikes []models.DailySpikeEvent
+	if err := s.DB.Where("window_end >= ? AND window_start <= ?", from, to).Order("trigger_at desc").Limit(200).Find(&spikes).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "spike list query failed"})
+		return
+	}
+
+	errorClasses := s.collectPerformanceErrorClasses(from, to, 120000)
+	overviewBuckets := aggregateMinuteRows(rows, step, s.Location)
+	systemBuckets := aggregateSystemRows(systemRows, step, s.Location)
+	hotspots := aggregateDBHotspots(dbRows, 20)
+	routes := aggregateRouteHotspots(rows, 25)
+	windowMinutes := int(to.Sub(from) / time.Minute)
+	if windowMinutes < 1 {
+		windowMinutes = 1
+	}
+	slo := buildSLOState(rows, time.Now().In(s.Location), s.Location, windowMinutes)
+	var throttleCount int64
+	for _, row := range errorClasses {
+		if row.ErrorClass == "http_429" || row.ErrorClass == "rate_limited" || row.ErrorClass == "feed_rate_limited" {
+			throttleCount += row.Count
+		}
+	}
+	totalRequests := sumInt64FromBuckets(overviewBuckets, func(item performanceBucketRow) int64 { return item.Requests })
+	totalErrors := sumInt64FromBuckets(overviewBuckets, func(item performanceBucketRow) int64 { return item.Errors })
+
+	c.JSON(http.StatusOK, gin.H{
+		"schemaVersion": "daily_tracking_v1",
+		"generatedAt":   time.Now().In(s.Location),
+		"from":          from,
+		"to":            to,
+		"bucket":        bucket,
+		"tracking": gin.H{
+			"enabled":       settings.PerformanceTrackingEnabled,
+			"windowMinutes": settings.PerformanceTrackingWindowMinutes,
+			"oneShot":       settings.PerformanceTrackingOneShot,
+		},
+		"selectedSpike": selectedSpike,
+		"spikes":        spikes,
+		"errorClasses":  errorClasses,
+		"slo":           slo,
+		"overview": gin.H{
+			"items":       overviewBuckets,
+			"system":      systemBuckets,
+			"dbHotspots":  hotspots,
+			"errorClasses": errorClasses,
+			"summary": gin.H{
+				"requests":      totalRequests,
+				"errors":        totalErrors,
+				"p95Peak":       maxFloatFromBuckets(overviewBuckets, func(item performanceBucketRow) float64 { return item.P95Ms }),
+				"p99Peak":       maxFloatFromBuckets(overviewBuckets, func(item performanceBucketRow) float64 { return item.P99Ms }),
+				"throttleCount": throttleCount,
+				"throttleRate":  perfRoundFloat(safeRate(throttleCount, totalRequests), 4),
+			},
+		},
+		"routes":     routes,
+		"minuteRows": rows,
+		"systemRows": systemRows,
+		"dbQueryRows": dbRows,
+	})
+}
+
+func (s *Server) performanceTrackingState() (models.AppSettings, *models.DailySpikeEvent, *models.DailySpikeEvent, error) {
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err != nil {
+		return models.AppSettings{}, nil, nil, err
+	}
+	settings = normalizeSettings(settings)
+
+	now := time.Now().In(s.Location)
+	var active models.DailySpikeEvent
+	activeErr := s.DB.Where("window_start <= ? AND window_end >= ?", now, now).Order("trigger_at desc").First(&active).Error
+	var activePtr *models.DailySpikeEvent
+	if activeErr == nil {
+		activePtr = &active
+	} else if !errorsIsNotFound(activeErr) {
+		return settings, nil, nil, activeErr
+	}
+
+	var latest models.DailySpikeEvent
+	latestErr := s.DB.Order("trigger_at desc").First(&latest).Error
+	var latestPtr *models.DailySpikeEvent
+	if latestErr == nil {
+		latestPtr = &latest
+	} else if !errorsIsNotFound(latestErr) {
+		return settings, activePtr, nil, latestErr
+	}
+	return settings, activePtr, latestPtr, nil
+}
+
+func errorsIsNotFound(err error) bool {
+	return errors.Is(err, gorm.ErrRecordNotFound)
 }
 
 func (s *Server) handleAdminPerformanceOverview(c *gin.Context) {

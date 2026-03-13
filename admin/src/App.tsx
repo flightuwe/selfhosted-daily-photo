@@ -38,9 +38,11 @@ import {
   getDebugLogs,
   downloadDebugLogs,
   downloadPerformanceExport,
+  downloadPerformanceTrackingExport,
   getReports,
   getAdminPerformanceOverview,
   getAdminPerformanceRoutes,
+  getAdminPerformanceTracking,
   getAdminPerformanceSlo,
   getAdminPerformanceSpikes,
   getSystemHealth,
@@ -53,6 +55,7 @@ import {
   resetTodayPrompt,
   sendChat,
   triggerPrompt,
+  updateAdminPerformanceTracking,
   updateCalendarDay,
   updateChatCommand,
   updateReport,
@@ -63,6 +66,7 @@ import {
   type AdminPerformanceSloState,
   type AdminPerformanceRouteHotspot,
   type AdminPerformanceSpikeWindow,
+  type AdminPerformanceTrackingState,
   type AdminSearchResult,
   type AdminSearchScope,
   type AdminStats,
@@ -114,6 +118,9 @@ const DEFAULT_SETTINGS: Settings = {
   promptWindowEndHour: 20,
   uploadWindowMinutes: 10,
   feedCommentPreviewLimit: 10,
+  performanceTrackingEnabled: false,
+  performanceTrackingWindowMinutes: 30,
+  performanceTrackingOneShot: false,
   promptNotificationText: "Zeit fuer dein Daily Foto",
   maxUploadBytes: 0,
   chatCommandEnabled: false,
@@ -360,6 +367,11 @@ export function App() {
   const [performanceSlo, setPerformanceSlo] = useState<AdminPerformanceSloState | null>(null);
   const [performanceRoutes, setPerformanceRoutes] = useState<AdminPerformanceRouteHotspot[]>([]);
   const [performanceSpikes, setPerformanceSpikes] = useState<AdminPerformanceSpikeWindow[]>([]);
+  const [performanceTrackingEnabled, setPerformanceTrackingEnabled] = useState(false);
+  const [performanceTrackingWindowMinutes, setPerformanceTrackingWindowMinutes] = useState(30);
+  const [performanceTrackingOneShot, setPerformanceTrackingOneShot] = useState(false);
+  const [performanceTrackingActiveSpike, setPerformanceTrackingActiveSpike] = useState<AdminPerformanceSpikeWindow | null>(null);
+  const [performanceTrackingLatestSpike, setPerformanceTrackingLatestSpike] = useState<AdminPerformanceSpikeWindow | null>(null);
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
@@ -722,6 +734,9 @@ export function App() {
       ]);
       setSettings(s);
       setSavedSettings(s);
+      setPerformanceTrackingEnabled(Boolean(s.performanceTrackingEnabled));
+      setPerformanceTrackingWindowMinutes(Number(s.performanceTrackingWindowMinutes || 30));
+      setPerformanceTrackingOneShot(Boolean(s.performanceTrackingOneShot));
       setStats(st);
       setUsers(u);
       setChatCommands(cmds);
@@ -1026,20 +1041,71 @@ export function App() {
     try {
       const fromIso = fromInput ? new Date(fromInput).toISOString() : undefined;
       const toIso = toInput ? new Date(toInput).toISOString() : undefined;
-      const [overview, routes, spikes] = await Promise.all([
+      const [overview, routes, spikes, tracking] = await Promise.all([
         getAdminPerformanceOverview(authToken, { bucket, from: fromIso, to: toIso }),
         getAdminPerformanceRoutes(authToken, { from: fromIso, to: toIso, top: 20 }),
         getAdminPerformanceSpikes(authToken, 14),
+        getAdminPerformanceTracking(authToken),
       ]);
       setPerformanceOverview(overview);
       setPerformanceRoutes(routes.items || []);
       setPerformanceSpikes(spikes.items || []);
+      setPerformanceTrackingEnabled(Boolean(tracking.enabled));
+      setPerformanceTrackingWindowMinutes(Number(tracking.windowMinutes || 30));
+      setPerformanceTrackingOneShot(Boolean(tracking.oneShot));
+      setPerformanceTrackingActiveSpike(tracking.activeSpike || null);
+      setPerformanceTrackingLatestSpike(tracking.latestSpike || null);
       if (overview.slo) {
         setPerformanceSlo(overview.slo);
       } else {
         const fallbackSlo = await getAdminPerformanceSlo(authToken, 30);
         setPerformanceSlo(fallbackSlo);
       }
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onSavePerformanceTracking() {
+    try {
+      const next: AdminPerformanceTrackingState = await updateAdminPerformanceTracking(token, {
+        enabled: performanceTrackingEnabled,
+        windowMinutes: performanceTrackingWindowMinutes,
+        oneShot: performanceTrackingOneShot,
+      });
+      setPerformanceTrackingEnabled(Boolean(next.enabled));
+      setPerformanceTrackingWindowMinutes(Number(next.windowMinutes || 30));
+      setPerformanceTrackingOneShot(Boolean(next.oneShot));
+      setPerformanceTrackingActiveSpike(next.activeSpike || null);
+      setPerformanceTrackingLatestSpike(next.latestSpike || null);
+      setSettings((prev) => ({
+        ...prev,
+        performanceTrackingEnabled: Boolean(next.enabled),
+        performanceTrackingWindowMinutes: Number(next.windowMinutes || 30),
+        performanceTrackingOneShot: Boolean(next.oneShot),
+      }));
+      setSavedSettings((prev) => ({
+        ...prev,
+        performanceTrackingEnabled: Boolean(next.enabled),
+        performanceTrackingWindowMinutes: Number(next.windowMinutes || 30),
+        performanceTrackingOneShot: Boolean(next.oneShot),
+      }));
+      setMessage("Daily-Tracking gespeichert.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDownloadTrackingExport() {
+    try {
+      if (performanceTrackingActiveSpike?.id) {
+        await downloadPerformanceTrackingExport(token, { eventId: performanceTrackingActiveSpike.id, bucket: performanceBucket });
+      } else if (performanceTrackingLatestSpike?.id) {
+        await downloadPerformanceTrackingExport(token, { eventId: performanceTrackingLatestSpike.id, bucket: performanceBucket });
+      } else {
+        await downloadPerformanceTrackingExport(token, { bucket: performanceBucket });
+      }
+      setMessage("Daily-Tracking JSON wurde heruntergeladen.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -2527,6 +2593,48 @@ export function App() {
                 <button onClick={() => onDownloadPerformance("csv")}>CSV Export</button>
               </div>
             </div>
+
+            <article className="settings-current">
+              <h3>Daily-Moment Last-Tracking</h3>
+              <div className="settings-grid">
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={performanceTrackingEnabled}
+                    onChange={(e) => setPerformanceTrackingEnabled(e.target.checked)}
+                  />
+                  Tracking bei Daily-Trigger aktivieren
+                </label>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={performanceTrackingOneShot}
+                    onChange={(e) => setPerformanceTrackingOneShot(e.target.checked)}
+                    disabled={!performanceTrackingEnabled}
+                  />
+                  Nur einmal (auto aus nach erstem Daily)
+                </label>
+                <label>
+                  Tracking-Fenster (Minuten)
+                  <input
+                    type="number"
+                    min={5}
+                    max={180}
+                    value={performanceTrackingWindowMinutes}
+                    onChange={(e) => setPerformanceTrackingWindowMinutes(Number(e.target.value))}
+                  />
+                </label>
+              </div>
+              <div className="row">
+                <button onClick={onSavePerformanceTracking}>Tracking speichern</button>
+                <button onClick={onDownloadTrackingExport}>Daily-Tracking JSON exportieren</button>
+              </div>
+              <p className="small">
+                Aktiv: {performanceTrackingActiveSpike ? `${formatDateTime(performanceTrackingActiveSpike.windowStart)} bis ${formatDateTime(performanceTrackingActiveSpike.windowEnd)}` : "nein"}.
+                Letztes Event: {performanceTrackingLatestSpike ? `${formatDateTime(performanceTrackingLatestSpike.triggerAt)} (${Number(performanceTrackingLatestSpike.p95PeakMs || 0).toFixed(1)} ms)` : "-"}.
+                Modus: {performanceTrackingEnabled ? (performanceTrackingOneShot ? "One-shot armed" : "dauerhaft aktiv") : "aus"}.
+              </p>
+            </article>
 
             <div className="grid4">
               <CardStat title="Requests" value={Number(performanceOverview?.summary?.requests || 0)} />
