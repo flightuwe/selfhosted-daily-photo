@@ -109,6 +109,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.consumePositionChange
@@ -287,7 +288,9 @@ data class PromptPhoto(
     val capsuleMode: String? = null,
     val capsuleVisibleAt: String? = null,
     val capsulePrivate: Boolean = false,
-    val capsuleGroupRemind: Boolean = false
+    val capsuleGroupRemind: Boolean = false,
+    val capsulePreviewUrl: String? = null,
+    val capsuleLocked: Boolean = false
 )
 data class PromptResponse(
     val day: String,
@@ -3280,22 +3283,54 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                                         if (item == null) {
                                             Spacer(modifier = Modifier.weight(1f))
                                         } else {
-                                            val urls = listOfNotNull(item.url, item.secondUrl)
-                                            AsyncImage(
-                                                model = item.url,
-                                                contentDescription = "Profilbild",
+                                            val isLocked = item.capsuleLocked
+                                            val previewUrl = if (isLocked) {
+                                                safeApiString(item.capsulePreviewUrl).ifBlank { item.url }
+                                            } else {
+                                                item.url
+                                            }
+                                            val urls = if (isLocked) emptyList() else listOfNotNull(item.url, item.secondUrl)
+                                            Box(
                                                 modifier = Modifier
                                                     .weight(1f)
                                                     .height(92.dp)
-                                                    .clickable {
-                                                        profileAvatarPreviewUrl = ""
-                                                        vm.closeViewedProfile()
-                                                        viewerUrls = urls
-                                                        viewerIndex = 0
-                                                        viewerPhotoId = item.id
-                                                    },
-                                                contentScale = ContentScale.Crop
-                                            )
+                                            ) {
+                                                AsyncImage(
+                                                    model = previewUrl,
+                                                    contentDescription = "Profilbild",
+                                                    modifier = Modifier
+                                                        .fillMaxSize()
+                                                        .then(if (isLocked) Modifier.blur(12.dp) else Modifier)
+                                                        .clickable(enabled = !isLocked) {
+                                                            profileAvatarPreviewUrl = ""
+                                                            vm.closeViewedProfile()
+                                                            viewerUrls = urls
+                                                            viewerIndex = 0
+                                                            viewerPhotoId = item.id
+                                                        },
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                                if (isLocked) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .background(Color(0x66131B2B)),
+                                                        contentAlignment = Alignment.BottomCenter
+                                                    ) {
+                                                        Text(
+                                                            "🔒 bis ${formatCapsuleOpenAt(item.capsuleVisibleAt)}",
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .background(Color(0xAA101828))
+                                                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                                                            textAlign = TextAlign.Center,
+                                                            color = Color.White,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -4717,9 +4752,6 @@ fun FeedTab(
                                     "🧊 Oeffnet wieder am ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}",
                                     color = secondaryTextColor
                                 )
-                                if (item.photo.capsulePrivate) {
-                                    Text("private Kapsel", color = secondaryTextColor)
-                                }
                             } else {
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                     urls.forEach { url ->

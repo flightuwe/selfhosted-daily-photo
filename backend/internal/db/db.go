@@ -47,6 +47,9 @@ func Connect(path string) (*gorm.DB, error) {
 	if err := ensureDefaultChatCommands(database); err != nil {
 		return nil, err
 	}
+	if err := ensureCapsulePrivateDisabled(database); err != nil {
+		return nil, err
+	}
 
 	return database, nil
 }
@@ -126,4 +129,11 @@ func ensureDefaultChatCommands(database *gorm.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureCapsulePrivateDisabled(database *gorm.DB) error {
+	result := database.Model(&models.Photo{}).
+		Where("capsule_private = ?", true).
+		Update("capsule_private", false)
+	return result.Error
 }

@@ -6,6 +6,10 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"math"
 	"mime/multipart"
@@ -963,12 +967,22 @@ func (s *Server) handleUpload(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
 		return
 	}
+	capsulePreviewPath := ""
+	if capsuleVisibleAt != nil {
+		previewPath, previewErr := s.ensureCapsulePreview(relPath)
+		if previewErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "capsule preview failed"})
+			return
+		}
+		capsulePreviewPath = previewPath
+	}
 
 	photo := models.Photo{
 		UserID:             user.ID,
 		Day:                day,
 		PromptOnly:         kind == "prompt",
 		FilePath:           relPath,
+		CapsulePreviewPath: capsulePreviewPath,
 		Caption:            c.PostForm("caption"),
 		CapsuleMode:        capsuleMode,
 		CapsuleVisibleAt:   capsuleVisibleAt,
@@ -2934,7 +2948,7 @@ func (s *Server) handleFeedDays(c *gin.Context) {
 	var rows []row
 	now := time.Now().In(s.Location)
 	if err := s.DB.Model(&models.Photo{}).
-		Where("user_id = ? OR (capsule_private = ? AND (capsule_visible_at IS NULL OR capsule_visible_at <= ?))", user.ID, false, now).
+		Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", user.ID, now).
 		Select("DISTINCT day").
 		Order("day desc").
 		Limit(365).
@@ -2973,7 +2987,7 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
 	now := time.Now().In(s.Location)
 	if err := s.DB.Model(&models.Photo{}).
 		Select("day, COUNT(*) as post_count, COUNT(DISTINCT user_id) as participant_count").
-		Where("user_id = ? OR (capsule_private = ? AND (capsule_visible_at IS NULL OR capsule_visible_at <= ?))", user.ID, false, now).
+		Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", user.ID, now).
 		Group("day").
 		Order("day desc").
 		Limit(365).
@@ -3002,7 +3016,7 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
 	if len(visibleDays) > 0 {
 		if err := s.DB.Preload("User").
 			Where("day IN ?", visibleDays).
-			Where("user_id = ? OR (capsule_private = ? AND (capsule_visible_at IS NULL OR capsule_visible_at <= ?))", user.ID, false, now).
+			Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", user.ID, now).
 			Order("day desc, created_at desc, id desc").
 			Find(&photos).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -3842,6 +3856,22 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save front failed"})
 		return
 	}
+	capsulePreviewPath := ""
+	capsuleSecondPreviewPath := ""
+	if capsuleVisibleAt != nil {
+		previewBack, previewErr := s.ensureCapsulePreview(backPath)
+		if previewErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "capsule preview failed"})
+			return
+		}
+		previewFront, previewFrontErr := s.ensureCapsulePreview(frontPath)
+		if previewFrontErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "capsule preview failed"})
+			return
+		}
+		capsulePreviewPath = previewBack
+		capsuleSecondPreviewPath = previewFront
+	}
 
 	photo := models.Photo{
 		UserID:             user.ID,
@@ -3849,6 +3879,8 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		PromptOnly:         kind == "prompt",
 		FilePath:           backPath,
 		SecondPath:         frontPath,
+		CapsulePreviewPath: capsulePreviewPath,
+		CapsuleSecondPreviewPath: capsuleSecondPreviewPath,
 		Caption:            c.PostForm("caption"),
 		CapsuleMode:        capsuleMode,
 		CapsuleVisibleAt:   capsuleVisibleAt,
@@ -3959,6 +3991,14 @@ func (s *Server) handleDeleteMyPhoto(c *gin.Context) {
 	}
 	if err := s.removePhotoFile(photo.SecondPath); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete second file failed"})
+		return
+	}
+	if err := s.removePhotoFile(photo.CapsulePreviewPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete preview file failed"})
+		return
+	}
+	if err := s.removePhotoFile(photo.CapsuleSecondPreviewPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete second preview file failed"})
 		return
 	}
 
@@ -4236,6 +4276,118 @@ func (s *Server) saveUploadedFile(day string, userID uint, header *multipart.Fil
 	return s.Store.SavePhoto(day, userID, src, ext)
 }
 
+func (s *Server) ensureCapsulePreview(relPath string) (string, error) {
+	cleanRel := filepath.ToSlash(strings.TrimSpace(relPath))
+	if cleanRel == "" {
+		return "", errors.New("empty photo path")
+	}
+	ext := filepath.Ext(cleanRel)
+	base := strings.TrimSuffix(cleanRel, ext)
+	previewRel := filepath.ToSlash(filepath.Join("capsule-previews", base+"_preview.jpg"))
+	previewFull := filepath.Join(s.Config.UploadDir, previewRel)
+	if _, err := os.Stat(previewFull); err == nil {
+		return previewRel, nil
+	}
+
+	srcFull := filepath.Join(s.Config.UploadDir, cleanRel)
+	srcFile, err := os.Open(srcFull)
+	if err != nil {
+		return "", err
+	}
+	defer srcFile.Close()
+
+	img, _, decodeErr := image.Decode(srcFile)
+	if decodeErr != nil {
+		img = buildFallbackPreviewImage()
+	}
+	blurred := buildBlurPreview(img)
+
+	if err := os.MkdirAll(filepath.Dir(previewFull), 0o755); err != nil {
+		return "", err
+	}
+	outFile, err := os.Create(previewFull)
+	if err != nil {
+		return "", err
+	}
+	defer outFile.Close()
+	if err := jpeg.Encode(outFile, blurred, &jpeg.Options{Quality: 55}); err != nil {
+		return "", err
+	}
+	return previewRel, nil
+}
+
+func buildFallbackPreviewImage() *image.RGBA {
+	w, h := 96, 96
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			shade := uint8(90 + (x+y)%30)
+			img.SetRGBA(x, y, color.RGBA{R: shade, G: shade, B: shade + 10, A: 255})
+		}
+	}
+	return img
+}
+
+func buildBlurPreview(src image.Image) *image.RGBA {
+	b := src.Bounds()
+	srcW := maxInt(1, b.Dx())
+	srcH := maxInt(1, b.Dy())
+	targetMax := 640
+	targetW := srcW
+	targetH := srcH
+	if targetW > targetMax || targetH > targetMax {
+		if targetW >= targetH {
+			targetH = maxInt(1, int(float64(targetH)*float64(targetMax)/float64(targetW)))
+			targetW = targetMax
+		} else {
+			targetW = maxInt(1, int(float64(targetW)*float64(targetMax)/float64(targetH)))
+			targetH = targetMax
+		}
+	}
+	normalized := scaleImageNearest(src, targetW, targetH)
+	smallW := maxInt(10, targetW/18)
+	smallH := maxInt(10, targetH/18)
+	pixelated := scaleImageNearest(normalized, smallW, smallH)
+	preview := scaleImageNearest(pixelated, targetW, targetH)
+	applyDimOverlay(preview, color.RGBA{R: 18, G: 26, B: 48, A: 74})
+	return preview
+}
+
+func scaleImageNearest(src image.Image, width int, height int) *image.RGBA {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	srcBounds := src.Bounds()
+	srcW := maxInt(1, srcBounds.Dx())
+	srcH := maxInt(1, srcBounds.Dy())
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		sy := srcBounds.Min.Y + (y*srcH)/height
+		for x := 0; x < width; x++ {
+			sx := srcBounds.Min.X + (x*srcW)/width
+			dst.Set(x, y, src.At(sx, sy))
+		}
+	}
+	return dst
+}
+
+func applyDimOverlay(img *image.RGBA, overlay color.RGBA) {
+	b := img.Bounds()
+	alpha := float64(overlay.A) / 255.0
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			cr, cg, cb, ca := img.At(x, y).RGBA()
+			r := uint8(float64(cr>>8)*(1-alpha) + float64(overlay.R)*alpha)
+			g := uint8(float64(cg>>8)*(1-alpha) + float64(overlay.G)*alpha)
+			bl := uint8(float64(cb>>8)*(1-alpha) + float64(overlay.B)*alpha)
+			img.SetRGBA(x, y, color.RGBA{R: r, G: g, B: bl, A: uint8(ca >> 8)})
+		}
+	}
+}
+
 func (s *Server) saveAvatarFile(userID uint, header *multipart.FileHeader) (string, error) {
 	src, err := header.Open()
 	if err != nil {
@@ -4288,12 +4440,17 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 		"createdAt":          p.CreatedAt,
 		"capsuleMode":        p.CapsuleMode,
 		"capsuleVisibleAt":   p.CapsuleVisibleAt,
-		"capsulePrivate":     p.CapsulePrivate,
+		"capsulePrivate":     false,
 		"capsuleGroupRemind": p.CapsuleGroupRemind,
 		"url":                fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
+		"capsuleLocked":      false,
+		"capsulePreviewUrl":  "",
 	}
 	if p.SecondPath != "" {
 		out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
+	}
+	if strings.TrimSpace(p.CapsulePreviewPath) != "" {
+		out["capsulePreviewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsulePreviewPath)
 	}
 	return out
 }
@@ -4421,15 +4578,50 @@ func (s *Server) loadVisibleUserPhotos(viewerID uint, targetID uint) ([]gin.H, e
 	now := time.Now().In(s.Location)
 	out := make([]gin.H, 0, len(photos))
 	for _, p := range photos {
-		if p.CapsulePrivate && viewerID != targetID {
+		locked := p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt)
+		if locked {
+			row := s.profilePhotoJSON(p, locked)
+			out = append(out, row)
 			continue
 		}
-		if p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt) && viewerID != targetID {
-			continue
-		}
-		out = append(out, s.photoJSON(p))
+		out = append(out, s.profilePhotoJSON(p, false))
 	}
 	return out, nil
+}
+
+func (s *Server) profilePhotoJSON(p models.Photo, locked bool) gin.H {
+	row := s.photoJSON(p)
+	row["capsulePrivate"] = false
+	row["capsuleLocked"] = locked
+	if !locked {
+		return row
+	}
+	row["secondUrl"] = ""
+
+	previewPath := strings.TrimSpace(p.CapsulePreviewPath)
+	if previewPath == "" {
+		if generatedPath, err := s.ensureCapsulePreview(p.FilePath); err == nil {
+			previewPath = generatedPath
+			_ = s.DB.Model(&models.Photo{}).Where("id = ?", p.ID).Update("capsule_preview_path", generatedPath).Error
+		}
+	}
+	if previewPath != "" {
+		row["capsulePreviewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, previewPath)
+		row["url"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, previewPath)
+	} else {
+		row["url"] = ""
+	}
+	secondPreview := strings.TrimSpace(p.CapsuleSecondPreviewPath)
+	if secondPreview == "" && strings.TrimSpace(p.SecondPath) != "" {
+		if generatedSecond, err := s.ensureCapsulePreview(p.SecondPath); err == nil {
+			secondPreview = generatedSecond
+			_ = s.DB.Model(&models.Photo{}).Where("id = ?", p.ID).Update("capsule_second_preview_path", generatedSecond).Error
+		}
+	}
+	if secondPreview != "" {
+		row["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, secondPreview)
+	}
+	return row
 }
 
 func (s *Server) allDeviceTokens() []string {
@@ -4507,7 +4699,6 @@ func (s *Server) userHasVisiblePhotoForDay(userID uint, day string, now time.Tim
 	var count int64
 	if err := s.DB.Model(&models.Photo{}).
 		Where("user_id = ? AND day = ?", userID, day).
-		Where("capsule_private = ?", false).
 		Where("capsule_visible_at IS NULL OR capsule_visible_at <= ?", now).
 		Count(&count).Error; err != nil {
 		return false, err
@@ -4598,9 +4789,6 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 func (s *Server) ensurePhotoVisibleToUser(userID uint, photo models.Photo) (bool, string) {
 	now := time.Now().In(s.Location)
 	if !photoVisibleToViewer(userID, photo, now) {
-		if photo.CapsulePrivate && photo.UserID != userID {
-			return false, "private capsule"
-		}
 		return false, "capsule locked"
 	}
 
@@ -4647,9 +4835,6 @@ func isPromptWindowActive(prompt models.DailyPrompt, now time.Time) bool {
 func photoVisibleToViewer(userID uint, photo models.Photo, now time.Time) bool {
 	if photo.UserID == userID {
 		return true
-	}
-	if photo.CapsulePrivate {
-		return false
 	}
 	if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) {
 		return false
@@ -4723,11 +4908,11 @@ func (s *Server) cleanupInvalidPromptOnlyPhotosSinceDay(startDay string) (int64,
 
 func parseCapsuleForm(c *gin.Context, kind string, dailyWindowActive bool, now time.Time) (string, *time.Time, bool, bool, error) {
 	mode := strings.ToLower(strings.TrimSpace(c.PostForm("capsule_mode")))
-	privateFlag := parseFormBool(c.PostForm("capsule_private"))
+	_ = parseFormBool(c.PostForm("capsule_private"))
 	groupRemind := parseFormBool(c.PostForm("capsule_group_remind"))
 
 	if mode == "" {
-		if privateFlag || groupRemind {
+		if groupRemind {
 			return "", nil, false, false, errors.New("capsule_mode required")
 		}
 		return "", nil, false, false, nil
@@ -4751,7 +4936,7 @@ func parseCapsuleForm(c *gin.Context, kind string, dailyWindowActive bool, now t
 	default:
 		return "", nil, false, false, errors.New("invalid capsule_mode (allowed: 7d, 30d, 1y)")
 	}
-	return mode, &visibleAt, privateFlag, groupRemind, nil
+	return mode, &visibleAt, false, groupRemind, nil
 }
 
 func parseFormBool(v string) bool {
@@ -4906,8 +5091,8 @@ func (s *Server) inviteRegistrationNotificationTokens() []string {
 }
 
 func (s *Server) notifyPostCreated(author models.User, photo models.Photo) {
-	// Private or delayed capsules should not trigger immediate post notifications.
-	if photo.CapsulePrivate || photo.CapsuleVisibleAt != nil {
+	// Delayed capsules should not trigger immediate post notifications.
+	if photo.CapsuleVisibleAt != nil {
 		return
 	}
 	tokens := s.postNotificationTokens(author.ID)
@@ -4960,7 +5145,7 @@ func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
 		return
 	}
 	now := time.Now().In(s.Location)
-	if photo.CapsulePrivate || (photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt)) {
+	if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) {
 		return
 	}
 	tokens := s.reactionNotificationTokens(photo.UserID, actor.ID)
@@ -4985,7 +5170,7 @@ func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo) {
 		return
 	}
 	now := time.Now().In(s.Location)
-	if photo.CapsulePrivate || (photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt)) {
+	if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) {
 		return
 	}
 	tokens := s.commentNotificationTokens(photo.UserID, actor.ID)

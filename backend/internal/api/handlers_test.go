@@ -75,8 +75,7 @@ func TestPhotoVisibleToViewer(t *testing.T) {
 		photo  models.Photo
 		want   bool
 	}{
-		{name: "own private photo remains visible", viewer: 7, photo: models.Photo{UserID: 7, CapsulePrivate: true}, want: true},
-		{name: "foreign private photo hidden", viewer: 7, photo: models.Photo{UserID: 8, CapsulePrivate: true}, want: false},
+		{name: "own locked capsule remains visible", viewer: 7, photo: models.Photo{UserID: 7, CapsuleVisibleAt: &future}, want: true},
 		{name: "foreign locked capsule hidden", viewer: 7, photo: models.Photo{UserID: 8, CapsuleVisibleAt: &future}, want: false},
 		{name: "foreign released photo visible", viewer: 7, photo: models.Photo{UserID: 8}, want: true},
 	}

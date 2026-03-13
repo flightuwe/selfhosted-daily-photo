@@ -110,6 +110,8 @@ type Photo struct {
 	PromptOnly         bool       `gorm:"default:false" json:"promptOnly"`
 	FilePath           string     `gorm:"size:255;not null" json:"filePath"`
 	SecondPath         string     `gorm:"size:255" json:"secondPath"`
+	CapsulePreviewPath string     `gorm:"size:255" json:"capsulePreviewPath"`
+	CapsuleSecondPreviewPath string `gorm:"size:255" json:"capsuleSecondPreviewPath"`
 	Caption            string     `gorm:"size:255" json:"caption"`
 	CapsuleMode        string     `gorm:"size:16" json:"capsuleMode"`
 	CapsuleVisibleAt   *time.Time `json:"capsuleVisibleAt"`
