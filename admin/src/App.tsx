@@ -1242,11 +1242,18 @@ export function App() {
     { id: "debug_export", label: "Debug JSON exportieren", run: () => onDownloadAllLogs(24, "json") },
   ];
 
-  async function onTriggerEvent() {
+  async function onTriggerEvent(opts?: { silent?: boolean; notifyUserIds?: number[] }) {
     setMessage("");
     try {
-      await triggerPrompt(token);
-      setMessage("Daily Event ausgelöst. Nutzer können Prompt-Fotos hochladen.");
+      const result = await triggerPrompt(token, opts);
+      if (result.mode === "silent") {
+        setMessage("Interner Daily-Test ausgelöst (silent, ohne Push an alle).");
+      } else if (result.mode === "targeted_users") {
+        setMessage(`Interner Daily-Test ausgelöst. Push nur an Zielnutzer gesendet (sent=${result.sentTo || 0}, failed=${result.failed || 0}).`);
+      } else {
+        setMessage("Daily Event ausgelöst. Nutzer können Prompt-Fotos hochladen.");
+      }
+      await refreshAll();
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1678,6 +1685,10 @@ export function App() {
         {activeTab === "events" && (
           <div className="stack">
             <button className="accent" onClick={onTriggerEvent}>Daily Event manuell auslösen</button>
+            <button onClick={() => onTriggerEvent({ silent: true })}>Interner Daily-Test (ohne Push)</button>
+            <button onClick={() => onTriggerEvent({ notifyUserIds: targetUserId ? [targetUserId] : [] })} disabled={!targetUserId}>
+              Daily-Test nur für gewählten Benutzer (mit Push)
+            </button>
             <button className="danger" onClick={onResetToday}>Heutigen Tag zurücksetzen</button>
 
             <label>

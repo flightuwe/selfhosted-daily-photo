@@ -143,6 +143,9 @@ Hinweis:
   - `pwsh scripts/test-e2e-smoke.ps1 -BaseUrl https://daily.teacloud.synology.me -AdminToken <token>`
 - Feed-Burst-Skript (Rate-Limit/5xx-Guard):
   - `pwsh scripts/test-feed-rate-limit.ps1 -BaseUrl https://daily.teacloud.synology.me -UserToken <token> -Requests 80 -Concurrency 8`
+- Interner Daily-Test-Trigger (ohne Broadcast an alle):
+  - silent: `pwsh scripts/trigger-daily-test.ps1 -AdminToken <adminToken> -Silent`
+  - nur Testnutzer pushen: `pwsh scripts/trigger-daily-test.ps1 -AdminToken <adminToken> -NotifyUserIds "12,15"`
 
 ## Erste Inbetriebnahme testen
 1. `https://daily.deine-domain.tld/api/health` -> `ok: true`

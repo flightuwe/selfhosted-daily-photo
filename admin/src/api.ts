@@ -83,6 +83,19 @@ export type AdminUserAccessToken = {
   expiresAt?: string | null;
 };
 
+export type AdminTriggerPromptResponse = {
+  prompt?: any;
+  settings?: any;
+  mode?: "broadcast_all" | "silent" | "targeted_users";
+  targetUsers?: number[];
+  devices?: number;
+  provider?: string;
+  sentTo?: number;
+  failed?: number;
+  invalidRemoved?: number;
+  notificationErr?: string;
+};
+
 export type DebugLogItem = {
   id: number;
   createdAt: string;
@@ -638,12 +651,23 @@ export async function getStats(token: string): Promise<AdminStats> {
   return parse<AdminStats>(res);
 }
 
-export async function triggerPrompt(token: string): Promise<void> {
+export async function triggerPrompt(
+  token: string,
+  opts?: { silent?: boolean; notifyUserIds?: number[] }
+): Promise<AdminTriggerPromptResponse> {
+  const payload = {
+    silent: Boolean(opts?.silent),
+    notifyUserIds: (opts?.notifyUserIds || []).filter((id) => Number.isFinite(id) && id > 0),
+  };
   const res = await fetch(`${apiBase}/admin/prompt/trigger`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
   });
-  await parse(res);
+  return parse<AdminTriggerPromptResponse>(res);
 }
 
 export async function resetTodayPrompt(token: string): Promise<{ day: string; message: string }> {

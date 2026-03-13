@@ -1547,7 +1547,39 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 
 func (s *Server) handleTriggerPrompt(c *gin.Context) {
 	adminUser, _ := userFromContext(c)
-	prompt, settings, err := s.Prompt.TriggerNowWithSource("admin_manual", &adminUser)
+	var req struct {
+		Silent        bool   `json:"silent"`
+		NotifyUserIDs []uint `json:"notifyUserIds"`
+	}
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+			return
+		}
+	}
+
+	notifyIDs := make([]uint, 0, len(req.NotifyUserIDs))
+	seenIDs := make(map[uint]struct{}, len(req.NotifyUserIDs))
+	for _, id := range req.NotifyUserIDs {
+		if id == 0 {
+			continue
+		}
+		if _, exists := seenIDs[id]; exists {
+			continue
+		}
+		seenIDs[id] = struct{}{}
+		notifyIDs = append(notifyIDs, id)
+	}
+
+	triggerSource := "admin_manual"
+	switch {
+	case req.Silent:
+		triggerSource = "admin_manual_silent"
+	case len(notifyIDs) > 0:
+		triggerSource = "admin_manual_targeted"
+	}
+
+	prompt, settings, err := s.Prompt.TriggerNowWithSource(triggerSource, &adminUser)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "trigger failed"})
 		return
@@ -1560,14 +1592,34 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 		s.Monitor.MarkDailySpike(prompt.Day, triggerAt, 30*time.Minute)
 	}
 
-	tokens := s.allDeviceTokens()
-	sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
-	s.recordPushResult(sendResult, sendErr)
-	removed := s.removeInvalidTokens(sendResult.InvalidTokens)
+	mode := "broadcast_all"
+	tokens := make([]string, 0, 64)
+	if req.Silent {
+		mode = "silent"
+	} else if len(notifyIDs) > 0 {
+		mode = "targeted_users"
+		for _, id := range notifyIDs {
+			tokens = append(tokens, s.userDeviceTokens(id)...)
+		}
+	} else {
+		tokens = s.allDeviceTokens()
+	}
+
+	sendResult := notify.SendResult{}
+	var sendErr error
+	removed := 0
+	if mode != "silent" {
+		sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
+		s.recordPushResult(sendResult, sendErr)
+		removed = s.removeInvalidTokens(sendResult.InvalidTokens)
+	}
+
 	if sendErr != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"prompt":          prompt,
 			"settings":        settings,
+			"mode":            mode,
+			"targetUsers":     notifyIDs,
 			"devices":         len(tokens),
 			"provider":        s.Notifier.Name(),
 			"sentTo":          sendResult.Sent,
@@ -1581,6 +1633,8 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"prompt":         prompt,
 		"settings":       settings,
+		"mode":           mode,
+		"targetUsers":    notifyIDs,
 		"devices":        len(tokens),
 		"provider":       s.Notifier.Name(),
 		"sentTo":         sendResult.Sent,
