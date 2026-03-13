@@ -1,0 +1,14 @@
+{
+  "version": "0.4.13",
+  "releasedAt": "2026-03-13T00:00:00Z",
+  "highlights": [
+    "Kotlin-Compile-Konflikt im Feed-Refresh behoben.",
+    "Performance- und Telemetrieverbesserungen aus dem letzten Releaseumfang stabil ausgerollt.",
+    "Admin-Performanceansicht mit Error-Classes und Throttle-Metriken erweitert."
+  ],
+  "details": [
+    "refreshAll in MainActivity.kt bereinigt (keine kollidierenden Variablendeklarationen mehr).",
+    "App-Version auf 0.4.13 und versionCode auf 64 angehoben.",
+    "Backend-Performanceexport liefert konsistente Diagnosefelder fuer Last- und Fehleranalyse."
+  ]
+}

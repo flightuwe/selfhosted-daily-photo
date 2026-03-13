@@ -2308,15 +2308,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 failedCall = "me"
                 throw RefreshStageException("me", t)
             }
-            val inviteCode = runCatching { repo.myInviteCode() }.getOrElse {
+            val fetchedInviteCode = runCatching { repo.myInviteCode() }.getOrElse {
                 failedCall = "inviteCode"
                 state.myInviteCode
             }
-            val prompt = runCatching { repo.prompt() }.getOrElse {
+            val fetchedPrompt = runCatching { repo.prompt() }.getOrElse {
                 failedCall = "prompt"
                 state.prompt ?: throw RefreshStageException("prompt", it)
             }
-            val rules = runCatching { repo.promptRules() }.getOrElse {
+            val fetchedRules = runCatching { repo.promptRules() }.getOrElse {
                 failedCall = "promptRules"
                 state.promptRules ?: PromptRulesResponse(
                     promptWindowStartHour = 8,
@@ -2326,7 +2326,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     timezone = "UTC"
                 )
             }
-            val special = runCatching { repo.specialMomentStatus() }.getOrElse {
+            val fetchedSpecial = runCatching { repo.specialMomentStatus() }.getOrElse {
                 failedCall = "specialMoment"
                 state.specialMomentStatus ?: SpecialMomentStatus(
                     canRequest = false,
@@ -2336,11 +2336,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     lastRequestedAt = null
                 )
             }
-            val photos = runCatching { repo.myPhotos() }.getOrElse {
+            val fetchedPhotos = runCatching { repo.myPhotos() }.getOrElse {
                 failedCall = "myPhotos"
                 state.photos
             }
-            val chat = runCatching { repo.listChat() }.getOrElse {
+            val fetchedChat = runCatching { repo.listChat() }.getOrElse {
                 failedCall = "chat"
                 state.chat
             }
@@ -2356,12 +2356,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 me = meResp.user,
                 streakDays = meResp.streakDays,
                 dailyMomentCount = meResp.dailyMomentCount,
-                inviteCode = inviteCode,
-                prompt = prompt,
-                rules = rules,
-                special = special,
-                photos = photos,
-                chat = chat,
+                inviteCode = fetchedInviteCode,
+                prompt = fetchedPrompt,
+                rules = fetchedRules,
+                special = fetchedSpecial,
+                photos = fetchedPhotos,
+                chat = fetchedChat,
                 feedDays = feedDays,
                 communityStats = communityStats
             )
