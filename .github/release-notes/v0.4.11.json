@@ -1,0 +1,14 @@
+{
+  "version": "0.4.11",
+  "releasedAt": "2026-03-13T00:00:00Z",
+  "highlights": [
+    "Korrigierte App-Versionsanzeige nach dem 0.4.10-Mismatch.",
+    "Release-Workflow blockiert Tag/versionName-Abweichungen automatisch.",
+    "Release-Workflow prueft jetzt auch, dass versionCode immer steigt."
+  ],
+  "details": [
+    "Android build.gradle.kts auf versionName 0.4.11 und versionCode 62 aktualisiert.",
+    "Neue CI-Validierung vor dem APK-Build liest Tag, versionName und versionCode direkt aus dem Repo.",
+    "Bei Mismatch wird der Release mit einer klaren Fehlermeldung abgebrochen."
+  ]
+}

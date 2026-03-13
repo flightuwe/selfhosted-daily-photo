@@ -14,6 +14,39 @@ jobs:
       ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate Android version against release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          [[ "$CURRENT_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || (echo "::error::Expected semantic tag like v0.4.11, got $CURRENT_TAG" && exit 1)
+          TAG_VERSION="${BASH_REMATCH[1]}"
+
+          GRADLE_FILE="android/app/build.gradle.kts"
+          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$GRADLE_FILE" | head -n 1)"
+          VERSION_CODE="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' "$GRADLE_FILE" | head -n 1)"
+
+          [ -n "$VERSION_NAME" ] || (echo "::error::Could not read versionName from $GRADLE_FILE" && exit 1)
+          [ -n "$VERSION_CODE" ] || (echo "::error::Could not read versionCode from $GRADLE_FILE" && exit 1)
+
+          if [ "$VERSION_NAME" != "$TAG_VERSION" ]; then
+            echo "::error::Tag/version mismatch: tag=$TAG_VERSION, android.versionName=$VERSION_NAME"
+            exit 1
+          fi
+
+          PREV_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -vx "$CURRENT_TAG" | head -n 1 || true)"
+          if [ -n "$PREV_TAG" ]; then
+            PREV_CODE="$(git show "${PREV_TAG}:android/app/build.gradle.kts" 2>/dev/null | sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' | head -n 1)"
+            if [ -n "$PREV_CODE" ] && [ "$VERSION_CODE" -le "$PREV_CODE" ]; then
+              echo "::error::android.versionCode must increase. current=$VERSION_CODE previous($PREV_TAG)=$PREV_CODE"
+              exit 1
+            fi
+          fi
+
+          echo "Validated: tag=$CURRENT_TAG versionName=$VERSION_NAME versionCode=$VERSION_CODE previousTag=${PREV_TAG:-none}"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
