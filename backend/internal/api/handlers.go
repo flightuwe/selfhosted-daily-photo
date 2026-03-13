@@ -156,6 +156,7 @@ func (s *Server) Router() *gin.Engine {
 
 			admin.GET("/users", s.handleAdminListUsers)
 			admin.POST("/users", s.handleAdminCreateUser)
+			admin.POST("/users/:id/token", s.handleAdminIssueUserToken)
 			admin.PUT("/users/:id", s.handleAdminUpdateUser)
 			admin.DELETE("/users/:id", s.handleAdminDeleteUser)
 		}
@@ -2232,6 +2233,41 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
 	_ = s.DB.Model(&models.DeviceToken{}).Where("user_id = ?", user.ID).Count(&tokenCount).Error
 
 	c.JSON(http.StatusOK, toAdminUser(user, photoCount, tokenCount, nil, nil, 0, "", nil, "", "", nil, nil))
+}
+
+func (s *Server) handleAdminIssueUserToken(c *gin.Context) {
+	id, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	var user models.User
+	if err := s.DB.First(&user, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+
+	token, err := s.Auth.Sign(user.ID, user.Username, user.IsAdmin)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "token create failed"})
+		return
+	}
+
+	claims, parseErr := s.Auth.Parse(token)
+	var expiresAt *time.Time
+	if parseErr == nil && claims != nil && claims.ExpiresAt != nil {
+		t := claims.ExpiresAt.Time
+		expiresAt = &t
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"userId":    user.ID,
+		"username":  user.Username,
+		"isAdmin":   user.IsAdmin,
+		"token":     token,
+		"expiresAt": expiresAt,
+	})
 }
 
 func (s *Server) handleAdminDeleteUser(c *gin.Context) {

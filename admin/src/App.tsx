@@ -46,6 +46,7 @@ import {
   getSystemHealth,
   getSettings,
   getStats,
+  issueUserAccessToken,
   listUsers,
   login,
   notifyUser,
@@ -396,6 +397,7 @@ export function App() {
   const [newIsAdmin, setNewIsAdmin] = useState(false);
 
   const [resetPassword, setResetPassword] = useState<Record<number, string>>({});
+  const [issuingTokenForUserId, setIssuingTokenForUserId] = useState<number>(0);
   const [broadcastBody, setBroadcastBody] = useState("Server-Test: Bitte App öffnen und Daily Foto posten.");
   const [updateNoticeVersion, setUpdateNoticeVersion] = useState("0.2.12");
   const [targetUserId, setTargetUserId] = useState<number>(0);
@@ -1354,6 +1356,50 @@ export function App() {
     }
   }
 
+  async function copyToClipboard(text: string) {
+    if (!text) throw new Error("Kein Text zum Kopieren vorhanden.");
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "true");
+    ta.style.position = "absolute";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    if (!ok) throw new Error("Kopieren nicht möglich.");
+  }
+
+  async function onCopyAdminToken() {
+    setMessage("");
+    try {
+      await copyToClipboard(token);
+      setMessage("Admin-Token kopiert.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onCopyUserToken(user: AdminUser) {
+    if (!token) return;
+    setMessage("");
+    setIssuingTokenForUserId(user.id);
+    try {
+      const issued = await issueUserAccessToken(token, user.id);
+      await copyToClipboard(issued.token);
+      const expiry = issued.expiresAt ? ` (gültig bis ${formatDateTime(issued.expiresAt)})` : "";
+      setMessage(`Token für ${user.username} kopiert${expiry}.`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    } finally {
+      setIssuingTokenForUserId(0);
+    }
+  }
+
   function logout() {
     localStorage.removeItem("admin-token");
     setToken("");
@@ -1796,6 +1842,9 @@ export function App() {
             </form>
 
             <h2>Bestehende Nutzer</h2>
+            <div className="row">
+              <button onClick={onCopyAdminToken}>Admin-Token kopieren</button>
+            </div>
             <table className="table">
               <thead>
                 <tr>
@@ -1806,6 +1855,7 @@ export function App() {
                   <th>Fotos</th>
                   <th>Geräte</th>
                   <th>Letzte App/Fehler</th>
+                  <th>Token</th>
                   <th>Passwort ändern</th>
                   <th>Löschen</th>
                 </tr>
@@ -1846,6 +1896,11 @@ export function App() {
                         <span className="small"><strong>Fehlerzeit:</strong> {u.lastErrorAt ? formatDateTime(u.lastErrorAt) : "-"}</span>
                         <span className="small"><strong>Profil OK:</strong> {u.lastProfileOkAt ? formatDateTime(u.lastProfileOkAt) : "-"}</span>
                       </div>
+                    </td>
+                    <td>
+                      <button onClick={() => onCopyUserToken(u)} disabled={issuingTokenForUserId === u.id}>
+                        {issuingTokenForUserId === u.id ? "Erzeuge..." : "Token kopieren"}
+                      </button>
                     </td>
                     <td>
                       <div className="row">

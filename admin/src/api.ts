@@ -75,6 +75,14 @@ export type AdminUser = {
   lastProfileOkAt?: string;
 };
 
+export type AdminUserAccessToken = {
+  userId: number;
+  username: string;
+  isAdmin: boolean;
+  token: string;
+  expiresAt?: string | null;
+};
+
 export type DebugLogItem = {
   id: number;
   createdAt: string;
@@ -712,6 +720,14 @@ export async function deleteUser(token: string, id: number): Promise<void> {
     headers: { Authorization: `Bearer ${token}` },
   });
   await parse(res);
+}
+
+export async function issueUserAccessToken(token: string, id: number): Promise<AdminUserAccessToken> {
+  const res = await fetch(`${apiBase}/admin/users/${id}/token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<AdminUserAccessToken>(res);
 }
 
 export async function getAdminFeed(token: string, day?: string): Promise<AdminFeedResponse> {
