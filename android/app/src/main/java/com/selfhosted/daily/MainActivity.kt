@@ -96,6 +96,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -518,10 +519,18 @@ interface Api {
     suspend fun feed(@Header("Authorization") token: String, @Query("day") day: String): FeedResponse
 
     @GET("feed/days")
-    suspend fun feedDays(@Header("Authorization") token: String): DayListResponse
+    suspend fun feedDays(
+        @Header("Authorization") token: String,
+        @Query("from") from: String? = null,
+        @Query("to") to: String? = null
+    ): DayListResponse
 
     @GET("feed/day-stats")
-    suspend fun feedDayStats(@Header("Authorization") token: String): DayStatsResponse
+    suspend fun feedDayStats(
+        @Header("Authorization") token: String,
+        @Query("from") from: String? = null,
+        @Query("to") to: String? = null
+    ): DayStatsResponse
 
     @GET("community/stats")
     suspend fun communityStats(@Header("Authorization") token: String): CommunityStatsResponse
@@ -1073,8 +1082,10 @@ class AppRepo(private val api: Api, private val context: Context) {
     suspend fun requestSpecialMoment() { api.requestSpecialMoment("Bearer ${token()}") }
 
     suspend fun feedByDay(day: String): FeedResponse = api.feed("Bearer ${token()}", day)
-    suspend fun feedDays(): List<String> = api.feedDays("Bearer ${token()}").items
-    suspend fun feedDayStats(): List<DayStatItem> = api.feedDayStats("Bearer ${token()}").items
+    suspend fun feedDays(from: String? = null, to: String? = null): List<String> =
+        api.feedDays("Bearer ${token()}", from, to).items
+    suspend fun feedDayStats(from: String? = null, to: String? = null): List<DayStatItem> =
+        api.feedDayStats("Bearer ${token()}", from, to).items
     suspend fun communityStats(): CommunityStatsResponse = api.communityStats("Bearer ${token()}")
 
     suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
@@ -1398,6 +1409,7 @@ data class UiState(
     val communityStatsLoading: Boolean = false,
     val feedFocusDay: String? = null,
     val feedFocusPhotoId: Long? = null,
+    val feedScrollRequestId: Long = 0L,
     val feedPaging: Boolean = false,
     val feedRefreshing: Boolean = false,
     val feedTodayLocked: Boolean = false,
@@ -1465,7 +1477,6 @@ data class DashboardData(
     val photos: List<PromptPhoto>,
     val chat: List<ChatItem>,
     val feedDays: List<String>,
-    val dayStats: List<DayStatItem>,
     val communityStats: CommunityStatsResponse?
 )
 
@@ -1479,6 +1490,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val refreshAllCooldownMs = 2_000L
     private val dashboardFailureDedupMs = 5 * 60 * 1000L
     private var lastRefreshAllStartedAt = 0L
+    private var nextFeedScrollRequestId = 1L
+    private var calendarStatsLoadedPrefix = 0
+    private var calendarStatsLoading = false
     private val profileSectionIds = listOf(
         "display",
         "notifications",
@@ -1516,6 +1530,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     private fun normalizeChatBody(body: String): String =
         body.trim().split(Regex("\\s+")).filter { it.isNotBlank() }.joinToString(" ").lowercase()
+
+    private fun issueFeedScrollRequestId(): Long {
+        val id = nextFeedScrollRequestId
+        nextFeedScrollRequestId += 1L
+        return id
+    }
 
     private fun cleanupPendingChatBodies(nowMs: Long) {
         val it = pendingChatBodies.iterator()
@@ -1891,6 +1911,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
             return
         }
+        if (tab == AppTab.CALENDAR) {
+            state = state.copy(activeTab = tab)
+            viewModelScope.launch { ensureCalendarStatsPrefix(14) }
+            return
+        }
         state = state.copy(activeTab = tab)
     }
 
@@ -1901,15 +1926,37 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun jumpToDay(day: String) {
-        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = null)
+        val scrollRequestId = issueFeedScrollRequestId()
+        state = state.copy(
+            activeTab = AppTab.FEED,
+            feedFocusDay = day,
+            feedFocusPhotoId = null,
+            feedScrollRequestId = scrollRequestId
+        )
         loadFeedWindow(day, around = 0)
-        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = null)
+        state = state.copy(
+            activeTab = AppTab.FEED,
+            feedFocusDay = day,
+            feedFocusPhotoId = null,
+            feedScrollRequestId = scrollRequestId
+        )
     }
 
     suspend fun jumpToPhoto(day: String, photoId: Long) {
-        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = photoId)
+        val scrollRequestId = issueFeedScrollRequestId()
+        state = state.copy(
+            activeTab = AppTab.FEED,
+            feedFocusDay = day,
+            feedFocusPhotoId = photoId,
+            feedScrollRequestId = scrollRequestId
+        )
         loadFeedWindow(day, around = 3)
-        state = state.copy(activeTab = AppTab.FEED, feedFocusDay = day, feedFocusPhotoId = photoId)
+        state = state.copy(
+            activeTab = AppTab.FEED,
+            feedFocusDay = day,
+            feedFocusPhotoId = photoId,
+            feedScrollRequestId = scrollRequestId
+        )
     }
 
     suspend fun refreshAll() {
@@ -1936,7 +1983,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photos = repo.myPhotos(),
                 chat = repo.listChat(),
                 feedDays = repo.feedDays(),
-                dayStats = runCatching { repo.feedDayStats() }.getOrDefault(emptyList()),
                 communityStats = runCatching { repo.communityStats() }.getOrNull()
             )
             val me = payload.me
@@ -1949,7 +1995,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photos = payload.photos
             val chat = payload.chat
             val calendarDays = payload.feedDays
-            val calendarDayStats = payload.dayStats.associateBy { it.day }
+            val previousCalendarDays = state.calendarDays
+            val calendarChanged = previousCalendarDays != calendarDays
+            if (calendarChanged) {
+                calendarStatsLoadedPrefix = 0
+            }
+            val calendarDayStats = if (calendarChanged) {
+                emptyMap()
+            } else {
+                state.calendarDayStats.filterKeys { calendarDays.contains(it) }
+            }
             val latestOtherChat = latestOtherChatMillis(chat, me.id)
             val seenChat = repo.lastSeenOtherChatMillis()
             var hasUnreadChat = latestOtherChat > seenChat
@@ -2009,7 +2064,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             maybeShowProfileSetupPrompt(me)
             val focus = state.feedFocusDay
             val anchor = if (focus != null && calendarDays.contains(focus)) focus else prompt.day
-            loadFeedWindow(anchor, around = 3)
+            if (state.feedDays.isEmpty() || !state.feedDays.contains(anchor)) {
+                loadFeedWindow(anchor, around = 1)
+            } else {
+                val today = prompt.day
+                val hasVisibleTodayFeed = state.feedByDay[today].orEmpty().isNotEmpty()
+                state = state.copy(
+                    feed = state.feedByDay[today].orEmpty(),
+                    feedTodayLocked = !prompt.hasVisiblePostToday && !hasVisibleTodayFeed
+                )
+            }
+            ensureCalendarStatsPrefix(2)
         } catch (t: Throwable) {
             if (isBenignCancellation(t)) {
                 state = state.copy(loading = false, communityStatsLoading = false)
@@ -2032,6 +2097,32 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val elapsed = System.currentTimeMillis() - started
             if (elapsed < 700) delay(700 - elapsed)
             state = state.copy(feedRefreshing = false)
+        }
+    }
+
+    suspend fun loadMoreCalendarStats(batch: Int = 30) {
+        ensureCalendarStatsPrefix(calendarStatsLoadedPrefix + batch)
+    }
+
+    private suspend fun ensureCalendarStatsPrefix(targetCount: Int) {
+        if (calendarStatsLoading) return
+        val days = state.calendarDays
+        if (days.isEmpty()) return
+        val capped = targetCount.coerceIn(0, days.size)
+        if (capped <= calendarStatsLoadedPrefix) return
+        val startIndex = calendarStatsLoadedPrefix
+        val endIndexInclusive = capped - 1
+        if (startIndex > endIndexInclusive) return
+
+        calendarStatsLoading = true
+        try {
+            val toDay = days[startIndex]
+            val fromDay = days[endIndexInclusive]
+            val fetched = runCatching { repo.feedDayStats(from = fromDay, to = toDay) }.getOrDefault(emptyList())
+            state = state.copy(calendarDayStats = state.calendarDayStats + fetched.associateBy { it.day })
+            calendarStatsLoadedPrefix = capped
+        } finally {
+            calendarStatsLoading = false
         }
     }
 
@@ -2126,10 +2217,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val monthRecapMap = mutableMapOf<String, MonthlyRecap>()
         val promptMap = mutableMapOf<String, PromptMeta>()
         for (day in days.distinct()) {
-            val fetched = fetchDaySafe(day)
-            map[day] = fetched.items
-            promptMap[day] = fetched.meta
-            fetched.monthRecap?.let { monthRecapMap[day] = it }
+            val cachedItems = state.feedByDay[day]
+            val cachedMeta = state.promptMetaByDay[day]
+            if (cachedItems != null && cachedMeta != null) {
+                map[day] = cachedItems
+                promptMap[day] = cachedMeta
+                state.monthRecapByDay[day]?.let { monthRecapMap[day] = it }
+            } else {
+                val fetched = fetchDaySafe(day)
+                map[day] = fetched.items
+                promptMap[day] = fetched.meta
+                fetched.monthRecap?.let { monthRecapMap[day] = it }
+            }
         }
         val today = state.prompt?.day ?: LocalDate.now().toString()
         val postedToday = state.prompt?.hasVisiblePostToday == true
@@ -2910,7 +3009,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state = state.copy(
                     activeTab = AppTab.FEED,
                     feedFocusDay = day,
-                    feedFocusPhotoId = targetPhotoId
+                    feedFocusPhotoId = targetPhotoId,
+                    feedScrollRequestId = issueFeedScrollRequestId()
                 )
             }
 
@@ -3746,6 +3846,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     promptMetaByDay = state.promptMetaByDay,
                     focusDay = state.feedFocusDay,
                     focusPhotoId = state.feedFocusPhotoId,
+                    scrollRequestId = state.feedScrollRequestId,
                     listState = feedListState,
                     refreshing = state.feedRefreshing,
                     todayLocked = state.feedTodayLocked,
@@ -3772,6 +3873,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     monthRecapByDay = state.monthRecapByDay,
                     promptMetaByDay = state.promptMetaByDay,
                     selected = state.feedFocusDay ?: state.prompt?.day.orEmpty(),
+                    onLoadMoreStats = { scope.launch { vm.loadMoreCalendarStats() } },
                     onSelect = { day ->
                         scope.launch { vm.jumpToDay(day) }
                     }
@@ -4563,6 +4665,7 @@ fun FeedTab(
     promptMetaByDay: Map<String, PromptMeta>,
     focusDay: String?,
     focusPhotoId: Long?,
+    scrollRequestId: Long,
     listState: LazyListState,
     refreshing: Boolean,
     todayLocked: Boolean,
@@ -4604,19 +4707,19 @@ fun FeedTab(
             .toList()
     }
 
-    LaunchedEffect(focusDay, focusPhotoId, rows.size) {
+    var handledScrollRequestId by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(scrollRequestId, rows.size) {
+        if (scrollRequestId <= 0L || scrollRequestId == handledScrollRequestId) return@LaunchedEffect
         val idx = if (focusPhotoId != null) {
             rows.indexOfFirst { it is FeedRow.PhotoItem && it.item.photo.id == focusPhotoId }
         } else {
             val target = focusDay ?: return@LaunchedEffect
             rows.indexOfFirst { it is FeedRow.DayHeader && it.day == target }
         }
-        if (idx >= 0) {
-            listState.scrollToItem(idx)
-        }
-        if (focusPhotoId != null) {
-            onFocusPhotoConsumed()
-        }
+        if (idx < 0) return@LaunchedEffect
+        listState.scrollToItem(idx)
+        handledScrollRequestId = scrollRequestId
+        if (focusPhotoId != null) onFocusPhotoConsumed()
     }
 
     LaunchedEffect(listState, rows.size, paging) {
@@ -4851,6 +4954,7 @@ fun CalendarTab(
     monthRecapByDay: Map<String, MonthlyRecap>,
     promptMetaByDay: Map<String, PromptMeta>,
     selected: String,
+    onLoadMoreStats: () -> Unit,
     onSelect: (String) -> Unit
 ) {
     if (days.isEmpty()) {
@@ -4859,7 +4963,16 @@ fun CalendarTab(
         }
         return
     }
+    val listState = rememberLazyListState()
+    LaunchedEffect(listState, days.size) {
+        snapshotFlow {
+            listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        }.collect { lastVisible ->
+            if (lastVisible >= days.lastIndex - 5) onLoadMoreStats()
+        }
+    }
     LazyColumn(
+        state = listState,
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxSize()
     ) {

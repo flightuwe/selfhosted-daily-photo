@@ -2284,10 +2284,10 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			return existing
 		}
 		created := &dayMetrics{
-			postedUsers: make(map[uint]struct{}),
-			promptUsers: make(map[uint]struct{}),
-			extraUsers:  make(map[uint]struct{}),
-			onlineUsers: make(map[uint]struct{}),
+			postedUsers:  make(map[uint]struct{}),
+			promptUsers:  make(map[uint]struct{}),
+			extraUsers:   make(map[uint]struct{}),
+			onlineUsers:  make(map[uint]struct{}),
 			userActivity: make(map[uint]gin.H),
 		}
 		metricsByDay[day] = created
@@ -2485,16 +2485,16 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			"onlineTrackingAvailable": onlineTrackingAvailable,
 			"userActivity":            userActivityRows,
 			"analytics": gin.H{
-				"promptPhotoRatio":       promptPhotoRatio,
-				"extraPhotoRatio":        extraPhotoRatio,
-				"capsulePhotoRatio":      capsulePhotoRatio,
-				"promptUserRatio":        safeRatio(len(metrics.promptUsers), maxInt(1, len(metrics.postedUsers))),
-				"extraUserRatio":         safeRatio(len(metrics.extraUsers), maxInt(1, len(metrics.postedUsers))),
-				"avgRequestsPerOnline":   avgRequestsPerOnlineUser,
-				"triggerDelayMinutes":    triggerDelayMinutes,
-				"onTimeTrigger":          onTime,
-				"hasTriggerPerformance":  hasPlan && hasPrompt && prompt.TriggeredAt != nil,
-				"totalRequests":          totalRequests,
+				"promptPhotoRatio":      promptPhotoRatio,
+				"extraPhotoRatio":       extraPhotoRatio,
+				"capsulePhotoRatio":     capsulePhotoRatio,
+				"promptUserRatio":       safeRatio(len(metrics.promptUsers), maxInt(1, len(metrics.postedUsers))),
+				"extraUserRatio":        safeRatio(len(metrics.extraUsers), maxInt(1, len(metrics.postedUsers))),
+				"avgRequestsPerOnline":  avgRequestsPerOnlineUser,
+				"triggerDelayMinutes":   triggerDelayMinutes,
+				"onTimeTrigger":         onTime,
+				"hasTriggerPerformance": hasPlan && hasPrompt && prompt.TriggeredAt != nil,
+				"totalRequests":         totalRequests,
 			},
 		}
 		if hasPlan {
@@ -2746,14 +2746,14 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 		},
 		"timeseries": timeseries,
 		"distribution": gin.H{
-			"photoMix": distribution["photoMix"],
-			"userMix":  distribution["userMix"],
+			"photoMix":  distribution["photoMix"],
+			"userMix":   distribution["userMix"],
 			"rawTotals": distribution["rawTotals"],
 		},
-		"conversion": conversion,
+		"conversion":  conversion,
 		"reliability": reliability,
 		"cohorts":     cohorts,
-		"anomalies": anomalies,
+		"anomalies":   anomalies,
 	})
 }
 
@@ -2942,13 +2942,39 @@ func (s *Server) handleChatList(c *gin.Context) {
 
 func (s *Server) handleFeedDays(c *gin.Context) {
 	user, _ := userFromContext(c)
+	fromDay := strings.TrimSpace(c.Query("from"))
+	toDay := strings.TrimSpace(c.Query("to"))
+	if (fromDay == "") != (toDay == "") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "from/to must be provided together"})
+		return
+	}
+	if fromDay != "" {
+		fromParsed, err := time.ParseInLocation("2006-01-02", fromDay, s.Location)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from date"})
+			return
+		}
+		toParsed, err := time.ParseInLocation("2006-01-02", toDay, s.Location)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to date"})
+			return
+		}
+		if fromParsed.After(toParsed) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "from must be before or equal to to"})
+			return
+		}
+	}
 	type row struct {
 		Day string
 	}
 	var rows []row
 	now := time.Now().In(s.Location)
-	if err := s.DB.Model(&models.Photo{}).
-		Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", user.ID, now).
+	query := s.DB.Model(&models.Photo{}).
+		Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", user.ID, now)
+	if fromDay != "" {
+		query = query.Where("day >= ? AND day <= ?", fromDay, toDay)
+	}
+	if err := query.
 		Select("DISTINCT day").
 		Order("day desc").
 		Limit(365).
@@ -2957,10 +2983,15 @@ func (s *Server) handleFeedDays(c *gin.Context) {
 		return
 	}
 	today := now.Format("2006-01-02")
-	hasPostedToday, err := s.userHasVisiblePhotoForDay(user.ID, today, now)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-		return
+	hasPostedToday := true
+	includeToday := fromDay == "" || (fromDay <= today && today <= toDay)
+	if includeToday {
+		var err error
+		hasPostedToday, err = s.userHasVisiblePhotoForDay(user.ID, today, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
 	}
 	days := make([]string, 0, len(rows))
 	for _, r := range rows {
@@ -2974,6 +3005,28 @@ func (s *Server) handleFeedDays(c *gin.Context) {
 
 func (s *Server) handleFeedDayStats(c *gin.Context) {
 	user, _ := userFromContext(c)
+	fromDay := strings.TrimSpace(c.Query("from"))
+	toDay := strings.TrimSpace(c.Query("to"))
+	if (fromDay == "") != (toDay == "") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "from/to must be provided together"})
+		return
+	}
+	if fromDay != "" {
+		fromParsed, err := time.ParseInLocation("2006-01-02", fromDay, s.Location)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from date"})
+			return
+		}
+		toParsed, err := time.ParseInLocation("2006-01-02", toDay, s.Location)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to date"})
+			return
+		}
+		if fromParsed.After(toParsed) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "from must be before or equal to to"})
+			return
+		}
+	}
 	type dayRow struct {
 		Day              string
 		PostCount        int64
@@ -2985,10 +3038,14 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
 	}
 	var rows []dayRow
 	now := time.Now().In(s.Location)
-	if err := s.DB.Model(&models.Photo{}).
+	query := s.DB.Model(&models.Photo{}).
 		Select("day, COUNT(*) as post_count, COUNT(DISTINCT user_id) as participant_count").
 		Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", user.ID, now).
-		Group("day").
+		Group("day")
+	if fromDay != "" {
+		query = query.Where("day >= ? AND day <= ?", fromDay, toDay)
+	}
+	if err := query.
 		Order("day desc").
 		Limit(365).
 		Scan(&rows).Error; err != nil {
@@ -2996,10 +3053,15 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
 		return
 	}
 	today := now.Format("2006-01-02")
-	hasPostedToday, err := s.userHasVisiblePhotoForDay(user.ID, today, now)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-		return
+	hasPostedToday := true
+	includeToday := fromDay == "" || (fromDay <= today && today <= toDay)
+	if includeToday {
+		var err error
+		hasPostedToday, err = s.userHasVisiblePhotoForDay(user.ID, today, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
 	}
 
 	visibleRows := make([]dayRow, 0, len(rows))
@@ -3874,18 +3936,18 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	}
 
 	photo := models.Photo{
-		UserID:             user.ID,
-		Day:                day,
-		PromptOnly:         kind == "prompt",
-		FilePath:           backPath,
-		SecondPath:         frontPath,
-		CapsulePreviewPath: capsulePreviewPath,
+		UserID:                   user.ID,
+		Day:                      day,
+		PromptOnly:               kind == "prompt",
+		FilePath:                 backPath,
+		SecondPath:               frontPath,
+		CapsulePreviewPath:       capsulePreviewPath,
 		CapsuleSecondPreviewPath: capsuleSecondPreviewPath,
-		Caption:            c.PostForm("caption"),
-		CapsuleMode:        capsuleMode,
-		CapsuleVisibleAt:   capsuleVisibleAt,
-		CapsulePrivate:     capsulePrivate,
-		CapsuleGroupRemind: capsuleGroupRemind,
+		Caption:                  c.PostForm("caption"),
+		CapsuleMode:              capsuleMode,
+		CapsuleVisibleAt:         capsuleVisibleAt,
+		CapsulePrivate:           capsulePrivate,
+		CapsuleGroupRemind:       capsuleGroupRemind,
 	}
 	if err := s.DB.Create(&photo).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})

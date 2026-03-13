@@ -1,0 +1,16 @@
+{
+  "version": "0.4.8",
+  "releasedAt": "2026-03-13T00:00:00Z",
+  "highlights": [
+    "Feed springt nicht mehr bei normalen Refreshes an den Anfang.",
+    "Schnellerer App-Start durch schlankeres Initial-Loading.",
+    "Kalender- und Feed-Daten werden inkrementell/lazy nachgeladen.",
+    "Backend-Range-Filter für feed/days und feed/day-stats (from/to)."
+  ],
+  "details": [
+    "Auto-Scroll im Feed ist jetzt an explizite Jump-Requests gebunden.",
+    "Refresh-All lädt kein breites Feed-Fenster mehr bei jedem Polling-Zyklus.",
+    "Kalender-Stats werden in Batches nachgeladen statt vollständig beim Start.",
+    "Neue optionale Query-Parameter im Backend ermöglichen gezielte Bereichsabfragen."
+  ]
+}
