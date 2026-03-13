@@ -106,6 +106,70 @@ type DailyUserActivity struct {
 	UpdatedAt    time.Time
 }
 
+type APIMinuteMetric struct {
+	ID          uint      `gorm:"primaryKey"`
+	Minute      time.Time `gorm:"not null;index:idx_api_minute_metric_bucket,unique"`
+	Route       string    `gorm:"size:120;not null;index:idx_api_minute_metric_bucket,unique"`
+	Method      string    `gorm:"size:8;not null;index:idx_api_minute_metric_bucket,unique"`
+	StatusClass string    `gorm:"size:4;not null;index:idx_api_minute_metric_bucket,unique"`
+	Count       int64     `gorm:"default:0"`
+	P50Latency  float64   `gorm:"default:0"`
+	P95Latency  float64   `gorm:"default:0"`
+	P99Latency  float64   `gorm:"default:0"`
+	MaxLatency  float64   `gorm:"default:0"`
+	BytesIn     int64     `gorm:"default:0"`
+	BytesOut    int64     `gorm:"default:0"`
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type SystemMinuteMetric struct {
+	ID                 uint      `gorm:"primaryKey"`
+	Minute             time.Time `gorm:"not null;uniqueIndex"`
+	MemAllocBytes      uint64
+	MemSysBytes        uint64
+	NumGoroutine       int
+	GCPauseTotalMs     float64
+	LastGCPauseMs      float64
+	DBOpenConnections  int
+	DBInUseConnections int
+	DBIdleConnections  int
+	DBWaitCount        int64
+	DBWaitDurationMs   float64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type DBQueryMinuteMetric struct {
+	ID         uint      `gorm:"primaryKey"`
+	Minute     time.Time `gorm:"not null;index:idx_db_query_minute_bucket,unique"`
+	Route      string    `gorm:"size:120;not null;index:idx_db_query_minute_bucket,unique"`
+	QueryGroup string    `gorm:"size:80;not null;index:idx_db_query_minute_bucket,unique"`
+	Count      int64     `gorm:"default:0"`
+	P50Ms      float64   `gorm:"default:0"`
+	P95Ms      float64   `gorm:"default:0"`
+	P99Ms      float64   `gorm:"default:0"`
+	MaxMs      float64   `gorm:"default:0"`
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+type DailySpikeEvent struct {
+	ID            uint       `gorm:"primaryKey"`
+	Day           string     `gorm:"size:10;index"`
+	TriggerAt     time.Time  `gorm:"index"`
+	WindowStart   time.Time  `gorm:"index"`
+	WindowEnd     time.Time  `gorm:"index"`
+	PushSent      int64      `gorm:"default:0"`
+	UploadCount   int64      `gorm:"default:0"`
+	FeedReadCount int64      `gorm:"default:0"`
+	ErrorCount    int64      `gorm:"default:0"`
+	P95PeakMs     float64    `gorm:"default:0"`
+	FinalizedAt   *time.Time `gorm:"index"`
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 type Photo struct {
 	ID                       uint       `gorm:"primaryKey" json:"id"`
 	UserID                   uint       `gorm:"index;not null" json:"userId"`
@@ -183,6 +247,8 @@ type ClientDebugLog struct {
 	User       User      `json:"user"`
 	DeviceName string    `gorm:"size:120" json:"deviceName"`
 	AppVersion string    `gorm:"size:40" json:"appVersion"`
+	SessionID  string    `gorm:"size:64;index" json:"sessionId"`
+	RequestID  string    `gorm:"size:64;index" json:"requestId"`
 	Type       string    `gorm:"size:32;index;not null" json:"type"`
 	Message    string    `gorm:"size:500;not null" json:"message"`
 	Meta       string    `gorm:"size:4000" json:"meta"`

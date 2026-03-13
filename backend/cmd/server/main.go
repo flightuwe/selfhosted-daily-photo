@@ -55,27 +55,31 @@ func main() {
         log.Printf("notifications: provider=%s", notifier.Name())
     }
     promptService := &scheduler.DailyPromptService{DB: database, Location: location}
-    monitor := api.NewMonitor()
-    server := &api.Server{
-        DB:       database,
-        Config:   cfg,
-        Auth:     auth.NewManager(cfg.JWTSecret, cfg.TokenTTL),
-        Store:    store,
-        Notifier: notifier,
-        Prompt:   promptService,
-        Location: location,
-        Monitor:  monitor,
-    }
+	monitor := api.NewMonitor(database, location)
+	server := &api.Server{
+		DB:       database,
+		Config:   cfg,
+		Auth:     auth.NewManager(cfg.JWTSecret, cfg.TokenTTL),
+		Store:    store,
+		Notifier: notifier,
+		Prompt:   promptService,
+		Location: location,
+		Monitor:  monitor,
+		FeedCache:   api.NewFeedDayCache(12 * time.Second),
+		FeedLimiter: api.NewFeedPollLimiter(28, 30*time.Second),
+	}
     if fixed, cleanupErr := server.CleanupInvalidPromptOnlyPhotosRecent(14); cleanupErr != nil {
         log.Printf("prompt cleanup failed: %v", cleanupErr)
     } else if fixed > 0 {
         log.Printf("prompt cleanup fixed invalid prompt_only rows: %d", fixed)
     }
 
-    promptService.Start(cfg.SchedulerEnabled, func(_ models.DailyPrompt, settings models.AppSettings) {
-        var rows []models.DeviceToken
-        if err := database.Find(&rows).Error; err != nil {
-            log.Printf("device token query failed: %v", err)
+	promptService.Start(cfg.SchedulerEnabled, func(_ models.DailyPrompt, settings models.AppSettings) {
+		now := time.Now().In(location)
+		monitor.MarkDailySpike(now.Format("2006-01-02"), now, 30*time.Minute)
+		var rows []models.DeviceToken
+		if err := database.Find(&rows).Error; err != nil {
+			log.Printf("device token query failed: %v", err)
             return
         }
         tokens := make([]string, 0, len(rows))

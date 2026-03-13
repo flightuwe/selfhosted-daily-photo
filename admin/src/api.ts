@@ -44,6 +44,19 @@ export type AdminStats = {
   diagnosticsConsentRate?: number;
 };
 
+export type AdminSearchScope = "users" | "reports" | "commands" | "history";
+
+export type AdminSearchResult = {
+  type: AdminSearchScope;
+  id: string;
+  label: string;
+  meta?: string;
+  target: {
+    tab: "users" | "reports" | "commands" | "history";
+    day?: string;
+  };
+};
+
 export type AdminUser = {
   id: number;
   username: string;
@@ -70,6 +83,8 @@ export type DebugLogItem = {
   meta?: string;
   appVersion?: string;
   deviceName?: string;
+  sessionId?: string;
+  requestId?: string;
   user: { id: number; username: string };
 };
 
@@ -375,6 +390,124 @@ export type SystemHealth = {
       errors?: number;
     };
   };
+};
+
+export type AdminPerformanceBucket = {
+  bucketStart: string;
+  requests: number;
+  errors: number;
+  errors4xx: number;
+  errors5xx: number;
+  p95Ms: number;
+  p99Ms: number;
+  maxMs: number;
+  bytesIn: number;
+  bytesOut: number;
+};
+
+export type AdminPerformanceSystemBucket = {
+  bucketStart: string;
+  memAllocBytes: number;
+  memSysBytes: number;
+  numGoroutine: number;
+  lastGCPauseMs: number;
+  dbOpenConnections: number;
+  dbInUseConnections: number;
+  dbIdleConnections: number;
+  dbWaitCount: number;
+  dbWaitDurationMs: number;
+};
+
+export type AdminPerformanceDbHotspot = {
+  route: string;
+  queryGroup: string;
+  count: number;
+  p95PeakMs: number;
+  p99PeakMs: number;
+  maxPeakMs: number;
+};
+
+export type AdminPerformanceSloViolation = {
+  id: string;
+  severity: "low" | "medium" | "high";
+  threshold: number;
+  observed: number;
+  unit: "ms" | "ratio";
+};
+
+export type AdminPerformanceSloState = {
+  evaluatedAt: string;
+  windowMinutes: number;
+  status: "ok" | "breach";
+  metrics: {
+    feedP95PeakMs: number;
+    global5xxRate: number;
+    uploadErrorRate: number;
+    feed4xxRate: number;
+    requestsTotal: number;
+  };
+  thresholds: {
+    feedP95PeakMs: number;
+    global5xxRate: number;
+    uploadErrorRate: number;
+    feed4xxRate: number;
+  };
+  violations: AdminPerformanceSloViolation[];
+};
+
+export type AdminPerformanceOverview = {
+  from: string;
+  to: string;
+  bucket: "1m" | "5m";
+  items: AdminPerformanceBucket[];
+  system?: AdminPerformanceSystemBucket[];
+  dbHotspots?: AdminPerformanceDbHotspot[];
+  slo?: AdminPerformanceSloState;
+  summary?: {
+    requests: number;
+    errors: number;
+    p95Peak: number;
+    p99Peak: number;
+  };
+};
+
+export type AdminPerformanceRouteHotspot = {
+  route: string;
+  method: string;
+  requests: number;
+  errors: number;
+  errors4xx: number;
+  errors5xx: number;
+  errorRate: number;
+  p95PeakMs: number;
+  p99PeakMs: number;
+  maxPeakMs: number;
+};
+
+export type AdminPerformanceRoutesResponse = {
+  from: string;
+  to: string;
+  top: number;
+  items: AdminPerformanceRouteHotspot[];
+};
+
+export type AdminPerformanceSpikeWindow = {
+  id: number;
+  day: string;
+  triggerAt: string;
+  windowStart: string;
+  windowEnd: string;
+  pushSent: number;
+  uploadCount: number;
+  feedReadCount: number;
+  errorCount: number;
+  p95PeakMs: number;
+  finalizedAt?: string | null;
+};
+
+export type AdminPerformanceSpikesResponse = {
+  days: number;
+  items: AdminPerformanceSpikeWindow[];
 };
 
 const apiBase = import.meta.env.VITE_API_BASE || "/api";
@@ -736,6 +869,129 @@ export async function getSystemHealth(token: string): Promise<SystemHealth> {
   return parse<SystemHealth>(res);
 }
 
+export async function getAdminPerformanceOverview(
+  token: string,
+  opts?: { from?: string; to?: string; bucket?: "1m" | "5m" }
+): Promise<AdminPerformanceOverview> {
+  const qs = new URLSearchParams();
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  qs.set("bucket", opts?.bucket || "1m");
+  const res = await fetch(`${apiBase}/admin/performance/overview?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminPerformanceOverview>(res);
+  return {
+    from: data.from,
+    to: data.to,
+    bucket: data.bucket || "1m",
+    items: data.items || [],
+    system: data.system || [],
+    dbHotspots: data.dbHotspots || [],
+    slo: data.slo,
+    summary: data.summary || { requests: 0, errors: 0, p95Peak: 0, p99Peak: 0 },
+  };
+}
+
+export async function getAdminPerformanceSlo(
+  token: string,
+  windowMinutes = 30
+): Promise<AdminPerformanceSloState> {
+  const qs = new URLSearchParams();
+  qs.set("windowMinutes", String(windowMinutes));
+  const res = await fetch(`${apiBase}/admin/performance/slo?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminPerformanceSloState>(res);
+  return {
+    evaluatedAt: data.evaluatedAt,
+    windowMinutes: data.windowMinutes || windowMinutes,
+    status: data.status || "ok",
+    metrics: data.metrics || {
+      feedP95PeakMs: 0,
+      global5xxRate: 0,
+      uploadErrorRate: 0,
+      feed4xxRate: 0,
+      requestsTotal: 0,
+    },
+    thresholds: data.thresholds || {
+      feedP95PeakMs: 2500,
+      global5xxRate: 0.02,
+      uploadErrorRate: 0.08,
+      feed4xxRate: 0.15,
+    },
+    violations: data.violations || [],
+  };
+}
+
+export async function getAdminPerformanceRoutes(
+  token: string,
+  opts?: { from?: string; to?: string; top?: number }
+): Promise<AdminPerformanceRoutesResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  if (opts?.top && opts.top > 0) qs.set("top", String(opts.top));
+  const res = await fetch(`${apiBase}/admin/performance/routes?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminPerformanceRoutesResponse>(res);
+  return {
+    from: data.from,
+    to: data.to,
+    top: data.top || (opts?.top ?? 20),
+    items: data.items || [],
+  };
+}
+
+export async function getAdminPerformanceSpikes(
+  token: string,
+  days = 14
+): Promise<AdminPerformanceSpikesResponse> {
+  const qs = new URLSearchParams();
+  qs.set("days", String(days));
+  const res = await fetch(`${apiBase}/admin/performance/spikes?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminPerformanceSpikesResponse>(res);
+  return {
+    days: data.days || days,
+    items: data.items || [],
+  };
+}
+
+export async function downloadPerformanceExport(
+  token: string,
+  opts?: { from?: string; to?: string; format?: "csv" | "json" }
+): Promise<void> {
+  const qs = new URLSearchParams();
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  qs.set("format", opts?.format || "json");
+  const res = await fetch(`${apiBase}/admin/performance/export?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    throw new Error(body.error || "Download fehlgeschlagen");
+  }
+
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") || "";
+  const fileMatch = disposition.match(/filename="?([^"]+)"?/i);
+  const fallbackExt = (opts?.format || "json") === "csv" ? "csv" : "json";
+  const filename = fileMatch?.[1] || `performance-export.${fallbackExt}`;
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export async function getDebugLogs(token: string, userId?: number, limit = 150, sinceHours = 24): Promise<DebugLogsResponse> {
   const qs = new URLSearchParams();
   qs.set("limit", String(limit));
@@ -814,6 +1070,28 @@ export async function getReports(
     headers: { Authorization: `Bearer ${token}` },
   });
   const data = await parse<{ items: AdminReportItem[] }>(res);
+  return data.items || [];
+}
+
+export async function getAdminSearch(
+  token: string,
+  q: string,
+  opts?: { scopes?: AdminSearchScope[]; limit?: number }
+): Promise<AdminSearchResult[]> {
+  const query = q.trim();
+  if (!query) return [];
+  const qs = new URLSearchParams();
+  qs.set("q", query);
+  if (opts?.scopes && opts.scopes.length > 0) {
+    qs.set("scope", opts.scopes.join(","));
+  }
+  if (opts?.limit && opts.limit > 0) {
+    qs.set("limit", String(opts.limit));
+  }
+  const res = await fetch(`${apiBase}/admin/search?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: AdminSearchResult[] }>(res);
   return data.items || [];
 }
 

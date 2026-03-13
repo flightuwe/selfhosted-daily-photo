@@ -207,6 +207,64 @@ button.danger {
   flex-wrap: wrap;
 }
 
+.topbar {
+  align-items: center;
+}
+
+.topbar-actions {
+  justify-content: flex-end;
+}
+
+.admin-shell-head {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0.5rem 0 0.9rem;
+}
+
+.search-box {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.5rem;
+}
+
+.saved-views {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.search-results {
+  border: 1px solid var(--table-border);
+  border-radius: 12px;
+  padding: 0.45rem;
+  display: grid;
+  gap: 0.35rem;
+  background: color-mix(in srgb, var(--soft-card) 85%, transparent);
+}
+
+.search-result-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  background: var(--tab-bg);
+  color: var(--tab-fg);
+}
+
+.ia-nav {
+  display: grid;
+  gap: 0.55rem;
+  margin-bottom: 0.95rem;
+}
+
+.ia-primary,
+.ia-subtabs {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
 .tab {
   background: var(--tab-bg);
   color: var(--tab-fg);
@@ -261,6 +319,10 @@ button.danger {
   background: var(--soft-card);
   position: relative;
   overflow: hidden;
+}
+
+.stat.clickable {
+  cursor: pointer;
 }
 
 .stat::after {
@@ -641,6 +703,18 @@ button.danger {
 
   .history-chart-grid {
     grid-template-columns: 1fr;
+  }
+
+  .search-box {
+    grid-template-columns: 1fr;
+  }
+
+  .ia-primary,
+  .ia-subtabs {
+    overflow-x: auto;
+    white-space: nowrap;
+    flex-wrap: nowrap;
+    padding-bottom: 0.2rem;
   }
 
   .debug-filters,

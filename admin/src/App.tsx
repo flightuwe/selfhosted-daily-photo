@@ -29,6 +29,7 @@ import {
   deleteChatCommand,
   deleteUser,
   getAdminFeed,
+  getAdminSearch,
   getAdminHistory,
   getAdminTimeCapsules,
   getCalendar,
@@ -36,7 +37,12 @@ import {
   getChatCommands,
   getDebugLogs,
   downloadDebugLogs,
+  downloadPerformanceExport,
   getReports,
+  getAdminPerformanceOverview,
+  getAdminPerformanceRoutes,
+  getAdminPerformanceSlo,
+  getAdminPerformanceSpikes,
   getSystemHealth,
   getSettings,
   getStats,
@@ -52,6 +58,12 @@ import {
   updateSettings,
   updateUser,
   type AdminReportItem,
+  type AdminPerformanceOverview,
+  type AdminPerformanceSloState,
+  type AdminPerformanceRouteHotspot,
+  type AdminPerformanceSpikeWindow,
+  type AdminSearchResult,
+  type AdminSearchScope,
   type AdminStats,
   type AdminHistoryDay,
   type AdminHistoryAnomaly,
@@ -75,7 +87,26 @@ import {
   type UserPromptRule,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "history" | "time_capsule" | "reports" | "debug" | "settings";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "history" | "performance" | "time_capsule" | "reports" | "debug" | "settings";
+type AdminArea = "operations" | "analytics" | "config";
+type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "time_capsules" | "reports";
+type AnalyticsSubtab = "history" | "performance" | "debug" | "system";
+type ConfigSubtab = "users" | "events" | "commands" | "settings";
+type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
+
+type SavedView = {
+  id: string;
+  name: string;
+  tab: "reports" | "debug" | "history";
+  payload: Record<string, string | number | boolean>;
+};
+
+type TopAction = {
+  id: string;
+  label: string;
+  run: () => void | Promise<void>;
+  tone?: "normal" | "danger";
+};
 
 const DEFAULT_SETTINGS: Settings = {
   promptWindowStartHour: 8,
@@ -110,6 +141,54 @@ const cloneDefaultSettings = (): Settings => ({
   userPromptRules: DEFAULT_SETTINGS.userPromptRules.map((rule) => ({ ...rule })),
 });
 const emptySettings: Settings = cloneDefaultSettings();
+const legacyNavStorageKey = "admin-legacy-nav-enabled";
+const savedViewsStorageKey = "admin-saved-views-v1";
+
+const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
+  operations: {
+    cockpit: "dashboard",
+    daily_calendar: "calendar",
+    feed: "feed",
+    chat: "chat",
+    time_capsules: "time_capsule",
+    reports: "reports",
+  },
+  analytics: {
+    history: "history",
+    performance: "performance",
+    debug: "debug",
+    system: "system",
+  },
+  config: {
+    users: "users",
+    events: "events",
+    commands: "commands",
+    settings: "settings",
+  },
+};
+
+const areaSubtabs: Record<AdminArea, Array<{ key: AdminSubtab; label: string }>> = {
+  operations: [
+    { key: "cockpit", label: "Cockpit" },
+    { key: "daily_calendar", label: "Daily & Kalender" },
+    { key: "feed", label: "Feed" },
+    { key: "chat", label: "Chat" },
+    { key: "time_capsules", label: "Time-Capsules" },
+    { key: "reports", label: "Reports" },
+  ],
+  analytics: [
+    { key: "history", label: "Historie" },
+    { key: "performance", label: "Performance" },
+    { key: "debug", label: "Debug Logs" },
+    { key: "system", label: "System Health" },
+  ],
+  config: [
+    { key: "users", label: "Benutzerverwaltung" },
+    { key: "events", label: "Events & Notifications" },
+    { key: "commands", label: "Chat-Commands" },
+    { key: "settings", label: "Einstellungen" },
+  ],
+};
 
 const emptyStats: AdminStats = {
   users: 0,
@@ -153,6 +232,69 @@ function debugMetaHint(meta: string): string {
   if (normalized.includes("network=connect")) return "Verbindungsproblem";
   if (normalized.includes("network=timeout")) return "Timeout";
   return "";
+}
+
+function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
+  switch (tab) {
+    case "dashboard":
+      return { area: "operations", subtab: "cockpit" };
+    case "calendar":
+      return { area: "operations", subtab: "daily_calendar" };
+    case "feed":
+      return { area: "operations", subtab: "feed" };
+    case "chat":
+      return { area: "operations", subtab: "chat" };
+    case "time_capsule":
+      return { area: "operations", subtab: "time_capsules" };
+    case "reports":
+      return { area: "operations", subtab: "reports" };
+    case "history":
+      return { area: "analytics", subtab: "history" };
+    case "performance":
+      return { area: "analytics", subtab: "performance" };
+    case "debug":
+      return { area: "analytics", subtab: "debug" };
+    case "system":
+      return { area: "analytics", subtab: "system" };
+    case "users":
+      return { area: "config", subtab: "users" };
+    case "events":
+      return { area: "config", subtab: "events" };
+    case "commands":
+      return { area: "config", subtab: "commands" };
+    case "settings":
+    default:
+      return { area: "config", subtab: "settings" };
+  }
+}
+
+function parseQueryAreaSubtab(): { area: AdminArea; subtab: AdminSubtab } | null {
+  const params = new URLSearchParams(window.location.search);
+  const area = (params.get("area") || "").trim() as AdminArea;
+  const subtab = (params.get("subtab") || "").trim() as AdminSubtab;
+  if (!area || !subtab) return null;
+  if (!(area in subtabToTab)) return null;
+  if (!Object.prototype.hasOwnProperty.call(subtabToTab[area], subtab)) return null;
+  return { area, subtab };
+}
+
+function readSavedViews(): SavedView[] {
+  try {
+    const raw = localStorage.getItem(savedViewsStorageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry) => entry && typeof entry === "object")
+      .map((entry) => ({
+        id: String(entry.id || `view_${Date.now()}`),
+        name: String(entry.name || "Gespeicherte Ansicht"),
+        tab: (entry.tab === "reports" || entry.tab === "debug" || entry.tab === "history" ? entry.tab : "history"),
+        payload: typeof entry.payload === "object" && entry.payload ? entry.payload : {},
+      }));
+  } catch {
+    return [];
+  }
 }
 
 export function App() {
@@ -210,6 +352,13 @@ export function App() {
     avgRequestsPerOnlineUser: 0,
   });
   const [historyCohorts, setHistoryCohorts] = useState<AdminHistoryCohortEntry[]>([]);
+  const [performanceFrom, setPerformanceFrom] = useState("");
+  const [performanceTo, setPerformanceTo] = useState("");
+  const [performanceBucket, setPerformanceBucket] = useState<"1m" | "5m">("1m");
+  const [performanceOverview, setPerformanceOverview] = useState<AdminPerformanceOverview | null>(null);
+  const [performanceSlo, setPerformanceSlo] = useState<AdminPerformanceSloState | null>(null);
+  const [performanceRoutes, setPerformanceRoutes] = useState<AdminPerformanceRouteHotspot[]>([]);
+  const [performanceSpikes, setPerformanceSpikes] = useState<AdminPerformanceSpikeWindow[]>([]);
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
@@ -225,7 +374,22 @@ export function App() {
   const [debugSinceHours, setDebugSinceHours] = useState<1 | 12 | 24>(24);
   const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [message, setMessage] = useState("");
-  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  const initialNav = useMemo(() => parseQueryAreaSubtab(), []);
+  const [activeArea, setActiveArea] = useState<AdminArea>(initialNav?.area || "operations");
+  const [activeSubtab, setActiveSubtab] = useState<AdminSubtab>(initialNav?.subtab || "cockpit");
+  const [activeTab, setActiveTab] = useState<Tab>(() => {
+    if (initialNav) {
+      return subtabToTab[initialNav.area][initialNav.subtab];
+    }
+    return "dashboard";
+  });
+  const [legacyNavEnabled, setLegacyNavEnabled] = useState<boolean>(() => localStorage.getItem(legacyNavStorageKey) === "1");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchScope, setSearchScope] = useState<"all" | AdminSearchScope>("all");
+  const [searchResults, setSearchResults] = useState<AdminSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [savedViews, setSavedViews] = useState<SavedView[]>(() => readSavedViews());
+  const [openReportsCount, setOpenReportsCount] = useState(0);
 
   const [newUsername, setNewUsername] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -342,6 +506,38 @@ export function App() {
       })),
     [historyCohorts]
   );
+  const performanceTrendData = useMemo(
+    () =>
+      (performanceOverview?.items || []).map((row) => ({
+        ...row,
+        bucketLabel: new Date(row.bucketStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      })),
+    [performanceOverview]
+  );
+  const performanceSystemData = useMemo(
+    () =>
+      (performanceOverview?.system || []).map((row) => ({
+        ...row,
+        bucketLabel: new Date(row.bucketStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        memAllocMb: Number(row.memAllocBytes || 0) / (1024 * 1024),
+        dbWaitMs: Number(row.dbWaitDurationMs || 0),
+      })),
+    [performanceOverview]
+  );
+  const performanceSpikeChartData = useMemo(
+    () =>
+      performanceSpikes
+        .slice()
+        .reverse()
+        .map((row) => ({
+          dayLabel: formatDateShort(row.day),
+          p95PeakMs: row.p95PeakMs,
+          feedReadCount: row.feedReadCount,
+          uploadCount: row.uploadCount,
+          errorCount: row.errorCount,
+        })),
+    [performanceSpikes]
+  );
 
   useEffect(() => {
     if (!token) return;
@@ -362,6 +558,9 @@ export function App() {
     if (activeTab === "history") {
       void loadHistory(token, historyDays, historyOffset);
     }
+    if (activeTab === "performance") {
+      void loadPerformance(token, performanceBucket, performanceFrom, performanceTo);
+    }
     if (activeTab === "time_capsule") {
       void loadTimeCapsules(token);
     }
@@ -377,7 +576,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset]);
+  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -391,19 +590,148 @@ export function App() {
     localStorage.setItem("admin-dark-mode", darkMode ? "1" : "0");
   }, [darkMode]);
 
+  useEffect(() => {
+    localStorage.setItem(legacyNavStorageKey, legacyNavEnabled ? "1" : "0");
+  }, [legacyNavEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem(savedViewsStorageKey, JSON.stringify(savedViews));
+  }, [savedViews]);
+
+  useEffect(() => {
+    if (legacyNavEnabled) return;
+    const tab = subtabToTab[activeArea][activeSubtab];
+    if (tab && tab !== activeTab) {
+      setActiveTab(tab);
+    }
+  }, [legacyNavEnabled, activeArea, activeSubtab, activeTab]);
+
+  useEffect(() => {
+    if (legacyNavEnabled) return;
+    const params = new URLSearchParams(window.location.search);
+    params.set("area", activeArea);
+    params.set("subtab", activeSubtab);
+    window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
+  }, [legacyNavEnabled, activeArea, activeSubtab]);
+
+  function navigateTab(tab: Tab) {
+    setActiveTab(tab);
+    const mapped = tabToAreaSubtab(tab);
+    setActiveArea(mapped.area);
+    setActiveSubtab(mapped.subtab);
+  }
+
+  function navigateSubtab(area: AdminArea, subtab: AdminSubtab) {
+    setActiveArea(area);
+    setActiveSubtab(subtab);
+    const tab = subtabToTab[area][subtab];
+    setActiveTab(tab);
+  }
+
+  async function runSearch() {
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchResults([]);
+      return;
+    }
+    setSearchLoading(true);
+    try {
+      const scopes = searchScope === "all" ? undefined : [searchScope];
+      const items = await getAdminSearch(token, q, { scopes, limit: 16 });
+      setSearchResults(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    } finally {
+      setSearchLoading(false);
+    }
+  }
+
+  function onSelectSearchResult(item: AdminSearchResult) {
+    navigateTab(item.target.tab);
+    if (item.target.tab === "history" && item.target.day) {
+      setHistoryOffset(0);
+      setHistoryDays(30);
+    }
+    setSearchResults([]);
+    setSearchQuery("");
+  }
+
+  function saveCurrentView() {
+    let tab: SavedView["tab"] | null = null;
+    let payload: SavedView["payload"] = {};
+    if (activeTab === "history") {
+      tab = "history";
+      payload = { days: historyDays, offset: historyOffset };
+    }
+    if (activeTab === "debug") {
+      tab = "debug";
+      payload = { userId: debugUserFilter, sinceHours: debugSinceHours };
+    }
+    if (activeTab === "reports") {
+      tab = "reports";
+      payload = { userId: reportUserFilter, type: reportTypeFilter, status: reportStatusFilter };
+    }
+    if (!tab) {
+      setMessage("Saved Views gibt es fuer Reports, Debug und Historie.");
+      return;
+    }
+    const name = window.prompt("Name fuer diese Ansicht:", `${tab} view`)?.trim();
+    if (!name) return;
+    const next: SavedView = {
+      id: `view_${Date.now()}`,
+      name,
+      tab,
+      payload,
+    };
+    setSavedViews((prev) => [next, ...prev].slice(0, 30));
+    setMessage("Ansicht gespeichert.");
+  }
+
+  function applySavedView(view: SavedView) {
+    if (view.tab === "history") {
+      setHistoryDays(Number(view.payload.days || 30));
+      setHistoryOffset(Number(view.payload.offset || 0));
+      navigateTab("history");
+      return;
+    }
+    if (view.tab === "debug") {
+      const hours = Number(view.payload.sinceHours || 24);
+      setDebugUserFilter(Number(view.payload.userId || 0));
+      setDebugSinceHours(hours === 1 || hours === 12 || hours === 24 ? hours : 24);
+      navigateTab("debug");
+      return;
+    }
+    setReportUserFilter(Number(view.payload.userId || 0));
+    setReportTypeFilter((view.payload.type as "" | "bug" | "idea") || "");
+    setReportStatusFilter((view.payload.status as "" | "open" | "in_review" | "done" | "rejected") || "");
+    navigateTab("reports");
+  }
+
   async function loadAdminData(authToken: string) {
     try {
-      const [s, st, u, cmds] = await Promise.all([
+      const [s, st, u, cmds, cal, sys, openReports] = await Promise.all([
         getSettings(authToken),
         getStats(authToken),
         listUsers(authToken),
         getChatCommands(authToken),
+        getCalendar(authToken, 7),
+        getSystemHealth(authToken),
+        getReports(authToken, { status: "open", limit: 200 }),
       ]);
       setSettings(s);
       setSavedSettings(s);
       setStats(st);
       setUsers(u);
       setChatCommands(cmds);
+      setCalendarItems(cal);
+      setCalendarDrafts(
+        cal.reduce<Record<string, string>>((acc, item) => {
+          acc[item.day] = toInputDateTime(item.plannedAt);
+          return acc;
+        }, {})
+      );
+      setSystemHealth(sys);
+      setOpenReportsCount(openReports.length);
     } catch (err) {
       setMessage((err as Error).message);
       setToken("");
@@ -545,23 +873,34 @@ export function App() {
     }
   }
 
-  async function onDownloadUserLogs(hours: 1 | 12 | 24) {
+  async function onDownloadUserLogs(hours: 1 | 12 | 24, format: "csv" | "json" = "csv") {
     if (debugUserFilter <= 0) {
       setMessage("Bitte erst einen Nutzer auswaehlen.");
       return;
     }
     try {
-      await downloadDebugLogs(token, { userId: debugUserFilter, sinceHours: hours, format: "csv" });
-      setMessage(`Nutzer-Logs (${hours}h) wurden heruntergeladen.`);
+      await downloadDebugLogs(token, { userId: debugUserFilter, sinceHours: hours, format });
+      setMessage(`Nutzer-Logs (${hours}h, ${format.toUpperCase()}) wurden heruntergeladen.`);
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
-  async function onDownloadAllLogs(hours: 1 | 12 | 24) {
+  async function onDownloadAllLogs(hours: 1 | 12 | 24, format: "csv" | "json" = "csv") {
     try {
-      await downloadDebugLogs(token, { sinceHours: hours, format: "csv" });
-      setMessage(`Gesamte Logs (${hours}h) wurden heruntergeladen.`);
+      await downloadDebugLogs(token, { sinceHours: hours, format });
+      setMessage(`Gesamte Logs (${hours}h, ${format.toUpperCase()}) wurden heruntergeladen.`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDownloadPerformance(format: "csv" | "json" = "json") {
+    try {
+      const fromIso = performanceFrom ? new Date(performanceFrom).toISOString() : undefined;
+      const toIso = performanceTo ? new Date(performanceTo).toISOString() : undefined;
+      await downloadPerformanceExport(token, { from: fromIso, to: toIso, format });
+      setMessage(`Performance-Export (${format.toUpperCase()}) wurde heruntergeladen.`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -681,6 +1020,25 @@ export function App() {
     }
   }
 
+  async function loadPerformance(authToken: string, bucket: "1m" | "5m", fromInput = "", toInput = "") {
+    try {
+      const fromIso = fromInput ? new Date(fromInput).toISOString() : undefined;
+      const toIso = toInput ? new Date(toInput).toISOString() : undefined;
+      const [overview, routes, spikes, slo] = await Promise.all([
+        getAdminPerformanceOverview(authToken, { bucket, from: fromIso, to: toIso }),
+        getAdminPerformanceRoutes(authToken, { from: fromIso, to: toIso, top: 20 }),
+        getAdminPerformanceSpikes(authToken, 14),
+        getAdminPerformanceSlo(authToken, 30),
+      ]);
+      setPerformanceOverview(overview);
+      setPerformanceRoutes(routes.items || []);
+      setPerformanceSpikes(spikes.items || []);
+      setPerformanceSlo(slo);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function loadTimeCapsules(authToken: string) {
     try {
       const items = await getAdminTimeCapsules(authToken);
@@ -697,6 +1055,9 @@ export function App() {
     if (activeTab === "chat") await loadChat(token);
     if (activeTab === "calendar") await loadCalendar(token);
     if (activeTab === "history") await loadHistory(token, historyDays, historyOffset);
+    if (activeTab === "performance") await loadPerformance(token, performanceBucket, performanceFrom, performanceTo);
+    if (activeTab === "time_capsule") await loadTimeCapsules(token);
+    if (activeTab === "debug") await loadDebugLogs(token, debugUserFilter, debugSinceHours);
     if (activeTab === "reports") await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
     if (activeTab === "commands") await loadCommands(token);
     if (activeTab === "system") await loadSystemHealth(token);
@@ -750,7 +1111,7 @@ export function App() {
       responseText: cmd.responseText || "",
       cooldownSecond: cmd.cooldownSecond || 0,
     });
-    setActiveTab("commands");
+    navigateTab("commands");
   }
 
   async function onDeleteCommand(cmd: ChatCommand) {
@@ -857,6 +1218,23 @@ export function App() {
       setMessage((err as Error).message);
     }
   }
+
+  async function runQuickAction(action: TopAction) {
+    setMessage("");
+    try {
+      await action.run();
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  const todayCalendar = calendarItems.find((item) => item.day === new Date().toISOString().slice(0, 10)) || calendarItems[0];
+  const quickActions: TopAction[] = [
+    { id: "trigger", label: "Daily jetzt ausloesen", run: () => onTriggerEvent() },
+    { id: "reset", label: "Heutigen Tag resetten", run: () => onResetToday(), tone: "danger" },
+    { id: "broadcast", label: "Broadcast senden", run: () => onBroadcast() },
+    { id: "debug_export", label: "Debug JSON exportieren", run: () => onDownloadAllLogs(24, "json") },
+  ];
 
   async function onTriggerEvent() {
     setMessage("");
@@ -1008,33 +1386,156 @@ export function App() {
   return (
     <main className={`page ${darkMode ? "theme-dark" : ""}`}>
       <section className="panel wide">
-        <div className="row">
+        <div className="row topbar">
           <h1>Admin Panel</h1>
-          <div className="row">
+          <div className="row topbar-actions">
             <button onClick={() => setDarkMode((v) => !v)}>{darkMode ? "Light" : "Dark"}</button>
             <button onClick={refreshAll}>Reload</button>
+            <button onClick={() => setLegacyNavEnabled((v) => !v)}>{legacyNavEnabled ? "Neue IA" : "Legacy Tabs"}</button>
             <button onClick={logout}>Logout</button>
           </div>
         </div>
 
-        <div className="tabs">
-          <button className={activeTab === "dashboard" ? "tab active" : "tab"} onClick={() => setActiveTab("dashboard")}>Dashboard</button>
-          <button className={activeTab === "system" ? "tab active" : "tab"} onClick={() => setActiveTab("system")}>System Health</button>
-          <button className={activeTab === "events" ? "tab active" : "tab"} onClick={() => setActiveTab("events")}>Events & Notifications</button>
-          <button className={activeTab === "commands" ? "tab active" : "tab"} onClick={() => setActiveTab("commands")}>Chat-Commands</button>
-          <button className={activeTab === "users" ? "tab active" : "tab"} onClick={() => setActiveTab("users")}>Benutzerverwaltung</button>
-          <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => setActiveTab("feed")}>Feed</button>
-          <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => setActiveTab("chat")}>Chat</button>
-          <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => setActiveTab("calendar")}>Kalender</button>
-          <button className={activeTab === "history" ? "tab active" : "tab"} onClick={() => setActiveTab("history")}>Historie</button>
-          <button className={activeTab === "time_capsule" ? "tab active" : "tab"} onClick={() => setActiveTab("time_capsule")}>Time-Capsule</button>
-          <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => setActiveTab("reports")}>Reports</button>
-          <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => setActiveTab("debug")}>Debug</button>
-          <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => setActiveTab("settings")}>Einstellungen</button>
+        <div className="admin-shell-head">
+          <div className="search-box">
+            <input
+              placeholder="Suche: Nutzer, Reports, Commands, Historie..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void runSearch();
+                }
+              }}
+            />
+            <select value={searchScope} onChange={(e) => setSearchScope(e.target.value as "all" | AdminSearchScope)}>
+              <option value="all">Alle Bereiche</option>
+              <option value="users">Nutzer</option>
+              <option value="reports">Reports</option>
+              <option value="commands">Commands</option>
+              <option value="history">Historie</option>
+            </select>
+            <button onClick={() => void runSearch()}>{searchLoading ? "Suche..." : "Suchen"}</button>
+          </div>
+          <div className="saved-views">
+            <button onClick={saveCurrentView}>View speichern</button>
+            {savedViews.length > 0 && (
+              <select
+                defaultValue=""
+                onChange={(e) => {
+                  const id = e.target.value;
+                  if (!id) return;
+                  const view = savedViews.find((entry) => entry.id === id);
+                  if (view) applySavedView(view);
+                  e.currentTarget.value = "";
+                }}
+              >
+                <option value="">Saved Views laden</option>
+                {savedViews.map((view) => (
+                  <option key={view.id} value={view.id}>
+                    {view.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          {searchResults.length > 0 && (
+            <div className="search-results">
+              {searchResults.map((item, idx) => (
+                <button key={`${item.type}-${item.id}-${idx}`} className="search-result-item" onClick={() => onSelectSearchResult(item)}>
+                  <strong>{item.label}</strong>
+                  <span className="small">
+                    {item.type}
+                    {item.meta ? ` · ${item.meta}` : ""}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
+        {legacyNavEnabled ? (
+          <div className="tabs">
+            <button className={activeTab === "dashboard" ? "tab active" : "tab"} onClick={() => navigateTab("dashboard")}>Dashboard</button>
+            <button className={activeTab === "system" ? "tab active" : "tab"} onClick={() => navigateTab("system")}>System Health</button>
+            <button className={activeTab === "events" ? "tab active" : "tab"} onClick={() => navigateTab("events")}>Events & Notifications</button>
+            <button className={activeTab === "commands" ? "tab active" : "tab"} onClick={() => navigateTab("commands")}>Chat-Commands</button>
+            <button className={activeTab === "users" ? "tab active" : "tab"} onClick={() => navigateTab("users")}>Benutzerverwaltung</button>
+            <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => navigateTab("feed")}>Feed</button>
+            <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => navigateTab("chat")}>Chat</button>
+            <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => navigateTab("calendar")}>Kalender</button>
+            <button className={activeTab === "history" ? "tab active" : "tab"} onClick={() => navigateTab("history")}>Historie</button>
+            <button className={activeTab === "performance" ? "tab active" : "tab"} onClick={() => navigateTab("performance")}>Performance</button>
+            <button className={activeTab === "time_capsule" ? "tab active" : "tab"} onClick={() => navigateTab("time_capsule")}>Time-Capsule</button>
+            <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => navigateTab("reports")}>Reports</button>
+            <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => navigateTab("debug")}>Debug</button>
+            <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => navigateTab("settings")}>Einstellungen</button>
+          </div>
+        ) : (
+          <div className="ia-nav">
+            <div className="ia-primary">
+              <button className={activeArea === "operations" ? "tab active" : "tab"} onClick={() => navigateSubtab("operations", "cockpit")}>Operations</button>
+              <button className={activeArea === "analytics" ? "tab active" : "tab"} onClick={() => navigateSubtab("analytics", "history")}>Analyse</button>
+              <button className={activeArea === "config" ? "tab active" : "tab"} onClick={() => navigateSubtab("config", "users")}>Konfiguration</button>
+            </div>
+            <div className="ia-subtabs">
+              {areaSubtabs[activeArea].map((entry) => {
+                const isActive = activeSubtab === entry.key;
+                return (
+                  <button key={entry.key} className={isActive ? "tab active" : "tab"} onClick={() => navigateSubtab(activeArea, entry.key)}>
+                    {entry.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {activeTab === "dashboard" && (
-          <div className="grid4">
+          <div className="stack">
+            <div className="row">
+              <h2>Ops Cockpit</h2>
+              <div className="row">
+                {quickActions.map((action) => (
+                  <button
+                    key={action.id}
+                    className={action.tone === "danger" ? "danger" : ""}
+                    onClick={() => void runQuickAction(action)}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="grid4">
+              <article className="stat clickable" onClick={() => navigateTab("system")}>
+                <h3>Serverzustand</h3>
+                <p>{systemHealth?.ok ? "OK" : "CHECK"}</p>
+              </article>
+              <article className="stat clickable" onClick={() => navigateTab("reports")}>
+                <h3>Offene Reports</h3>
+                <p>{openReportsCount}</p>
+              </article>
+              <article className="stat clickable" onClick={() => navigateTab("debug")}>
+                <h3>Debug-Fehlerindikatoren</h3>
+                <p>{historyItems.reduce((acc, row) => acc + Number(row.debugErrorCount || 0), 0)}</p>
+              </article>
+              <article className="stat clickable" onClick={() => navigateTab("calendar")}>
+                <h3>Heutiges Daily-Fenster</h3>
+                <p>{todayCalendar?.uploadUntil ? formatDateTime(todayCalendar.uploadUntil) : "-"}</p>
+              </article>
+            </div>
+            <article className="settings-current">
+              <h3>Heute</h3>
+              <div className="settings-grid">
+                <p><strong>Tag:</strong> {todayCalendar?.day || "-"}</p>
+                <p><strong>Geplant:</strong> {todayCalendar?.plannedAt ? formatDateTime(todayCalendar.plannedAt) : "-"}</p>
+                <p><strong>Ausgeloest:</strong> {todayCalendar?.triggeredAt ? formatDateTime(todayCalendar.triggeredAt) : "-"}</p>
+                <p><strong>Upload bis:</strong> {todayCalendar?.uploadUntil ? formatDateTime(todayCalendar.uploadUntil) : "-"}</p>
+              </div>
+            </article>
+            <div className="grid4">
             <CardStat title="Nutzer" value={stats.users} />
             <CardStat title="Geräte" value={stats.devices} />
             <CardStat title="Fotos" value={stats.photos} />
@@ -1046,6 +1547,7 @@ export function App() {
               title="Consent-Quote"
               value={`${Math.round((stats.diagnosticsConsentRate ?? 0) * 100)}% (${stats.diagnosticsConsentUsers ?? 0})`}
             />
+            </div>
           </div>
         )}
 
@@ -1930,6 +2432,241 @@ export function App() {
           </div>
         )}
 
+        {activeTab === "performance" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Performance</h2>
+              <div className="row">
+                <label>
+                  Von
+                  <input type="datetime-local" value={performanceFrom} onChange={(e) => setPerformanceFrom(e.target.value)} />
+                </label>
+                <label>
+                  Bis
+                  <input type="datetime-local" value={performanceTo} onChange={(e) => setPerformanceTo(e.target.value)} />
+                </label>
+                <label>
+                  Bucket
+                  <select value={performanceBucket} onChange={(e) => setPerformanceBucket(e.target.value as "1m" | "5m")}>
+                    <option value="1m">1 Minute</option>
+                    <option value="5m">5 Minuten</option>
+                  </select>
+                </label>
+                <button onClick={() => loadPerformance(token, performanceBucket, performanceFrom, performanceTo)}>Aktualisieren</button>
+                <button onClick={() => onDownloadPerformance("json")}>JSON Export</button>
+                <button onClick={() => onDownloadPerformance("csv")}>CSV Export</button>
+              </div>
+            </div>
+
+            <div className="grid4">
+              <CardStat title="Requests" value={Number(performanceOverview?.summary?.requests || 0)} />
+              <CardStat title="Errors" value={Number(performanceOverview?.summary?.errors || 0)} />
+              <CardStat title="P95 Peak" value={`${Number(performanceOverview?.summary?.p95Peak || 0).toFixed(1)} ms`} />
+              <CardStat title="P99 Peak" value={`${Number(performanceOverview?.summary?.p99Peak || 0).toFixed(1)} ms`} />
+            </div>
+            <div className="grid4">
+              <CardStat title="SLO Status" value={performanceSlo?.status === "breach" ? "Breach" : "OK"} />
+              <CardStat title="Feed P95" value={`${Number(performanceSlo?.metrics?.feedP95PeakMs || 0).toFixed(1)} ms`} />
+              <CardStat title="5xx Rate" value={`${(Number(performanceSlo?.metrics?.global5xxRate || 0) * 100).toFixed(2)}%`} />
+              <CardStat title="Upload Error-Rate" value={`${(Number(performanceSlo?.metrics?.uploadErrorRate || 0) * 100).toFixed(2)}%`} />
+            </div>
+
+            {performanceSlo && performanceSlo.violations?.length > 0 && (
+              <article className="history-chart-card">
+                <h3>SLO-Verletzungen ({performanceSlo.windowMinutes}m)</h3>
+                <div className="table-wrap">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Severity</th>
+                        <th>Observed</th>
+                        <th>Threshold</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {performanceSlo.violations.map((v) => (
+                        <tr key={v.id}>
+                          <td><code>{v.id}</code></td>
+                          <td>{v.severity}</td>
+                          <td>{v.unit === "ratio" ? `${(v.observed * 100).toFixed(2)}%` : `${Number(v.observed).toFixed(1)} ms`}</td>
+                          <td>{v.unit === "ratio" ? `${(v.threshold * 100).toFixed(2)}%` : `${Number(v.threshold).toFixed(1)} ms`}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </article>
+            )}
+
+            <div className="history-chart-grid">
+              <article className="history-chart-card">
+                <h3>Requests & Errors</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <LineChart data={performanceTrendData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="bucketLabel" />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip />
+                      <Legend />
+                      <Line type="monotone" dataKey="requests" name="Requests" stroke="#386dff" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Line type="monotone" dataKey="errors" name="Errors" stroke="#df5656" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={520} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Latency (P95 / P99)</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <AreaChart data={performanceTrendData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="bucketLabel" />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Area type="monotone" dataKey="p95Ms" name="P95 ms" fill="#3f79ff" stroke="#2c65f5" fillOpacity={0.24} isAnimationActive={!reduceMotion} animationDuration={500} />
+                      <Area type="monotone" dataKey="p99Ms" name="P99 ms" fill="#aa5dff" stroke="#8f44e7" fillOpacity={0.24} isAnimationActive={!reduceMotion} animationDuration={500} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>Daily-Spike Verlauf</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={performanceSpikeChartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="dayLabel" />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Bar dataKey="feedReadCount" name="Feed Reads" fill="#3d7bff" isAnimationActive={!reduceMotion} animationDuration={500} />
+                      <Bar dataKey="uploadCount" name="Uploads" fill="#2abf88" isAnimationActive={!reduceMotion} animationDuration={500} />
+                      <Bar dataKey="errorCount" name="Errors" fill="#d85a5a" isAnimationActive={!reduceMotion} animationDuration={500} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="history-chart-card">
+                <h3>System: Memory & DB-Wait</h3>
+                <div className="history-chart-wrap">
+                  <ResponsiveContainer width="100%" height={260}>
+                    <LineChart data={performanceSystemData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <XAxis dataKey="bucketLabel" />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Line type="monotone" dataKey="memAllocMb" name="Mem Alloc (MB)" stroke="#2abf88" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Line type="monotone" dataKey="dbWaitMs" name="DB Wait (ms)" stroke="#f5a524" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={520} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+            </div>
+
+            <h3>Route-Hotspots</h3>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Route</th>
+                  <th>Methode</th>
+                  <th>Requests</th>
+                  <th>Error-Rate</th>
+                  <th>P95 Peak</th>
+                  <th>P99 Peak</th>
+                </tr>
+              </thead>
+              <tbody>
+                {performanceRoutes.length === 0 ? (
+                  <tr>
+                    <td colSpan={6}>Keine Daten.</td>
+                  </tr>
+                ) : (
+                  performanceRoutes.map((row, idx) => (
+                    <tr key={`${row.method}-${row.route}-${idx}`}>
+                      <td>{row.route}</td>
+                      <td>{row.method}</td>
+                      <td>{row.requests}</td>
+                      <td>{(Number(row.errorRate || 0) * 100).toFixed(2)}%</td>
+                      <td>{Number(row.p95PeakMs || 0).toFixed(1)} ms</td>
+                      <td>{Number(row.p99PeakMs || 0).toFixed(1)} ms</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+
+            <h3>Spike-Events</h3>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Tag</th>
+                  <th>Trigger</th>
+                  <th>Push</th>
+                  <th>Uploads</th>
+                  <th>Feed Reads</th>
+                  <th>Errors</th>
+                  <th>P95 Peak</th>
+                </tr>
+              </thead>
+              <tbody>
+                {performanceSpikes.length === 0 ? (
+                  <tr>
+                    <td colSpan={7}>Keine Spike-Ereignisse.</td>
+                  </tr>
+                ) : (
+                  performanceSpikes.map((row) => (
+                    <tr key={row.id}>
+                      <td>{new Date(`${row.day}T00:00:00`).toLocaleDateString()}</td>
+                      <td>{formatDateTime(row.triggerAt)}</td>
+                      <td>{row.pushSent}</td>
+                      <td>{row.uploadCount}</td>
+                      <td>{row.feedReadCount}</td>
+                      <td>{row.errorCount}</td>
+                      <td>{Number(row.p95PeakMs || 0).toFixed(1)} ms</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+
+            <h3>DB-Hotspots</h3>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Route</th>
+                  <th>Query Group</th>
+                  <th>Count</th>
+                  <th>P95 Peak</th>
+                  <th>P99 Peak</th>
+                  <th>Max Peak</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(performanceOverview?.dbHotspots || []).length === 0 ? (
+                  <tr>
+                    <td colSpan={6}>Keine DB-Hotspots.</td>
+                  </tr>
+                ) : (
+                  (performanceOverview?.dbHotspots || []).map((row, idx) => (
+                    <tr key={`${row.route}-${row.queryGroup}-${idx}`}>
+                      <td>{row.route}</td>
+                      <td><code>{row.queryGroup}</code></td>
+                      <td>{row.count}</td>
+                      <td>{Number(row.p95PeakMs || 0).toFixed(1)} ms</td>
+                      <td>{Number(row.p99PeakMs || 0).toFixed(1)} ms</td>
+                      <td>{Number(row.maxPeakMs || 0).toFixed(1)} ms</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
         {activeTab === "time_capsule" && (
           <div className="stack">
             <div className="row">
@@ -2030,21 +2767,35 @@ export function App() {
                     <strong>Nutzer-Export</strong>
                     <span className="small">Exportiert den aktuell ausgewaehlten Nutzer im aktiven Zeitraum.</span>
                   </div>
-                  <button
-                    onClick={() => onDownloadUserLogs(debugSinceHours)}
-                    disabled={debugUserFilter <= 0}
-                  >
-                    CSV herunterladen
-                  </button>
+                  <div className="row">
+                    <button
+                      onClick={() => onDownloadUserLogs(debugSinceHours, "csv")}
+                      disabled={debugUserFilter <= 0}
+                    >
+                      CSV herunterladen
+                    </button>
+                    <button
+                      className="accent"
+                      onClick={() => onDownloadUserLogs(debugSinceHours, "json")}
+                      disabled={debugUserFilter <= 0}
+                    >
+                      JSON herunterladen
+                    </button>
+                  </div>
                 </article>
                 <article className="debug-export-card">
                   <div className="stack" style={{ marginBottom: 0 }}>
                     <strong>Gesamt-Export</strong>
                     <span className="small">Exportiert alle Debug-Logs im aktiven Zeitraum.</span>
                   </div>
-                  <button className="accent" onClick={() => onDownloadAllLogs(debugSinceHours)}>
-                    CSV herunterladen
-                  </button>
+                  <div className="row">
+                    <button className="accent" onClick={() => onDownloadAllLogs(debugSinceHours, "csv")}>
+                      CSV herunterladen
+                    </button>
+                    <button onClick={() => onDownloadAllLogs(debugSinceHours, "json")}>
+                      JSON herunterladen
+                    </button>
+                  </div>
                 </article>
               </div>
             </div>
@@ -2057,6 +2808,7 @@ export function App() {
                       <th>Zeit</th>
                       <th>Nutzer</th>
                       <th>Geraet / App</th>
+                      <th>Session / Request</th>
                       <th>Typ</th>
                       <th>Nachricht</th>
                       <th>Meta</th>
@@ -2073,6 +2825,12 @@ export function App() {
                             <div className="debug-device">
                               <strong>{row.deviceName || "-"}</strong>
                               <span className="small">{row.appVersion || "-"}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="debug-type-stack">
+                              <code className="debug-type-code">{row.sessionId || "-"}</code>
+                              <code className="debug-type-code">{row.requestId || "-"}</code>
                             </div>
                           </td>
                           <td>

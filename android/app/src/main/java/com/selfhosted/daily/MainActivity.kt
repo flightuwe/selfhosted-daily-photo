@@ -472,7 +472,9 @@ data class ClientDebugLogUploadRequest(
     val message: String,
     val meta: String = "",
     val appVersion: String,
-    val deviceName: String
+    val deviceName: String,
+    val sessionId: String = "",
+    val requestId: String = ""
 )
 
 data class DebugLogEntry(
@@ -653,6 +655,7 @@ class AppRepo(private val api: Api, private val context: Context) {
     private val debugLastUploadAtKey = "debug_last_upload_at"
     private val diagnosticsConsentLocalKey = "diagnostics_consent_local"
     private val diagnosticsConsentPendingKey = "diagnostics_consent_pending"
+    private val diagnosticsSessionIdKey = "diagnostics_session_id"
     private val promptSeenVersionPrefix = "user_prompt_seen_version_"
     private val debugMaxEntries = 500
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
@@ -701,6 +704,14 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     fun setDiagnosticsUploadEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(debugUploadEnabledKey, enabled).apply()
+    }
+
+    fun diagnosticsSessionId(): String {
+        val existing = prefs.getString(diagnosticsSessionIdKey, "")?.trim().orEmpty()
+        if (existing.isNotBlank()) return existing
+        val generated = "sess_${UUID.randomUUID()}"
+        prefs.edit().putString(diagnosticsSessionIdKey, generated).apply()
+        return generated
     }
 
     private fun readDebugLogsInternal(): MutableList<DebugLogEntry> {
@@ -788,8 +799,10 @@ class AppRepo(private val api: Api, private val context: Context) {
         val rows = recentDebugLogs(20)
         if (rows.isEmpty()) return 0
         var sent = 0
+        val sessionId = diagnosticsSessionId()
         rows.forEach { row ->
             runCatching {
+                val inferredRequestId = extractRequestIdFromMeta(row.meta)
                 api.uploadClientDebugLog(
                     "Bearer ${token()}",
                     ClientDebugLogUploadRequest(
@@ -797,7 +810,9 @@ class AppRepo(private val api: Api, private val context: Context) {
                         message = row.message,
                         meta = row.meta,
                         appVersion = BuildConfig.VERSION_NAME,
-                        deviceName = currentDeviceName()
+                        deviceName = currentDeviceName(),
+                        sessionId = sessionId,
+                        requestId = inferredRequestId
                     )
                 )
             }.onSuccess { sent += 1 }
@@ -806,6 +821,17 @@ class AppRepo(private val api: Api, private val context: Context) {
             prefs.edit().putLong(debugLastUploadAtKey, now).apply()
         }
         return sent
+    }
+
+    private fun extractRequestIdFromMeta(meta: String): String {
+        if (meta.isBlank()) return ""
+        val marker = "requestId="
+        val idx = meta.indexOf(marker)
+        if (idx < 0) return ""
+        val start = idx + marker.length
+        if (start >= meta.length) return ""
+        val end = meta.indexOf(';', start).let { if (it < 0) meta.length else it }
+        return meta.substring(start, end).trim().take(64)
     }
 
     fun installCrashHandler() {
@@ -1557,11 +1583,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val recentDashboardFailureAt = mutableMapOf<String, Long>()
     private val pendingChatWindowMs = 4_000L
     private val refreshAllCooldownMs = 2_000L
+    private val feedAutoRefreshBaseMs = 25_000L
+    private val feedAutoRefreshJitterMs = 15_000L
     private val dashboardFailureDedupMs = 5 * 60 * 1000L
     private var lastRefreshAllStartedAt = 0L
     private var nextFeedScrollRequestId = 1L
     private var calendarStatsLoadedPrefix = 0
     private var calendarStatsLoading = false
+    private val staleFeedDays = mutableSetOf<String>()
     private val profileSectionIds = listOf(
         "display",
         "notifications",
@@ -1665,6 +1694,25 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         return true
     }
 
+    private fun shouldSamplePerf(success: Boolean): Boolean {
+        if (!success) return true
+        return Random.nextInt(100) < 25
+    }
+
+    private fun logPerfEvent(event: String, durationMs: Long, success: Boolean, extra: String = "") {
+        if (!shouldSamplePerf(success)) return
+        val meta = buildString {
+            append("event=").append(event)
+            append(";durationMs=").append(durationMs.coerceAtLeast(0L))
+            append(";result=").append(if (success) "ok" else "error")
+            append(";appVersion=").append(BuildConfig.VERSION_NAME)
+            if (extra.isNotBlank()) {
+                append(";").append(extra)
+            }
+        }
+        repo.logDebug(type = "perf_event", message = event, meta = meta)
+    }
+
     private suspend fun fetchChangelogLinesFresh(): List<String> {
         suspend fun loadOnce(): List<String> =
             runCatching { repo.changelogLines(BuildConfig.VERSION_NAME) }
@@ -1688,6 +1736,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun bootstrap() {
         if (state.startupDone) return
+        val perfStartedAt = System.currentTimeMillis()
         profileSetupPromptShownInSession = false
         state = state.copy(startupDone = false, startupQuote = "")
         repo.syncAutoUpdateScheduler()
@@ -1743,6 +1792,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
         runCatching { checkForUpdate(silent = true) }
+        logPerfEvent(
+            event = "app_start",
+            durationMs = System.currentTimeMillis() - perfStartedAt,
+            success = healthOk,
+            extra = "serverConnected=$healthOk"
+        )
     }
 
     suspend fun login(username: String, password: String) {
@@ -1827,12 +1882,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private suspend fun logApiFailure(type: String, endpoint: String, throwable: Throwable, extraMeta: String = "") {
         if (isBenignCancellation(throwable)) return
         if (type == "dashboard_load_failed" && !shouldLogDashboardFailure(endpoint, throwable)) return
-        val code = (throwable as? HttpException)?.code()
+        val http = throwable as? HttpException
+        val code = http?.code()
+        val responseRequestId = http?.response()?.headers()?.get("X-Request-ID")?.trim().orEmpty()
         val network = networkFailureKind(throwable)
         val base = buildString {
             append("endpoint=").append(endpoint)
             append(";http=").append(code ?: -1)
             append(";error=").append(throwable::class.java.simpleName)
+            if (responseRequestId.isNotBlank()) {
+                append(";requestId=").append(responseRequestId.take(64))
+            }
             if (network != null) {
                 append(";network=").append(network)
             }
@@ -2102,7 +2162,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedFocusPhotoId = null,
             feedScrollRequestId = scrollRequestId
         )
-        loadFeedWindow(day, around = 0)
+        loadFeedWindow(day, around = 0, forceReload = false)
         state = state.copy(
             activeTab = AppTab.FEED,
             feedFocusDay = day,
@@ -2119,7 +2179,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedFocusPhotoId = photoId,
             feedScrollRequestId = scrollRequestId
         )
-        loadFeedWindow(day, around = 3)
+        loadFeedWindow(day, around = 3, forceReload = false)
         state = state.copy(
             activeTab = AppTab.FEED,
             feedFocusDay = day,
@@ -2128,16 +2188,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         )
     }
 
-    suspend fun refreshAll() {
-        if (repo.token().isBlank()) return
+    suspend fun refreshAll(
+        reason: String = "general",
+        forceFeedReload: Boolean = false,
+        bypassCooldown: Boolean = false,
+        showLoading: Boolean = true
+    ): Boolean {
+        if (repo.token().isBlank()) return false
         val now = System.currentTimeMillis()
-        if (!refreshAllMutex.tryLock()) return
-        if (now - lastRefreshAllStartedAt < refreshAllCooldownMs) {
+        if (!refreshAllMutex.tryLock()) return false
+        if (!bypassCooldown && now - lastRefreshAllStartedAt < refreshAllCooldownMs) {
             refreshAllMutex.unlock()
-            return
+            return false
         }
         lastRefreshAllStartedAt = now
-        state = state.copy(loading = true, communityStatsLoading = true)
+        if (showLoading) {
+            state = state.copy(loading = true, communityStatsLoading = true)
+        } else {
+            state = state.copy(communityStatsLoading = true)
+        }
+        var success = false
+        var refreshedFeedDays = 0
         try {
             repo.syncDeviceTokenIfNeeded()
             val meResp = repo.me()
@@ -2227,7 +2298,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 diagnosticsConsentUpdatedAt = me.diagnosticsConsentUpdatedAt,
                 debugLogs = repo.recentDebugLogs(),
                 profileSectionExpanded = profileSectionExpanded,
-                loading = false,
+                loading = if (showLoading) false else state.loading,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
             )
@@ -2243,36 +2314,73 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val focus = state.feedFocusDay
             val anchor = if (focus != null && calendarDays.contains(focus)) focus else prompt.day
             if (state.feedDays.isEmpty() || !state.feedDays.contains(anchor)) {
-                loadFeedWindow(anchor, around = 1)
+                refreshedFeedDays = loadFeedWindow(anchor, around = 1, forceReload = forceFeedReload)
             } else {
-                val today = prompt.day
-                val hasVisibleTodayFeed = state.feedByDay[today].orEmpty().isNotEmpty()
-                state = state.copy(
-                    feed = state.feedByDay[today].orEmpty(),
-                    feedTodayLocked = !prompt.hasVisiblePostToday && !hasVisibleTodayFeed
-                )
+                refreshedFeedDays = if (forceFeedReload || staleFeedDays.isNotEmpty()) {
+                    loadFeedWindow(anchor, around = 1, forceReload = forceFeedReload)
+                } else {
+                    val today = prompt.day
+                    val hasVisibleTodayFeed = state.feedByDay[today].orEmpty().isNotEmpty()
+                    state = state.copy(
+                        feed = state.feedByDay[today].orEmpty(),
+                        feedTodayLocked = !prompt.hasVisiblePostToday && !hasVisibleTodayFeed
+                    )
+                    0
+                }
             }
             ensureCalendarStatsPrefix(2)
+            success = true
+            if (reason == "feed_pull" || reason == "feed_auto" || forceFeedReload) {
+                val durationMs = System.currentTimeMillis() - now
+                repo.logDebug(
+                    type = "feed_refresh",
+                    message = "feed refresh ok",
+                    meta = "reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs"
+                )
+            }
         } catch (t: Throwable) {
             if (isBenignCancellation(t)) {
-                state = state.copy(loading = false, communityStatsLoading = false)
-                return
+                state = state.copy(loading = if (showLoading) false else state.loading, communityStatsLoading = false)
+                return false
             }
-            state = state.copy(loading = false, communityStatsLoading = false, message = apiError(t, "Laden fehlgeschlagen"))
+            state = state.copy(
+                loading = if (showLoading) false else state.loading,
+                communityStatsLoading = false,
+                message = apiError(t, "Laden fehlgeschlagen")
+            )
             logApiFailure("dashboard_load_failed", "refresh_all", t)
+            val durationMs = System.currentTimeMillis() - now
+            repo.logDebug(
+                type = "feed_refresh_failed",
+                message = debugFailureMessage(t),
+                meta = "reason=$reason;forced=$forceFeedReload;durationMs=$durationMs;root=${rootCause(t)::class.java.simpleName}"
+            )
         } finally {
             refreshAllMutex.unlock()
         }
+        return success
     }
 
-    suspend fun refreshFeed() {
+    suspend fun refreshFeed(reason: String = "feed_pull") {
         if (state.feedRefreshing) return
         state = state.copy(feedRefreshing = true)
         val started = System.currentTimeMillis()
+        var ok = false
         try {
-            refreshAll()
+            ok = refreshAll(
+                reason = reason,
+                forceFeedReload = true,
+                bypassCooldown = true,
+                showLoading = false
+            )
         } finally {
             val elapsed = System.currentTimeMillis() - started
+            logPerfEvent(
+                event = "refresh_feed",
+                durationMs = elapsed,
+                success = ok,
+                extra = "reason=$reason"
+            )
             if (elapsed < 700) delay(700 - elapsed)
             state = state.copy(feedRefreshing = false)
         }
@@ -2330,7 +2438,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val newRecapMap = state.monthRecapByDay.toMutableMap()
         for (day in newDays) {
             if (!newMap.containsKey(day)) {
-                val fetched = fetchDaySafe(day)
+                val fetched = fetchDaySafe(day, forceReload = false)
                 newMap[day] = fetched.items
                 newPromptMap[day] = fetched.meta
                 fetched.monthRecap?.let { newRecapMap[day] = it }
@@ -2354,7 +2462,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val newRecapMap = state.monthRecapByDay.toMutableMap()
         for (day in prependDays) {
             if (!newMap.containsKey(day)) {
-                val fetched = fetchDaySafe(day)
+                val fetched = fetchDaySafe(day, forceReload = false)
                 newMap[day] = fetched.items
                 newPromptMap[day] = fetched.meta
                 fetched.monthRecap?.let { newRecapMap[day] = it }
@@ -2363,7 +2471,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(feedDays = prependDays + state.feedDays, feedByDay = newMap, monthRecapByDay = newRecapMap, promptMetaByDay = newPromptMap, feedPaging = false)
     }
 
-    private suspend fun loadFeedWindow(anchorDay: String, around: Int) {
+    private suspend fun loadFeedWindow(anchorDay: String, around: Int, forceReload: Boolean): Int {
         val fetchedDays = if (state.calendarDays.isEmpty()) {
             runCatching { repo.feedDays() }.getOrDefault(emptyList())
         } else {
@@ -2384,7 +2492,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 feedFocusDay = state.prompt?.day,
                 feedFocusPhotoId = null
             )
-            return
+            return 0
         }
         val target = if (allDays.contains(anchorDay)) anchorDay else allDays.first()
         val idx = allDays.indexOf(target)
@@ -2394,18 +2502,37 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val map = mutableMapOf<String, List<FeedItem>>()
         val monthRecapMap = mutableMapOf<String, MonthlyRecap>()
         val promptMap = mutableMapOf<String, PromptMeta>()
+        var reloadedCount = 0
+        var reloadErrors = 0
         for (day in days.distinct()) {
             val cachedItems = state.feedByDay[day]
             val cachedMeta = state.promptMetaByDay[day]
+            val shouldReloadDay = forceReload || staleFeedDays.contains(day)
+            if (!shouldReloadDay && cachedItems != null && cachedMeta != null) {
+                map[day] = cachedItems
+                promptMap[day] = cachedMeta
+                state.monthRecapByDay[day]?.let { monthRecapMap[day] = it }
+                continue
+            }
+
+            val fetched = runCatching { fetchDaySafe(day, forceReload = true) }.getOrNull()
+            if (fetched != null) {
+                map[day] = fetched.items
+                promptMap[day] = fetched.meta
+                fetched.monthRecap?.let { monthRecapMap[day] = it }
+                staleFeedDays.remove(day)
+                reloadedCount++
+                continue
+            }
+            reloadErrors++
+
             if (cachedItems != null && cachedMeta != null) {
                 map[day] = cachedItems
                 promptMap[day] = cachedMeta
                 state.monthRecapByDay[day]?.let { monthRecapMap[day] = it }
             } else {
-                val fetched = fetchDaySafe(day)
-                map[day] = fetched.items
-                promptMap[day] = fetched.meta
-                fetched.monthRecap?.let { monthRecapMap[day] = it }
+                map[day] = emptyList()
+                promptMap[day] = PromptMeta(day = day)
             }
         }
         val today = state.prompt?.day ?: LocalDate.now().toString()
@@ -2422,13 +2549,28 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedFocusDay = target,
             feedFocusPhotoId = state.feedFocusPhotoId
         )
+        if (reloadErrors > 0 && (forceReload || staleFeedDays.isNotEmpty())) {
+            repo.logDebug(
+                type = "feed_refresh_failed",
+                message = "partial day reload fallback",
+                meta = "anchor=$anchorDay;days=${days.size};errors=$reloadErrors;reloaded=$reloadedCount"
+            )
+        }
+        return reloadedCount
     }
 
     private data class DayFetchResult(val items: List<FeedItem>, val meta: PromptMeta, val monthRecap: MonthlyRecap? = null)
 
-    private suspend fun fetchDaySafe(day: String): DayFetchResult {
+    private suspend fun fetchDaySafe(day: String, forceReload: Boolean): DayFetchResult {
+        val startedAt = System.currentTimeMillis()
         return try {
             val res = repo.feedByDay(day)
+            logPerfEvent(
+                event = "feed_day_load",
+                durationMs = System.currentTimeMillis() - startedAt,
+                success = true,
+                extra = "day=$day;items=${res.items.size};forced=$forceReload"
+            )
             DayFetchResult(
                 items = res.items,
                 meta = PromptMeta(
@@ -2441,11 +2583,35 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 monthRecap = res.monthRecap
             )
         } catch (e: HttpException) {
-            if (e.code() == 403) {
+            val code = e.code()
+            if (code == 403) {
+                if (forceReload) {
+                    staleFeedDays.remove(day)
+                }
+                logPerfEvent(
+                    event = "feed_day_load",
+                    durationMs = System.currentTimeMillis() - startedAt,
+                    success = false,
+                    extra = "day=$day;http=403;forced=$forceReload"
+                )
                 DayFetchResult(items = emptyList(), meta = PromptMeta(day = day), monthRecap = null)
             } else {
+                logPerfEvent(
+                    event = "feed_day_load",
+                    durationMs = System.currentTimeMillis() - startedAt,
+                    success = false,
+                    extra = "day=$day;http=$code;forced=$forceReload"
+                )
                 throw e
             }
+        } catch (t: Throwable) {
+            logPerfEvent(
+                event = "feed_day_load",
+                durationMs = System.currentTimeMillis() - startedAt,
+                success = false,
+                extra = "day=$day;error=${t::class.java.simpleName};forced=$forceReload"
+            )
+            throw t
         }
     }
 
@@ -2456,14 +2622,33 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         capsule: CapsuleUploadOptions = CapsuleUploadOptions(),
         onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
     ): Boolean {
+        val startedAt = System.currentTimeMillis()
         state = state.copy(loading = true)
+        logPerfEvent(
+            event = "upload_start",
+            durationMs = 0,
+            success = true,
+            extra = "kind=${if (asPrompt) "prompt" else "extra"};capsule=${capsule.enabled}"
+        )
         return try {
             repo.uploadDual(back, front, asPrompt, capsule, onProgress)
             state = state.copy(loading = false, message = "Fotos gepostet")
             refreshAll()
+            logPerfEvent(
+                event = "upload_end",
+                durationMs = System.currentTimeMillis() - startedAt,
+                success = true,
+                extra = "kind=${if (asPrompt) "prompt" else "extra"};capsule=${capsule.enabled}"
+            )
             true
         } catch (t: Throwable) {
             state = state.copy(loading = false, message = apiError(t, "Upload fehlgeschlagen"))
+            logPerfEvent(
+                event = "upload_end",
+                durationMs = System.currentTimeMillis() - startedAt,
+                success = false,
+                extra = "kind=${if (asPrompt) "prompt" else "extra"};capsule=${capsule.enabled};error=${t::class.java.simpleName}"
+            )
             false
         }
     }
@@ -2610,11 +2795,36 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun commentPhoto(photoId: Long, body: String) {
         val trimmed = body.trim()
         if (photoId <= 0 || trimmed.isBlank()) return
+        val startedAt = System.currentTimeMillis()
         state = state.copy(interactionsLoading = true)
         runCatching { repo.commentPhoto(photoId, trimmed) }
-            .onSuccess { state = state.copy(interactionsLoading = false, photoInteractions = it) }
-            .onFailure { state = state.copy(interactionsLoading = false, message = apiError(it, "Kommentar fehlgeschlagen")) }
+            .onSuccess {
+                val touchedDay = state.feedByDay.entries.firstOrNull { (_, items) ->
+                    items.any { feedItem -> feedItem.photo.id == photoId }
+                }?.key
+                if (!touchedDay.isNullOrBlank()) {
+                    staleFeedDays.add(touchedDay)
+                }
+                state = state.copy(interactionsLoading = false, photoInteractions = it)
+                logPerfEvent(
+                    event = "comment_submit",
+                    durationMs = System.currentTimeMillis() - startedAt,
+                    success = true,
+                    extra = "photoId=$photoId;bodyLen=${trimmed.length}"
+                )
+            }
+            .onFailure {
+                state = state.copy(interactionsLoading = false, message = apiError(it, "Kommentar fehlgeschlagen"))
+                logPerfEvent(
+                    event = "comment_submit",
+                    durationMs = System.currentTimeMillis() - startedAt,
+                    success = false,
+                    extra = "photoId=$photoId;error=${it::class.java.simpleName}"
+                )
+            }
     }
+
+    fun feedAutoRefreshIntervalMs(): Long = feedAutoRefreshBaseMs + Random.nextLong(feedAutoRefreshJitterMs + 1L)
 
     fun clearPhotoInteractions() {
         state = state.copy(photoInteractions = null, interactionsLoading = false)
@@ -3216,9 +3426,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        val httpClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val requestId = "req_${UUID.randomUUID()}"
+                val newReq = chain.request().newBuilder()
+                    .header("X-Request-ID", requestId)
+                    .build()
+                chain.proceed(newReq)
+            }
+            .build()
         val api = Retrofit.Builder()
             .baseUrl(BuildConfig.API_BASE_URL)
-            .client(OkHttpClient.Builder().build())
+            .client(httpClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(Api::class.java)
@@ -3415,6 +3634,18 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         if (launchIntentTick <= 0) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         vm.refreshAll()
+    }
+
+    LaunchedEffect(state.token, state.startupDone, state.activeTab) {
+        if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
+        if (state.activeTab != AppTab.FEED) return@LaunchedEffect
+        while (true) {
+            delay(vm.feedAutoRefreshIntervalMs())
+            if (state.activeTab != AppTab.FEED) break
+            if (!state.feedRefreshing && !state.loading) {
+                vm.refreshFeed(reason = "feed_auto")
+            }
+        }
     }
 
     LaunchedEffect(state.token, state.startupDone, state.diagnosticsUploadEnabled) {

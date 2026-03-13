@@ -55,6 +55,8 @@ type Server struct {
 	Prompt   *scheduler.DailyPromptService
 	Location *time.Location
 	Monitor  *Monitor
+	FeedCache   *FeedDayCache
+	FeedLimiter *FeedPollLimiter
 }
 
 func (s *Server) Router() *gin.Engine {
@@ -63,8 +65,8 @@ func (s *Server) Router() *gin.Engine {
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     s.Config.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE"},
-		AllowHeaders:     []string{"Authorization", "Content-Type"},
-		ExposeHeaders:    []string{"Content-Length"},
+		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-ID"},
+		ExposeHeaders:    []string{"Content-Length", "X-Request-ID"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
@@ -125,6 +127,7 @@ func (s *Server) Router() *gin.Engine {
 			admin.GET("/feed", s.handleAdminFeed)
 			admin.GET("/calendar", s.handleAdminCalendar)
 			admin.GET("/history", s.handleAdminHistory)
+			admin.GET("/search", s.handleAdminSearch)
 			admin.GET("/time-capsules", s.handleAdminTimeCapsules)
 			admin.PUT("/calendar/:day", s.handleAdminCalendarDay)
 
@@ -145,6 +148,11 @@ func (s *Server) Router() *gin.Engine {
 			admin.DELETE("/debug/logs", s.handleAdminDeleteDebugLogs)
 			admin.GET("/debug/logs/export", s.handleAdminDebugLogsExport)
 			admin.GET("/system/health", s.handleAdminSystemHealth)
+			admin.GET("/performance/overview", s.handleAdminPerformanceOverview)
+			admin.GET("/performance/routes", s.handleAdminPerformanceRoutes)
+			admin.GET("/performance/spikes", s.handleAdminPerformanceSpikes)
+			admin.GET("/performance/slo", s.handleAdminPerformanceSLO)
+			admin.GET("/performance/export", s.handleAdminPerformanceExport)
 
 			admin.GET("/users", s.handleAdminListUsers)
 			admin.POST("/users", s.handleAdminCreateUser)
@@ -744,6 +752,8 @@ type clientDebugLogRequest struct {
 	Meta       string `json:"meta" binding:"max=4000"`
 	AppVersion string `json:"appVersion" binding:"max=40"`
 	DeviceName string `json:"deviceName" binding:"max=120"`
+	SessionID  string `json:"sessionId" binding:"max=64"`
+	RequestID  string `json:"requestId" binding:"max=64"`
 }
 
 func (s *Server) handleClientDebugLog(c *gin.Context) {
@@ -770,12 +780,19 @@ func (s *Server) handleClientDebugLog(c *gin.Context) {
 		Meta:       strings.TrimSpace(req.Meta),
 		AppVersion: strings.TrimSpace(req.AppVersion),
 		DeviceName: strings.TrimSpace(req.DeviceName),
+		SessionID:  strings.TrimSpace(req.SessionID),
+		RequestID:  strings.TrimSpace(req.RequestID),
 	}
 	if entry.AppVersion == "" {
 		entry.AppVersion = "unknown"
 	}
 	if entry.DeviceName == "" {
 		entry.DeviceName = "unknown"
+	}
+	if entry.RequestID == "" {
+		if reqID, ok := c.Get("requestId"); ok {
+			entry.RequestID = strings.TrimSpace(fmt.Sprint(reqID))
+		}
 	}
 	if err := s.DB.Create(&entry).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log save failed"})
@@ -928,6 +945,13 @@ func (s *Server) handleSpecialMomentRequest(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "special trigger failed"})
 		return
 	}
+	if s.Monitor != nil {
+		triggerAt := time.Now().In(s.Location)
+		if prompt.TriggeredAt != nil {
+			triggerAt = prompt.TriggeredAt.In(s.Location)
+		}
+		s.Monitor.MarkDailySpike(prompt.Day, triggerAt, 30*time.Minute)
+	}
 
 	reqRow := models.SpecialMomentRequest{
 		UserID:      user.ID,
@@ -1071,6 +1095,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	}
 
+	s.invalidateFeedDayCache(photo.Day)
 	s.notifyPostCreated(user, photo)
 	c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
 }
@@ -1228,19 +1253,27 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 	_ = s.DB.Where("day = ?", day).First(&prompt).Error
 
 	var photos []models.Photo
+	photosQueryStart := time.Now()
 	if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
+	}
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/feed", "feed_photos_query", time.Since(photosQueryStart))
 	}
 
 	photoIDs := make([]uint, 0, len(photos))
 	for _, p := range photos {
 		photoIDs = append(photoIDs, p.ID)
 	}
+	interactionStart := time.Now()
 	reactionByPhoto, commentByPhoto, err := s.feedInteractionPreview(photoIDs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "interaction query failed"})
 		return
+	}
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/feed", "feed_interaction_preview", time.Since(interactionStart))
 	}
 
 	out := make([]gin.H, 0, len(photos))
@@ -1299,6 +1332,21 @@ func (s *Server) handleFeed(c *gin.Context) {
 	}
 	today := time.Now().In(s.Location).Format("2006-01-02")
 	now := time.Now().In(s.Location)
+	if allow, retryAfter := s.allowFeedRead(user.ID, now); !allow {
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":      "Zu viele Feed-Aktualisierungen in kurzer Zeit. Bitte gleich erneut versuchen.",
+			"code":       "feed_rate_limited",
+			"retryAfter": retryAfter,
+		})
+		return
+	}
+	if s.shouldUseFeedCache(day, now) {
+		if cached, ok := s.feedCachedPayload(user.ID, day, now); ok {
+			c.JSON(http.StatusOK, cached)
+			return
+		}
+	}
 	if day == today {
 		hasPosted, err := s.userHasVisiblePhotoForDay(user.ID, day, now)
 		if err != nil {
@@ -1370,9 +1418,12 @@ func (s *Server) handleFeed(c *gin.Context) {
 		})
 	}
 
+	recapStart := time.Now()
 	recap, _ := s.monthlyRecapForDay(day, user.ID)
-
-	c.JSON(http.StatusOK, gin.H{
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/feed", "feed_monthly_recap", time.Since(recapStart))
+	}
+	payload := gin.H{
 		"items":           out,
 		"day":             day,
 		"triggeredAt":     prompt.TriggeredAt,
@@ -1380,7 +1431,11 @@ func (s *Server) handleFeed(c *gin.Context) {
 		"triggerSource":   prompt.TriggerSource,
 		"requestedByUser": prompt.RequestedBy,
 		"monthRecap":      recap,
-	})
+	}
+	if s.shouldUseFeedCache(day, now) {
+		s.putFeedCachedPayload(user.ID, day, payload, now)
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 func (s *Server) handleGetSettings(c *gin.Context) {
@@ -1489,6 +1544,13 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "trigger failed"})
 		return
 	}
+	if s.Monitor != nil {
+		triggerAt := time.Now().In(s.Location)
+		if prompt.TriggeredAt != nil {
+			triggerAt = prompt.TriggeredAt.In(s.Location)
+		}
+		s.Monitor.MarkDailySpike(prompt.Day, triggerAt, 30*time.Minute)
+	}
 
 	tokens := s.allDeviceTokens()
 	sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
@@ -1548,6 +1610,10 @@ func (s *Server) handleAdminResetToday(c *gin.Context) {
 	if txErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reset failed"})
 		return
+	}
+	s.invalidateFeedDayCache(day)
+	if s.Monitor != nil {
+		s.Monitor.MarkDailySpike(day, now, 30*time.Minute)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1759,6 +1825,8 @@ func (s *Server) handleAdminDebugLogs(c *gin.Context) {
 			"meta":       row.Meta,
 			"appVersion": row.AppVersion,
 			"deviceName": row.DeviceName,
+			"sessionId":  row.SessionID,
+			"requestId":  row.RequestID,
 			"user": gin.H{
 				"id":       row.User.ID,
 				"username": row.User.Username,
@@ -1883,6 +1951,8 @@ func (s *Server) handleAdminDebugLogsExport(c *gin.Context) {
 				"meta":       row.Meta,
 				"appVersion": row.AppVersion,
 				"deviceName": row.DeviceName,
+				"sessionId":  row.SessionID,
+				"requestId":  row.RequestID,
 				"user": gin.H{
 					"id":       row.User.ID,
 					"username": row.User.Username,
@@ -1908,7 +1978,7 @@ func (s *Server) handleAdminDebugLogsExport(c *gin.Context) {
 	buf.Write([]byte{0xEF, 0xBB, 0xBF})
 	writer := csv.NewWriter(&buf)
 	_ = writer.Write([]string{
-		"id", "created_at", "user_id", "username", "device_name", "app_version", "type", "message", "meta",
+		"id", "created_at", "user_id", "username", "device_name", "app_version", "session_id", "request_id", "type", "message", "meta",
 	})
 	for _, row := range rows {
 		_ = writer.Write([]string{
@@ -1918,6 +1988,8 @@ func (s *Server) handleAdminDebugLogsExport(c *gin.Context) {
 			row.User.Username,
 			row.DeviceName,
 			row.AppVersion,
+			row.SessionID,
+			row.RequestID,
 			row.Type,
 			row.Message,
 			row.Meta,
@@ -2237,6 +2309,188 @@ WHERE created_at IS NOT NULL
 		"storageBytes":            storageBytes,
 		"diagnosticsConsentUsers": diagnosticsConsentUsers,
 		"diagnosticsConsentRate":  safeRatio(int(diagnosticsConsentUsers), maxInt(1, int(users))),
+	})
+}
+
+func (s *Server) handleAdminSearch(c *gin.Context) {
+	q := strings.TrimSpace(c.Query("q"))
+	if q == "" {
+		c.JSON(http.StatusOK, gin.H{"items": []gin.H{}})
+		return
+	}
+	limit := 12
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			if n < 3 {
+				n = 3
+			}
+			if n > 50 {
+				n = 50
+			}
+			limit = n
+		}
+	}
+
+	scopeRaw := strings.ToLower(strings.TrimSpace(c.Query("scope")))
+	scopeSet := map[string]bool{
+		"users":    true,
+		"reports":  true,
+		"commands": true,
+		"history":  true,
+	}
+	if scopeRaw != "" {
+		scopeSet = map[string]bool{
+			"users":    false,
+			"reports":  false,
+			"commands": false,
+			"history":  false,
+		}
+		for _, part := range strings.Split(scopeRaw, ",") {
+			k := strings.TrimSpace(part)
+			if _, ok := scopeSet[k]; ok {
+				scopeSet[k] = true
+			}
+		}
+	}
+
+	items := make([]gin.H, 0, limit*2)
+	like := "%" + strings.ToLower(q) + "%"
+
+	if scopeSet["users"] {
+		var rows []models.User
+		if err := s.DB.
+			Where("LOWER(username) LIKE ?", like).
+			Order("username asc").
+			Limit(limit).
+			Find(&rows).Error; err == nil {
+			for _, row := range rows {
+				items = append(items, gin.H{
+					"type":  "users",
+					"id":    strconv.FormatUint(uint64(row.ID), 10),
+					"label": "@" + row.Username,
+					"meta":  fmt.Sprintf("User #%d", row.ID),
+					"target": gin.H{
+						"tab": "users",
+					},
+				})
+			}
+		}
+	}
+
+	if scopeSet["reports"] {
+		var rows []models.UserReport
+		if err := s.DB.
+			Preload("User").
+			Where("LOWER(body) LIKE ? OR LOWER(type) LIKE ? OR LOWER(status) LIKE ?", like, like, like).
+			Order("created_at desc").
+			Limit(limit).
+			Find(&rows).Error; err == nil {
+			for _, row := range rows {
+				body := strings.TrimSpace(row.Body)
+				if len(body) > 90 {
+					body = body[:90] + "..."
+				}
+				meta := fmt.Sprintf("%s | %s | @%s", row.Type, row.Status, row.User.Username)
+				items = append(items, gin.H{
+					"type":  "reports",
+					"id":    strconv.FormatUint(uint64(row.ID), 10),
+					"label": body,
+					"meta":  meta,
+					"target": gin.H{
+						"tab": "reports",
+					},
+				})
+			}
+		}
+	}
+
+	if scopeSet["commands"] {
+		var rows []models.ChatCommand
+		if err := s.DB.
+			Where("LOWER(name) LIKE ? OR LOWER(command) LIKE ? OR LOWER(response_text) LIKE ?", like, like, like).
+			Order("name asc").
+			Limit(limit).
+			Find(&rows).Error; err == nil {
+			for _, row := range rows {
+				meta := strings.TrimSpace(row.ResponseText)
+				if len(meta) > 90 {
+					meta = meta[:90] + "..."
+				}
+				items = append(items, gin.H{
+					"type":  "commands",
+					"id":    strconv.FormatUint(uint64(row.ID), 10),
+					"label": fmt.Sprintf("%s (%s)", row.Name, row.Command),
+					"meta":  meta,
+					"target": gin.H{
+						"tab": "commands",
+					},
+				})
+			}
+		}
+	}
+
+	if scopeSet["history"] {
+		dayLike := "%" + q + "%"
+		var promptRows []models.DailyPrompt
+		if err := s.DB.
+			Where("day LIKE ? OR requested_by LIKE ? OR trigger_source LIKE ?", dayLike, like, like).
+			Order("day desc").
+			Limit(limit).
+			Find(&promptRows).Error; err == nil {
+			for _, row := range promptRows {
+				meta := "Prompt"
+				if strings.TrimSpace(row.TriggerSource) != "" {
+					meta = "Prompt | " + row.TriggerSource
+				}
+				items = append(items, gin.H{
+					"type":  "history",
+					"id":    row.Day,
+					"label": row.Day,
+					"meta":  meta,
+					"target": gin.H{
+						"tab": "history",
+						"day": row.Day,
+					},
+				})
+			}
+		}
+
+		var planRows []models.PromptPlan
+		if err := s.DB.
+			Where("day LIKE ?", dayLike).
+			Order("day desc").
+			Limit(limit).
+			Find(&planRows).Error; err == nil {
+			seen := make(map[string]struct{}, len(promptRows))
+			for _, row := range promptRows {
+				seen[row.Day] = struct{}{}
+			}
+			for _, row := range planRows {
+				if _, exists := seen[row.Day]; exists {
+					continue
+				}
+				items = append(items, gin.H{
+					"type":  "history",
+					"id":    row.Day + "-plan",
+					"label": row.Day,
+					"meta":  "Plan",
+					"target": gin.H{
+						"tab": "history",
+						"day": row.Day,
+					},
+				})
+			}
+		}
+	}
+
+	if len(items) > 200 {
+		items = items[:200]
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items": items,
+		"q":     q,
+		"limit": limit,
 	})
 }
 
@@ -3751,6 +4005,13 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "command trigger failed"})
 			return true, triggerErr
 		}
+		if s.Monitor != nil {
+			triggerAt := time.Now().In(s.Location)
+			if prompt.TriggeredAt != nil {
+				triggerAt = prompt.TriggeredAt.In(s.Location)
+			}
+			s.Monitor.MarkDailySpike(prompt.Day, triggerAt, 30*time.Minute)
+		}
 		if cmd.SendPush {
 			pushText := renderCommandText(cmd.PushText, user.Username)
 			tokens := s.allDeviceTokens()
@@ -4045,6 +4306,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		return
 	}
 
+	s.invalidateFeedDayCache(photo.Day)
 	s.notifyPostCreated(user, photo)
 	c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
 }
@@ -4155,6 +4417,7 @@ func (s *Server) handleDeleteMyPhoto(c *gin.Context) {
 		return
 	}
 
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deletedId": photo.ID})
 }
 
@@ -4254,6 +4517,7 @@ func (s *Server) handlePhotoReaction(c *gin.Context) {
 	if shouldNotify {
 		s.notifyPhotoReaction(user, photo)
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, out)
 }
 
@@ -4302,6 +4566,7 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	s.notifyPhotoComment(user, photo)
 	c.JSON(http.StatusCreated, out)
 }
@@ -4895,6 +5160,7 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 	}
 
 	var reactionRows []photoReactionPreviewRow
+	reactionQueryStart := time.Now()
 	if err := s.DB.Model(&models.PhotoReaction{}).
 		Select("photo_id as photo_id, emoji as emoji, COUNT(*) as count").
 		Where("photo_id IN ?", photoIDs).
@@ -4903,6 +5169,9 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 		Scan(&reactionRows).Error; err != nil {
 		return nil, nil, err
 	}
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/feed", "feed_reaction_preview_query", time.Since(reactionQueryStart))
+	}
 	for _, row := range reactionRows {
 		reactionByPhoto[row.PhotoID] = append(reactionByPhoto[row.PhotoID], gin.H{
 			"emoji": row.Emoji,
@@ -4910,25 +5179,50 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 		})
 	}
 
-	var comments []models.PhotoComment
-	if err := s.DB.Preload("User").
-		Where("photo_id IN ?", photoIDs).
-		Order("created_at desc, id desc").
-		Find(&comments).Error; err != nil {
+	type commentPreviewRow struct {
+		PhotoID       uint
+		ID            uint
+		Body          string
+		CreatedAt     time.Time
+		UserID        uint
+		Username      string
+		FavoriteColor string
+	}
+	rows := make([]commentPreviewRow, 0, len(photoIDs)*commentLimit)
+	commentQueryStart := time.Now()
+	if err := s.DB.Raw(`
+		SELECT photo_id, id, body, created_at, user_id, username, favorite_color
+		FROM (
+			SELECT
+				pc.photo_id AS photo_id,
+				pc.id AS id,
+				pc.body AS body,
+				pc.created_at AS created_at,
+				u.id AS user_id,
+				u.username AS username,
+				u.favorite_color AS favorite_color,
+				ROW_NUMBER() OVER (PARTITION BY pc.photo_id ORDER BY pc.created_at DESC, pc.id DESC) AS rn
+			FROM photo_comments pc
+			JOIN users u ON u.id = pc.user_id
+			WHERE pc.photo_id IN ?
+		)
+		WHERE rn <= ?
+		ORDER BY created_at DESC, id DESC
+	`, photoIDs, commentLimit).Scan(&rows).Error; err != nil {
 		return nil, nil, err
 	}
-	for _, item := range comments {
-		if len(commentByPhoto[item.PhotoID]) >= commentLimit {
-			continue
-		}
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/feed", "feed_comment_preview_query", time.Since(commentQueryStart))
+	}
+	for _, item := range rows {
 		commentByPhoto[item.PhotoID] = append(commentByPhoto[item.PhotoID], gin.H{
 			"id":        item.ID,
 			"body":      item.Body,
 			"createdAt": item.CreatedAt,
 			"user": gin.H{
-				"id":            item.User.ID,
-				"username":      item.User.Username,
-				"favoriteColor": defaultColor(item.User.FavoriteColor),
+				"id":            item.UserID,
+				"username":      item.Username,
+				"favoriteColor": defaultColor(item.FavoriteColor),
 			},
 		})
 	}
@@ -4986,6 +5280,48 @@ func isPromptWindowActive(prompt models.DailyPrompt, now time.Time) bool {
 		return false
 	}
 	return !now.Before(*prompt.TriggeredAt) && !now.After(*prompt.UploadUntil)
+}
+
+func (s *Server) allowFeedRead(userID uint, now time.Time) (bool, int) {
+	if s == nil || s.Monitor == nil || !s.Monitor.IsInActiveSpike(now) {
+		return true, 0
+	}
+	if s.FeedLimiter == nil {
+		return true, 0
+	}
+	return s.FeedLimiter.Allow(userID, now)
+}
+
+func (s *Server) shouldUseFeedCache(day string, now time.Time) bool {
+	if s == nil || s.Monitor == nil || s.FeedCache == nil {
+		return false
+	}
+	today := now.In(s.Location).Format("2006-01-02")
+	if day != today {
+		return false
+	}
+	return s.Monitor.IsInActiveSpike(now)
+}
+
+func (s *Server) feedCachedPayload(userID uint, day string, now time.Time) (gin.H, bool) {
+	if s == nil || s.FeedCache == nil {
+		return nil, false
+	}
+	return s.FeedCache.Get(userID, day, now)
+}
+
+func (s *Server) putFeedCachedPayload(userID uint, day string, payload gin.H, now time.Time) {
+	if s == nil || s.FeedCache == nil {
+		return
+	}
+	s.FeedCache.Put(userID, day, payload, now)
+}
+
+func (s *Server) invalidateFeedDayCache(day string) {
+	if s == nil || s.FeedCache == nil || strings.TrimSpace(day) == "" {
+		return
+	}
+	s.FeedCache.InvalidateDay(day)
 }
 
 func photoVisibleToViewer(userID uint, photo models.Photo, now time.Time) bool {
