@@ -72,6 +72,7 @@ import {
   type MonthlyRecap,
   type Settings,
   type SystemHealth,
+  type UserPromptRule,
 } from "./api";
 
 type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "history" | "time_capsule" | "reports" | "debug" | "settings";
@@ -90,8 +91,25 @@ const DEFAULT_SETTINGS: Settings = {
   chatCommandPushText: "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
   chatCommandEchoChat: true,
   chatCommandEchoText: "Moment wurde von {user} angefordert.",
+  userPromptRules: [
+    {
+      id: "diagnostics_consent_v1",
+      enabled: true,
+      triggerType: "app_version",
+      title: "Diagnose & Performance teilen?",
+      body: "Wenn du zustimmst, sendet die App bei Problemen und Ladezeiten technische Diagnosedaten. Das hilft uns, Fehler und Engpaesse schneller zu finden. Du kannst das jederzeit im Profil widerrufen.",
+      confirmLabel: "Zustimmen",
+      declineLabel: "Nicht teilen",
+      cooldownHours: 0,
+      priority: 10,
+    },
+  ],
 };
-const emptySettings: Settings = { ...DEFAULT_SETTINGS };
+const cloneDefaultSettings = (): Settings => ({
+  ...DEFAULT_SETTINGS,
+  userPromptRules: DEFAULT_SETTINGS.userPromptRules.map((rule) => ({ ...rule })),
+});
+const emptySettings: Settings = cloneDefaultSettings();
 
 const emptyStats: AdminStats = {
   users: 0,
@@ -794,10 +812,44 @@ export function App() {
     }
   }
 
+  function addUserPromptRule() {
+    setSettings((prev) => ({
+      ...prev,
+      userPromptRules: [
+        ...prev.userPromptRules,
+        {
+          id: `rule_${Date.now()}`,
+          enabled: true,
+          triggerType: "app_version",
+          title: "",
+          body: "",
+          confirmLabel: "Zustimmen",
+          declineLabel: "Nicht teilen",
+          cooldownHours: 0,
+          priority: 1,
+        },
+      ],
+    }));
+  }
+
+  function updateUserPromptRule(index: number, patch: Partial<UserPromptRule>) {
+    setSettings((prev) => ({
+      ...prev,
+      userPromptRules: prev.userPromptRules.map((rule, idx) => (idx === index ? { ...rule, ...patch } : rule)),
+    }));
+  }
+
+  function removeUserPromptRule(index: number) {
+    setSettings((prev) => ({
+      ...prev,
+      userPromptRules: prev.userPromptRules.filter((_, idx) => idx !== index),
+    }));
+  }
+
   async function onApplyDefaultSettings() {
     setMessage("");
     try {
-      const next = await updateSettings(token, DEFAULT_SETTINGS);
+      const next = await updateSettings(token, cloneDefaultSettings());
       setSettings(next);
       setSavedSettings(next);
       setMessage("Standard-Einstellungen wurden gesetzt.");
@@ -990,6 +1042,10 @@ export function App() {
             <CardStat title="Tage aktiv" value={stats.runningDays} />
             <CardStat title="Bilder gesamt" value={stats.totalImages} />
             <CardStat title="Speicher gesamt" value={formatBytes(stats.storageBytes)} />
+            <CardStat
+              title="Consent-Quote"
+              value={`${Math.round((stats.diagnosticsConsentRate ?? 0) * 100)}% (${stats.diagnosticsConsentUsers ?? 0})`}
+            />
           </div>
         )}
 
@@ -2132,6 +2188,7 @@ export function App() {
                 <p><strong>Feed-Kommentare pro Bild:</strong> {savedSettings.feedCommentPreviewLimit}</p>
                 <p><strong>Max Upload:</strong> {savedSettings.maxUploadBytes <= 0 ? "Unbegrenzt" : `${Math.round(savedSettings.maxUploadBytes / (1024 * 1024))} MB`}</p>
                 <p><strong>Notification-Text:</strong> {savedSettings.promptNotificationText}</p>
+                <p><strong>Nutzer-Nachfragen aktiv:</strong> {savedSettings.userPromptRules.filter((r) => r.enabled).length}/{savedSettings.userPromptRules.length}</p>
               </div>
             </article>
 
@@ -2201,6 +2258,103 @@ export function App() {
                 />
                 Unbegrenzte Upload-Groesse
               </label>
+              <div className="stack">
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                  <h3>Nutzer-Nachfragen</h3>
+                  <button type="button" onClick={addUserPromptRule}>Regel hinzufuegen</button>
+                </div>
+                <p className="small">
+                  Steuert freiwillige Dialoge in der App, z. B. bei neuer Version zur Freigabe von Diagnose-/Performance-Daten.
+                </p>
+                {settings.userPromptRules.length === 0 && <p className="small">Keine Regeln konfiguriert.</p>}
+                {settings.userPromptRules.map((rule, idx) => (
+                  <article key={`${rule.id}-${idx}`} className="stack" style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 12 }}>
+                    <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                      <strong>Regel #{idx + 1}</strong>
+                      <button type="button" className="danger" onClick={() => removeUserPromptRule(idx)}>Entfernen</button>
+                    </div>
+                    <label>
+                      Rule-ID
+                      <input
+                        value={rule.id}
+                        onChange={(e) => updateUserPromptRule(idx, { id: e.target.value })}
+                      />
+                    </label>
+                    <label className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={rule.enabled}
+                        onChange={(e) => updateUserPromptRule(idx, { enabled: e.target.checked })}
+                      />
+                      Aktiv
+                    </label>
+                    <label>
+                      Trigger
+                      <select
+                        value={rule.triggerType}
+                        onChange={(e) => updateUserPromptRule(idx, { triggerType: e.target.value as UserPromptRule["triggerType"] })}
+                      >
+                        <option value="app_version">Neue App-Version</option>
+                        <option value="app_start">App-Start</option>
+                        <option value="time_based">Zeitbasiert</option>
+                      </select>
+                    </label>
+                    <label>
+                      Titel
+                      <input
+                        value={rule.title}
+                        onChange={(e) => updateUserPromptRule(idx, { title: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Text
+                      <textarea
+                        value={rule.body}
+                        onChange={(e) => updateUserPromptRule(idx, { body: e.target.value })}
+                        rows={3}
+                      />
+                    </label>
+                    <div className="row">
+                      <label style={{ flex: 1 }}>
+                        Zustimmen-Label
+                        <input
+                          value={rule.confirmLabel}
+                          onChange={(e) => updateUserPromptRule(idx, { confirmLabel: e.target.value })}
+                        />
+                      </label>
+                      <label style={{ flex: 1 }}>
+                        Ablehnen-Label
+                        <input
+                          value={rule.declineLabel}
+                          onChange={(e) => updateUserPromptRule(idx, { declineLabel: e.target.value })}
+                        />
+                      </label>
+                    </div>
+                    <div className="row">
+                      <label style={{ flex: 1 }}>
+                        Cooldown (h)
+                        <input
+                          type="number"
+                          min={0}
+                          max={720}
+                          value={rule.cooldownHours}
+                          onChange={(e) => updateUserPromptRule(idx, { cooldownHours: Number(e.target.value) || 0 })}
+                        />
+                      </label>
+                      <label style={{ flex: 1 }}>
+                        Prioritaet
+                        <input
+                          type="number"
+                          min={0}
+                          max={1000}
+                          value={rule.priority}
+                          onChange={(e) => updateUserPromptRule(idx, { priority: Number(e.target.value) || 0 })}
+                        />
+                      </label>
+                    </div>
+                  </article>
+                ))}
+              </div>
               <div className="row">
                 <button type="button" onClick={onApplyDefaultSettings}>Standardwerte setzen (8-20, 10 Min, unbegrenzt)</button>
                 <button type="submit">Settings speichern</button>

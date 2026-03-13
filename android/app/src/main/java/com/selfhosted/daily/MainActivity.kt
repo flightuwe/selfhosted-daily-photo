@@ -223,7 +223,10 @@ data class User(
     val statusVisible: Boolean = false,
     val quietHoursEnabled: Boolean = false,
     val quietHoursStart: String = "22:00",
-    val quietHoursEnd: String = "07:00"
+    val quietHoursEnd: String = "07:00",
+    val diagnosticsConsentGranted: Boolean = false,
+    val diagnosticsConsentUpdatedAt: String? = null,
+    val diagnosticsConsentSource: String? = null
 )
 data class MeResponse(val user: User, val dailyMomentCount: Int = 0, val streakDays: Int = 0)
 data class ProfileUpdateRequest(
@@ -246,7 +249,24 @@ data class PreferencesUpdateRequest(
     val inviteRegistrationPushEnabled: Boolean,
     val photoReactionPushEnabled: Boolean,
     val photoCommentPushEnabled: Boolean,
-    val allowPhotoDownload: Boolean
+    val allowPhotoDownload: Boolean,
+    val diagnosticsConsentGranted: Boolean? = null,
+    val diagnosticsConsentSource: String? = null
+)
+data class UserPromptRule(
+    val id: String,
+    val enabled: Boolean = true,
+    val triggerType: String = "app_version",
+    val title: String = "",
+    val body: String = "",
+    val confirmLabel: String = "Zustimmen",
+    val declineLabel: String = "Nicht teilen",
+    val cooldownHours: Int = 0,
+    val priority: Int = 0
+)
+data class UserPromptEvaluationResponse(
+    val items: List<UserPromptRule> = emptyList(),
+    val appVersion: String = ""
 )
 data class AuthResponse(val token: String, val user: User)
 data class LoginRequest(val username: String, val password: String)
@@ -479,6 +499,12 @@ interface Api {
     @GET("me")
     suspend fun me(@Header("Authorization") token: String): MeResponse
 
+    @GET("me/user-prompts/evaluate")
+    suspend fun evaluateUserPrompts(
+        @Header("Authorization") token: String,
+        @Query("appVersion") appVersion: String
+    ): UserPromptEvaluationResponse
+
     @GET("users/{id}/profile")
     suspend fun userProfile(
         @Header("Authorization") token: String,
@@ -625,6 +651,9 @@ class AppRepo(private val api: Api, private val context: Context) {
     private val debugLogsPrefKey = "debug_logs_v1"
     private val debugUploadEnabledKey = "debug_upload_enabled"
     private val debugLastUploadAtKey = "debug_last_upload_at"
+    private val diagnosticsConsentLocalKey = "diagnostics_consent_local"
+    private val diagnosticsConsentPendingKey = "diagnostics_consent_pending"
+    private val promptSeenVersionPrefix = "user_prompt_seen_version_"
     private val debugMaxEntries = 500
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
 
@@ -640,6 +669,35 @@ class AppRepo(private val api: Api, private val context: Context) {
     }
 
     fun diagnosticsUploadEnabled(): Boolean = prefs.getBoolean(debugUploadEnabledKey, false)
+
+    fun diagnosticsConsentGrantedLocal(): Boolean = prefs.getBoolean(diagnosticsConsentLocalKey, false)
+
+    fun setDiagnosticsConsentLocal(granted: Boolean) {
+        prefs.edit().putBoolean(diagnosticsConsentLocalKey, granted).apply()
+    }
+
+    fun markDiagnosticsConsentPending(granted: Boolean) {
+        prefs.edit().putBoolean(diagnosticsConsentPendingKey, granted).apply()
+    }
+
+    fun diagnosticsConsentPendingOrNull(): Boolean? =
+        if (prefs.contains(diagnosticsConsentPendingKey)) prefs.getBoolean(diagnosticsConsentPendingKey, false) else null
+
+    fun clearDiagnosticsConsentPending() {
+        prefs.edit().remove(diagnosticsConsentPendingKey).apply()
+    }
+
+    fun hasSeenUserPromptVersion(version: String): Boolean {
+        val clean = version.trim()
+        if (clean.isBlank()) return false
+        return prefs.getBoolean("$promptSeenVersionPrefix$clean", false)
+    }
+
+    fun markUserPromptVersionSeen(version: String) {
+        val clean = version.trim()
+        if (clean.isBlank()) return
+        prefs.edit().putBoolean("$promptSeenVersionPrefix$clean", true).apply()
+    }
 
     fun setDiagnosticsUploadEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(debugUploadEnabledKey, enabled).apply()
@@ -722,6 +780,7 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     suspend fun uploadRecentDebugLogs(force: Boolean = false): Int {
         if (token().isBlank()) return 0
+        if (!diagnosticsConsentGrantedLocal()) return 0
         if (!force && !diagnosticsUploadEnabled()) return 0
         val now = System.currentTimeMillis()
         val last = prefs.getLong(debugLastUploadAtKey, 0L)
@@ -1012,6 +1071,8 @@ class AppRepo(private val api: Api, private val context: Context) {
 
     suspend fun health(): HealthResponse = api.health()
     suspend fun me(): MeResponse = api.me("Bearer ${token()}")
+    suspend fun evaluateUserPrompts(appVersion: String): UserPromptEvaluationResponse =
+        api.evaluateUserPrompts("Bearer ${token()}", appVersion)
     suspend fun myInviteCode(): String = api.myInviteCode("Bearer ${token()}").inviteCode
     suspend fun rollMyInviteCode(): String = api.rollInviteCode("Bearer ${token()}").inviteCode
     suspend fun updateProfile(
@@ -1063,7 +1124,9 @@ class AppRepo(private val api: Api, private val context: Context) {
         inviteRegistrationPushEnabled: Boolean,
         photoReactionPushEnabled: Boolean,
         photoCommentPushEnabled: Boolean,
-        allowPhotoDownload: Boolean
+        allowPhotoDownload: Boolean,
+        diagnosticsConsentGranted: Boolean? = null,
+        diagnosticsConsentSource: String? = null
     ): User =
         api.updatePreferences(
             "Bearer ${token()}",
@@ -1072,7 +1135,9 @@ class AppRepo(private val api: Api, private val context: Context) {
                 inviteRegistrationPushEnabled = inviteRegistrationPushEnabled,
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
-                allowPhotoDownload = allowPhotoDownload
+                allowPhotoDownload = allowPhotoDownload,
+                diagnosticsConsentGranted = diagnosticsConsentGranted,
+                diagnosticsConsentSource = diagnosticsConsentSource
             )
         ).user
 
@@ -1462,6 +1527,10 @@ data class UiState(
     val customNotificationToneEnabled: Boolean = false,
     val customNotificationToneUri: String = "",
     val diagnosticsUploadEnabled: Boolean = false,
+    val diagnosticsConsentGranted: Boolean = false,
+    val diagnosticsConsentUpdatedAt: String? = null,
+    val showDiagnosticsConsentDialog: Boolean = false,
+    val diagnosticsConsentPrompt: UserPromptRule? = null,
     val debugLogs: List<DebugLogEntry> = emptyList(),
     val profileSectionExpanded: Map<String, Boolean> = emptyMap()
 )
@@ -1522,7 +1591,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
-            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled(),
+            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
+            diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
             debugLogs = repo.recentDebugLogs()
         )
     )
@@ -1667,7 +1737,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
-            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled(),
+            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
+            diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
             debugLogs = repo.recentDebugLogs(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
@@ -1738,7 +1809,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
-            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled(),
+            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
+            diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
             debugLogs = repo.recentDebugLogs(),
             invitePreview = null
         )
@@ -1776,6 +1848,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun setDiagnosticsUploadEnabled(enabled: Boolean) {
+        if (enabled && !state.diagnosticsConsentGranted) {
+            state = state.copy(message = "Bitte gib zuerst die freiwillige Diagnose-Freigabe.")
+            return
+        }
         repo.setDiagnosticsUploadEnabled(enabled)
         state = state.copy(diagnosticsUploadEnabled = enabled, message = if (enabled) "Diagnose-Upload aktiviert" else "Diagnose-Upload deaktiviert")
         if (enabled) {
@@ -1792,16 +1868,109 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    fun setDiagnosticsConsentGranted(granted: Boolean, source: String = "profile_toggle") {
+        repo.setDiagnosticsConsentLocal(granted)
+        if (!granted) {
+            repo.setDiagnosticsUploadEnabled(false)
+        }
+        state = state.copy(
+            diagnosticsConsentGranted = granted,
+            diagnosticsUploadEnabled = if (granted) state.diagnosticsUploadEnabled else false,
+            diagnosticsConsentUpdatedAt = OffsetDateTime.now().toString(),
+            showDiagnosticsConsentDialog = false,
+            diagnosticsConsentPrompt = null,
+            message = if (granted) "Danke, Diagnose-Freigabe aktiviert." else "Diagnose-Freigabe deaktiviert."
+        )
+        val current = state.user ?: return
+        viewModelScope.launch {
+            runCatching {
+                repo.updatePreferences(
+                    chatPushEnabled = current.chatPushEnabled,
+                    inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
+                    photoReactionPushEnabled = current.photoReactionPushEnabled,
+                    photoCommentPushEnabled = current.photoCommentPushEnabled,
+                    allowPhotoDownload = current.allowPhotoDownload,
+                    diagnosticsConsentGranted = granted,
+                    diagnosticsConsentSource = source
+                )
+            }.onSuccess { updated ->
+                repo.setDiagnosticsConsentLocal(updated.diagnosticsConsentGranted)
+                repo.clearDiagnosticsConsentPending()
+                state = state.copy(
+                    user = updated,
+                    diagnosticsConsentGranted = updated.diagnosticsConsentGranted,
+                    diagnosticsConsentUpdatedAt = updated.diagnosticsConsentUpdatedAt
+                )
+            }.onFailure {
+                repo.markDiagnosticsConsentPending(granted)
+                state = state.copy(message = "Freigabe lokal gespeichert. Server-Sync folgt automatisch.")
+            }
+        }
+    }
+
+    fun dismissDiagnosticsConsentDialogLater() {
+        state = state.copy(showDiagnosticsConsentDialog = false, diagnosticsConsentPrompt = null)
+    }
+
     fun refreshDebugLogs() {
         state = state.copy(debugLogs = repo.recentDebugLogs())
     }
 
     suspend fun autoUploadDebugLogsIfEnabled() {
-        if (!state.diagnosticsUploadEnabled) return
+        if (!state.diagnosticsUploadEnabled || !state.diagnosticsConsentGranted) return
         try {
             repo.uploadRecentDebugLogs()
         } catch (_: Throwable) {
         }
+    }
+
+    private suspend fun syncPendingDiagnosticsConsent(current: User) {
+        val pending = repo.diagnosticsConsentPendingOrNull() ?: return
+        if (current.diagnosticsConsentGranted == pending) {
+            repo.clearDiagnosticsConsentPending()
+            return
+        }
+        runCatching {
+            repo.updatePreferences(
+                chatPushEnabled = current.chatPushEnabled,
+                inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
+                photoReactionPushEnabled = current.photoReactionPushEnabled,
+                photoCommentPushEnabled = current.photoCommentPushEnabled,
+                allowPhotoDownload = current.allowPhotoDownload,
+                diagnosticsConsentGranted = pending,
+                diagnosticsConsentSource = "offline_retry"
+            )
+        }.onSuccess { updated ->
+            repo.clearDiagnosticsConsentPending()
+            repo.setDiagnosticsConsentLocal(updated.diagnosticsConsentGranted)
+            state = state.copy(
+                user = updated,
+                diagnosticsConsentGranted = updated.diagnosticsConsentGranted,
+                diagnosticsConsentUpdatedAt = updated.diagnosticsConsentUpdatedAt,
+                diagnosticsUploadEnabled = state.diagnosticsUploadEnabled && updated.diagnosticsConsentGranted
+            )
+        }
+    }
+
+    private suspend fun evaluateDiagnosticsConsentPrompt() {
+        val user = state.user ?: return
+        val version = BuildConfig.VERSION_NAME
+        if (version.isBlank()) return
+        if (repo.hasSeenUserPromptVersion(version)) return
+        if (user.diagnosticsConsentGranted) {
+            repo.markUserPromptVersionSeen(version)
+            return
+        }
+        val result = runCatching { repo.evaluateUserPrompts(version) }.getOrNull() ?: return
+        val prompt = result.items
+            .filter { it.enabled && it.triggerType.equals("app_version", ignoreCase = true) }
+            .maxByOrNull { it.priority }
+            ?: return
+        repo.markUserPromptVersionSeen(version)
+        state = state.copy(
+            showDiagnosticsConsentDialog = true,
+            diagnosticsConsentPrompt = prompt
+        )
     }
 
     fun exportDebugLogsForShare(): Uri? {
@@ -2053,13 +2222,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 notificationMasterEnabled = notificationMaster && autoUpdateEnabled && feedPostPushEnabled && me.chatPushEnabled && inviteRegistrationPushEnabled && photoReactionPushEnabled && photoCommentPushEnabled,
-                diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled(),
+                diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && me.diagnosticsConsentGranted,
+                diagnosticsConsentGranted = me.diagnosticsConsentGranted,
+                diagnosticsConsentUpdatedAt = me.diagnosticsConsentUpdatedAt,
                 debugLogs = repo.recentDebugLogs(),
                 profileSectionExpanded = profileSectionExpanded,
                 loading = false,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
             )
+            repo.setDiagnosticsConsentLocal(me.diagnosticsConsentGranted)
+            if (!me.diagnosticsConsentGranted && state.diagnosticsUploadEnabled) {
+                repo.setDiagnosticsUploadEnabled(false)
+                state = state.copy(diagnosticsUploadEnabled = false)
+            }
+            syncPendingDiagnosticsConsent(me)
+            evaluateDiagnosticsConsentPrompt()
             applyPendingLaunchNavigation(prompt, calendarDays)
             maybeShowProfileSetupPrompt(me)
             val focus = state.feedFocusDay
@@ -3561,6 +3739,35 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         )
     }
 
+    state.diagnosticsConsentPrompt?.let { consentPrompt ->
+        if (state.showDiagnosticsConsentDialog) {
+            AlertDialog(
+                onDismissRequest = { vm.dismissDiagnosticsConsentDialogLater() },
+                confirmButton = {
+                    TextButton(onClick = { vm.setDiagnosticsConsentGranted(true, "version_prompt") }) {
+                        Text(consentPrompt.confirmLabel.ifBlank { "Zustimmen" })
+                    }
+                },
+                dismissButton = {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = { vm.dismissDiagnosticsConsentDialogLater() }) { Text("Spaeter") }
+                        TextButton(onClick = { vm.setDiagnosticsConsentGranted(false, "version_prompt") }) {
+                            Text(consentPrompt.declineLabel.ifBlank { "Nicht teilen" })
+                        }
+                    }
+                },
+                title = { Text(consentPrompt.title.ifBlank { "Diagnose & Performance teilen?" }) },
+                text = {
+                    Text(
+                        consentPrompt.body.ifBlank {
+                            "Wenn du zustimmst, sendet die App technische Ladezeit- und Fehlerdaten zur Analyse. Das hilft bei der Fehlersuche. Du kannst das jederzeit im Profil widerrufen."
+                        }
+                    )
+                }
+            )
+        }
+    }
+
     if (viewerUrls.isNotEmpty()) {
         val closeViewer = {
             viewerUrls = emptyList()
@@ -3932,6 +4139,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
                     diagnosticsUploadEnabled = state.diagnosticsUploadEnabled,
+                    diagnosticsConsentGranted = state.diagnosticsConsentGranted,
                     debugLogs = state.debugLogs,
                     profileSetupJumpTarget = state.profileSetupJumpTarget,
                     profileSectionsExpanded = state.profileSectionExpanded,
@@ -3974,6 +4182,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onClearCustomNotificationTone = { vm.setCustomNotificationToneUri("") },
                     onTestCustomNotificationTone = { vm.testCustomNotificationTone() },
                     onDiagnosticsUploadEnabledChange = { vm.setDiagnosticsUploadEnabled(it) },
+                    onDiagnosticsConsentChange = { vm.setDiagnosticsConsentGranted(it, "profile_toggle") },
                     onRefreshDebugLogs = { vm.refreshDebugLogs() },
                     onShareDebugLogs = {
                         val uri = vm.exportDebugLogsForShare()
@@ -5289,6 +5498,7 @@ fun ProfileTab(
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
     diagnosticsUploadEnabled: Boolean,
+    diagnosticsConsentGranted: Boolean,
     debugLogs: List<DebugLogEntry>,
     profileSetupJumpTarget: String,
     profileSectionsExpanded: Map<String, Boolean>,
@@ -5321,6 +5531,7 @@ fun ProfileTab(
     onClearCustomNotificationTone: () -> Unit,
     onTestCustomNotificationTone: () -> Unit,
     onDiagnosticsUploadEnabledChange: (Boolean) -> Unit,
+    onDiagnosticsConsentChange: (Boolean) -> Unit,
     onRefreshDebugLogs: () -> Unit,
     onShareDebugLogs: () -> Unit,
     onProfileSectionExpandedChange: (String, Boolean) -> Unit,
@@ -6220,10 +6431,20 @@ fun ProfileTab(
                           subtitle = "Nur wenn du Probleme nachvollziehen oder uns Logs schicken willst."
                       ) {
                           SettingsToggleRow(
+                              label = "Freiwillige Datenfreigabe",
+                              checked = diagnosticsConsentGranted,
+                              onCheckedChange = onDiagnosticsConsentChange,
+                              supportingText = "Damit duerfen technische Ladezeit- und Fehlerdaten zur Analyse uebermittelt werden. Jederzeit widerrufbar."
+                          )
+                          SettingsToggleRow(
                               label = "Diagnose-Upload aktivieren",
                               checked = diagnosticsUploadEnabled,
                               onCheckedChange = onDiagnosticsUploadEnabledChange,
-                              supportingText = "Wenn aktiviert, werden Diagnose-Logs bei App-Start und bei neuen Fehlern automatisch an den Server geschickt."
+                              supportingText = if (diagnosticsConsentGranted) {
+                                  "Wenn aktiviert, werden Diagnose-Logs bei App-Start und bei neuen Fehlern automatisch an den Server geschickt."
+                              } else {
+                                  "Erfordert zuerst die freiwillige Datenfreigabe."
+                              }
                           )
                           Row(
                               modifier = Modifier.fillMaxWidth(),

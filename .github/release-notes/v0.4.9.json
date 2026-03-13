@@ -1,0 +1,16 @@
+{
+  "version": "0.4.9",
+  "releasedAt": "2026-03-13T00:00:00Z",
+  "highlights": [
+    "Freiwillige Diagnose- und Performance-Freigabe bei neuer App-Version.",
+    "Consent optional und jederzeit widerrufbar im Profil.",
+    "Diagnose-Upload nur noch bei Consent plus lokalem Upload-Toggle.",
+    "Admin kann Nutzer-Nachfragen zentral ueber Regeln steuern."
+  ],
+  "details": [
+    "Backend erweitert um Consent-Felder pro Nutzer und um Prompt-Regeln v1.",
+    "Neuer Endpoint zur Evaluierung aktiver Nutzer-Nachfragen je App-Version.",
+    "Admin-Settings unterstuetzen Trigger-Typen app_version, app_start und time_based.",
+    "Android synchronisiert Consent robust (lokal, serverseitig, offline retry)."
+  ]
+}

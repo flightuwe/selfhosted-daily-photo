@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -32,6 +33,18 @@ import (
 	"github.com/yosho/selfhosted-bereal/backend/internal/storage"
 	"gorm.io/gorm"
 )
+
+type userPromptRule struct {
+	ID            string `json:"id"`
+	Enabled       bool   `json:"enabled"`
+	TriggerType   string `json:"triggerType"`
+	Title         string `json:"title"`
+	Body          string `json:"body"`
+	ConfirmLabel  string `json:"confirmLabel"`
+	DeclineLabel  string `json:"declineLabel"`
+	CooldownHours int    `json:"cooldownHours"`
+	Priority      int    `json:"priority"`
+}
 
 type Server struct {
 	DB       *gorm.DB
@@ -73,6 +86,7 @@ func (s *Server) Router() *gin.Engine {
 		protected.Use(s.requireAuth)
 		{
 			protected.GET("/me", s.handleMe)
+			protected.GET("/me/user-prompts/evaluate", s.handleEvaluateUserPrompts)
 			protected.GET("/users/:id/profile", s.handleUserProfile)
 			protected.POST("/debug/client-log", s.handleClientDebugLog)
 			protected.GET("/me/invite", s.handleMyInvite)
@@ -544,11 +558,13 @@ func (s *Server) handleUpdateProfile(c *gin.Context) {
 func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	user, _ := userFromContext(c)
 	var req struct {
-		ChatPushEnabled               *bool `json:"chatPushEnabled"`
-		InviteRegistrationPushEnabled *bool `json:"inviteRegistrationPushEnabled"`
-		PhotoReactionPushEnabled      *bool `json:"photoReactionPushEnabled"`
-		PhotoCommentPushEnabled       *bool `json:"photoCommentPushEnabled"`
-		AllowPhotoDownload            *bool `json:"allowPhotoDownload"`
+		ChatPushEnabled               *bool  `json:"chatPushEnabled"`
+		InviteRegistrationPushEnabled *bool  `json:"inviteRegistrationPushEnabled"`
+		PhotoReactionPushEnabled      *bool  `json:"photoReactionPushEnabled"`
+		PhotoCommentPushEnabled       *bool  `json:"photoCommentPushEnabled"`
+		AllowPhotoDownload            *bool  `json:"allowPhotoDownload"`
+		DiagnosticsConsentGranted     *bool  `json:"diagnosticsConsentGranted"`
+		DiagnosticsConsentSource      string `json:"diagnosticsConsentSource"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
@@ -569,6 +585,19 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.AllowPhotoDownload != nil {
 		updates["allow_photo_download"] = *req.AllowPhotoDownload
+	}
+	if req.DiagnosticsConsentGranted != nil {
+		updates["diagnostics_consent_granted"] = *req.DiagnosticsConsentGranted
+		now := time.Now().In(s.Location)
+		updates["diagnostics_consent_updated_at"] = &now
+		source := strings.TrimSpace(req.DiagnosticsConsentSource)
+		if source == "" {
+			source = "profile_toggle"
+		}
+		if len(source) > 32 {
+			source = source[:32]
+		}
+		updates["diagnostics_consent_source"] = source
 	}
 	if len(updates) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no preferences provided"})
@@ -791,6 +820,54 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		"ownPhoto":             ownPhoto,
 		"triggerSource":        prompt.TriggerSource,
 		"requestedByUser":      prompt.RequestedBy,
+	})
+}
+
+func (s *Server) handleEvaluateUserPrompts(c *gin.Context) {
+	user, _ := userFromContext(c)
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+		return
+	}
+	settings = normalizeSettings(settings)
+	rules := parseUserPromptRulesJSON(settings.UserPromptRulesJSON)
+	appVersion := strings.TrimSpace(c.Query("appVersion"))
+
+	items := make([]gin.H, 0)
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
+		}
+		shouldShow := false
+		switch rule.TriggerType {
+		case "app_version":
+			shouldShow = appVersion != "" && !user.DiagnosticsConsentGranted
+		case "app_start":
+			shouldShow = !user.DiagnosticsConsentGranted
+		case "time_based":
+			shouldShow = false
+		}
+		if !shouldShow {
+			continue
+		}
+		items = append(items, gin.H{
+			"id":            rule.ID,
+			"enabled":       rule.Enabled,
+			"triggerType":   rule.TriggerType,
+			"title":         rule.Title,
+			"body":          rule.Body,
+			"confirmLabel":  rule.ConfirmLabel,
+			"declineLabel":  rule.DeclineLabel,
+			"cooldownHours": rule.CooldownHours,
+			"priority":      rule.Priority,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":      items,
+		"appVersion": appVersion,
+		"serverNow":  time.Now().In(s.Location),
 	})
 }
 
@@ -1313,23 +1390,24 @@ func (s *Server) handleGetSettings(c *gin.Context) {
 		return
 	}
 	settings = normalizeSettings(settings)
-	c.JSON(http.StatusOK, settings)
+	c.JSON(http.StatusOK, settingsJSON(settings))
 }
 
 type settingsRequest struct {
-	PromptWindowStartHour   int    `json:"promptWindowStartHour"`
-	PromptWindowEndHour     int    `json:"promptWindowEndHour"`
-	UploadWindowMinutes     int    `json:"uploadWindowMinutes"`
-	FeedCommentPreviewLimit int    `json:"feedCommentPreviewLimit"`
-	PromptNotificationText  string `json:"promptNotificationText"`
-	MaxUploadBytes          int64  `json:"maxUploadBytes"`
-	ChatCommandEnabled      bool   `json:"chatCommandEnabled"`
-	ChatCommandValue        string `json:"chatCommandValue"`
-	ChatCommandTrigger      bool   `json:"chatCommandTrigger"`
-	ChatCommandSendPush     bool   `json:"chatCommandSendPush"`
-	ChatCommandPushText     string `json:"chatCommandPushText"`
-	ChatCommandEchoChat     bool   `json:"chatCommandEchoChat"`
-	ChatCommandEchoText     string `json:"chatCommandEchoText"`
+	PromptWindowStartHour   int              `json:"promptWindowStartHour"`
+	PromptWindowEndHour     int              `json:"promptWindowEndHour"`
+	UploadWindowMinutes     int              `json:"uploadWindowMinutes"`
+	FeedCommentPreviewLimit int              `json:"feedCommentPreviewLimit"`
+	PromptNotificationText  string           `json:"promptNotificationText"`
+	MaxUploadBytes          int64            `json:"maxUploadBytes"`
+	ChatCommandEnabled      bool             `json:"chatCommandEnabled"`
+	ChatCommandValue        string           `json:"chatCommandValue"`
+	ChatCommandTrigger      bool             `json:"chatCommandTrigger"`
+	ChatCommandSendPush     bool             `json:"chatCommandSendPush"`
+	ChatCommandPushText     string           `json:"chatCommandPushText"`
+	ChatCommandEchoChat     bool             `json:"chatCommandEchoChat"`
+	ChatCommandEchoText     string           `json:"chatCommandEchoText"`
+	UserPromptRules         []userPromptRule `json:"userPromptRules"`
 }
 
 func (s *Server) handleUpdateSettings(c *gin.Context) {
@@ -1361,6 +1439,12 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "chat command is empty"})
 		return
 	}
+	if req.UserPromptRules != nil {
+		if err := validateUserPromptRulesRequest(req.UserPromptRules); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
 
 	oldStartHour := settings.PromptWindowStartHour
 	oldEndHour := settings.PromptWindowEndHour
@@ -1378,6 +1462,9 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	settings.ChatCommandPushText = req.ChatCommandPushText
 	settings.ChatCommandEchoChat = req.ChatCommandEchoChat
 	settings.ChatCommandEchoText = req.ChatCommandEchoText
+	if req.UserPromptRules != nil {
+		settings.UserPromptRulesJSON = encodeUserPromptRulesJSON(req.UserPromptRules)
+	}
 	settings = normalizeSettings(settings)
 
 	if err := s.DB.Save(&settings).Error; err != nil {
@@ -1392,7 +1479,7 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, settings)
+	c.JSON(http.StatusOK, settingsJSON(settings))
 }
 
 func (s *Server) handleTriggerPrompt(c *gin.Context) {
@@ -2105,11 +2192,13 @@ func (s *Server) handleAdminStats(c *gin.Context) {
 	var totalImages int64
 	var runningDays int64
 	var storageBytes int64
+	var diagnosticsConsentUsers int64
 
 	_ = s.DB.Model(&models.User{}).Count(&users).Error
 	_ = s.DB.Model(&models.Photo{}).Count(&photos).Error
 	_ = s.DB.Model(&models.DeviceToken{}).Count(&devices).Error
 	_ = s.DB.Model(&models.DailyPrompt{}).Count(&prompts).Error
+	_ = s.DB.Model(&models.User{}).Where("diagnostics_consent_granted = ?", true).Count(&diagnosticsConsentUsers).Error
 	_ = s.DB.Raw("SELECT COALESCE(SUM(CASE WHEN second_path IS NOT NULL AND second_path <> '' THEN 2 ELSE 1 END),0) FROM photos").Scan(&totalImages).Error
 
 	var startedAt *time.Time
@@ -2139,13 +2228,15 @@ WHERE created_at IS NOT NULL
 	})
 
 	c.JSON(http.StatusOK, gin.H{
-		"users":        users,
-		"photos":       photos,
-		"devices":      devices,
-		"prompts":      prompts,
-		"totalImages":  totalImages,
-		"runningDays":  runningDays,
-		"storageBytes": storageBytes,
+		"users":                   users,
+		"photos":                  photos,
+		"devices":                 devices,
+		"prompts":                 prompts,
+		"totalImages":             totalImages,
+		"runningDays":             runningDays,
+		"storageBytes":            storageBytes,
+		"diagnosticsConsentUsers": diagnosticsConsentUsers,
+		"diagnosticsConsentRate":  safeRatio(int(diagnosticsConsentUsers), maxInt(1, int(users))),
 	})
 }
 
@@ -4568,6 +4659,9 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"quietHoursEnabled":             u.QuietHoursEnabled,
 		"quietHoursStart":               defaultIfBlank(u.QuietHoursStart, "22:00"),
 		"quietHoursEnd":                 defaultIfBlank(u.QuietHoursEnd, "07:00"),
+		"diagnosticsConsentGranted":     u.DiagnosticsConsentGranted,
+		"diagnosticsConsentUpdatedAt":   u.DiagnosticsConsentUpdatedAt,
+		"diagnosticsConsentSource":      strings.TrimSpace(u.DiagnosticsConsentSource),
 		"createdAt":                     u.CreatedAt,
 	}
 }
@@ -5423,6 +5517,125 @@ func isHHMM(v string) bool {
 	return hhmmRe.MatchString(strings.TrimSpace(v))
 }
 
+func defaultUserPromptRules() []userPromptRule {
+	return []userPromptRule{
+		{
+			ID:            "diagnostics_consent_v1",
+			Enabled:       true,
+			TriggerType:   "app_version",
+			Title:         "Diagnose & Performance teilen?",
+			Body:          "Wenn du zustimmst, sendet die App bei Problemen und Ladezeiten technische Diagnosedaten. Das hilft uns, Fehler und Engpaesse schneller zu finden. Du kannst das jederzeit im Profil widerrufen.",
+			ConfirmLabel:  "Zustimmen",
+			DeclineLabel:  "Nicht teilen",
+			CooldownHours: 0,
+			Priority:      10,
+		},
+	}
+}
+
+func sanitizeUserPromptRules(in []userPromptRule) []userPromptRule {
+	out := make([]userPromptRule, 0, len(in))
+	seen := map[string]struct{}{}
+	for _, rule := range in {
+		id := strings.TrimSpace(rule.ID)
+		trigger := strings.TrimSpace(strings.ToLower(rule.TriggerType))
+		title := strings.TrimSpace(rule.Title)
+		body := strings.TrimSpace(rule.Body)
+		confirm := strings.TrimSpace(rule.ConfirmLabel)
+		decline := strings.TrimSpace(rule.DeclineLabel)
+		if id == "" || title == "" || body == "" || confirm == "" || decline == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		switch trigger {
+		case "app_version", "app_start", "time_based":
+		default:
+			continue
+		}
+		cooldown := rule.CooldownHours
+		if cooldown < 0 {
+			cooldown = 0
+		}
+		if cooldown > 24*30 {
+			cooldown = 24 * 30
+		}
+		priority := rule.Priority
+		if priority < 0 {
+			priority = 0
+		}
+		if priority > 1000 {
+			priority = 1000
+		}
+		out = append(out, userPromptRule{
+			ID:            id,
+			Enabled:       rule.Enabled,
+			TriggerType:   trigger,
+			Title:         title,
+			Body:          body,
+			ConfirmLabel:  confirm,
+			DeclineLabel:  decline,
+			CooldownHours: cooldown,
+			Priority:      priority,
+		})
+		seen[id] = struct{}{}
+	}
+	if len(out) == 0 {
+		return defaultUserPromptRules()
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority > out[j].Priority })
+	return out
+}
+
+func parseUserPromptRulesJSON(raw string) []userPromptRule {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return defaultUserPromptRules()
+	}
+	var rules []userPromptRule
+	if err := json.Unmarshal([]byte(trimmed), &rules); err != nil {
+		return defaultUserPromptRules()
+	}
+	return sanitizeUserPromptRules(rules)
+}
+
+func validateUserPromptRulesRequest(rules []userPromptRule) error {
+	seen := map[string]struct{}{}
+	for _, rule := range rules {
+		id := strings.TrimSpace(rule.ID)
+		if id == "" {
+			return errors.New("user prompt rule id required")
+		}
+		if _, exists := seen[id]; exists {
+			return errors.New("duplicate user prompt rule id")
+		}
+		seen[id] = struct{}{}
+		trigger := strings.ToLower(strings.TrimSpace(rule.TriggerType))
+		switch trigger {
+		case "app_version", "app_start", "time_based":
+		default:
+			return errors.New("invalid user prompt triggerType")
+		}
+		if strings.TrimSpace(rule.Title) == "" || strings.TrimSpace(rule.Body) == "" {
+			return errors.New("user prompt title/body required")
+		}
+		if strings.TrimSpace(rule.ConfirmLabel) == "" || strings.TrimSpace(rule.DeclineLabel) == "" {
+			return errors.New("user prompt labels required")
+		}
+	}
+	return nil
+}
+
+func encodeUserPromptRulesJSON(rules []userPromptRule) string {
+	safe := sanitizeUserPromptRules(rules)
+	buf, err := json.Marshal(safe)
+	if err != nil {
+		return "[]"
+	}
+	return string(buf)
+}
+
 func normalizeSettings(settings models.AppSettings) models.AppSettings {
 	if strings.TrimSpace(settings.ChatCommandValue) == "" {
 		settings.ChatCommandValue = "-moment"
@@ -5442,7 +5655,31 @@ func normalizeSettings(settings models.AppSettings) models.AppSettings {
 	if settings.FeedCommentPreviewLimit > 50 {
 		settings.FeedCommentPreviewLimit = 50
 	}
+	settings.UserPromptRulesJSON = encodeUserPromptRulesJSON(parseUserPromptRulesJSON(settings.UserPromptRulesJSON))
 	return settings
+}
+
+func settingsJSON(settings models.AppSettings) gin.H {
+	return gin.H{
+		"id":                      settings.ID,
+		"promptWindowStartHour":   settings.PromptWindowStartHour,
+		"promptWindowEndHour":     settings.PromptWindowEndHour,
+		"uploadWindowMinutes":     settings.UploadWindowMinutes,
+		"feedCommentPreviewLimit": settings.FeedCommentPreviewLimit,
+		"promptNotificationText":  settings.PromptNotificationText,
+		"maxUploadBytes":          settings.MaxUploadBytes,
+		"chatCommandEnabled":      settings.ChatCommandEnabled,
+		"chatCommandValue":        settings.ChatCommandValue,
+		"chatCommandTrigger":      settings.ChatCommandTrigger,
+		"chatCommandSendPush":     settings.ChatCommandSendPush,
+		"chatCommandPushText":     settings.ChatCommandPushText,
+		"chatCommandEchoChat":     settings.ChatCommandEchoChat,
+		"chatCommandEchoText":     settings.ChatCommandEchoText,
+		"userPromptRulesJson":     settings.UserPromptRulesJSON,
+		"userPromptRules":         parseUserPromptRulesJSON(settings.UserPromptRulesJSON),
+		"createdAt":               settings.CreatedAt,
+		"updatedAt":               settings.UpdatedAt,
+	}
 }
 
 func normalizeCommandValue(v string) string {

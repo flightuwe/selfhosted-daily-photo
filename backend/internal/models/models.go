@@ -25,6 +25,9 @@ type User struct {
 	QuietHoursEnabled             bool       `gorm:"default:false" json:"quietHoursEnabled"`
 	QuietHoursStart               string     `gorm:"size:5;default:'22:00'" json:"quietHoursStart"`
 	QuietHoursEnd                 string     `gorm:"size:5;default:'07:00'" json:"quietHoursEnd"`
+	DiagnosticsConsentGranted     bool       `gorm:"default:false" json:"diagnosticsConsentGranted"`
+	DiagnosticsConsentUpdatedAt   *time.Time `json:"diagnosticsConsentUpdatedAt"`
+	DiagnosticsConsentSource      string     `gorm:"size:32" json:"diagnosticsConsentSource"`
 	CreatedAt                     time.Time  `json:"createdAt"`
 }
 
@@ -64,6 +67,7 @@ type AppSettings struct {
 	ChatCommandPushText     string    `gorm:"size:255;default:'{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.'" json:"chatCommandPushText"`
 	ChatCommandEchoChat     bool      `gorm:"default:true" json:"chatCommandEchoChat"`
 	ChatCommandEchoText     string    `gorm:"size:255;default:'Moment wurde von {user} angefordert.'" json:"chatCommandEchoText"`
+	UserPromptRulesJSON     string    `gorm:"type:text" json:"userPromptRulesJson"`
 	CreatedAt               time.Time `json:"createdAt"`
 	UpdatedAt               time.Time `json:"updatedAt"`
 }
@@ -103,21 +107,21 @@ type DailyUserActivity struct {
 }
 
 type Photo struct {
-	ID                 uint       `gorm:"primaryKey" json:"id"`
-	UserID             uint       `gorm:"index;not null" json:"userId"`
-	User               User       `json:"user"`
-	Day                string     `gorm:"index;size:10;not null" json:"day"`
-	PromptOnly         bool       `gorm:"default:false" json:"promptOnly"`
-	FilePath           string     `gorm:"size:255;not null" json:"filePath"`
-	SecondPath         string     `gorm:"size:255" json:"secondPath"`
-	CapsulePreviewPath string     `gorm:"size:255" json:"capsulePreviewPath"`
-	CapsuleSecondPreviewPath string `gorm:"size:255" json:"capsuleSecondPreviewPath"`
-	Caption            string     `gorm:"size:255" json:"caption"`
-	CapsuleMode        string     `gorm:"size:16" json:"capsuleMode"`
-	CapsuleVisibleAt   *time.Time `json:"capsuleVisibleAt"`
-	CapsulePrivate     bool       `gorm:"default:false" json:"capsulePrivate"`
-	CapsuleGroupRemind bool       `gorm:"default:false" json:"capsuleGroupRemind"`
-	CreatedAt          time.Time  `json:"createdAt"`
+	ID                       uint       `gorm:"primaryKey" json:"id"`
+	UserID                   uint       `gorm:"index;not null" json:"userId"`
+	User                     User       `json:"user"`
+	Day                      string     `gorm:"index;size:10;not null" json:"day"`
+	PromptOnly               bool       `gorm:"default:false" json:"promptOnly"`
+	FilePath                 string     `gorm:"size:255;not null" json:"filePath"`
+	SecondPath               string     `gorm:"size:255" json:"secondPath"`
+	CapsulePreviewPath       string     `gorm:"size:255" json:"capsulePreviewPath"`
+	CapsuleSecondPreviewPath string     `gorm:"size:255" json:"capsuleSecondPreviewPath"`
+	Caption                  string     `gorm:"size:255" json:"caption"`
+	CapsuleMode              string     `gorm:"size:16" json:"capsuleMode"`
+	CapsuleVisibleAt         *time.Time `json:"capsuleVisibleAt"`
+	CapsulePrivate           bool       `gorm:"default:false" json:"capsulePrivate"`
+	CapsuleGroupRemind       bool       `gorm:"default:false" json:"capsuleGroupRemind"`
+	CreatedAt                time.Time  `json:"createdAt"`
 }
 
 type PhotoReaction struct {

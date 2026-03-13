@@ -3,6 +3,18 @@ export type AuthResponse = {
   user: { id: number; username: string; isAdmin: boolean };
 };
 
+export type UserPromptRule = {
+  id: string;
+  enabled: boolean;
+  triggerType: "app_version" | "app_start" | "time_based";
+  title: string;
+  body: string;
+  confirmLabel: string;
+  declineLabel: string;
+  cooldownHours: number;
+  priority: number;
+};
+
 export type Settings = {
   promptWindowStartHour: number;
   promptWindowEndHour: number;
@@ -17,6 +29,7 @@ export type Settings = {
   chatCommandPushText: string;
   chatCommandEchoChat: boolean;
   chatCommandEchoText: string;
+  userPromptRules: UserPromptRule[];
 };
 
 export type AdminStats = {
@@ -27,6 +40,8 @@ export type AdminStats = {
   totalImages: number;
   runningDays: number;
   storageBytes: number;
+  diagnosticsConsentUsers?: number;
+  diagnosticsConsentRate?: number;
 };
 
 export type AdminUser = {
@@ -378,6 +393,19 @@ const settingsDefaults: Settings = {
   chatCommandPushText: "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
   chatCommandEchoChat: true,
   chatCommandEchoText: "Moment wurde von {user} angefordert.",
+  userPromptRules: [
+    {
+      id: "diagnostics_consent_v1",
+      enabled: true,
+      triggerType: "app_version",
+      title: "Diagnose & Performance teilen?",
+      body: "Wenn du zustimmst, sendet die App bei Problemen und Ladezeiten technische Diagnosedaten. Das hilft uns, Fehler und Engpaesse schneller zu finden. Du kannst das jederzeit im Profil widerrufen.",
+      confirmLabel: "Zustimmen",
+      declineLabel: "Nicht teilen",
+      cooldownHours: 0,
+      priority: 10,
+    },
+  ],
 };
 
 async function parse<T>(res: Response): Promise<T> {
@@ -389,6 +417,21 @@ async function parse<T>(res: Response): Promise<T> {
 }
 
 function normalizeSettings(raw: any): Settings {
+  const rawRules = Array.isArray(raw?.userPromptRules) ? raw.userPromptRules : [];
+  const normalizedRules: UserPromptRule[] =
+    rawRules.length > 0
+      ? rawRules.map((rule: any, idx: number) => ({
+          id: String(rule?.id ?? `rule_${idx + 1}`),
+          enabled: Boolean(rule?.enabled ?? true),
+          triggerType: (String(rule?.triggerType ?? "app_version") as UserPromptRule["triggerType"]),
+          title: String(rule?.title ?? ""),
+          body: String(rule?.body ?? ""),
+          confirmLabel: String(rule?.confirmLabel ?? "Zustimmen"),
+          declineLabel: String(rule?.declineLabel ?? "Nicht teilen"),
+          cooldownHours: Number(rule?.cooldownHours ?? 0),
+          priority: Number(rule?.priority ?? 0),
+        }))
+      : settingsDefaults.userPromptRules;
   return {
     promptWindowStartHour: Number(raw?.promptWindowStartHour ?? raw?.PromptWindowStartHour ?? settingsDefaults.promptWindowStartHour),
     promptWindowEndHour: Number(raw?.promptWindowEndHour ?? raw?.PromptWindowEndHour ?? settingsDefaults.promptWindowEndHour),
@@ -403,6 +446,7 @@ function normalizeSettings(raw: any): Settings {
     chatCommandPushText: String(raw?.chatCommandPushText ?? raw?.ChatCommandPushText ?? settingsDefaults.chatCommandPushText),
     chatCommandEchoChat: Boolean(raw?.chatCommandEchoChat ?? raw?.ChatCommandEchoChat ?? settingsDefaults.chatCommandEchoChat),
     chatCommandEchoText: String(raw?.chatCommandEchoText ?? raw?.ChatCommandEchoText ?? settingsDefaults.chatCommandEchoText),
+    userPromptRules: normalizedRules,
   };
 }
 
