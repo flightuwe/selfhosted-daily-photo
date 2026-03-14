@@ -1622,7 +1622,7 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 
 	sendResult := notify.SendResult{}
 	var sendErr error
-	removed := 0
+	removed := int64(0)
 	if mode != "silent" {
 		sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
 		s.recordPushResult(sendResult, sendErr)
