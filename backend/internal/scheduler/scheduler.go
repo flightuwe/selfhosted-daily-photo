@@ -4,10 +4,12 @@ import (
 	crand "crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
@@ -16,9 +18,12 @@ import (
 )
 
 type DailyPromptService struct {
-	DB       *gorm.DB
-	Location *time.Location
+	DB             *gorm.DB
+	Location       *time.Location
 	ServerInstance string
+	tickRunning    int32
+	lastTickAt     atomic.Int64
+	lastTickResult atomic.Value
 }
 
 var ErrAlreadyTriggeredToday = errors.New("already_triggered_today")
@@ -30,11 +35,21 @@ type TriggerAttemptMeta struct {
 	Meta         map[string]any
 }
 
+const (
+	schedulerLeaseName               = "daily_trigger_scheduler"
+	schedulerLeaseTimeout            = 90 * time.Second
+	schedulerAutoPauseWindow         = 3 * time.Minute
+	schedulerAutoPauseAttemptLimit   = 4
+	dispatchKindDailyPromptPush      = "daily_prompt_push"
+)
+
 func (s *DailyPromptService) Start(enabled bool, onTrigger func(models.DailyPrompt, models.AppSettings)) {
 	if !enabled {
 		log.Println("scheduler disabled")
+		s.lastTickResult.Store("disabled")
 		return
 	}
+	s.lastTickResult.Store("starting")
 
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -48,40 +63,81 @@ func (s *DailyPromptService) Start(enabled bool, onTrigger func(models.DailyProm
 }
 
 func (s *DailyPromptService) tick(onTrigger func(models.DailyPrompt, models.AppSettings)) {
+	if !atomic.CompareAndSwapInt32(&s.tickRunning, 0, 1) {
+		s.recordTick("skipped:tick_running")
+		return
+	}
+	defer atomic.StoreInt32(&s.tickRunning, 0)
+	s.recordTick("running")
+
 	now := time.Now().In(s.Location)
 	day := now.Format("2006-01-02")
+
+	if s.isAutoPaused() {
+		_ = s.writeSchedulerSkipAudit(day, now, "scheduler_auto_paused")
+		s.recordTick("blocked:scheduler_auto_paused")
+		return
+	}
+	leaseOwner, leaseGranted, leaseErr := s.acquireOrRenewSchedulerLease(now)
+	if leaseErr != nil {
+		log.Printf("scheduler lease failed: %v", leaseErr)
+		_ = s.writeSchedulerSkipAudit(day, now, "lease_error")
+		s.recordTick("failed:lease_error")
+		return
+	}
+	if !leaseGranted {
+		_ = s.writeSchedulerSkipAudit(day, now, "not_lease_owner")
+		s.recordTick("blocked:not_lease_owner")
+		return
+	}
+	if leaseOwner == "" {
+		leaseOwner = s.resolvedServerInstance()
+	}
 
 	var existing models.DailyPrompt
 	if err := s.DB.Where("day = ?", day).First(&existing).Error; err == nil {
 		if existing.TriggeredAt != nil {
+			s.recordTick("noop:already_triggered")
 			return
 		}
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		log.Printf("scheduler day-check failed: %v", err)
+		s.recordTick("failed:day_check")
 		return
 	}
 
 	plan, err := s.EnsurePlanForDay(day)
 	if err != nil {
 		log.Printf("ensure plan failed: %v", err)
+		s.recordTick("failed:ensure_plan")
 		return
 	}
 	var settings models.AppSettings
 	if err := s.DB.First(&settings).Error; err == nil {
 		_, windowEnd := promptWindowBounds(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, s.Location), settings, s.Location)
 		if !now.Before(windowEnd) {
+			s.recordTick("noop:outside_window")
 			return
 		}
 	}
 	if now.Before(plan.PlannedAt.In(s.Location)) {
+		s.recordTick("noop:planned_later")
 		return
 	}
 
-	prompt, settings, err := s.TriggerNow()
+	prompt, settings, err := s.TriggerNowWithSourceAndMeta("scheduler", nil, TriggerAttemptMeta{
+		AttemptType:    "scheduler",
+		ServerInstance: leaseOwner,
+	})
 	if err != nil {
 		log.Printf("daily trigger failed: %v", err)
+		if s.shouldAutoPauseScheduler(now) {
+			_ = s.setAutoPaused("scheduler_attempt_storm")
+		}
+		s.recordTick("failed:trigger")
 		return
 	}
+	s.recordTick("triggered")
 	if onTrigger != nil {
 		onTrigger(prompt, settings)
 	}
@@ -300,15 +356,7 @@ func (s *DailyPromptService) TriggerNowWithSourceAndMeta(source string, requeste
 
 	serverInstance := strings.TrimSpace(meta.ServerInstance)
 	if serverInstance == "" {
-		serverInstance = strings.TrimSpace(s.ServerInstance)
-	}
-	if serverInstance == "" {
-		if host, hostErr := os.Hostname(); hostErr == nil {
-			serverInstance = strings.TrimSpace(host)
-		}
-	}
-	if serverInstance == "" {
-		serverInstance = "unknown"
+		serverInstance = s.resolvedServerInstance()
 	}
 
 	auditEvent := models.DailyTriggerAuditEvent{
@@ -398,7 +446,11 @@ func (s *DailyPromptService) TriggerNowWithSourceAndMeta(source string, requeste
 		auditEvent.AfterTriggeredAt = prompt.TriggeredAt
 		auditEvent.AfterTriggerSource = strings.TrimSpace(prompt.TriggerSource)
 		auditEvent.Result = "triggered"
-		auditEvent.Reason = "ok"
+		if source == "admin_reset" {
+			auditEvent.Reason = "manual_reset"
+		} else {
+			auditEvent.Reason = "ok"
+		}
 		return nil
 	}); err != nil {
 		resultErr = err
@@ -431,4 +483,222 @@ func (s *DailyPromptService) TriggerNowWithSourceAndMeta(source string, requeste
 	}
 
 	return prompt, settings, nil
+}
+
+func (s *DailyPromptService) recordTick(result string) {
+	now := time.Now().In(s.Location)
+	s.lastTickAt.Store(now.Unix())
+	s.lastTickResult.Store(strings.TrimSpace(result))
+}
+
+func (s *DailyPromptService) acquireOrRenewSchedulerLease(now time.Time) (owner string, granted bool, err error) {
+	ownerID := s.resolvedServerInstance()
+	expiresAt := now.Add(schedulerLeaseTimeout)
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
+		var lease models.SchedulerLease
+		findErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("lease_name = ?", schedulerLeaseName).
+			First(&lease).Error
+		if findErr != nil {
+			if errors.Is(findErr, gorm.ErrRecordNotFound) {
+				lease = models.SchedulerLease{
+					LeaseName:   schedulerLeaseName,
+					OwnerID:     ownerID,
+					HeartbeatAt: now,
+					ExpiresAt:   expiresAt,
+				}
+				if createErr := tx.Create(&lease).Error; createErr != nil {
+					return createErr
+				}
+				owner = ownerID
+				granted = true
+				return nil
+			}
+			return findErr
+		}
+
+		owner = strings.TrimSpace(lease.OwnerID)
+		if owner == ownerID || !lease.ExpiresAt.After(now) {
+			lease.OwnerID = ownerID
+			lease.HeartbeatAt = now
+			lease.ExpiresAt = expiresAt
+			if saveErr := tx.Save(&lease).Error; saveErr != nil {
+				return saveErr
+			}
+			owner = ownerID
+			granted = true
+			return nil
+		}
+		granted = false
+		return nil
+	})
+	return owner, granted, err
+}
+
+func (s *DailyPromptService) writeSchedulerSkipAudit(day string, at time.Time, reason string) error {
+	serverInstance := s.resolvedServerInstance()
+	row := models.DailyTriggerAuditEvent{
+		Day:            day,
+		OccurredAt:     at,
+		Source:         "scheduler",
+		AttemptType:    "scheduler",
+		Result:         "blocked",
+		Reason:         strings.TrimSpace(reason),
+		ServerInstance: serverInstance,
+	}
+	return s.DB.Create(&row).Error
+}
+
+func (s *DailyPromptService) isAutoPaused() bool {
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err != nil {
+		return false
+	}
+	return settings.SchedulerAutoPaused
+}
+
+func (s *DailyPromptService) setAutoPaused(reason string) error {
+	now := time.Now().In(s.Location)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "manual"
+	}
+	return s.DB.Model(&models.AppSettings{}).
+		Where("id > 0").
+		Updates(map[string]any{
+			"scheduler_auto_paused":       true,
+			"scheduler_auto_pause_reason": reason,
+			"scheduler_auto_paused_at":    &now,
+		}).Error
+}
+
+func (s *DailyPromptService) clearAutoPaused() error {
+	return s.DB.Model(&models.AppSettings{}).
+		Where("id > 0").
+		Updates(map[string]any{
+			"scheduler_auto_paused":       false,
+			"scheduler_auto_pause_reason": "",
+			"scheduler_auto_paused_at":    nil,
+		}).Error
+}
+
+func (s *DailyPromptService) SetAutoPaused(reason string) error {
+	return s.setAutoPaused(reason)
+}
+
+func (s *DailyPromptService) ClearAutoPaused() error {
+	return s.clearAutoPaused()
+}
+
+func (s *DailyPromptService) shouldAutoPauseScheduler(now time.Time) bool {
+	var count int64
+	err := s.DB.Model(&models.DailyTriggerAuditEvent{}).
+		Where("attempt_type = ? AND occurred_at >= ? AND result = ?", "scheduler", now.Add(-schedulerAutoPauseWindow), "failed").
+		Count(&count).Error
+	if err != nil {
+		return false
+	}
+	return count >= schedulerAutoPauseAttemptLimit
+}
+
+func (s *DailyPromptService) RuntimeState(now time.Time) map[string]any {
+	if now.IsZero() {
+		now = time.Now().In(s.Location)
+	}
+	state := map[string]any{
+		"serverInstance": s.resolvedServerInstance(),
+		"leaseName":      schedulerLeaseName,
+		"leaseTimeoutSec": int64(schedulerLeaseTimeout / time.Second),
+	}
+	lastTickUnix := s.lastTickAt.Load()
+	if lastTickUnix > 0 {
+		state["lastTickAt"] = time.Unix(lastTickUnix, 0).In(s.Location)
+	}
+	if v := s.lastTickResult.Load(); v != nil {
+		state["lastTickResult"] = fmt.Sprint(v)
+	}
+	state["tickRunning"] = atomic.LoadInt32(&s.tickRunning) == 1
+
+	var lease models.SchedulerLease
+	serverInstance := s.resolvedServerInstance()
+	if err := s.DB.Where("lease_name = ?", schedulerLeaseName).First(&lease).Error; err == nil {
+		state["lease"] = map[string]any{
+			"ownerId":     lease.OwnerID,
+			"heartbeatAt": lease.HeartbeatAt,
+			"expiresAt":   lease.ExpiresAt,
+			"isExpired":   !lease.ExpiresAt.After(now),
+			"isOwner":     strings.TrimSpace(lease.OwnerID) == serverInstance,
+		}
+	} else {
+		state["lease"] = map[string]any{"ownerId": "", "isExpired": true}
+	}
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err == nil {
+		state["autoPaused"] = settings.SchedulerAutoPaused
+		state["autoPauseReason"] = settings.SchedulerAutoPauseReason
+		state["autoPausedAt"] = settings.SchedulerAutoPausedAt
+	}
+	return state
+}
+
+func (s *DailyPromptService) ReleaseLease() error {
+	return s.DB.Where("lease_name = ?", schedulerLeaseName).Delete(&models.SchedulerLease{}).Error
+}
+
+func (s *DailyPromptService) ReserveDispatch(day string, kind string, source string, requestID string) (bool, models.DailyDispatch, error) {
+	day = strings.TrimSpace(day)
+	kind = strings.TrimSpace(kind)
+	if day == "" || kind == "" {
+		return false, models.DailyDispatch{}, errors.New("invalid dispatch key")
+	}
+	serverInstance := s.resolvedServerInstance()
+	row := models.DailyDispatch{
+		Day:            day,
+		Kind:           kind,
+		Source:         strings.TrimSpace(source),
+		RequestID:      strings.TrimSpace(requestID),
+		ServerInstance: serverInstance,
+		Status:         "reserved",
+	}
+	if err := s.DB.Create(&row).Error; err != nil {
+		var existing models.DailyDispatch
+		if loadErr := s.DB.Where("day = ? AND kind = ?", day, kind).First(&existing).Error; loadErr == nil {
+			return false, existing, nil
+		}
+		return false, models.DailyDispatch{}, err
+	}
+	return true, row, nil
+}
+
+func (s *DailyPromptService) MarkDispatchResult(day string, kind string, status string, sent int64, failed int64, errMsg string) {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = "unknown"
+	}
+	updates := map[string]any{
+		"status":        status,
+		"sent_count":    sent,
+		"failed_count":  failed,
+		"error_message": strings.TrimSpace(errMsg),
+		"updated_at":    time.Now().In(s.Location),
+	}
+	_ = s.DB.Model(&models.DailyDispatch{}).Where("day = ? AND kind = ?", day, kind).Updates(updates).Error
+}
+
+func (s *DailyPromptService) DispatchKindDailyPromptPush() string {
+	return dispatchKindDailyPromptPush
+}
+
+func (s *DailyPromptService) resolvedServerInstance() string {
+	id := strings.TrimSpace(s.ServerInstance)
+	if id != "" {
+		return id
+	}
+	if host, err := os.Hostname(); err == nil {
+		id = strings.TrimSpace(host)
+	}
+	if id == "" {
+		id = "unknown"
+	}
+	return id
 }

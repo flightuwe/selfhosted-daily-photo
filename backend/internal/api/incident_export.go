@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -66,6 +67,9 @@ func (s *Server) handleAdminIncidentExport(c *gin.Context) {
 		return
 	}
 	triggerSummary := summarizeTriggerAuditRows(triggerRows)
+	runtimeState := s.Prompt.RuntimeState(time.Now().In(s.Location))
+	dispatchState := s.collectDispatchDedupeState(from, to)
+	rootCauseHints := buildRootCauseHints(triggerRows, triggerSummary)
 
 	backendLog, backendWarnings := s.collectForensicLogExcerpt(s.Config.ForensicBackendLogPath, from, to, "backend")
 	gatewayLog := gin.H{"available": false}
@@ -102,6 +106,11 @@ func (s *Server) handleAdminIncidentExport(c *gin.Context) {
 				"lastTriggerSource": lastSource,
 				"gatewayLogAvailable": gatewayLog["available"],
 				"backendLogAvailable": backendLog["available"],
+			},
+			"triggerRuntime": gin.H{
+				"autoPaused": runtimeState["autoPaused"],
+				"lastTickAt": runtimeState["lastTickAt"],
+				"lastTickResult": runtimeState["lastTickResult"],
 			},
 			"collectionWarnings": collectionWarnings,
 		})
@@ -159,6 +168,17 @@ func (s *Server) handleAdminIncidentExport(c *gin.Context) {
 		},
 		"historySlice":       historySlice,
 		"liveSnapshot":       liveSnapshot,
+		"schedulerLeaseState": runtimeState["lease"],
+		"triggerCoordinatorState": gin.H{
+			"tickRunning":   runtimeState["tickRunning"],
+			"lastTickAt":    runtimeState["lastTickAt"],
+			"lastTickResult": runtimeState["lastTickResult"],
+			"autoPaused":    runtimeState["autoPaused"],
+			"autoPauseReason": runtimeState["autoPauseReason"],
+			"autoPausedAt":  runtimeState["autoPausedAt"],
+		},
+		"dispatchDedupeState": dispatchState,
+		"rootCauseHints":      rootCauseHints,
 		"rawBackendLogExcerpt": backendLog,
 		"rawGatewayLogExcerpt": gatewayLog,
 		"collectionWarnings": collectionWarnings,
@@ -274,6 +294,9 @@ func (s *Server) collectForensicLogExcerpt(path string, from, to time.Time, kind
 	if path == "" {
 		return gin.H{"available": false, "path": "", "lines": []string{}}, append(warnings, fmt.Sprintf("%s log path not configured", kind))
 	}
+	if ensureErr := ensureForensicLogFile(path); ensureErr != nil {
+		warnings = append(warnings, fmt.Sprintf("%s log path init failed: %v", kind, ensureErr))
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return gin.H{"available": false, "path": path, "lines": []string{}}, append(warnings, fmt.Sprintf("%s log not available: %v", kind, err))
@@ -324,6 +347,26 @@ func (s *Server) collectForensicLogExcerpt(path string, from, to time.Time, kind
 		"maxBytes":      incidentLogMaxBytes,
 		"lines":         lines,
 	}, warnings
+}
+
+func ensureForensicLogFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 func parseForensicLogTime(line string, kind string, loc *time.Location) (time.Time, bool) {
@@ -458,4 +501,89 @@ func (s *Server) buildIncidentHistorySlice(from, to time.Time, triggerRows []mod
 		return fmt.Sprint(items[i]["day"]) > fmt.Sprint(items[j]["day"])
 	})
 	return items, nil
+}
+
+func (s *Server) collectDispatchDedupeState(from, to time.Time) gin.H {
+	var rows []models.DailyDispatch
+	_ = s.DB.Where("created_at >= ? AND created_at <= ?", from, to).Order("created_at desc").Limit(500).Find(&rows).Error
+	total := len(rows)
+	byStatus := map[string]int64{}
+	byDay := map[string]int64{}
+	for _, row := range rows {
+		status := strings.TrimSpace(strings.ToLower(row.Status))
+		if status == "" {
+			status = "unknown"
+		}
+		byStatus[status]++
+		dayKey := strings.TrimSpace(row.Day)
+		if dayKey == "" {
+			dayKey = row.CreatedAt.In(s.Location).Format("2006-01-02")
+		}
+		byDay[dayKey]++
+	}
+	duplicateReservations := int64(0)
+	for _, count := range byDay {
+		if count > 1 {
+			duplicateReservations += count - 1
+		}
+	}
+	return gin.H{
+		"total":                 total,
+		"byStatus":              byStatus,
+		"duplicateReservations": duplicateReservations,
+		"items":                 rows,
+	}
+}
+
+func buildRootCauseHints(rows []models.DailyTriggerAuditEvent, summary gin.H) []gin.H {
+	hints := make([]gin.H, 0, 8)
+	reasonCounts := map[string]int64{}
+	for _, row := range rows {
+		reason := strings.TrimSpace(strings.ToLower(row.Reason))
+		if reason == "" {
+			reason = "unknown"
+		}
+		reasonCounts[reason]++
+	}
+	if asInt64(summary["duplicateAttempts"]) > 0 {
+		hints = append(hints, gin.H{
+			"id":       "duplicate_attempts",
+			"severity": "high",
+			"message":  "Multiple trigger attempts detected for same day window.",
+			"count":    summary["duplicateAttempts"],
+		})
+	}
+	if reasonCounts["race_lost"] > 0 {
+		hints = append(hints, gin.H{
+			"id":       "race_lost_spike",
+			"severity": "medium",
+			"message":  "Concurrent trigger races detected (CAS losers).",
+			"count":    reasonCounts["race_lost"],
+		})
+	}
+	if reasonCounts["db_locked"] > 0 {
+		hints = append(hints, gin.H{
+			"id":       "db_lock_wave",
+			"severity": "high",
+			"message":  "Database lock failures detected during trigger attempts.",
+			"count":    reasonCounts["db_locked"],
+		})
+	}
+	if reasonCounts["not_lease_owner"] > 0 {
+		hints = append(hints, gin.H{
+			"id":       "lease_flap",
+			"severity": "medium",
+			"message":  "Scheduler lease contention detected (not lease owner).",
+			"count":    reasonCounts["not_lease_owner"],
+		})
+	}
+	if len(hints) == 0 {
+		hints = append(hints, gin.H{
+			"id":       "no_critical_hint",
+			"severity": "low",
+			"message":  "No dominant trigger anomaly pattern detected in selected window.",
+			"count":    0,
+		})
+	}
+	return hints
 }

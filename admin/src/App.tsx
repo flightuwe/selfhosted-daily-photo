@@ -48,6 +48,7 @@ import {
   getAdminPerformanceSlo,
   getAdminPerformanceSpikes,
   getAdminIncidentExportStatus,
+  getAdminTriggerRuntime,
   getAdminTriggerAudit,
   getAdminTriggerAuditSummary,
   getSystemHealth,
@@ -61,6 +62,7 @@ import {
   sendChat,
   triggerPrompt,
   updateAdminPerformanceTracking,
+  updateAdminTriggerRuntime,
   updateCalendarDay,
   updateChatCommand,
   updateReport,
@@ -73,6 +75,7 @@ import {
   type AdminPerformanceSpikeWindow,
   type AdminPerformanceTrackingState,
   type AdminIncidentExportStatus,
+  type AdminTriggerRuntimeResponse,
   type AdminTriggerAuditItem,
   type AdminTriggerAuditSummary,
   type AdminSearchResult,
@@ -397,6 +400,8 @@ export function App() {
   const [incidentDay, setIncidentDay] = useState<string>("");
   const [incidentIncludeGateway, setIncidentIncludeGateway] = useState<boolean>(true);
   const [incidentStatus, setIncidentStatus] = useState<AdminIncidentExportStatus | null>(null);
+  const [triggerRuntime, setTriggerRuntime] = useState<AdminTriggerRuntimeResponse | null>(null);
+  const [triggerRuntimeWindowMinutes, setTriggerRuntimeWindowMinutes] = useState<number>(60);
   const [triggerAuditItems, setTriggerAuditItems] = useState<AdminTriggerAuditItem[]>([]);
   const [triggerAuditSummary, setTriggerAuditSummary] = useState<AdminTriggerAuditSummary | null>(null);
   const [triggerAuditDays, setTriggerAuditDays] = useState<number>(7);
@@ -611,6 +616,7 @@ export function App() {
     }
     if (activeTab === "incident_export") {
       void loadIncidentStatus(token);
+      void loadTriggerRuntime(token);
     }
     if (activeTab === "trigger_audit") {
       void loadTriggerAudit(token);
@@ -630,7 +636,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
+  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -763,7 +769,7 @@ export function App() {
 
   async function loadAdminData(authToken: string) {
     try {
-      const [s, st, u, cmds, cal, sys, openReports, triggerSummary] = await Promise.all([
+      const [s, st, u, cmds, cal, sys, openReports, triggerSummary, runtime] = await Promise.all([
         getSettings(authToken),
         getStats(authToken),
         listUsers(authToken),
@@ -772,6 +778,7 @@ export function App() {
         getSystemHealth(authToken),
         getReports(authToken, { status: "open", limit: 200 }),
         getAdminTriggerAuditSummary(authToken, 7),
+        getAdminTriggerRuntime(authToken, { windowMinutes: triggerRuntimeWindowMinutes }),
       ]);
       setSettings(s);
       setSavedSettings(s);
@@ -791,6 +798,7 @@ export function App() {
       setSystemHealth(sys);
       setOpenReportsCount(openReports.length);
       setTriggerAuditSummary(triggerSummary);
+      setTriggerRuntime(runtime);
     } catch (err) {
       setMessage((err as Error).message);
       setToken("");
@@ -1205,6 +1213,36 @@ export function App() {
     }
   }
 
+  async function loadTriggerRuntime(authToken: string) {
+    try {
+      const runtime = await getAdminTriggerRuntime(authToken, {
+        windowMinutes: triggerRuntimeWindowMinutes,
+      });
+      setTriggerRuntime(runtime);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onUpdateTriggerRuntime(action: "pause" | "unpause" | "release_lease", reason?: string) {
+    try {
+      const runtime = await updateAdminTriggerRuntime(token, {
+        action,
+        reason: reason?.trim() || undefined,
+      });
+      setTriggerRuntime(runtime);
+      if (action === "pause") {
+        setMessage("Scheduler wurde pausiert.");
+      } else if (action === "unpause") {
+        setMessage("Scheduler wurde fortgesetzt.");
+      } else {
+        setMessage("Scheduler-Lease wurde freigegeben.");
+      }
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function onDownloadIncidentBundle() {
     try {
       const fromIso = incidentFrom ? new Date(incidentFrom).toISOString() : undefined;
@@ -1247,7 +1285,10 @@ export function App() {
     if (activeTab === "calendar") await loadCalendar(token);
     if (activeTab === "history") await loadHistory(token, historyDays, historyOffset);
     if (activeTab === "performance") await loadPerformance(token, performanceBucket, performanceFrom, performanceTo);
-    if (activeTab === "incident_export") await loadIncidentStatus(token);
+    if (activeTab === "incident_export") {
+      await loadIncidentStatus(token);
+      await loadTriggerRuntime(token);
+    }
     if (activeTab === "trigger_audit") await loadTriggerAudit(token);
     if (activeTab === "time_capsule") await loadTimeCapsules(token);
     if (activeTab === "debug") await loadDebugLogs(token, debugUserFilter, debugSinceHours);
@@ -1425,6 +1466,23 @@ export function App() {
   const quickActions: TopAction[] = [
     { id: "trigger", label: "Daily jetzt ausloesen", run: () => onTriggerEvent() },
     { id: "reset", label: "Heutigen Tag resetten", run: () => onResetToday(), tone: "danger" },
+    {
+      id: "scheduler_pause",
+      label: "Scheduler pausieren",
+      run: () => onUpdateTriggerRuntime("pause", "manual_admin_pause"),
+      tone: "danger",
+    },
+    {
+      id: "scheduler_unpause",
+      label: "Scheduler fortsetzen",
+      run: () => onUpdateTriggerRuntime("unpause"),
+    },
+    {
+      id: "lease_release",
+      label: "Lease freigeben",
+      run: () => onUpdateTriggerRuntime("release_lease"),
+      tone: "danger",
+    },
     { id: "broadcast", label: "Broadcast senden", run: () => onBroadcast() },
     { id: "debug_export", label: "Debug JSON exportieren", run: () => onDownloadAllLogs(24, "json") },
   ];
@@ -1792,6 +1850,8 @@ export function App() {
                 <p><strong>Geplant:</strong> {todayCalendar?.plannedAt ? formatDateTime(todayCalendar.plannedAt) : "-"}</p>
                 <p><strong>Ausgeloest:</strong> {todayCalendar?.triggeredAt ? formatDateTime(todayCalendar.triggeredAt) : "-"}</p>
                 <p><strong>Upload bis:</strong> {todayCalendar?.uploadUntil ? formatDateTime(todayCalendar.uploadUntil) : "-"}</p>
+                <p><strong>Scheduler:</strong> {triggerRuntime?.runtime?.autoPaused ? "pausiert" : "aktiv"}</p>
+                <p><strong>Lease Owner:</strong> {triggerRuntime?.runtime?.lease?.ownerId || "-"}</p>
               </div>
             </article>
             <div className="grid4">
@@ -3073,6 +3133,74 @@ export function App() {
               <CardStat title="Zeitraum von" value={incidentStatus?.meta?.from ? formatDateTime(incidentStatus.meta.from) : "-"} />
               <CardStat title="Zeitraum bis" value={incidentStatus?.meta?.to ? formatDateTime(incidentStatus.meta.to) : "-"} />
             </div>
+            <article className="settings-current">
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                <h3>Trigger Runtime</h3>
+                <div className="row">
+                  <label>
+                    Fenster (Min)
+                    <input
+                      type="number"
+                      min={5}
+                      max={240}
+                      value={triggerRuntimeWindowMinutes}
+                      onChange={(e) =>
+                        setTriggerRuntimeWindowMinutes(Math.max(5, Math.min(240, Number(e.target.value) || 60)))
+                      }
+                    />
+                  </label>
+                  <button onClick={() => loadTriggerRuntime(token)}>Runtime aktualisieren</button>
+                  <button className="danger" onClick={() => onUpdateTriggerRuntime("pause", "manual_admin_pause")}>
+                    Scheduler pausieren
+                  </button>
+                  <button onClick={() => onUpdateTriggerRuntime("unpause")}>Scheduler fortsetzen</button>
+                  <button className="danger" onClick={() => onUpdateTriggerRuntime("release_lease")}>
+                    Lease freigeben
+                  </button>
+                </div>
+              </div>
+              <div className="grid4">
+                <CardStat title="Auto-Pause" value={triggerRuntime?.runtime?.autoPaused ? "aktiv" : "aus"} />
+                <CardStat title="Pause-Grund" value={triggerRuntime?.runtime?.autoPauseReason || "-"} />
+                <CardStat title="Lease Owner" value={triggerRuntime?.runtime?.lease?.ownerId || "-"} />
+                <CardStat title="Ist Owner?" value={triggerRuntime?.runtime?.lease?.isOwner ? "ja" : "nein"} />
+              </div>
+              <div className="grid4">
+                <CardStat title="Attempts (Fenster)" value={Number(triggerRuntime?.recent?.attempts || 0)} />
+                <CardStat title="Blocked" value={Number(triggerRuntime?.recent?.blocked || 0)} />
+                <CardStat title="Failed" value={Number(triggerRuntime?.recent?.failed || 0)} />
+                <CardStat title="DB-Lock" value={Number(triggerRuntime?.recent?.dbLocked || 0)} />
+              </div>
+              <div className="grid4">
+                <CardStat title="Duplikate heute" value={Number(triggerRuntime?.recent?.duplicateToday || 0)} />
+                <CardStat title="Block-Rate" value={`${(Number(triggerRuntime?.recent?.blockRate || 0) * 100).toFixed(2)}%`} />
+                <CardStat title="Lease Expired?" value={triggerRuntime?.runtime?.lease?.isExpired ? "ja" : "nein"} />
+                <CardStat title="Lease bis" value={triggerRuntime?.runtime?.lease?.expiresAt ? formatDateTime(triggerRuntime.runtime.lease.expiresAt) : "-"} />
+              </div>
+              <div className="grid4">
+                <CardStat title="Trigger SLO" value={triggerRuntime?.slo?.status === "breach" ? "BREACH" : "OK"} />
+                <CardStat title="Lease-Contention" value={Number(triggerRuntime?.recent?.byReason?.not_lease_owner || 0)} />
+                <CardStat title="Race Lost" value={Number(triggerRuntime?.recent?.byReason?.race_lost || 0)} />
+                <CardStat title="Already Triggered" value={Number(triggerRuntime?.recent?.byReason?.already_triggered_today || 0)} />
+              </div>
+              {(triggerRuntime?.slo?.violations || []).length > 0 && (
+                <article className="history-chart-card" style={{ borderColor: "#c74444" }}>
+                  <h3 style={{ color: "#ff6f6f" }}>Trigger-SLO verletzt</h3>
+                  <ul>
+                    {(triggerRuntime?.slo?.violations || []).map((v, idx) => (
+                      <li key={`${v.id}-${idx}`}>
+                        <code>{v.id}</code>: observed={Number(v.observed).toFixed(3)} threshold={Number(v.threshold).toFixed(3)} ({v.unit})
+                      </li>
+                    ))}
+                  </ul>
+                </article>
+              )}
+              <p className="small">
+                Last Tick: {triggerRuntime?.runtime?.lastTickAt ? formatDateTime(triggerRuntime.runtime.lastTickAt) : "-"} | Ergebnis:{" "}
+                <code>{triggerRuntime?.runtime?.lastTickResult || "-"}</code> | Dispatch:{" "}
+                <code>{triggerRuntime?.dispatch?.last?.status || "-"}</code>
+              </p>
+            </article>
             {(incidentStatus?.collectionWarnings || []).length > 0 && (
               <article className="history-chart-card">
                 <h3>Collection Warnings</h3>

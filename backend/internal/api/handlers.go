@@ -154,6 +154,8 @@ func (s *Server) Router() *gin.Engine {
 			admin.GET("/performance/slo", s.handleAdminPerformanceSLO)
 			admin.GET("/performance/export", s.handleAdminPerformanceExport)
 			admin.GET("/incidents/export", s.handleAdminIncidentExport)
+			admin.GET("/trigger-runtime", s.handleAdminTriggerRuntime)
+			admin.PUT("/trigger-runtime", s.handleAdminTriggerRuntimeUpdate)
 			admin.GET("/trigger-audit", s.handleAdminTriggerAudit)
 			admin.GET("/trigger-audit/summary", s.handleAdminTriggerAuditSummary)
 			admin.GET("/trigger-audit/export", s.handleAdminTriggerAuditExport)
@@ -979,14 +981,31 @@ func (s *Server) handleSpecialMomentRequest(c *gin.Context) {
 
 	pushBody := fmt.Sprintf("Sondermoment von %s angefordert! Du hast %d Minuten Zeit.", user.Username, settings.UploadWindowMinutes)
 	tokens := s.allDeviceTokens()
-	sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
-		Title:  "Sondermoment",
-		Body:   pushBody,
-		Type:   "special_request",
-		Action: "open_camera",
-	})
-	s.recordPushResult(sendResult, sendErr)
-	removed := s.removeInvalidTokens(sendResult.InvalidTokens)
+	sendResult := notify.SendResult{}
+	var sendErr error
+	removed := int64(0)
+	created, _, reserveErr := s.Prompt.ReserveDispatch(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), "special_request", requestIDFromContext(c))
+	if reserveErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "dispatch reserve failed"})
+		return
+	}
+	if created {
+		sendResult, sendErr = s.Notifier.Send(tokens, notify.Message{
+			Title:  "Sondermoment",
+			Body:   pushBody,
+			Type:   "special_request",
+			Action: "open_camera",
+		})
+		s.recordPushResult(sendResult, sendErr)
+		removed = s.removeInvalidTokens(sendResult.InvalidTokens)
+		dispatchStatus := "sent"
+		dispatchErr := ""
+		if sendErr != nil {
+			dispatchStatus = "failed"
+			dispatchErr = sendErr.Error()
+		}
+		s.Prompt.MarkDispatchResult(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), dispatchStatus, int64(sendResult.Sent), int64(sendResult.Failed), dispatchErr)
+	}
 
 	nextStatus, _ := s.specialMomentStatus(user.ID)
 	c.JSON(http.StatusOK, gin.H{
@@ -1642,9 +1661,23 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 	var sendErr error
 	removed := int64(0)
 	if mode != "silent" {
-		sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
-		s.recordPushResult(sendResult, sendErr)
-		removed = s.removeInvalidTokens(sendResult.InvalidTokens)
+		created, _, reserveErr := s.Prompt.ReserveDispatch(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), triggerSource, requestIDFromContext(c))
+		if reserveErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "dispatch reserve failed"})
+			return
+		}
+		if created {
+			sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
+			s.recordPushResult(sendResult, sendErr)
+			removed = s.removeInvalidTokens(sendResult.InvalidTokens)
+			dispatchStatus := "sent"
+			dispatchErr := ""
+			if sendErr != nil {
+				dispatchStatus = "failed"
+				dispatchErr = sendErr.Error()
+			}
+			s.Prompt.MarkDispatchResult(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), dispatchStatus, int64(sendResult.Sent), int64(sendResult.Failed), dispatchErr)
+		}
 	}
 
 	if sendErr != nil {
@@ -4187,9 +4220,23 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
 		if cmd.SendPush {
 			pushText := renderCommandText(cmd.PushText, user.Username)
 			tokens := s.allDeviceTokens()
-			sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
-			s.recordPushResult(sendResult, sendErr)
-			invalidRemoved = s.removeInvalidTokens(sendResult.InvalidTokens)
+			created, _, reserveErr := s.Prompt.ReserveDispatch(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), "chat_command", requestIDFromContext(c))
+			if reserveErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "dispatch reserve failed"})
+				return true, reserveErr
+			}
+			if created {
+				sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
+				s.recordPushResult(sendResult, sendErr)
+				invalidRemoved = s.removeInvalidTokens(sendResult.InvalidTokens)
+				dispatchStatus := "sent"
+				dispatchErr := ""
+				if sendErr != nil {
+					dispatchStatus = "failed"
+					dispatchErr = sendErr.Error()
+				}
+				s.Prompt.MarkDispatchResult(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), dispatchStatus, int64(sendResult.Sent), int64(sendResult.Failed), dispatchErr)
+			}
 		}
 		if cmd.PostChat {
 			chatMessage = models.ChatMessage{

@@ -77,9 +77,19 @@ func main() {
 
 	promptService.Start(cfg.SchedulerEnabled, func(prompt models.DailyPrompt, settings models.AppSettings) {
 		server.TrackDailyPromptSpikeIfEnabled(prompt)
+		created, _, reserveErr := promptService.ReserveDispatch(prompt.Day, promptService.DispatchKindDailyPromptPush(), "scheduler", "")
+		if reserveErr != nil {
+			log.Printf("dispatch reserve failed: %v", reserveErr)
+			return
+		}
+		if !created {
+			log.Printf("dispatch dedupe: daily prompt push already sent/reserved for day=%s", prompt.Day)
+			return
+		}
 		var rows []models.DeviceToken
 		if err := database.Find(&rows).Error; err != nil {
 			log.Printf("device token query failed: %v", err)
+			promptService.MarkDispatchResult(prompt.Day, promptService.DispatchKindDailyPromptPush(), "failed", 0, 0, err.Error())
             return
         }
         tokens := make([]string, 0, len(rows))
@@ -87,6 +97,11 @@ func main() {
             tokens = append(tokens, t.Token)
         }
         result, err := notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
+		dispatchStatus := "sent"
+		if err != nil {
+			dispatchStatus = "failed"
+		}
+		promptService.MarkDispatchResult(prompt.Day, promptService.DispatchKindDailyPromptPush(), dispatchStatus, int64(result.Sent), int64(result.Failed), errorString(err))
         monitor.RecordPush(result.Sent, result.Failed, len(result.InvalidTokens), err != nil)
         if len(result.InvalidTokens) > 0 {
             if dbErr := database.Where("token IN ?", result.InvalidTokens).Delete(&models.DeviceToken{}).Error; dbErr != nil {
@@ -106,6 +121,13 @@ func main() {
     if err := r.Run(cfg.Address); err != nil {
         log.Fatalf("server run: %v", err)
     }
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func ensureBootstrapAdmin(database *gorm.DB) {

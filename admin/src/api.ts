@@ -321,6 +321,74 @@ export type AdminIncidentExportStatus = {
   collectionWarnings: string[];
 };
 
+export type AdminTriggerRuntimeLease = {
+  ownerId?: string;
+  heartbeatAt?: string;
+  expiresAt?: string;
+  isExpired?: boolean;
+  isOwner?: boolean;
+};
+
+export type AdminTriggerRuntimeState = {
+  serverInstance?: string;
+  leaseName?: string;
+  leaseTimeoutSec?: number;
+  lastTickAt?: string;
+  lastTickResult?: string;
+  tickRunning?: boolean;
+  autoPaused?: boolean;
+  autoPauseReason?: string;
+  autoPausedAt?: string | null;
+  lease?: AdminTriggerRuntimeLease;
+};
+
+export type AdminTriggerRuntimeResponse = {
+  serverNow: string;
+  windowMinutes: number;
+  runtime: AdminTriggerRuntimeState;
+  recent: {
+    attempts: number;
+    blocked: number;
+    failed: number;
+    dbLocked: number;
+    duplicateToday?: number;
+    blockRate?: number;
+    byReason?: Record<string, number>;
+    byReasonRate?: Record<string, number>;
+  };
+  slo?: {
+    evaluatedAt?: string;
+    windowMinutes?: number;
+    status?: "ok" | "breach";
+    thresholds?: {
+      duplicateToday?: number;
+      blockRate?: number;
+      dbLocked?: number;
+    };
+    violations?: Array<{
+      id: string;
+      severity: "low" | "medium" | "high" | string;
+      threshold: number;
+      observed: number;
+      unit: string;
+    }>;
+  };
+  dispatch: {
+    kind: string;
+    last?: {
+      day?: string;
+      kind?: string;
+      source?: string;
+      status?: string;
+      sentCount?: number;
+      failedCount?: number;
+      errorMessage?: string;
+      serverInstance?: string;
+      updatedAt?: string;
+    };
+  };
+};
+
 export type AdminHistoryLeaderboardEntry = {
   userId: number;
   username: string;
@@ -1291,6 +1359,58 @@ export async function getAdminIncidentExportStatus(
     },
     collectionWarnings: data.collectionWarnings || [],
   };
+}
+
+export async function getAdminTriggerRuntime(
+  token: string,
+  opts?: { windowMinutes?: number }
+): Promise<AdminTriggerRuntimeResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.windowMinutes && opts.windowMinutes > 0) {
+    qs.set("windowMinutes", String(opts.windowMinutes));
+  }
+  const url = qs.toString()
+    ? `${apiBase}/admin/trigger-runtime?${qs.toString()}`
+    : `${apiBase}/admin/trigger-runtime`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminTriggerRuntimeResponse>(res);
+  return {
+    serverNow: String(data.serverNow || ""),
+    windowMinutes: Number(data.windowMinutes || opts?.windowMinutes || 60),
+    runtime: data.runtime || {},
+    recent: {
+      attempts: Number(data.recent?.attempts || 0),
+      blocked: Number(data.recent?.blocked || 0),
+      failed: Number(data.recent?.failed || 0),
+      dbLocked: Number(data.recent?.dbLocked || 0),
+      duplicateToday: Number(data.recent?.duplicateToday || 0),
+      blockRate: Number(data.recent?.blockRate || 0),
+      byReason: (data.recent?.byReason || {}) as Record<string, number>,
+      byReasonRate: (data.recent?.byReasonRate || {}) as Record<string, number>,
+    },
+    slo: data.slo || { status: "ok", violations: [] },
+    dispatch: {
+      kind: String(data.dispatch?.kind || ""),
+      last: data.dispatch?.last || {},
+    },
+  };
+}
+
+export async function updateAdminTriggerRuntime(
+  token: string,
+  payload: { action: "pause" | "unpause" | "release_lease"; reason?: string }
+): Promise<AdminTriggerRuntimeResponse> {
+  const res = await fetch(`${apiBase}/admin/trigger-runtime`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  return parse<AdminTriggerRuntimeResponse>(res);
 }
 
 export async function downloadIncidentExport(

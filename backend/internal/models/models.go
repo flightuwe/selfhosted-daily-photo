@@ -70,9 +70,37 @@ type AppSettings struct {
 	PerformanceTrackingEnabled       bool      `gorm:"default:false" json:"performanceTrackingEnabled"`
 	PerformanceTrackingWindowMinutes int       `gorm:"default:30" json:"performanceTrackingWindowMinutes"`
 	PerformanceTrackingOneShot       bool      `gorm:"default:false" json:"performanceTrackingOneShot"`
+	SchedulerAutoPaused              bool      `gorm:"default:false" json:"schedulerAutoPaused"`
+	SchedulerAutoPauseReason         string    `gorm:"size:120" json:"schedulerAutoPauseReason"`
+	SchedulerAutoPausedAt            *time.Time `json:"schedulerAutoPausedAt"`
 	UserPromptRulesJSON     string    `gorm:"type:text" json:"userPromptRulesJson"`
 	CreatedAt               time.Time `json:"createdAt"`
 	UpdatedAt               time.Time `json:"updatedAt"`
+}
+
+type SchedulerLease struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	LeaseName   string    `gorm:"size:64;uniqueIndex;not null" json:"leaseName"`
+	OwnerID     string    `gorm:"size:120;index;not null" json:"ownerId"`
+	HeartbeatAt time.Time `gorm:"index;not null" json:"heartbeatAt"`
+	ExpiresAt   time.Time `gorm:"index;not null" json:"expiresAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type DailyDispatch struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	Day          string    `gorm:"size:10;not null;uniqueIndex:idx_daily_dispatch_day_kind" json:"day"`
+	Kind         string    `gorm:"size:32;not null;uniqueIndex:idx_daily_dispatch_day_kind" json:"kind"`
+	RequestID    string    `gorm:"size:64;index" json:"requestId"`
+	Source       string    `gorm:"size:32;index" json:"source"`
+	ServerInstance string  `gorm:"size:120;index" json:"serverInstance"`
+	Status       string    `gorm:"size:24;index;not null;default:'reserved'" json:"status"`
+	SentCount    int64     `gorm:"default:0" json:"sentCount"`
+	FailedCount  int64     `gorm:"default:0" json:"failedCount"`
+	ErrorMessage string    `gorm:"size:500" json:"errorMessage"`
+	CreatedAt    time.Time `gorm:"index" json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type DailyPrompt struct {
