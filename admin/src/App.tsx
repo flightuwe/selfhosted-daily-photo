@@ -39,12 +39,17 @@ import {
   downloadDebugLogs,
   downloadPerformanceExport,
   downloadPerformanceTrackingExport,
+  downloadIncidentExport,
+  downloadTriggerAuditExport,
   getReports,
   getAdminPerformanceOverview,
   getAdminPerformanceRoutes,
   getAdminPerformanceTracking,
   getAdminPerformanceSlo,
   getAdminPerformanceSpikes,
+  getAdminIncidentExportStatus,
+  getAdminTriggerAudit,
+  getAdminTriggerAuditSummary,
   getSystemHealth,
   getSettings,
   getStats,
@@ -67,6 +72,9 @@ import {
   type AdminPerformanceRouteHotspot,
   type AdminPerformanceSpikeWindow,
   type AdminPerformanceTrackingState,
+  type AdminIncidentExportStatus,
+  type AdminTriggerAuditItem,
+  type AdminTriggerAuditSummary,
   type AdminSearchResult,
   type AdminSearchScope,
   type AdminStats,
@@ -92,10 +100,10 @@ import {
   type UserPromptRule,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "history" | "performance" | "time_capsule" | "reports" | "debug" | "settings";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "reports" | "debug" | "settings";
 type AdminArea = "operations" | "analytics" | "config";
 type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "time_capsules" | "reports";
-type AnalyticsSubtab = "history" | "performance" | "debug" | "system";
+type AnalyticsSubtab = "history" | "performance" | "incident_export" | "trigger_audit" | "debug" | "system";
 type ConfigSubtab = "users" | "events" | "commands" | "settings";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
 
@@ -164,6 +172,8 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
   analytics: {
     history: "history",
     performance: "performance",
+    incident_export: "incident_export",
+    trigger_audit: "trigger_audit",
     debug: "debug",
     system: "system",
   },
@@ -187,6 +197,8 @@ const areaSubtabs: Record<AdminArea, Array<{ key: AdminSubtab; label: string }>>
   analytics: [
     { key: "history", label: "Historie" },
     { key: "performance", label: "Performance" },
+    { key: "incident_export", label: "Incident Export" },
+    { key: "trigger_audit", label: "Trigger Audit" },
     { key: "debug", label: "Debug Logs" },
     { key: "system", label: "System Health" },
   ],
@@ -260,6 +272,10 @@ function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
       return { area: "analytics", subtab: "history" };
     case "performance":
       return { area: "analytics", subtab: "performance" };
+    case "incident_export":
+      return { area: "analytics", subtab: "incident_export" };
+    case "trigger_audit":
+      return { area: "analytics", subtab: "trigger_audit" };
     case "debug":
       return { area: "analytics", subtab: "debug" };
     case "system":
@@ -372,6 +388,24 @@ export function App() {
   const [performanceTrackingOneShot, setPerformanceTrackingOneShot] = useState(false);
   const [performanceTrackingActiveSpike, setPerformanceTrackingActiveSpike] = useState<AdminPerformanceSpikeWindow | null>(null);
   const [performanceTrackingLatestSpike, setPerformanceTrackingLatestSpike] = useState<AdminPerformanceSpikeWindow | null>(null);
+  const [incidentFrom, setIncidentFrom] = useState<string>(() => {
+    const now = new Date();
+    const from = new Date(now.getTime() - 60 * 60 * 1000);
+    return toInputDateTime(from.toISOString());
+  });
+  const [incidentTo, setIncidentTo] = useState<string>(() => toInputDateTime(new Date().toISOString()));
+  const [incidentDay, setIncidentDay] = useState<string>("");
+  const [incidentIncludeGateway, setIncidentIncludeGateway] = useState<boolean>(true);
+  const [incidentStatus, setIncidentStatus] = useState<AdminIncidentExportStatus | null>(null);
+  const [triggerAuditItems, setTriggerAuditItems] = useState<AdminTriggerAuditItem[]>([]);
+  const [triggerAuditSummary, setTriggerAuditSummary] = useState<AdminTriggerAuditSummary | null>(null);
+  const [triggerAuditDays, setTriggerAuditDays] = useState<number>(7);
+  const [triggerAuditDay, setTriggerAuditDay] = useState("");
+  const [triggerAuditSource, setTriggerAuditSource] = useState("");
+  const [triggerAuditResult, setTriggerAuditResult] = useState("");
+  const [triggerAuditRequestId, setTriggerAuditRequestId] = useState("");
+  const [triggerAuditActorUserId, setTriggerAuditActorUserId] = useState<number>(0);
+  const [triggerAuditLimit, setTriggerAuditLimit] = useState<number>(200);
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
@@ -575,6 +609,12 @@ export function App() {
     if (activeTab === "performance") {
       void loadPerformance(token, performanceBucket, performanceFrom, performanceTo);
     }
+    if (activeTab === "incident_export") {
+      void loadIncidentStatus(token);
+    }
+    if (activeTab === "trigger_audit") {
+      void loadTriggerAudit(token);
+    }
     if (activeTab === "time_capsule") {
       void loadTimeCapsules(token);
     }
@@ -590,7 +630,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo]);
+  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -723,7 +763,7 @@ export function App() {
 
   async function loadAdminData(authToken: string) {
     try {
-      const [s, st, u, cmds, cal, sys, openReports] = await Promise.all([
+      const [s, st, u, cmds, cal, sys, openReports, triggerSummary] = await Promise.all([
         getSettings(authToken),
         getStats(authToken),
         listUsers(authToken),
@@ -731,6 +771,7 @@ export function App() {
         getCalendar(authToken, 7),
         getSystemHealth(authToken),
         getReports(authToken, { status: "open", limit: 200 }),
+        getAdminTriggerAuditSummary(authToken, 7),
       ]);
       setSettings(s);
       setSavedSettings(s);
@@ -749,6 +790,7 @@ export function App() {
       );
       setSystemHealth(sys);
       setOpenReportsCount(openReports.length);
+      setTriggerAuditSummary(triggerSummary);
     } catch (err) {
       setMessage((err as Error).message);
       setToken("");
@@ -1111,6 +1153,83 @@ export function App() {
     }
   }
 
+  async function loadTriggerAudit(authToken: string) {
+    try {
+      const [itemsResp, summaryResp] = await Promise.all([
+        getAdminTriggerAudit(authToken, {
+          day: triggerAuditDay || undefined,
+          source: triggerAuditSource || undefined,
+          result: triggerAuditResult || undefined,
+          actorUserId: triggerAuditActorUserId > 0 ? triggerAuditActorUserId : undefined,
+          requestId: triggerAuditRequestId.trim() || undefined,
+          limit: triggerAuditLimit,
+        }),
+        getAdminTriggerAuditSummary(authToken, triggerAuditDays),
+      ]);
+      setTriggerAuditItems(itemsResp.items || []);
+      setTriggerAuditSummary(summaryResp);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDownloadTriggerAudit(format: "json" | "csv" = "json") {
+    try {
+      await downloadTriggerAuditExport(token, {
+        day: triggerAuditDay || undefined,
+        source: triggerAuditSource || undefined,
+        result: triggerAuditResult || undefined,
+        actorUserId: triggerAuditActorUserId > 0 ? triggerAuditActorUserId : undefined,
+        requestId: triggerAuditRequestId.trim() || undefined,
+        format,
+      });
+      setMessage(`Trigger-Audit Export (${format.toUpperCase()}) wurde heruntergeladen.`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function loadIncidentStatus(authToken: string) {
+    try {
+      const fromIso = incidentFrom ? new Date(incidentFrom).toISOString() : undefined;
+      const toIso = incidentTo ? new Date(incidentTo).toISOString() : undefined;
+      const status = await getAdminIncidentExportStatus(authToken, {
+        from: fromIso,
+        to: toIso,
+        day: incidentDay || undefined,
+        includeGateway: incidentIncludeGateway,
+      });
+      setIncidentStatus(status);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDownloadIncidentBundle() {
+    try {
+      const fromIso = incidentFrom ? new Date(incidentFrom).toISOString() : undefined;
+      const toIso = incidentTo ? new Date(incidentTo).toISOString() : undefined;
+      await downloadIncidentExport(token, {
+        from: fromIso,
+        to: toIso,
+        day: incidentDay || undefined,
+        includeGateway: incidentIncludeGateway,
+      });
+      setMessage("Incident-Export (JSON) wurde heruntergeladen.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  function openIncidentExportWithRecentWindow(minutes = 60) {
+    const now = new Date();
+    const from = new Date(now.getTime() - Math.max(5, minutes) * 60 * 1000);
+    setIncidentFrom(toInputDateTime(from.toISOString()));
+    setIncidentTo(toInputDateTime(now.toISOString()));
+    setIncidentDay("");
+    navigateTab("incident_export");
+  }
+
   async function loadTimeCapsules(authToken: string) {
     try {
       const items = await getAdminTimeCapsules(authToken);
@@ -1128,6 +1247,8 @@ export function App() {
     if (activeTab === "calendar") await loadCalendar(token);
     if (activeTab === "history") await loadHistory(token, historyDays, historyOffset);
     if (activeTab === "performance") await loadPerformance(token, performanceBucket, performanceFrom, performanceTo);
+    if (activeTab === "incident_export") await loadIncidentStatus(token);
+    if (activeTab === "trigger_audit") await loadTriggerAudit(token);
     if (activeTab === "time_capsule") await loadTimeCapsules(token);
     if (activeTab === "debug") await loadDebugLogs(token, debugUserFilter, debugSinceHours);
     if (activeTab === "reports") await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
@@ -1590,6 +1711,8 @@ export function App() {
             <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => navigateTab("calendar")}>Kalender</button>
             <button className={activeTab === "history" ? "tab active" : "tab"} onClick={() => navigateTab("history")}>Historie</button>
             <button className={activeTab === "performance" ? "tab active" : "tab"} onClick={() => navigateTab("performance")}>Performance</button>
+            <button className={activeTab === "incident_export" ? "tab active" : "tab"} onClick={() => navigateTab("incident_export")}>Incident Export</button>
+            <button className={activeTab === "trigger_audit" ? "tab active" : "tab"} onClick={() => navigateTab("trigger_audit")}>Trigger Audit</button>
             <button className={activeTab === "time_capsule" ? "tab active" : "tab"} onClick={() => navigateTab("time_capsule")}>Time-Capsule</button>
             <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => navigateTab("reports")}>Reports</button>
             <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => navigateTab("debug")}>Debug</button>
@@ -1617,6 +1740,19 @@ export function App() {
 
         {activeTab === "dashboard" && (
           <div className="stack">
+            {Number(triggerAuditSummary?.summary?.duplicateAttempts || 0) > 0 && (
+              <article className="history-chart-card" style={{ borderColor: "#c74444" }}>
+                <h3 style={{ color: "#ff6f6f" }}>Alarm: Mehrfach-Trigger erkannt</h3>
+                <p className="small">
+                  In den letzten {triggerAuditDays} Tagen gab es {triggerAuditSummary?.summary?.duplicateAttempts} zusaetzliche Trigger-Versuche
+                  auf bereits ausgeloesten Tagen. Bitte Trigger Audit pruefen.
+                </p>
+                <div className="row">
+                  <button onClick={() => navigateTab("trigger_audit")}>Zum Trigger Audit</button>
+                  <button onClick={() => openIncidentExportWithRecentWindow(60)}>Jetzt Incident-Export</button>
+                </div>
+              </article>
+            )}
             <div className="row">
               <h2>Ops Cockpit</h2>
               <div className="row">
@@ -2570,6 +2706,19 @@ export function App() {
 
         {activeTab === "performance" && (
           <div className="stack">
+            {Number(triggerAuditSummary?.summary?.duplicateAttempts || 0) > 0 && (
+              <article className="history-chart-card" style={{ borderColor: "#c74444" }}>
+                <h3 style={{ color: "#ff6f6f" }}>Mehrfach-Trigger Alarm</h3>
+                <p className="small">
+                  {triggerAuditSummary?.summary?.duplicateAttempts} zusaetzliche Trigger-Versuche erkannt.
+                  Bitte Trigger Audit pruefen.
+                </p>
+                <div className="row">
+                  <button onClick={() => navigateTab("trigger_audit")}>Trigger Audit oeffnen</button>
+                  <button onClick={() => openIncidentExportWithRecentWindow(60)}>Incident-Export</button>
+                </div>
+              </article>
+            )}
             <div className="row">
               <h2>Performance</h2>
               <div className="row">
@@ -2869,6 +3018,198 @@ export function App() {
                       <td>{Number(row.p95PeakMs || 0).toFixed(1)} ms</td>
                       <td>{Number(row.p99PeakMs || 0).toFixed(1)} ms</td>
                       <td>{Number(row.maxPeakMs || 0).toFixed(1)} ms</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {activeTab === "incident_export" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Incident Export</h2>
+              <div className="row">
+                <button onClick={() => loadIncidentStatus(token)}>Status aktualisieren</button>
+                <button onClick={onDownloadIncidentBundle}>Incident JSON herunterladen</button>
+              </div>
+            </div>
+            <article className="settings-current">
+              <h3>Forensik-Zeitfenster</h3>
+              <div className="settings-grid">
+                <label>
+                  Von
+                  <input type="datetime-local" value={incidentFrom} onChange={(e) => setIncidentFrom(e.target.value)} />
+                </label>
+                <label>
+                  Bis
+                  <input type="datetime-local" value={incidentTo} onChange={(e) => setIncidentTo(e.target.value)} />
+                </label>
+                <label>
+                  Tagesfokus (optional)
+                  <input type="date" value={incidentDay} onChange={(e) => setIncidentDay(e.target.value)} />
+                </label>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={incidentIncludeGateway}
+                    onChange={(e) => setIncidentIncludeGateway(e.target.checked)}
+                  />
+                  Gateway-Logs einbeziehen (wenn gemountet)
+                </label>
+              </div>
+            </article>
+
+            <div className="grid4">
+              <CardStat title="Duplicate Attempts" value={Number(incidentStatus?.status?.duplicateAttempts || 0)} />
+              <CardStat title="Mehrfach-Tage" value={Number(incidentStatus?.status?.multipleAttemptDays || 0)} />
+              <CardStat title="Letzte Trigger-Quelle" value={incidentStatus?.status?.lastTriggerSource || "-"} />
+              <CardStat title="Gateway verfügbar" value={incidentStatus?.status?.gatewayLogAvailable ? "ja" : "nein"} />
+            </div>
+            <div className="grid4">
+              <CardStat title="Backend-Log verfügbar" value={incidentStatus?.status?.backendLogAvailable ? "ja" : "nein"} />
+              <CardStat title="Schema" value={incidentStatus?.meta?.schemaVersion || "-"} />
+              <CardStat title="Zeitraum von" value={incidentStatus?.meta?.from ? formatDateTime(incidentStatus.meta.from) : "-"} />
+              <CardStat title="Zeitraum bis" value={incidentStatus?.meta?.to ? formatDateTime(incidentStatus.meta.to) : "-"} />
+            </div>
+            {(incidentStatus?.collectionWarnings || []).length > 0 && (
+              <article className="history-chart-card">
+                <h3>Collection Warnings</h3>
+                <ul>
+                  {(incidentStatus?.collectionWarnings || []).map((warning, idx) => (
+                    <li key={`${warning}-${idx}`}>{warning}</li>
+                  ))}
+                </ul>
+              </article>
+            )}
+            <p className="small">
+              Der Export erzeugt ein einzelnes JSON-Bundle mit Trigger-Audit, Performance, History-Slice, Live-Snapshot und optionalen Log-Ausschnitten.
+            </p>
+          </div>
+        )}
+
+        {activeTab === "trigger_audit" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Trigger Audit</h2>
+              <div className="row">
+                <button onClick={() => loadTriggerAudit(token)}>Aktualisieren</button>
+                <button onClick={() => onDownloadTriggerAudit("json")}>JSON Export</button>
+                <button onClick={() => onDownloadTriggerAudit("csv")}>CSV Export</button>
+              </div>
+            </div>
+            <article className="settings-current">
+              <div className="settings-grid">
+                <label>
+                  Summary Zeitraum
+                  <select value={triggerAuditDays} onChange={(e) => setTriggerAuditDays(Number(e.target.value))}>
+                    <option value={1}>1 Tag</option>
+                    <option value={7}>7 Tage</option>
+                    <option value={14}>14 Tage</option>
+                    <option value={30}>30 Tage</option>
+                  </select>
+                </label>
+                <label>
+                  Tag (optional)
+                  <input type="date" value={triggerAuditDay} onChange={(e) => setTriggerAuditDay(e.target.value)} />
+                </label>
+                <label>
+                  Quelle
+                  <select value={triggerAuditSource} onChange={(e) => setTriggerAuditSource(e.target.value)}>
+                    <option value="">Alle</option>
+                    <option value="scheduler">scheduler</option>
+                    <option value="admin_manual">admin_manual</option>
+                    <option value="admin_manual_targeted">admin_manual_targeted</option>
+                    <option value="admin_manual_silent">admin_manual_silent</option>
+                    <option value="chat_command">chat_command</option>
+                    <option value="special_request">special_request</option>
+                    <option value="admin_reset">admin_reset</option>
+                  </select>
+                </label>
+                <label>
+                  Ergebnis
+                  <select value={triggerAuditResult} onChange={(e) => setTriggerAuditResult(e.target.value)}>
+                    <option value="">Alle</option>
+                    <option value="triggered">triggered</option>
+                    <option value="blocked">blocked</option>
+                    <option value="failed">failed</option>
+                  </select>
+                </label>
+                <label>
+                  User-ID (optional)
+                  <input
+                    type="number"
+                    min={0}
+                    value={triggerAuditActorUserId}
+                    onChange={(e) => setTriggerAuditActorUserId(Number(e.target.value) || 0)}
+                  />
+                </label>
+                <label>
+                  Request-ID (optional)
+                  <input value={triggerAuditRequestId} onChange={(e) => setTriggerAuditRequestId(e.target.value)} />
+                </label>
+                <label>
+                  Limit
+                  <input
+                    type="number"
+                    min={1}
+                    max={2000}
+                    value={triggerAuditLimit}
+                    onChange={(e) => setTriggerAuditLimit(Math.max(1, Math.min(2000, Number(e.target.value) || 200)))}
+                  />
+                </label>
+              </div>
+            </article>
+
+            <div className="grid4">
+              <CardStat title="Attempts" value={Number(triggerAuditSummary?.summary?.attempts || 0)} />
+              <CardStat title="Triggered" value={Number(triggerAuditSummary?.summary?.triggered || 0)} />
+              <CardStat title="Blocked" value={Number(triggerAuditSummary?.summary?.blocked || 0)} />
+              <CardStat title="Failed" value={Number(triggerAuditSummary?.summary?.failed || 0)} />
+            </div>
+            <div className="grid4">
+              <CardStat title="Duplicate Attempts" value={Number(triggerAuditSummary?.summary?.duplicateAttempts || 0)} />
+              <CardStat title="Mehrfach-Tage" value={Number(triggerAuditSummary?.summary?.multipleAttemptDays || 0)} />
+              <CardStat title="DB-Lock" value={Number(triggerAuditSummary?.summary?.dbLocked || 0)} />
+              <CardStat title="Blocked Rate" value={`${(Number(triggerAuditSummary?.summary?.blockedRate || 0) * 100).toFixed(2)}%`} />
+            </div>
+
+            <h3>Timeline</h3>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Zeit</th>
+                  <th>Tag</th>
+                  <th>Quelle</th>
+                  <th>Attempt</th>
+                  <th>Ergebnis</th>
+                  <th>Reason</th>
+                  <th>Nutzer</th>
+                  <th>Request-ID</th>
+                  <th>Before -> After</th>
+                </tr>
+              </thead>
+              <tbody>
+                {triggerAuditItems.length === 0 ? (
+                  <tr>
+                    <td colSpan={9}>Keine Trigger-Audit-Eintraege.</td>
+                  </tr>
+                ) : (
+                  triggerAuditItems.map((row) => (
+                    <tr key={row.id}>
+                      <td>{formatDateTime(row.occurredAt)}</td>
+                      <td>{new Date(`${row.day}T00:00:00`).toLocaleDateString()}</td>
+                      <td><code>{row.source || "-"}</code></td>
+                      <td><code>{row.attemptType || "-"}</code></td>
+                      <td><span className={`debug-chip ${row.result === "triggered" ? "ok" : row.result === "blocked" ? "warn" : "error"}`}>{row.result}</span></td>
+                      <td><code>{row.reason || "-"}</code></td>
+                      <td>{row.actorUsername ? `@${row.actorUsername}` : "-"}</td>
+                      <td><code>{row.requestId || "-"}</code></td>
+                      <td className="small">
+                        {(row.beforeTriggeredAt ? formatDateTime(row.beforeTriggeredAt) : "-")} ({row.beforeTriggerSource || "-"}) ->{" "}
+                        {(row.afterTriggeredAt ? formatDateTime(row.afterTriggeredAt) : "-")} ({row.afterTriggerSource || "-"})
+                      </td>
                     </tr>
                   ))
                 )}

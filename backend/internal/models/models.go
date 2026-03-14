@@ -173,6 +173,27 @@ type DailySpikeEvent struct {
 	UpdatedAt     time.Time
 }
 
+type DailyTriggerAuditEvent struct {
+	ID                 uint       `gorm:"primaryKey" json:"id"`
+	Day                string     `gorm:"size:10;index" json:"day"`
+	OccurredAt         time.Time  `gorm:"index;not null" json:"occurredAt"`
+	RequestID          string     `gorm:"size:64;index" json:"requestId"`
+	Source             string     `gorm:"size:32;index" json:"source"`
+	ActorUserID        *uint      `gorm:"index" json:"actorUserId"`
+	ActorUsername      string     `gorm:"size:64" json:"actorUsername"`
+	AttemptType        string     `gorm:"size:16;index" json:"attemptType"`
+	Result             string     `gorm:"size:16;index" json:"result"`
+	Reason             string     `gorm:"size:64;index" json:"reason"`
+	BeforeTriggeredAt  *time.Time `json:"beforeTriggeredAt"`
+	AfterTriggeredAt   *time.Time `json:"afterTriggeredAt"`
+	BeforeTriggerSource string    `gorm:"size:32" json:"beforeTriggerSource"`
+	AfterTriggerSource  string    `gorm:"size:32" json:"afterTriggerSource"`
+	ErrorMessage       string     `gorm:"size:500" json:"errorMessage"`
+	ServerInstance     string     `gorm:"size:120;index" json:"serverInstance"`
+	MetaJSON           string     `gorm:"type:text" json:"metaJson"`
+	CreatedAt          time.Time  `gorm:"index" json:"createdAt"`
+}
+
 type Photo struct {
 	ID                       uint       `gorm:"primaryKey" json:"id"`
 	UserID                   uint       `gorm:"index;not null" json:"userId"`

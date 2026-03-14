@@ -153,6 +153,10 @@ func (s *Server) Router() *gin.Engine {
 			admin.GET("/performance/spikes", s.handleAdminPerformanceSpikes)
 			admin.GET("/performance/slo", s.handleAdminPerformanceSLO)
 			admin.GET("/performance/export", s.handleAdminPerformanceExport)
+			admin.GET("/incidents/export", s.handleAdminIncidentExport)
+			admin.GET("/trigger-audit", s.handleAdminTriggerAudit)
+			admin.GET("/trigger-audit/summary", s.handleAdminTriggerAuditSummary)
+			admin.GET("/trigger-audit/export", s.handleAdminTriggerAuditExport)
 			admin.GET("/performance/tracking", s.handleAdminPerformanceTracking)
 			admin.PUT("/performance/tracking", s.handleAdminPerformanceTrackingUpdate)
 			admin.GET("/performance/tracking/export", s.handleAdminPerformanceTrackingExport)
@@ -944,8 +948,15 @@ func (s *Server) handleSpecialMomentRequest(c *gin.Context) {
 		return
 	}
 
-	prompt, settings, err := s.Prompt.TriggerNowWithSource("special_request", &user)
+	prompt, settings, err := s.Prompt.TriggerNowWithSourceAndMeta("special_request", &user, scheduler.TriggerAttemptMeta{
+		RequestID:   requestIDFromContext(c),
+		AttemptType: "special",
+	})
 	if err != nil {
+		if errors.Is(err, scheduler.ErrAlreadyTriggeredToday) {
+			c.JSON(http.StatusConflict, gin.H{"error": "already_triggered_today"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "special trigger failed"})
 		return
 	}
@@ -1594,8 +1605,15 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 		triggerSource = "admin_manual_targeted"
 	}
 
-	prompt, settings, err := s.Prompt.TriggerNowWithSource(triggerSource, &adminUser)
+	prompt, settings, err := s.Prompt.TriggerNowWithSourceAndMeta(triggerSource, &adminUser, scheduler.TriggerAttemptMeta{
+		RequestID:   requestIDFromContext(c),
+		AttemptType: "admin",
+	})
 	if err != nil {
+		if errors.Is(err, scheduler.ErrAlreadyTriggeredToday) {
+			c.JSON(http.StatusConflict, gin.H{"error": "already_triggered_today"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "trigger failed"})
 		return
 	}
@@ -1659,33 +1677,27 @@ func (s *Server) handleTriggerPrompt(c *gin.Context) {
 }
 
 func (s *Server) handleAdminResetToday(c *gin.Context) {
+	adminUser, _ := userFromContext(c)
 	day := time.Now().In(s.Location).Format("2006-01-02")
 	now := time.Now().In(s.Location)
-
-	var settings models.AppSettings
-	if err := s.DB.First(&settings).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
-		return
-	}
-	uploadUntil := now.Add(time.Duration(settings.UploadWindowMinutes) * time.Minute)
 
 	txErr := s.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("day = ?", day).Delete(&models.Photo{}).Error; err != nil {
 			return err
 		}
-		if err := tx.Where("day = ?", day).Delete(&models.DailyPrompt{}).Error; err != nil {
-			return err
-		}
-		prompt := models.DailyPrompt{
-			Day:           day,
-			TriggeredAt:   &now,
-			UploadUntil:   &uploadUntil,
-			TriggerSource: "admin_reset",
-		}
-		return tx.Create(&prompt).Error
+		return tx.Where("day = ?", day).Delete(&models.DailyPrompt{}).Error
 	})
 	if txErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reset failed"})
+		return
+	}
+
+	prompt, _, triggerErr := s.Prompt.TriggerNowWithSourceAndMeta("admin_reset", &adminUser, scheduler.TriggerAttemptMeta{
+		RequestID:   requestIDFromContext(c),
+		AttemptType: "reset",
+	})
+	if triggerErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "reset trigger failed"})
 		return
 	}
 	s.invalidateFeedDayCache(day)
@@ -1696,8 +1708,8 @@ func (s *Server) handleAdminResetToday(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"ok":          true,
 		"day":         day,
-		"triggeredAt": now,
-		"uploadUntil": uploadUntil,
+		"triggeredAt": prompt.TriggeredAt,
+		"uploadUntil": prompt.UploadUntil,
 		"message":     "heutiger Moment wurde zurueckgesetzt und neu gestartet",
 	})
 }
@@ -2661,6 +2673,32 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 		promptByDay[prompt.Day] = prompt
 	}
 
+	type dayTriggerAuditCounts struct {
+		Attempts int
+		Blocked  int
+		Failed   int
+	}
+	triggerAuditByDay := make(map[string]dayTriggerAuditCounts, len(dayList))
+	var triggerAudits []models.DailyTriggerAuditEvent
+	if err := s.DB.
+		Select("day, result").
+		Where("day >= ? AND day <= ?", oldest, newest).
+		Find(&triggerAudits).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "history query failed"})
+		return
+	}
+	for _, ev := range triggerAudits {
+		counts := triggerAuditByDay[ev.Day]
+		counts.Attempts++
+		switch strings.ToLower(strings.TrimSpace(ev.Result)) {
+		case "blocked":
+			counts.Blocked++
+		case "failed":
+			counts.Failed++
+		}
+		triggerAuditByDay[ev.Day] = counts
+	}
+
 	var photos []models.Photo
 	if err := s.DB.Where("day >= ? AND day <= ?", oldest, newest).Find(&photos).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "history query failed"})
@@ -2914,7 +2952,8 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			metrics.reactionCount == 0 &&
 			metrics.chatMessageCount == 0 &&
 			onlineUsersCount == 0 &&
-			metrics.debugErrorCount == 0
+			metrics.debugErrorCount == 0 &&
+			triggerAuditByDay[day].Attempts == 0
 		if excludeEmpty && isEmptyDay {
 			continue
 		}
@@ -2940,6 +2979,10 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			"chatMessageCount":        metrics.chatMessageCount,
 			"debugErrorCount":         metrics.debugErrorCount,
 			"onlineTrackingAvailable": onlineTrackingAvailable,
+			"triggerAttemptCount":     triggerAuditByDay[day].Attempts,
+			"triggerBlockedCount":     triggerAuditByDay[day].Blocked,
+			"triggerFailedCount":      triggerAuditByDay[day].Failed,
+			"multipleTriggerAlert":    triggerAuditByDay[day].Attempts > 1,
 			"userActivity":            userActivityRows,
 			"analytics": gin.H{
 				"promptPhotoRatio":      promptPhotoRatio,
@@ -3241,6 +3284,16 @@ func asInt64(v any) int64 {
 	default:
 		return 0
 	}
+}
+
+func requestIDFromContext(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if requestID, ok := c.Get("requestId"); ok {
+		return strings.TrimSpace(fmt.Sprint(requestID))
+	}
+	return strings.TrimSpace(c.GetHeader("X-Request-ID"))
 }
 
 func computeParticipationTrend(userDays map[string]bool, orderedDays []string) (float64, float64, float64) {
@@ -4112,8 +4165,15 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
 	switch cmd.Action {
 	case "trigger_moment":
 		var triggerErr error
-		prompt, _, triggerErr = s.Prompt.TriggerNowWithSource("chat_command", &user)
+		prompt, _, triggerErr = s.Prompt.TriggerNowWithSourceAndMeta("chat_command", &user, scheduler.TriggerAttemptMeta{
+			RequestID:   requestIDFromContext(c),
+			AttemptType: "chat",
+		})
 		if triggerErr != nil {
+			if errors.Is(triggerErr, scheduler.ErrAlreadyTriggeredToday) {
+				c.JSON(http.StatusConflict, gin.H{"error": "already_triggered_today"})
+				return true, triggerErr
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "command trigger failed"})
 			return true, triggerErr
 		}

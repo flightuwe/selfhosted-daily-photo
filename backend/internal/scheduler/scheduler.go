@@ -2,18 +2,32 @@ package scheduler
 
 import (
 	crand "crypto/rand"
+	"encoding/json"
 	"errors"
 	"log"
 	"math/big"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type DailyPromptService struct {
 	DB       *gorm.DB
 	Location *time.Location
+	ServerInstance string
+}
+
+var ErrAlreadyTriggeredToday = errors.New("already_triggered_today")
+
+type TriggerAttemptMeta struct {
+	RequestID    string
+	AttemptType  string
+	ServerInstance string
+	Meta         map[string]any
 }
 
 func (s *DailyPromptService) Start(enabled bool, onTrigger func(models.DailyPrompt, models.AppSettings)) {
@@ -38,7 +52,12 @@ func (s *DailyPromptService) tick(onTrigger func(models.DailyPrompt, models.AppS
 	day := now.Format("2006-01-02")
 
 	var existing models.DailyPrompt
-	if err := s.DB.Where("day = ?", day).First(&existing).Error; err == nil && existing.TriggeredAt != nil {
+	if err := s.DB.Where("day = ?", day).First(&existing).Error; err == nil {
+		if existing.TriggeredAt != nil {
+			return
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Printf("scheduler day-check failed: %v", err)
 		return
 	}
 
@@ -241,10 +260,16 @@ func randomOffsetMinutes(max int) int {
 }
 
 func (s *DailyPromptService) TriggerNow() (models.DailyPrompt, models.AppSettings, error) {
-	return s.TriggerNowWithSource("scheduler", nil)
+	return s.TriggerNowWithSourceAndMeta("scheduler", nil, TriggerAttemptMeta{
+		AttemptType: "scheduler",
+	})
 }
 
 func (s *DailyPromptService) TriggerNowWithSource(source string, requestedBy *models.User) (models.DailyPrompt, models.AppSettings, error) {
+	return s.TriggerNowWithSourceAndMeta(source, requestedBy, TriggerAttemptMeta{})
+}
+
+func (s *DailyPromptService) TriggerNowWithSourceAndMeta(source string, requestedBy *models.User, meta TriggerAttemptMeta) (models.DailyPrompt, models.AppSettings, error) {
 	var settings models.AppSettings
 	if err := s.DB.First(&settings).Error; err != nil {
 		return models.DailyPrompt{}, settings, err
@@ -254,26 +279,155 @@ func (s *DailyPromptService) TriggerNowWithSource(source string, requestedBy *mo
 	day := now.Format("2006-01-02")
 	until := now.Add(time.Duration(settings.UploadWindowMinutes) * time.Minute)
 
-	prompt := models.DailyPrompt{Day: day}
-	if err := s.DB.Where("day = ?", day).FirstOrCreate(&prompt).Error; err != nil {
-		return models.DailyPrompt{}, settings, err
-	}
-
 	if source == "" {
 		source = "scheduler"
 	}
-	prompt.TriggeredAt = &now
-	prompt.UploadUntil = &until
-	prompt.TriggerSource = source
-	if requestedBy != nil {
-		prompt.RequestedByID = &requestedBy.ID
-		prompt.RequestedBy = requestedBy.Username
-	} else {
-		prompt.RequestedByID = nil
-		prompt.RequestedBy = ""
+	attemptType := strings.TrimSpace(meta.AttemptType)
+	if attemptType == "" {
+		switch source {
+		case "scheduler":
+			attemptType = "scheduler"
+		case "admin_reset":
+			attemptType = "reset"
+		case "chat_command":
+			attemptType = "chat"
+		case "special_request":
+			attemptType = "special"
+		default:
+			attemptType = "admin"
+		}
 	}
-	if err := s.DB.Save(&prompt).Error; err != nil {
-		return models.DailyPrompt{}, settings, err
+
+	serverInstance := strings.TrimSpace(meta.ServerInstance)
+	if serverInstance == "" {
+		serverInstance = strings.TrimSpace(s.ServerInstance)
+	}
+	if serverInstance == "" {
+		if host, hostErr := os.Hostname(); hostErr == nil {
+			serverInstance = strings.TrimSpace(host)
+		}
+	}
+	if serverInstance == "" {
+		serverInstance = "unknown"
+	}
+
+	auditEvent := models.DailyTriggerAuditEvent{
+		Day:          day,
+		OccurredAt:   now,
+		RequestID:    strings.TrimSpace(meta.RequestID),
+		Source:       source,
+		AttemptType:  attemptType,
+		Result:       "failed",
+		Reason:       "unknown",
+		ServerInstance: serverInstance,
+	}
+	if requestedBy != nil {
+		auditEvent.ActorUserID = &requestedBy.ID
+		auditEvent.ActorUsername = requestedBy.Username
+	}
+	if len(meta.Meta) > 0 {
+		if payload, err := json.Marshal(meta.Meta); err == nil {
+			auditEvent.MetaJSON = string(payload)
+		}
+	}
+
+	var prompt models.DailyPrompt
+	var resultErr error
+	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		findErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("day = ?", day).First(&prompt).Error
+		if findErr != nil {
+			if errors.Is(findErr, gorm.ErrRecordNotFound) {
+				prompt = models.DailyPrompt{
+					Day: day,
+				}
+				if createErr := tx.Create(&prompt).Error; createErr != nil {
+					return createErr
+				}
+			} else {
+				return findErr
+			}
+		}
+
+		auditEvent.BeforeTriggeredAt = prompt.TriggeredAt
+		auditEvent.BeforeTriggerSource = strings.TrimSpace(prompt.TriggerSource)
+
+		if source != "admin_reset" && prompt.TriggeredAt != nil {
+			auditEvent.AfterTriggeredAt = prompt.TriggeredAt
+			auditEvent.AfterTriggerSource = strings.TrimSpace(prompt.TriggerSource)
+			auditEvent.Result = "blocked"
+			auditEvent.Reason = "already_triggered_today"
+			return ErrAlreadyTriggeredToday
+		}
+
+		updates := map[string]any{
+			"triggered_at":    &now,
+			"upload_until":    &until,
+			"trigger_source":  source,
+			"updated_at":      now,
+		}
+		if requestedBy != nil {
+			updates["requested_by_id"] = &requestedBy.ID
+			updates["requested_by"] = requestedBy.Username
+		} else {
+			updates["requested_by_id"] = nil
+			updates["requested_by"] = ""
+		}
+
+		var res *gorm.DB
+		if source == "admin_reset" {
+			res = tx.Model(&models.DailyPrompt{}).Where("id = ?", prompt.ID).Updates(updates)
+		} else {
+			// Guard against concurrent trigger races: only one update may win.
+			res = tx.Model(&models.DailyPrompt{}).Where("id = ? AND triggered_at IS NULL", prompt.ID).Updates(updates)
+			if res.Error == nil && res.RowsAffected == 0 {
+				if loadErr := tx.Where("id = ?", prompt.ID).First(&prompt).Error; loadErr == nil {
+					auditEvent.AfterTriggeredAt = prompt.TriggeredAt
+					auditEvent.AfterTriggerSource = strings.TrimSpace(prompt.TriggerSource)
+				}
+				auditEvent.Result = "blocked"
+				auditEvent.Reason = "race_lost"
+				return ErrAlreadyTriggeredToday
+			}
+		}
+		if res.Error != nil {
+			return res.Error
+		}
+		if readErr := tx.Where("id = ?", prompt.ID).First(&prompt).Error; readErr != nil {
+			return readErr
+		}
+		auditEvent.AfterTriggeredAt = prompt.TriggeredAt
+		auditEvent.AfterTriggerSource = strings.TrimSpace(prompt.TriggerSource)
+		auditEvent.Result = "triggered"
+		auditEvent.Reason = "ok"
+		return nil
+	}); err != nil {
+		resultErr = err
+	}
+
+	if resultErr != nil {
+		errMsg := strings.TrimSpace(resultErr.Error())
+		if errors.Is(resultErr, ErrAlreadyTriggeredToday) {
+			if auditEvent.Result == "" || auditEvent.Result == "failed" {
+				auditEvent.Result = "blocked"
+				if auditEvent.Reason == "" || auditEvent.Reason == "unknown" {
+					auditEvent.Reason = "already_triggered_today"
+				}
+			}
+		} else if strings.Contains(strings.ToLower(errMsg), "database is locked") {
+			auditEvent.Result = "failed"
+			auditEvent.Reason = "db_locked"
+		} else {
+			auditEvent.Result = "failed"
+			auditEvent.Reason = "unknown"
+		}
+		auditEvent.ErrorMessage = errMsg
+	}
+	if auditErr := s.DB.Create(&auditEvent).Error; auditErr != nil {
+		log.Printf("trigger audit write failed: %v", auditErr)
+	}
+
+	if resultErr != nil {
+		return models.DailyPrompt{}, settings, resultErr
 	}
 
 	return prompt, settings, nil

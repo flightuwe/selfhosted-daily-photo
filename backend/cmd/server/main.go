@@ -54,7 +54,8 @@ func main() {
     } else {
         log.Printf("notifications: provider=%s", notifier.Name())
     }
-    promptService := &scheduler.DailyPromptService{DB: database, Location: location}
+	hostName, _ := os.Hostname()
+    promptService := &scheduler.DailyPromptService{DB: database, Location: location, ServerInstance: hostName}
 	monitor := api.NewMonitor(database, location)
 	server := &api.Server{
 		DB:       database,

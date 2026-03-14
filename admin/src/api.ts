@@ -237,9 +237,88 @@ export type AdminHistoryDay = {
   reactionCount: number;
   chatMessageCount: number;
   debugErrorCount?: number;
+  triggerAttemptCount?: number;
+  triggerBlockedCount?: number;
+  triggerFailedCount?: number;
+  multipleTriggerAlert?: boolean;
   onlineTrackingAvailable: boolean;
   userActivity?: AdminHistoryUserActivity[] | null;
   analytics?: AdminHistoryAnalytics;
+};
+
+export type AdminTriggerAuditItem = {
+  id: number;
+  day: string;
+  occurredAt: string;
+  requestId?: string;
+  source: string;
+  actorUserId?: number | null;
+  actorUsername?: string;
+  attemptType: "scheduler" | "admin" | "chat" | "special" | "reset" | string;
+  result: "triggered" | "blocked" | "failed" | string;
+  reason: string;
+  beforeTriggeredAt?: string | null;
+  afterTriggeredAt?: string | null;
+  beforeTriggerSource?: string;
+  afterTriggerSource?: string;
+  errorMessage?: string;
+  serverInstance?: string;
+  metaJson?: string;
+};
+
+export type AdminTriggerAuditResponse = {
+  items: AdminTriggerAuditItem[];
+  from: string;
+  to: string;
+  count: number;
+  limit: number;
+};
+
+export type AdminTriggerAuditSummary = {
+  days: number;
+  from: string;
+  to: string;
+  summary: {
+    attempts: number;
+    triggered: number;
+    blocked: number;
+    failed: number;
+    dbLocked: number;
+    duplicateAttempts: number;
+    multipleAttemptDays: number;
+    blockedRate: number;
+    failedRate: number;
+  };
+  byDay: Array<{
+    day: string;
+    attempts: number;
+    triggered: number;
+    blocked: number;
+    failed: number;
+    dbLocked: number;
+  }>;
+  bySource: Array<{ source: string; count: number }>;
+};
+
+export type AdminIncidentExportStatus = {
+  meta: {
+    schemaVersion: string;
+    generatedAt: string;
+    serverVersion: string;
+    timezone: string;
+    requestId: string;
+    from: string;
+    to: string;
+    includeGateway: boolean;
+  };
+  status: {
+    duplicateAttempts: number;
+    multipleAttemptDays: number;
+    lastTriggerSource?: string;
+    gatewayLogAvailable: boolean;
+    backendLogAvailable: boolean;
+  };
+  collectionWarnings: string[];
 };
 
 export type AdminHistoryLeaderboardEntry = {
@@ -1066,6 +1145,184 @@ export async function updateAdminPerformanceTracking(
     latestSpike: data.latestSpike || null,
     serverNow: data.serverNow,
   };
+}
+
+export async function getAdminTriggerAudit(
+  token: string,
+  opts?: {
+    day?: string;
+    from?: string;
+    to?: string;
+    source?: string;
+    result?: string;
+    actorUserId?: number;
+    requestId?: string;
+    limit?: number;
+  }
+): Promise<AdminTriggerAuditResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.day) qs.set("day", opts.day);
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  if (opts?.source) qs.set("source", opts.source);
+  if (opts?.result) qs.set("result", opts.result);
+  if (opts?.actorUserId && opts.actorUserId > 0) qs.set("actorUserId", String(opts.actorUserId));
+  if (opts?.requestId) qs.set("requestId", opts.requestId);
+  if (opts?.limit && opts.limit > 0) qs.set("limit", String(opts.limit));
+  const res = await fetch(`${apiBase}/admin/trigger-audit?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminTriggerAuditResponse>(res);
+  return {
+    items: data.items || [],
+    from: data.from || "",
+    to: data.to || "",
+    count: Number(data.count || 0),
+    limit: Number(data.limit || opts?.limit || 200),
+  };
+}
+
+export async function getAdminTriggerAuditSummary(
+  token: string,
+  days = 7
+): Promise<AdminTriggerAuditSummary> {
+  const qs = new URLSearchParams();
+  qs.set("days", String(days));
+  const res = await fetch(`${apiBase}/admin/trigger-audit/summary?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminTriggerAuditSummary>(res);
+  return {
+    days: Number(data.days || days),
+    from: data.from || "",
+    to: data.to || "",
+    summary: {
+      attempts: Number(data.summary?.attempts || 0),
+      triggered: Number(data.summary?.triggered || 0),
+      blocked: Number(data.summary?.blocked || 0),
+      failed: Number(data.summary?.failed || 0),
+      dbLocked: Number(data.summary?.dbLocked || 0),
+      duplicateAttempts: Number(data.summary?.duplicateAttempts || 0),
+      multipleAttemptDays: Number(data.summary?.multipleAttemptDays || 0),
+      blockedRate: Number(data.summary?.blockedRate || 0),
+      failedRate: Number(data.summary?.failedRate || 0),
+    },
+    byDay: data.byDay || [],
+    bySource: data.bySource || [],
+  };
+}
+
+export async function downloadTriggerAuditExport(
+  token: string,
+  opts?: {
+    day?: string;
+    from?: string;
+    to?: string;
+    source?: string;
+    result?: string;
+    actorUserId?: number;
+    requestId?: string;
+    format?: "json" | "csv";
+  }
+): Promise<void> {
+  const qs = new URLSearchParams();
+  if (opts?.day) qs.set("day", opts.day);
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  if (opts?.source) qs.set("source", opts.source);
+  if (opts?.result) qs.set("result", opts.result);
+  if (opts?.actorUserId && opts.actorUserId > 0) qs.set("actorUserId", String(opts.actorUserId));
+  if (opts?.requestId) qs.set("requestId", opts.requestId);
+  qs.set("format", opts?.format || "json");
+  const res = await fetch(`${apiBase}/admin/trigger-audit/export?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    throw new Error(body.error || "Download fehlgeschlagen");
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") || "";
+  const fileMatch = disposition.match(/filename=\"?([^\"]+)\"?/i);
+  const fallbackExt = (opts?.format || "json") === "csv" ? "csv" : "json";
+  const filename = fileMatch?.[1] || `trigger-audit-export.${fallbackExt}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function getAdminIncidentExportStatus(
+  token: string,
+  opts?: { from?: string; to?: string; day?: string; includeGateway?: boolean }
+): Promise<AdminIncidentExportStatus> {
+  const qs = new URLSearchParams();
+  qs.set("format", "json");
+  qs.set("statusOnly", "true");
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  if (opts?.day) qs.set("day", opts.day);
+  qs.set("includeGateway", String(opts?.includeGateway ?? true));
+  const res = await fetch(`${apiBase}/admin/incidents/export?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminIncidentExportStatus>(res);
+  return {
+    meta: {
+      schemaVersion: String(data.meta?.schemaVersion || "incident_bundle_v1"),
+      generatedAt: String(data.meta?.generatedAt || ""),
+      serverVersion: String(data.meta?.serverVersion || ""),
+      timezone: String(data.meta?.timezone || ""),
+      requestId: String(data.meta?.requestId || ""),
+      from: String(data.meta?.from || ""),
+      to: String(data.meta?.to || ""),
+      includeGateway: Boolean(data.meta?.includeGateway),
+    },
+    status: {
+      duplicateAttempts: Number(data.status?.duplicateAttempts || 0),
+      multipleAttemptDays: Number(data.status?.multipleAttemptDays || 0),
+      lastTriggerSource: data.status?.lastTriggerSource || "",
+      gatewayLogAvailable: Boolean(data.status?.gatewayLogAvailable),
+      backendLogAvailable: Boolean(data.status?.backendLogAvailable),
+    },
+    collectionWarnings: data.collectionWarnings || [],
+  };
+}
+
+export async function downloadIncidentExport(
+  token: string,
+  opts?: { from?: string; to?: string; day?: string; includeGateway?: boolean }
+): Promise<void> {
+  const qs = new URLSearchParams();
+  qs.set("format", "json");
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  if (opts?.day) qs.set("day", opts.day);
+  qs.set("includeGateway", String(opts?.includeGateway ?? true));
+
+  const res = await fetch(`${apiBase}/admin/incidents/export?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    throw new Error(body.error || "Download fehlgeschlagen");
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") || "";
+  const fileMatch = disposition.match(/filename=\"?([^\"]+)\"?/i);
+  const filename = fileMatch?.[1] || `incident-export-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function downloadPerformanceTrackingExport(

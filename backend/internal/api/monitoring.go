@@ -435,10 +435,12 @@ func (m *Monitor) runMaintenanceLocked(now time.Time) {
 	queryCutoff := now.Add(-14 * 24 * time.Hour)
 	systemCutoff := now.Add(-30 * 24 * time.Hour)
 	spikeCutoff := now.Add(-120 * 24 * time.Hour)
+	triggerAuditCutoff := now.Add(-30 * 24 * time.Hour)
 	_ = m.DB.Where("minute < ?", minuteCutoff).Delete(&models.APIMinuteMetric{}).Error
 	_ = m.DB.Where("minute < ?", queryCutoff).Delete(&models.DBQueryMinuteMetric{}).Error
 	_ = m.DB.Where("minute < ?", systemCutoff).Delete(&models.SystemMinuteMetric{}).Error
 	_ = m.DB.Where("window_end < ?", spikeCutoff).Delete(&models.DailySpikeEvent{}).Error
+	_ = m.DB.Where("occurred_at < ?", triggerAuditCutoff).Delete(&models.DailyTriggerAuditEvent{}).Error
 }
 
 func (m *Monitor) RecordPush(sent, failed, invalid int, hadError bool) {

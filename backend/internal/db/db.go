@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 	"gorm.io/driver/sqlite"
@@ -33,6 +34,7 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.SystemMinuteMetric{},
 		&models.DBQueryMinuteMetric{},
 		&models.DailySpikeEvent{},
+		&models.DailyTriggerAuditEvent{},
 		&models.Photo{},
 		&models.PhotoReaction{},
 		&models.PhotoComment{},
@@ -52,6 +54,9 @@ func Connect(path string) (*gorm.DB, error) {
 		return nil, err
 	}
 	if err := ensureCapsulePrivateDisabled(database); err != nil {
+		return nil, err
+	}
+	if err := ensureTriggerAuditRetention(database, 30); err != nil {
 		return nil, err
 	}
 
@@ -144,4 +149,12 @@ func ensureCapsulePrivateDisabled(database *gorm.DB) error {
 		Where("capsule_private = ?", true).
 		Update("capsule_private", false)
 	return result.Error
+}
+
+func ensureTriggerAuditRetention(database *gorm.DB, days int) error {
+	if days < 1 {
+		days = 30
+	}
+	cutoff := time.Now().AddDate(0, 0, -days)
+	return database.Where("occurred_at < ?", cutoff).Delete(&models.DailyTriggerAuditEvent{}).Error
 }

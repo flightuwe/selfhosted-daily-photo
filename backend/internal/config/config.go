@@ -8,19 +8,21 @@ import (
 )
 
 type Config struct {
-    Address               string
-    DatabasePath          string
-    UploadDir             string
+	Address               string
+	DatabasePath          string
+	UploadDir             string
     JWTSecret             string
     TokenTTL              time.Duration
     AllowedOrigins        []string
     PublicBaseURL         string
     Timezone              string
     SchedulerEnabled      bool
-    AppVersion            string
-    FCMEnabled            bool
-    FCMProjectID          string
-    FCMServiceAccountFile string
+	AppVersion            string
+	FCMEnabled            bool
+	FCMProjectID          string
+	FCMServiceAccountFile string
+	ForensicBackendLogPath string
+	ForensicGatewayLogPath string
 }
 
 func Load() Config {
@@ -34,11 +36,13 @@ func Load() Config {
         PublicBaseURL:         getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
         Timezone:              getEnv("APP_TIMEZONE", "Europe/Berlin"),
         SchedulerEnabled:      getBool("SCHEDULER_ENABLED", true),
-        AppVersion:            getEnv("APP_VERSION", "dev"),
-        FCMEnabled:            getBool("FCM_ENABLED", false),
-        FCMProjectID:          getEnv("FCM_PROJECT_ID", ""),
-        FCMServiceAccountFile: getEnv("FCM_SERVICE_ACCOUNT_FILE", ""),
-    }
+		AppVersion:            getEnv("APP_VERSION", "dev"),
+		FCMEnabled:            getBool("FCM_ENABLED", false),
+		FCMProjectID:          getEnv("FCM_PROJECT_ID", ""),
+		FCMServiceAccountFile: getEnv("FCM_SERVICE_ACCOUNT_FILE", ""),
+		ForensicBackendLogPath: getEnv("FORENSIC_BACKEND_LOG_PATH", ""),
+		ForensicGatewayLogPath: getEnv("FORENSIC_GATEWAY_LOG_PATH", ""),
+	}
 }
 
 func getEnv(key, fallback string) string {
