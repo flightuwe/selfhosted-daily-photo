@@ -161,8 +161,6 @@ import okio.buffer
 import org.json.JSONObject
 import org.json.JSONArray
 import retrofit2.HttpException
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
@@ -650,8 +648,13 @@ interface Api {
     ): PhotoInteractionsResponse
 }
 
-class AppRepo(private val api: Api, private val context: Context) {
+class AppRepo(
+    private val context: Context,
+    private val httpClient: OkHttpClient
+) {
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
+    @Volatile
+    private var api: Api = buildApiService(resolveApiBaseUrl(context), httpClient)
     private val maxUploadDimensionPx = 1600
     private val debugLogsPrefKey = "debug_logs_v1"
     private val debugUploadEnabledKey = "debug_upload_enabled"
@@ -664,6 +667,26 @@ class AppRepo(private val api: Api, private val context: Context) {
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
 
     fun token(): String = prefs.getString("token", "") ?: ""
+
+    fun resolvedApiBaseUrl(): String = resolveApiBaseUrl(context)
+
+    fun apiBaseUrlOverrideRaw(): String = currentApiBaseUrlOverride(context)
+
+    fun isApiBaseUrlOverrideActive(): Boolean = com.selfhosted.daily.isApiBaseUrlOverrideActive(context)
+
+    fun allowInsecureHttpOverride(): Boolean = com.selfhosted.daily.allowInsecureHttpOverride(context)
+
+    fun setAllowInsecureHttpOverride(enabled: Boolean) {
+        com.selfhosted.daily.setAllowInsecureHttpOverride(context, enabled)
+    }
+
+    fun validateApiBaseUrlInput(raw: String): ApiBaseUrlValidationResult =
+        com.selfhosted.daily.validateApiBaseUrlInput(raw, allowInsecureHttpOverride())
+
+    fun setApiBaseUrlOverride(normalizedOrBlank: String) {
+        com.selfhosted.daily.setApiBaseUrlOverride(context, normalizedOrBlank)
+        api = buildApiService(resolveApiBaseUrl(context), httpClient)
+    }
 
     fun hasUsableNetwork(): Boolean {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
@@ -1108,6 +1131,8 @@ class AppRepo(private val api: Api, private val context: Context) {
     }
 
     suspend fun health(): HealthResponse = api.health()
+    suspend fun probeHealth(baseUrl: String): HealthResponse =
+        buildApiService(baseUrl, httpClient).health()
     suspend fun me(): MeResponse = api.me("Bearer ${token()}")
     suspend fun evaluateUserPrompts(appVersion: String): UserPromptEvaluationResponse =
         api.evaluateUserPrompts("Bearer ${token()}", appVersion)
@@ -1538,6 +1563,10 @@ data class UiState(
     val pushProvider: String = "unknown",
     val chatDeleteSupported: Boolean = false,
     val lastPingMs: Long? = null,
+    val activeApiBaseUrl: String = BuildConfig.API_BASE_URL,
+    val apiBaseUrlOverride: String = "",
+    val allowInsecureHttpOverride: Boolean = false,
+    val applyServerOverrideInFlight: Boolean = false,
     val showPromptDialog: Boolean = false,
     val showProfileSetupPrompt: Boolean = false,
     val showProfileSetupGuide: Boolean = false,
@@ -1648,6 +1677,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
             diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
+            activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+            apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
+            allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
             debugLogs = repo.recentDebugLogs()
         )
     )
@@ -1935,6 +1967,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
             diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
+            activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+            apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
+            allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
             debugLogs = repo.recentDebugLogs(),
             invitePreview = null
         )
@@ -3087,6 +3122,79 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
+    fun setAllowInsecureHttpOverride(enabled: Boolean) {
+        repo.setAllowInsecureHttpOverride(enabled)
+        state = state.copy(allowInsecureHttpOverride = enabled)
+    }
+
+    suspend fun applyServerBaseUrlOverride(rawInput: String) {
+        val validation = repo.validateApiBaseUrlInput(rawInput)
+        if (validation.errorMessage != null) {
+            state = state.copy(message = validation.errorMessage)
+            return
+        }
+
+        val normalized = validation.normalizedBaseUrl
+        state = state.copy(loading = true, applyServerOverrideInFlight = true)
+
+        if (!normalized.isNullOrBlank()) {
+            val healthResult = runCatching { repo.probeHealth(normalized) }.getOrElse {
+                state = state.copy(
+                    loading = false,
+                    applyServerOverrideInFlight = false,
+                    message = apiError(it, "Zielserver nicht erreichbar")
+                )
+                return
+            }
+            if (!healthResult.ok) {
+                state = state.copy(
+                    loading = false,
+                    applyServerOverrideInFlight = false,
+                    message = "Zielserver antwortet, aber nicht mit ok=true"
+                )
+                return
+            }
+        }
+
+        repo.setApiBaseUrlOverride(normalized.orEmpty())
+        repo.logDebug(
+            "server_override_applied",
+            "API-Server gewechselt",
+            "target=${repo.resolvedApiBaseUrl()};custom=${repo.isApiBaseUrlOverrideActive()}"
+        )
+        profileSetupPromptShownInSession = false
+        repo.clearToken()
+        state = UiState(
+            startupDone = true,
+            serverConnected = false,
+            serverVersion = "unbekannt",
+            pushProvider = "unknown",
+            darkMode = state.darkMode,
+            oledMode = state.oledMode,
+            uploadQuality = state.uploadQuality,
+            autoUpdateEnabled = repo.autoUpdateEnabled(),
+            notificationMasterEnabled = repo.notificationMasterEnabled(),
+            feedPostPushEnabled = repo.feedPostPushEnabled(),
+            inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
+            photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
+            photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
+            customNotificationToneEnabled = repo.customNotificationToneEnabled(),
+            customNotificationToneUri = repo.customNotificationToneUri(),
+            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
+            diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
+            activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+            apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
+            allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
+            applyServerOverrideInFlight = false,
+            debugLogs = repo.recentDebugLogs(),
+            message = if (normalized.isNullOrBlank()) {
+                "Custom-Server entfernt. Bitte neu anmelden."
+            } else {
+                "Custom-Server gespeichert. Bitte neu anmelden."
+            }
+        )
+    }
+
     suspend fun requestSpecialMoment() {
         state = state.copy(loading = true)
         runCatching { repo.requestSpecialMoment() }
@@ -3620,13 +3728,7 @@ class MainActivity : ComponentActivity() {
                 chain.proceed(newReq)
             }
             .build()
-        val api = Retrofit.Builder()
-            .baseUrl(BuildConfig.API_BASE_URL)
-            .client(httpClient)
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-            .create(Api::class.java)
-        repo = AppRepo(api, this)
+        repo = AppRepo(this, httpClient)
         repo.installCrashHandler()
         repo.captureLaunchIntent(intent)
 
@@ -4540,7 +4642,10 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     updateAvailable = state.updateAvailable,
                     serverVersion = state.serverVersion,
                     pushProvider = state.pushProvider,
-                    apiBaseUrl = BuildConfig.API_BASE_URL,
+                    apiBaseUrl = state.activeApiBaseUrl,
+                    apiBaseUrlOverride = state.apiBaseUrlOverride,
+                    allowInsecureHttpOverride = state.allowInsecureHttpOverride,
+                    applyServerOverrideInFlight = state.applyServerOverrideInFlight,
                     serverConnected = state.serverConnected,
                     lastPingMs = state.lastPingMs,
                     uploadQuality = state.uploadQuality,
@@ -4655,6 +4760,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onShowHelp = { vm.showHelpDialog() },
                     onOpenSetupGuide = { vm.openProfileSetupGuide() },
                     onCheckConnection = { scope.launch { vm.checkConnection() } },
+                    onAllowInsecureHttpOverrideChange = { vm.setAllowInsecureHttpOverride(it) },
+                    onApplyServerBaseUrlOverride = { input -> scope.launch { vm.applyServerBaseUrlOverride(input) } },
                     onRollInviteCode = { scope.launch { vm.rollInviteCode() } },
                     onShareInviteCode = {
                         val code = state.myInviteCode.trim()
@@ -5900,6 +6007,9 @@ fun ProfileTab(
     serverVersion: String,
     pushProvider: String,
     apiBaseUrl: String,
+    apiBaseUrlOverride: String,
+    allowInsecureHttpOverride: Boolean,
+    applyServerOverrideInFlight: Boolean,
     serverConnected: Boolean,
     lastPingMs: Long?,
     uploadQuality: Int,
@@ -5978,6 +6088,8 @@ fun ProfileTab(
     onShowHelp: () -> Unit,
     onOpenSetupGuide: () -> Unit,
     onCheckConnection: () -> Unit,
+    onAllowInsecureHttpOverrideChange: (Boolean) -> Unit,
+    onApplyServerBaseUrlOverride: (String) -> Unit,
     onRollInviteCode: () -> Unit,
     onShareInviteCode: () -> Unit,
     onLogout: () -> Unit,
@@ -5997,6 +6109,7 @@ fun ProfileTab(
     var showAllowDownloadWarning by remember { mutableStateOf(false) }
     var updatePulseTick by remember { mutableStateOf(0) }
     var updateChecked by remember { mutableStateOf(false) }
+    var serverOverrideInput by remember(apiBaseUrlOverride) { mutableStateOf(apiBaseUrlOverride) }
     val updateButtonScale = remember { Animatable(1f) }
     fun sectionExpanded(sectionId: String): Boolean = profileSectionsExpanded[sectionId] ?: false
     var bioValue by remember(bio) { mutableStateOf(bio) }
@@ -6786,8 +6899,49 @@ fun ProfileTab(
                               Text("Push-Provider: $pushProvider")
                               Text("Letzter Ping: ${lastPingMs?.let { "${it} ms" } ?: "-"}")
                               Text("API: $apiBaseUrl")
+                              Text(
+                                  if (apiBaseUrlOverride.isBlank()) "Custom Server: aus"
+                                  else "Custom Server: aktiv"
+                              )
                               Spacer(modifier = Modifier.height(6.dp))
                               Button(onClick = onCheckConnection, modifier = Modifier.fillMaxWidth()) { Text("Verbindung pruefen") }
+                              Spacer(modifier = Modifier.height(8.dp))
+                              OutlinedTextField(
+                                  value = serverOverrideInput,
+                                  onValueChange = { serverOverrideInput = it },
+                                  label = { Text("Server-Override (optional)") },
+                                  placeholder = { Text("https://daily.example.com") },
+                                  modifier = Modifier.fillMaxWidth(),
+                                  singleLine = true
+                              )
+                              SettingsToggleRow(
+                                  label = "Lokales HTTP erlauben",
+                                  checked = allowInsecureHttpOverride,
+                                  onCheckedChange = onAllowInsecureHttpOverrideChange,
+                                  supportingText = "Nur fuer lokale Tests. Produktion sollte HTTPS nutzen."
+                              )
+                              Row(
+                                  modifier = Modifier.fillMaxWidth(),
+                                  horizontalArrangement = Arrangement.spacedBy(8.dp)
+                              ) {
+                                  Button(
+                                      onClick = { onApplyServerBaseUrlOverride(serverOverrideInput) },
+                                      enabled = !applyServerOverrideInFlight,
+                                      modifier = Modifier.weight(1f)
+                                  ) { Text(if (applyServerOverrideInFlight) "Pruefe..." else "Server uebernehmen") }
+                                  Button(
+                                      onClick = {
+                                          serverOverrideInput = ""
+                                          onApplyServerBaseUrlOverride("")
+                                      },
+                                      enabled = !applyServerOverrideInFlight,
+                                      modifier = Modifier.weight(1f)
+                                  ) { Text("Reset auf Standard") }
+                              }
+                              Text(
+                                  "Beim Wechsel wird die Session beendet und ein neuer Login am Zielserver gestartet.",
+                                  color = MaterialTheme.colorScheme.onSurfaceVariant
+                              )
                           }
                       }
                   }

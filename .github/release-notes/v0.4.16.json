@@ -1,0 +1,26 @@
+{
+  "version": "0.4.16",
+  "releasedAt": "2026-03-14T00:00:00Z",
+  "highlights": [
+    "Android Server-URL-Override v1 fuer kontrollierten Hostwechsel",
+    "Health-Check + Session-Reset beim Serverwechsel",
+    "Vollumzug-Skripte fuer Backup, Restore und Stack-Validierung"
+  ],
+  "details": [
+    {
+      "title": "Android",
+      "items": [
+        "Optionaler API-Server-Override in der App-Konfiguration",
+        "UploadQueueWorker nutzt den aktiven Override-Server",
+        "Lokales HTTP nur ueber expliziten Schalter"
+      ]
+    },
+    {
+      "title": "Operations",
+      "items": [
+        "Neues Migrations-Playbook fuer Freeze-Cutover und Warm-Rollback",
+        "Neue Scripts: backup-full, restore-full, validate-stack (PowerShell + Shell)"
+      ]
+    }
+  ]
+}

@@ -147,6 +147,16 @@ Hinweis:
   - silent: `pwsh scripts/trigger-daily-test.ps1 -AdminToken <adminToken> -Silent`
   - nur Testnutzer pushen: `pwsh scripts/trigger-daily-test.ps1 -AdminToken <adminToken> -NotifyUserIds "12,15"`
 
+## Vollumzug auf neuen Server
+- Playbook: `docs/server-migration-playbook.md`
+- Backup-Skript (PowerShell): `scripts/backup-full.ps1`
+- Restore-Skript (PowerShell): `scripts/restore-full.ps1`
+- Smoke-Validierung (PowerShell): `scripts/validate-stack.ps1`
+- Linux-Varianten:
+  - `scripts/backup-full.sh`
+  - `scripts/restore-full.sh`
+  - `scripts/validate-stack.sh`
+
 ## Erste Inbetriebnahme testen
 1. `https://daily.deine-domain.tld/api/health` -> `ok: true`
 2. Admin Login mit Bootstrap-Admin

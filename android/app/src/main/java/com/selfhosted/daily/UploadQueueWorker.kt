@@ -382,8 +382,9 @@ class UploadQueueWorker(
             error("Dateien fehlen fuer Queue-Upload")
         }
 
+        val apiBaseUrl = resolveApiBaseUrl(applicationContext)
         val api = Retrofit.Builder()
-            .baseUrl(BuildConfig.API_BASE_URL)
+            .baseUrl(apiBaseUrl)
             .client(OkHttpClient.Builder().build())
             .addConverterFactory(GsonConverterFactory.create())
             .build()
