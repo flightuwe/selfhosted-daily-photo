@@ -1,0 +1,18 @@
+{
+  "version": "0.4.15",
+  "releasedAt": "2026-03-14T00:00:00Z",
+  "highlights": [
+    "Admin-Buildfix fuer Incident/Trigger-Audit-Ansicht",
+    "Incident-Export als One-Click JSON-Bundle im Admin-Panel",
+    "Backend-Forensik-Endpoint mit Trigger-, Performance- und Log-Slice"
+  ],
+  "details": [
+    {
+      "title": "Build-Stabilitaet",
+      "items": [
+        "JSX-Parsingfehler in App.tsx behoben (escaped arrow in JSX-Text)",
+        "Release auf 0.4.15 mit erhoehtem versionCode"
+      ]
+    }
+  ]
+}

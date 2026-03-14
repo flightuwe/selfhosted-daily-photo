@@ -3187,7 +3187,7 @@ export function App() {
                   <th>Reason</th>
                   <th>Nutzer</th>
                   <th>Request-ID</th>
-                  <th>Before -> After</th>
+                    <th>Before -&gt; After</th>
                 </tr>
               </thead>
               <tbody>
@@ -3207,7 +3207,7 @@ export function App() {
                       <td>{row.actorUsername ? `@${row.actorUsername}` : "-"}</td>
                       <td><code>{row.requestId || "-"}</code></td>
                       <td className="small">
-                        {(row.beforeTriggeredAt ? formatDateTime(row.beforeTriggeredAt) : "-")} ({row.beforeTriggerSource || "-"}) ->{" "}
+                          {(row.beforeTriggeredAt ? formatDateTime(row.beforeTriggeredAt) : "-")} ({row.beforeTriggerSource || "-"}) -&gt;{" "}
                         {(row.afterTriggeredAt ? formatDateTime(row.afterTriggeredAt) : "-")} ({row.afterTriggerSource || "-"})
                       </td>
                     </tr>
