@@ -324,14 +324,16 @@ data class PromptResponse(
     val hasAnyPostToday: Boolean = false,
     val ownPhoto: PromptPhoto? = null,
     val triggerSource: String? = null,
-    val requestedByUser: String? = null
+    val requestedByUser: String? = null,
+    val momentKind: String? = null
 )
 data class PromptMeta(
     val day: String = "",
     val triggeredAt: String? = null,
     val uploadUntil: String? = null,
     val triggerSource: String? = null,
-    val requestedByUser: String? = null
+    val requestedByUser: String? = null,
+    val momentKind: String? = null
 )
 data class FeedItem(
     val isEarly: Boolean = false,
@@ -343,7 +345,8 @@ data class FeedItem(
     val reactions: List<ReactionCount>? = null,
     val comments: List<PhotoCommentItem>? = null,
     val triggerSource: String? = null,
-    val requestedByUser: String? = null
+    val requestedByUser: String? = null,
+    val momentKind: String? = null
 )
 
 data class CapsuleUploadOptions(
@@ -380,6 +383,7 @@ data class FeedResponse(
     val uploadUntil: String? = null,
     val triggerSource: String? = null,
     val requestedByUser: String? = null,
+    val momentKind: String? = null,
     val monthRecap: MonthlyRecap? = null
 )
 data class DayListResponse(val items: List<String>)
@@ -2776,7 +2780,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     triggeredAt = res.triggeredAt,
                     uploadUntil = res.uploadUntil,
                     triggerSource = res.triggerSource,
-                    requestedByUser = res.requestedByUser
+                    requestedByUser = res.requestedByUser,
+                    momentKind = res.momentKind
                 ),
                 monthRecap = res.monthRecap
             )
@@ -5552,11 +5557,13 @@ fun FeedTab(
                     val item = row.item
                     val meta = promptMetaByDay[row.day]
                     val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
-                    val isDailyMomentPost = isWithinDailyMomentWindow(
+                    val isMomentWindowPost = isWithinDailyMomentWindow(
                         item.photo.createdAt,
                         meta?.triggeredAt,
                         meta?.uploadUntil
                     )
+                    val postMomentKind = normalizeMomentKind(item.momentKind ?: meta?.momentKind, item.triggerSource ?: meta?.triggerSource)
+                    val requestedByUser = item.requestedByUser ?: meta?.requestedByUser
                     Card {
                         Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
@@ -5573,14 +5580,18 @@ fun FeedTab(
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
-                            if (!isDailyMomentPost) {
+                            if (!isMomentWindowPost) {
                                 Text(
                                     "🕒 ${formatMomentTime(item.photo.createdAt)}",
                                     color = secondaryTextColor,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             } else {
-                                DailyMomentBadge()
+                                if (postMomentKind == "special") {
+                                    SpecialMomentBadge(requestedByUser)
+                                } else {
+                                    DailyMomentBadge()
+                                }
                             }
                             if (item.capsuleLocked) {
                                 Text(
@@ -5764,7 +5775,7 @@ fun CalendarTab(
                             )
                         }
                     }
-                    momentReasonLine(meta?.triggerSource, meta?.requestedByUser)?.let { reason ->
+                    momentReasonLine(meta?.momentKind, meta?.triggerSource, meta?.requestedByUser)?.let { reason ->
                         Text(reason, color = Color(0xFF1F5FBF))
                     }
                     monthRecapByDay[day]?.let { recap ->
@@ -7450,14 +7461,25 @@ private fun themeModeLabel(mode: Int): String {
     }
 }
 
-private fun momentReasonLine(triggerSource: String?, requestedByUser: String?): String? {
-    val src = triggerSource?.trim().orEmpty().lowercase()
-    return if (src == "special_request" || src == "chat_command") {
-        if (!requestedByUser.isNullOrBlank()) "Sondermoment von $requestedByUser" else "Sondermoment"
-    } else if (src.isNotBlank()) {
-        "Daily-Moment"
-    } else {
-        null
+private fun normalizeMomentKind(momentKind: String?, triggerSource: String?): String {
+    val normalizedKind = momentKind?.trim().orEmpty().lowercase()
+    if (normalizedKind == "special" || normalizedKind == "daily") {
+        return normalizedKind
+    }
+    return when (triggerSource?.trim().orEmpty().lowercase()) {
+        "special_request", "chat_command" -> "special"
+        else -> "daily"
+    }
+}
+
+private fun momentReasonLine(momentKind: String?, triggerSource: String?, requestedByUser: String?): String? {
+    if (momentKind.isNullOrBlank() && triggerSource.isNullOrBlank()) {
+        return null
+    }
+    return when (normalizeMomentKind(momentKind, triggerSource)) {
+        "special" -> if (!requestedByUser.isNullOrBlank()) "Sondermoment von $requestedByUser" else "Sondermoment"
+        "daily" -> "Daily-Moment"
+        else -> null
     }
 }
 
@@ -7520,6 +7542,22 @@ private fun DailyMomentBadge() {
             .padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
         Text("Daily-Moment", color = Color.White, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun SpecialMomentBadge(requestedByUser: String?) {
+    val label = if (!requestedByUser.isNullOrBlank()) {
+        "Sondermoment von $requestedByUser"
+    } else {
+        "Sondermoment"
+    }
+    Box(
+        modifier = Modifier
+            .background(Color(0xFF0A7A42), shape = MaterialTheme.shapes.small)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
+    ) {
+        Text(label, color = Color.White, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -7658,7 +7696,7 @@ private fun helpLines(): List<String> = listOf(
     "",
     "Reiter T: Feed",
     "- Alle Tage als Verlauf mit Tages-Headern und klarer Trennung.",
-    "- Daily-Moment wird nur gezeigt, wenn der Post im echten Daily-Zeitfenster lag.",
+    "- Im Feed-Badge wird zwischen Daily-Moment und Sondermoment (mit Ausloesername) getrennt.",
     "- Reaktionen und Kommentare stehen direkt unter den Bildern.",
     "- Kommentare sind chronologisch (aelter oben, neuer unten).",
     "- Time-Capsule-Hinweise koennen dich zu entsperrten Capsule-Posts springen lassen.",

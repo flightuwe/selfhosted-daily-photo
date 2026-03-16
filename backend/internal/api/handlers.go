@@ -847,6 +847,7 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		"ownPhoto":             ownPhoto,
 		"triggerSource":        prompt.TriggerSource,
 		"requestedByUser":      prompt.RequestedBy,
+		"momentKind":           momentKindFromTriggerSource(prompt.TriggerSource),
 	})
 }
 
@@ -1176,6 +1177,7 @@ func (s *Server) handleAdminCalendar(c *gin.Context) {
 			row["uploadUntil"] = prompt.UploadUntil
 			row["triggerSource"] = prompt.TriggerSource
 			row["requestedByUser"] = prompt.RequestedBy
+			row["momentKind"] = momentKindFromTriggerSource(prompt.TriggerSource)
 		}
 		out = append(out, row)
 	}
@@ -1263,6 +1265,7 @@ func (s *Server) handleAdminCalendarDay(c *gin.Context) {
 
 	var prompt models.DailyPrompt
 	_ = s.DB.Where("day = ?", day).First(&prompt).Error
+	momentKind := momentKindFromTriggerSource(prompt.TriggerSource)
 
 	c.JSON(http.StatusOK, gin.H{
 		"day":             plan.Day,
@@ -1273,6 +1276,7 @@ func (s *Server) handleAdminCalendarDay(c *gin.Context) {
 		"uploadUntil":     prompt.UploadUntil,
 		"triggerSource":   prompt.TriggerSource,
 		"requestedByUser": prompt.RequestedBy,
+		"momentKind":      momentKind,
 	})
 }
 
@@ -1285,6 +1289,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 
 	var prompt models.DailyPrompt
 	_ = s.DB.Where("day = ?", day).First(&prompt).Error
+	momentKind := momentKindFromTriggerSource(prompt.TriggerSource)
 
 	var photos []models.Photo
 	photosQueryStart := time.Now()
@@ -1342,6 +1347,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 			"comments":        comments,
 			"triggerSource":   prompt.TriggerSource,
 			"requestedByUser": prompt.RequestedBy,
+			"momentKind":      momentKind,
 		})
 	}
 
@@ -1354,6 +1360,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 		"uploadUntil":     prompt.UploadUntil,
 		"triggerSource":   prompt.TriggerSource,
 		"requestedByUser": prompt.RequestedBy,
+		"momentKind":      momentKind,
 		"monthRecap":      recap,
 	})
 }
@@ -1405,6 +1412,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 
 	var prompt models.DailyPrompt
 	_ = s.DB.Where("day = ?", day).First(&prompt).Error
+	momentKind := momentKindFromTriggerSource(prompt.TriggerSource)
 
 	var photos []models.Photo
 	if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
@@ -1456,6 +1464,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 			"comments":        comments,
 			"triggerSource":   prompt.TriggerSource,
 			"requestedByUser": prompt.RequestedBy,
+			"momentKind":      momentKind,
 		})
 	}
 
@@ -1471,6 +1480,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 		"uploadUntil":     prompt.UploadUntil,
 		"triggerSource":   prompt.TriggerSource,
 		"requestedByUser": prompt.RequestedBy,
+		"momentKind":      momentKind,
 		"monthRecap":      recap,
 	}
 	if s.shouldUseFeedCache(day, now) {
@@ -2998,6 +3008,7 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			"source":                  "auto",
 			"triggerSource":           "",
 			"requestedByUser":         "",
+			"momentKind":              "daily",
 			"onlineUsersCount":        nil,
 			"postedUsersCount":        len(metrics.postedUsers),
 			"dailyMomentUsersCount":   len(metrics.promptUsers),
@@ -3041,6 +3052,7 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			row["uploadUntil"] = prompt.UploadUntil
 			row["triggerSource"] = prompt.TriggerSource
 			row["requestedByUser"] = prompt.RequestedBy
+			row["momentKind"] = momentKindFromTriggerSource(prompt.TriggerSource)
 		}
 		if onlineTrackingAvailable {
 			row["onlineUsersCount"] = onlineUsersCount
@@ -4331,6 +4343,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
 		resp["prompt"] = prompt
 		resp["triggerSource"] = "chat_command"
 		resp["requestedByUser"] = user.Username
+		resp["momentKind"] = "special"
 	}
 	if sendErr != nil {
 		resp["notificationErr"] = sendErr.Error()
@@ -5499,6 +5512,15 @@ func isPromptWindowActive(prompt models.DailyPrompt, now time.Time) bool {
 		return false
 	}
 	return !now.Before(*prompt.TriggeredAt) && !now.After(*prompt.UploadUntil)
+}
+
+func momentKindFromTriggerSource(triggerSource string) string {
+	switch strings.TrimSpace(strings.ToLower(triggerSource)) {
+	case "special_request", "chat_command":
+		return "special"
+	default:
+		return "daily"
+	}
 }
 
 func (s *Server) allowFeedRead(userID uint, now time.Time) (bool, int) {

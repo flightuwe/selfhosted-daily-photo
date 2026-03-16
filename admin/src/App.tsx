@@ -257,6 +257,23 @@ function debugMetaHint(meta: string): string {
   return "";
 }
 
+function normalizeMomentKind(momentKind?: string, triggerSource?: string): "daily" | "special" {
+  const kind = (momentKind || "").trim().toLowerCase();
+  if (kind === "special" || kind === "daily") return kind;
+  const source = (triggerSource || "").trim().toLowerCase();
+  if (source === "special_request" || source === "chat_command") return "special";
+  return "daily";
+}
+
+function momentSourceLabel(momentKind?: string, triggerSource?: string, requestedByUser?: string): string {
+  if (normalizeMomentKind(momentKind, triggerSource) === "special") {
+    return requestedByUser ? `Sondermoment (${requestedByUser})` : "Sondermoment";
+  }
+  if (triggerSource === "admin_manual") return "Admin";
+  if (triggerSource === "admin_reset") return "Admin Reset";
+  return "Scheduler";
+}
+
 function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
   switch (tab) {
     case "dashboard":
@@ -2236,8 +2253,11 @@ export function App() {
                     <strong>{item.user.username}</strong>
                     {item.isLate && <span className="late">Spaet</span>}
                   </div>
-                  {(item.triggerSource === "chat_command" || item.triggerSource === "special_request") && item.requestedByUser && (
-                    <p className="small"><strong>Sondermoment:</strong> von {item.requestedByUser} angefordert</p>
+                  {normalizeMomentKind(item.momentKind, item.triggerSource) === "special" && (
+                    <p className="small">
+                      <strong>Sondermoment:</strong>{" "}
+                      {item.requestedByUser ? `von ${item.requestedByUser} angefordert` : "angefordert"}
+                    </p>
                   )}
                   <div className="photo-grid">
                     <a href={item.photo.url} target="_blank" rel="noreferrer">
@@ -2319,13 +2339,7 @@ export function App() {
                     <td>{item.triggeredAt ? "Ausgeloest" : "Geplant"}</td>
                     <td>{item.source === "manual" ? "Manuell" : "Auto"}</td>
                     <td>
-                      {(item.triggerSource === "chat_command" || item.triggerSource === "special_request") && item.requestedByUser
-                        ? `Sondermoment (${item.requestedByUser})`
-                        : item.triggerSource === "admin_manual"
-                          ? "Admin"
-                          : item.triggerSource === "admin_reset"
-                            ? "Admin Reset"
-                            : "Scheduler"}
+                      {momentSourceLabel(item.momentKind, item.triggerSource, item.requestedByUser)}
                     </td>
                     <td>
                       <button onClick={() => onSaveCalendarDay(item.day)}>Speichern</button>
@@ -2664,16 +2678,9 @@ export function App() {
                     const expanded = !!expandedHistoryDays[item.day];
                     const userRows = item.userActivity ?? [];
                     const hasDetails = !!item.analytics || userRows.length > 0 || !item.onlineTrackingAvailable || item.commentCount > 0 || item.reactionCount > 0 || item.chatMessageCount > 0 || item.timeCapsuleCount > 0;
-                    const sourceLabel =
-                      (item.triggerSource === "chat_command" || item.triggerSource === "special_request") && item.requestedByUser
-                        ? `Sondermoment (${item.requestedByUser})`
-                        : item.triggerSource === "admin_manual"
-                          ? "Admin"
-                          : item.triggerSource === "admin_reset"
-                            ? "Admin Reset"
-                            : item.source === "manual"
-                              ? "Manuell"
-                              : "Scheduler";
+                    const sourceLabel = item.source === "manual"
+                      ? "Manuell"
+                      : momentSourceLabel(item.momentKind, item.triggerSource, item.requestedByUser);
                     const rows = [
                       <tr key={item.day}>
                         <td>{new Date(`${item.day}T00:00:00`).toLocaleDateString()}</td>

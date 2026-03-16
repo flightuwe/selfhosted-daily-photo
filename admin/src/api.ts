@@ -145,6 +145,7 @@ export type FeedItem = {
   isLate: boolean;
   triggerSource?: string;
   requestedByUser?: string;
+  momentKind?: "daily" | "special" | string;
   photo: FeedPhoto;
   user: { id: number; username: string };
 };
@@ -190,6 +191,7 @@ export type CalendarItem = {
   uploadUntil?: string | null;
   triggerSource?: string;
   requestedByUser?: string;
+  momentKind?: "daily" | "special" | string;
 };
 
 export type AdminHistoryUserActivity = {
@@ -224,6 +226,7 @@ export type AdminHistoryDay = {
   source: "auto" | "manual";
   triggerSource?: string;
   requestedByUser?: string;
+  momentKind?: "daily" | "special" | string;
   onlineUsersCount?: number | null;
   postedUsersCount: number;
   dailyMomentUsersCount: number;

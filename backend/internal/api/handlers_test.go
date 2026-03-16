@@ -88,3 +88,25 @@ func TestPhotoVisibleToViewer(t *testing.T) {
 		})
 	}
 }
+
+func TestMomentKindFromTriggerSource(t *testing.T) {
+	tests := []struct {
+		name          string
+		triggerSource string
+		want          string
+	}{
+		{name: "special request", triggerSource: "special_request", want: "special"},
+		{name: "chat command", triggerSource: "chat_command", want: "special"},
+		{name: "scheduler", triggerSource: "scheduler", want: "daily"},
+		{name: "unknown source fallback", triggerSource: "legacy_source", want: "daily"},
+		{name: "blank source fallback", triggerSource: "   ", want: "daily"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := momentKindFromTriggerSource(tc.triggerSource); got != tc.want {
+				t.Fatalf("momentKindFromTriggerSource() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
