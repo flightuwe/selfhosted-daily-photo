@@ -43,6 +43,8 @@ const (
 	dispatchKindDailyPromptPush      = "daily_prompt_push"
 )
 
+var specialTriggerSources = []string{"special_request", "chat_command"}
+
 func (s *DailyPromptService) Start(enabled bool, onTrigger func(models.DailyPrompt, models.AppSettings)) {
 	if !enabled {
 		log.Println("scheduler disabled")
@@ -95,14 +97,19 @@ func (s *DailyPromptService) tick(onTrigger func(models.DailyPrompt, models.AppS
 	}
 
 	var existing models.DailyPrompt
-	if err := s.DB.Where("day = ?", day).First(&existing).Error; err == nil {
-		if existing.TriggeredAt != nil {
-			s.recordTick("noop:already_triggered")
-			return
-		}
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		log.Printf("scheduler day-check failed: %v", err)
+	if err := s.DB.Where("day = ?", day).First(&existing).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Printf("scheduler prompt day-check failed: %v", err)
 		s.recordTick("failed:day_check")
+		return
+	}
+	dailyTriggeredToday, triggerCheckErr := s.hasTriggeredKindForDay(day, "daily")
+	if triggerCheckErr != nil {
+		log.Printf("scheduler trigger-check failed: %v", triggerCheckErr)
+		s.recordTick("failed:day_check")
+		return
+	}
+	if dailyTriggeredToday {
+		s.recordTick("noop:already_triggered")
 		return
 	}
 
@@ -398,13 +405,28 @@ func (s *DailyPromptService) TriggerNowWithSourceAndMeta(source string, requeste
 
 		auditEvent.BeforeTriggeredAt = prompt.TriggeredAt
 		auditEvent.BeforeTriggerSource = strings.TrimSpace(prompt.TriggerSource)
+		incomingKind := triggerKindFromSource(source)
+		existingKind := triggerKindFromSource(prompt.TriggerSource)
 
-		if source != "admin_reset" && prompt.TriggeredAt != nil {
-			auditEvent.AfterTriggeredAt = prompt.TriggeredAt
-			auditEvent.AfterTriggerSource = strings.TrimSpace(prompt.TriggerSource)
-			auditEvent.Result = "blocked"
-			auditEvent.Reason = "already_triggered_today"
-			return ErrAlreadyTriggeredToday
+		if source != "admin_reset" {
+			if prompt.TriggeredAt != nil && existingKind == incomingKind {
+				auditEvent.AfterTriggeredAt = prompt.TriggeredAt
+				auditEvent.AfterTriggerSource = strings.TrimSpace(prompt.TriggerSource)
+				auditEvent.Result = "blocked"
+				auditEvent.Reason = "already_triggered_today"
+				return ErrAlreadyTriggeredToday
+			}
+			kindTriggered, kindErr := s.hasTriggeredKindForDayTx(tx, day, incomingKind)
+			if kindErr != nil {
+				return kindErr
+			}
+			if kindTriggered {
+				auditEvent.AfterTriggeredAt = prompt.TriggeredAt
+				auditEvent.AfterTriggerSource = strings.TrimSpace(prompt.TriggerSource)
+				auditEvent.Result = "blocked"
+				auditEvent.Reason = "already_triggered_today"
+				return ErrAlreadyTriggeredToday
+			}
 		}
 
 		updates := map[string]any{
@@ -423,6 +445,9 @@ func (s *DailyPromptService) TriggerNowWithSourceAndMeta(source string, requeste
 
 		var res *gorm.DB
 		if source == "admin_reset" {
+			res = tx.Model(&models.DailyPrompt{}).Where("id = ?", prompt.ID).Updates(updates)
+		} else if prompt.TriggeredAt != nil {
+			// Allow one special and one daily trigger on the same day.
 			res = tx.Model(&models.DailyPrompt{}).Where("id = ?", prompt.ID).Updates(updates)
 		} else {
 			// Guard against concurrent trigger races: only one update may win.
@@ -599,6 +624,47 @@ func (s *DailyPromptService) shouldAutoPauseScheduler(now time.Time) bool {
 		return false
 	}
 	return count >= schedulerAutoPauseAttemptLimit
+}
+
+func triggerKindFromSource(source string) string {
+	switch strings.TrimSpace(strings.ToLower(source)) {
+	case "special_request", "chat_command":
+		return "special"
+	default:
+		return "daily"
+	}
+}
+
+func (s *DailyPromptService) hasTriggeredKindForDay(day string, kind string) (bool, error) {
+	var count int64
+	kind = strings.TrimSpace(strings.ToLower(kind))
+	query := s.DB.Model(&models.DailyTriggerAuditEvent{}).
+		Where("day = ? AND result = ?", day, "triggered")
+	if kind == "special" {
+		query = query.Where("source IN ?", specialTriggerSources)
+	} else {
+		query = query.Where("source NOT IN ?", specialTriggerSources)
+	}
+	if err := query.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *DailyPromptService) hasTriggeredKindForDayTx(tx *gorm.DB, day string, kind string) (bool, error) {
+	var count int64
+	kind = strings.TrimSpace(strings.ToLower(kind))
+	query := tx.Model(&models.DailyTriggerAuditEvent{}).
+		Where("day = ? AND result = ?", day, "triggered")
+	if kind == "special" {
+		query = query.Where("source IN ?", specialTriggerSources)
+	} else {
+		query = query.Where("source NOT IN ?", specialTriggerSources)
+	}
+	if err := query.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (s *DailyPromptService) RuntimeState(now time.Time) map[string]any {
