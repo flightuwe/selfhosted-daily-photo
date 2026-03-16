@@ -1522,15 +1522,16 @@ func (s *Server) handleAdminCalendarDay(c *gin.Context) {
 	specialRequestedByUserColor := strings.TrimSpace(triggerStatus.SpecialRequestedByUserColor)
 
 	c.JSON(http.StatusOK, gin.H{
-		"day":             plan.Day,
-		"plannedAt":       plan.PlannedAt,
-		"isManual":        plan.IsManual,
-		"source":          "manual",
-		"triggeredAt":     prompt.TriggeredAt,
-		"uploadUntil":     prompt.UploadUntil,
-		"triggerSource":   prompt.TriggerSource,
-		"requestedByUser": prompt.RequestedBy,
-		"momentKind":      momentKind,
+		"day":                         plan.Day,
+		"plannedAt":                   plan.PlannedAt,
+		"isManual":                    plan.IsManual,
+		"source":                      "manual",
+		"triggeredAt":                 prompt.TriggeredAt,
+		"uploadUntil":                 prompt.UploadUntil,
+		"triggerSource":               prompt.TriggerSource,
+		"requestedByUser":             requestedByUser,
+		"momentKind":                  momentKind,
+		"specialRequestedByUserColor": specialRequestedByUserColor,
 	})
 }
 
