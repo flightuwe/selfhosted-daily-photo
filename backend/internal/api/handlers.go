@@ -1318,6 +1318,48 @@ func (s *Server) handleAdminCalendar(c *gin.Context) {
 	for _, p := range prompts {
 		promptByDay[p.Day] = p
 	}
+	type triggerRow struct {
+		Day           string    `gorm:"column:day"`
+		OccurredAt    time.Time `gorm:"column:occurred_at"`
+		Source        string    `gorm:"column:source"`
+		ActorUsername string    `gorm:"column:actor_username"`
+	}
+	type dayTriggerSummary struct {
+		DailyTriggeredAt       *time.Time
+		DailyTriggerSource     string
+		DailyRequestedByUser   string
+		SpecialTriggeredAt     *time.Time
+		SpecialTriggerSource   string
+		SpecialRequestedByUser string
+	}
+	triggerSummaryByDay := make(map[string]dayTriggerSummary, len(dayList))
+	triggerRows := make([]triggerRow, 0, len(dayList)*2)
+	_ = s.DB.
+		Table("daily_trigger_audit_events").
+		Select("day, occurred_at, source, actor_username").
+		Where("day IN ? AND result = ?", dayList, "triggered").
+		Order("occurred_at asc").
+		Find(&triggerRows).Error
+	for _, ev := range triggerRows {
+		sum := triggerSummaryByDay[ev.Day]
+		switch triggerKindFromTriggerSource(ev.Source) {
+		case "special":
+			when := ev.OccurredAt
+			sum.SpecialTriggeredAt = &when
+			sum.SpecialTriggerSource = strings.TrimSpace(ev.Source)
+			if name := strings.TrimSpace(ev.ActorUsername); name != "" {
+				sum.SpecialRequestedByUser = name
+			}
+		default:
+			when := ev.OccurredAt
+			sum.DailyTriggeredAt = &when
+			sum.DailyTriggerSource = strings.TrimSpace(ev.Source)
+			if name := strings.TrimSpace(ev.ActorUsername); name != "" {
+				sum.DailyRequestedByUser = name
+			}
+		}
+		triggerSummaryByDay[ev.Day] = sum
+	}
 
 	out := make([]gin.H, 0, len(plans))
 	for _, p := range plans {
@@ -1330,12 +1372,50 @@ func (s *Server) handleAdminCalendar(c *gin.Context) {
 		if p.IsManual {
 			row["source"] = "manual"
 		}
+		summary, hasSummary := triggerSummaryByDay[p.Day]
+		row["dailyTriggeredAt"] = summary.DailyTriggeredAt
+		row["specialTriggeredAt"] = summary.SpecialTriggeredAt
+		row["dailyPending"] = summary.DailyTriggeredAt == nil
+		row["specialRequestedByUser"] = summary.SpecialRequestedByUser
+		if hasSummary && summary.DailyTriggeredAt != nil {
+			// Backward-compatible fields: table status must reflect Daily trigger, not special.
+			row["triggeredAt"] = summary.DailyTriggeredAt
+			row["triggerSource"] = summary.DailyTriggerSource
+			row["requestedByUser"] = summary.DailyRequestedByUser
+			row["momentKind"] = "daily"
+		} else if hasSummary && summary.SpecialTriggeredAt != nil {
+			// Keep special info visible in legacy columns, but day remains daily-pending.
+			row["triggeredAt"] = nil
+			row["triggerSource"] = summary.SpecialTriggerSource
+			row["requestedByUser"] = summary.SpecialRequestedByUser
+			row["momentKind"] = "special"
+		}
 		if prompt, ok := promptByDay[p.Day]; ok {
-			row["triggeredAt"] = prompt.TriggeredAt
+			if row["triggeredAt"] == nil && !(hasSummary && summary.SpecialTriggeredAt != nil && summary.DailyTriggeredAt == nil) {
+				row["triggeredAt"] = prompt.TriggeredAt
+			}
 			row["uploadUntil"] = prompt.UploadUntil
-			row["triggerSource"] = prompt.TriggerSource
-			row["requestedByUser"] = prompt.RequestedBy
-			row["momentKind"] = momentKindFromTriggerSource(prompt.TriggerSource)
+			if strings.TrimSpace(fmt.Sprint(row["triggerSource"])) == "" {
+				row["triggerSource"] = prompt.TriggerSource
+			}
+			if strings.TrimSpace(fmt.Sprint(row["requestedByUser"])) == "" {
+				row["requestedByUser"] = prompt.RequestedBy
+			}
+			if strings.TrimSpace(fmt.Sprint(row["momentKind"])) == "" {
+				row["momentKind"] = momentKindFromTriggerSource(prompt.TriggerSource)
+			}
+			if row["dailyTriggeredAt"] == nil && row["specialTriggeredAt"] == nil && prompt.TriggeredAt != nil {
+				kind := momentKindFromTriggerSource(prompt.TriggerSource)
+				if kind == "special" {
+					row["specialTriggeredAt"] = prompt.TriggeredAt
+					row["specialRequestedByUser"] = prompt.RequestedBy
+					row["dailyPending"] = true
+					row["triggeredAt"] = nil
+				} else {
+					row["dailyTriggeredAt"] = prompt.TriggeredAt
+					row["dailyPending"] = false
+				}
+			}
 		}
 		out = append(out, row)
 	}
