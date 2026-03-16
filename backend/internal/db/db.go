@@ -43,6 +43,8 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.PhotoReaction{},
 		&models.PhotoComment{},
 		&models.ChatMessage{},
+		&models.ChatPollOption{},
+		&models.ChatPollVote{},
 		&models.ChatCommand{},
 		&models.SpecialMomentRequest{},
 		&models.ClientDebugLog{},

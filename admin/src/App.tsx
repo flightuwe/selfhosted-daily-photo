@@ -32,6 +32,7 @@ import {
   getAdminSearch,
   getAdminHistory,
   getAdminTimeCapsules,
+  getAdminPolls,
   getCalendar,
   getChat,
   getChatCommands,
@@ -90,6 +91,7 @@ import {
   type AdminHistoryReliability,
   type AdminHistoryTimeSeriesPoint,
   type ChatCommand,
+  type AdminPollItem,
   type AdminUser,
   type ChatItem,
   type CalendarItem,
@@ -103,9 +105,9 @@ import {
   type UserPromptRule,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "reports" | "debug" | "settings";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "reports" | "debug" | "settings";
 type AdminArea = "operations" | "analytics" | "config";
-type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "time_capsules" | "reports";
+type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "polls" | "time_capsules" | "reports";
 type AnalyticsSubtab = "history" | "performance" | "incident_export" | "trigger_audit" | "debug" | "system";
 type ConfigSubtab = "users" | "events" | "commands" | "settings";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
@@ -169,6 +171,7 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
     daily_calendar: "calendar",
     feed: "feed",
     chat: "chat",
+    polls: "polls",
     time_capsules: "time_capsule",
     reports: "reports",
   },
@@ -194,6 +197,7 @@ const areaSubtabs: Record<AdminArea, Array<{ key: AdminSubtab; label: string }>>
     { key: "daily_calendar", label: "Daily & Kalender" },
     { key: "feed", label: "Feed" },
     { key: "chat", label: "Chat" },
+    { key: "polls", label: "Umfragen" },
     { key: "time_capsules", label: "Time-Capsules" },
     { key: "reports", label: "Reports" },
   ],
@@ -284,6 +288,8 @@ function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
       return { area: "operations", subtab: "feed" };
     case "chat":
       return { area: "operations", subtab: "chat" };
+    case "polls":
+      return { area: "operations", subtab: "polls" };
     case "time_capsule":
       return { area: "operations", subtab: "time_capsules" };
     case "reports":
@@ -354,6 +360,12 @@ export function App() {
   const [feedMonthRecap, setFeedMonthRecap] = useState<MonthlyRecap | null>(null);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [chatDraft, setChatDraft] = useState("");
+  const [pollItems, setPollItems] = useState<AdminPollItem[]>([]);
+  const [pollCount, setPollCount] = useState(0);
+  const [pollLimit, setPollLimit] = useState(100);
+  const [pollDay, setPollDay] = useState("");
+  const [pollOpenOnly, setPollOpenOnly] = useState(false);
+  const [pollCreatorUserId, setPollCreatorUserId] = useState<number>(0);
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
   const [chatCommands, setChatCommands] = useState<ChatCommand[]>([]);
   const [editingCommandId, setEditingCommandId] = useState<number | null>(null);
@@ -622,6 +634,9 @@ export function App() {
     if (activeTab === "chat") {
       void loadChat(token);
     }
+    if (activeTab === "polls") {
+      void loadPolls(token);
+    }
     if (activeTab === "calendar") {
       void loadCalendar(token);
     }
@@ -653,7 +668,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
+  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -836,6 +851,22 @@ export function App() {
     try {
       const items = await getChat(authToken);
       setChatItems(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function loadPolls(authToken: string) {
+    try {
+      const data = await getAdminPolls(authToken, {
+        limit: pollLimit,
+        day: pollDay || undefined,
+        openOnly: pollOpenOnly,
+        creatorUserId: pollCreatorUserId > 0 ? pollCreatorUserId : undefined,
+      });
+      setPollItems(data.items || []);
+      setPollCount(Number(data.count || 0));
+      setPollLimit(Number(data.limit || pollLimit || 100));
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1299,6 +1330,7 @@ export function App() {
     await loadAdminData(token);
     if (activeTab === "feed") await loadFeed(token, feedDay);
     if (activeTab === "chat") await loadChat(token);
+    if (activeTab === "polls") await loadPolls(token);
     if (activeTab === "calendar") await loadCalendar(token);
     if (activeTab === "history") await loadHistory(token, historyDays, historyOffset);
     if (activeTab === "performance") await loadPerformance(token, performanceBucket, performanceFrom, performanceTo);
@@ -1783,6 +1815,7 @@ export function App() {
             <button className={activeTab === "users" ? "tab active" : "tab"} onClick={() => navigateTab("users")}>Benutzerverwaltung</button>
             <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => navigateTab("feed")}>Feed</button>
             <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => navigateTab("chat")}>Chat</button>
+            <button className={activeTab === "polls" ? "tab active" : "tab"} onClick={() => navigateTab("polls")}>Umfragen</button>
             <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => navigateTab("calendar")}>Kalender</button>
             <button className={activeTab === "history" ? "tab active" : "tab"} onClick={() => navigateTab("history")}>Historie</button>
             <button className={activeTab === "performance" ? "tab active" : "tab"} onClick={() => navigateTab("performance")}>Performance</button>
@@ -2305,6 +2338,126 @@ export function App() {
                 </article>
               ))}
             </div>
+          </div>
+        )}
+
+        {activeTab === "polls" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Umfragen</h2>
+              <div className="row">
+                <button onClick={() => loadPolls(token)}>Aktualisieren</button>
+              </div>
+            </div>
+            <div className="settings-grid">
+              <label>
+                Tag (optional)
+                <input type="date" value={pollDay} onChange={(e) => setPollDay(e.target.value)} />
+              </label>
+              <label>
+                Ersteller
+                <select value={pollCreatorUserId} onChange={(e) => setPollCreatorUserId(Number(e.target.value) || 0)}>
+                  <option value={0}>Alle Nutzer</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>@{u.username}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Limit
+                <input
+                  type="number"
+                  min={10}
+                  max={500}
+                  value={pollLimit}
+                  onChange={(e) => setPollLimit(Math.max(10, Math.min(500, Number(e.target.value) || 100)))}
+                />
+              </label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={pollOpenOnly}
+                  onChange={(e) => setPollOpenOnly(e.target.checked)}
+                />
+                Nur offene Umfragen
+              </label>
+            </div>
+            <div className="grid4">
+              <CardStat title="Geladene Umfragen" value={pollItems.length} />
+              <CardStat title="Server Count" value={pollCount} />
+              <CardStat title="Offen" value={pollItems.filter((row) => !row.isClosed).length} />
+              <CardStat title="Geschlossen" value={pollItems.filter((row) => row.isClosed).length} />
+            </div>
+            {pollItems.length === 0 && <p>Keine Umfragen fuer den gesetzten Filter.</p>}
+            {pollItems.length > 0 && (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Zeit</th>
+                    <th>Ersteller</th>
+                    <th>Frage</th>
+                    <th>Status</th>
+                    <th>Modus</th>
+                    <th>Stimmen</th>
+                    <th>Optionen & Votes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pollItems.map((poll) => (
+                    <tr key={poll.id}>
+                      <td>{formatDateTime(poll.createdAt)}</td>
+                      <td>
+                        <strong style={{ color: poll.creator?.favoriteColor || undefined }}>
+                          @{poll.creator?.username || "-"}
+                        </strong>
+                        <div className="small">ID: {poll.creator?.id || "-"}</div>
+                      </td>
+                      <td>
+                        <strong>{poll.question || "-"}</strong>
+                        {poll.body ? <div className="small">{poll.body}</div> : null}
+                        <div className="small">Quelle: {poll.source || "-"}</div>
+                      </td>
+                      <td>
+                        <span className={`debug-chip ${poll.isClosed ? "neutral" : "ok"}`}>
+                          {poll.isClosed ? "geschlossen" : "offen"}
+                        </span>
+                        <div className="small">
+                          {poll.closedAt ? `geschlossen um ${formatDateTime(poll.closedAt)}` : "noch offen"}
+                        </div>
+                      </td>
+                      <td>{poll.allowMultiSelect ? "Mehrfachantworten" : "Eine Antwort"}</td>
+                      <td>
+                        <strong>{poll.totalVotes}</strong>
+                        <div className="small">{poll.totalVoters} abstimmende Nutzer</div>
+                      </td>
+                      <td>
+                        <div className="stack" style={{ marginBottom: 0 }}>
+                          {(poll.options || []).map((option) => (
+                            <div key={option.id} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: 8 }}>
+                              <div className="row" style={{ justifyContent: "space-between" }}>
+                                <strong>{option.text || "-"}</strong>
+                                <span>{option.votes} Vote(s)</span>
+                              </div>
+                              {(option.voters || []).length > 0 ? (
+                                <div className="small">
+                                  {(option.voters || []).map((voter) => (
+                                    <span key={`${option.id}-${voter.userId}-${voter.votedAt}`} style={{ display: "inline-block", marginRight: 8 }}>
+                                      <strong style={{ color: voter.favoriteColor || undefined }}>@{voter.username}</strong> ({formatDateTime(voter.votedAt)})
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="small">Noch keine Votes</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         )}
 

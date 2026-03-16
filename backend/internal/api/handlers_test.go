@@ -110,3 +110,23 @@ func TestMomentKindFromTriggerSource(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizePollOptions(t *testing.T) {
+	in := []string{
+		"  Ja  ",
+		"Nein",
+		"ja",
+		"",
+		"  Vielleicht spaeter ",
+	}
+	got := normalizePollOptions(in)
+	want := []string{"Ja", "Nein", "Vielleicht spaeter"}
+	if len(got) != len(want) {
+		t.Fatalf("normalizePollOptions() len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("normalizePollOptions()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

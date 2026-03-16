@@ -170,6 +170,46 @@ export type ChatItem = {
   user: { id: number; username: string };
 };
 
+export type AdminPollVoter = {
+  userId: number;
+  username: string;
+  favoriteColor?: string;
+  votedAt: string;
+};
+
+export type AdminPollOption = {
+  id: number;
+  text: string;
+  sortOrder: number;
+  votes: number;
+  voters: AdminPollVoter[];
+};
+
+export type AdminPollItem = {
+  id: number;
+  question: string;
+  allowMultiSelect: boolean;
+  isClosed: boolean;
+  closedAt?: string | null;
+  createdAt: string;
+  source: string;
+  body?: string;
+  totalVotes: number;
+  totalVoters: number;
+  creator: {
+    id: number;
+    username: string;
+    favoriteColor?: string;
+  };
+  options: AdminPollOption[];
+};
+
+export type AdminPollResponse = {
+  items: AdminPollItem[];
+  count: number;
+  limit: number;
+};
+
 export type ChatSendResult = {
   id?: number;
   body?: string;
@@ -974,6 +1014,36 @@ export async function getChat(token: string): Promise<ChatItem[]> {
   });
   const data = await parse<{ items: ChatItem[] }>(res);
   return data.items;
+}
+
+export async function getAdminPolls(
+  token: string,
+  opts?: {
+    limit?: number;
+    day?: string;
+    from?: string;
+    to?: string;
+    openOnly?: boolean;
+    creatorUserId?: number;
+  }
+): Promise<AdminPollResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.limit && opts.limit > 0) qs.set("limit", String(opts.limit));
+  if (opts?.day) qs.set("day", opts.day);
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  if (typeof opts?.openOnly === "boolean") qs.set("openOnly", String(opts.openOnly));
+  if (opts?.creatorUserId && opts.creatorUserId > 0) qs.set("creatorUserId", String(opts.creatorUserId));
+  const url = qs.toString() ? `${apiBase}/admin/polls?${qs.toString()}` : `${apiBase}/admin/polls`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminPollResponse>(res);
+  return {
+    items: data.items || [],
+    count: Number(data.count || 0),
+    limit: Number(data.limit || opts?.limit || 100),
+  };
 }
 
 export async function sendChat(token: string, body: string): Promise<ChatSendResult> {

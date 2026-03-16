@@ -116,6 +116,9 @@ func (s *Server) Router() *gin.Engine {
 			protected.GET("/community/stats", s.handleCommunityStats)
 			protected.GET("/chat", s.handleChatList)
 			protected.POST("/chat", s.handleChatCreate)
+			protected.POST("/chat/polls", s.handleChatPollCreate)
+			protected.POST("/chat/polls/:id/vote", s.handleChatPollVote)
+			protected.POST("/chat/polls/:id/close", s.handleChatPollClose)
 			protected.DELETE("/chat/:id", s.handleDeleteChatMessage)
 			protected.GET("/photos/:id/interactions", s.handlePhotoInteractions)
 			protected.POST("/photos/:id/reaction", s.handlePhotoReaction)
@@ -132,6 +135,7 @@ func (s *Server) Router() *gin.Engine {
 			admin.GET("/calendar", s.handleAdminCalendar)
 			admin.GET("/history", s.handleAdminHistory)
 			admin.GET("/search", s.handleAdminSearch)
+			admin.GET("/polls", s.handleAdminPolls)
 			admin.GET("/time-capsules", s.handleAdminTimeCapsules)
 			admin.PUT("/calendar/:day", s.handleAdminCalendarDay)
 
@@ -589,6 +593,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	user, _ := userFromContext(c)
 	var req struct {
 		ChatPushEnabled               *bool  `json:"chatPushEnabled"`
+		PollPushEnabled               *bool  `json:"pollPushEnabled"`
 		InviteRegistrationPushEnabled *bool  `json:"inviteRegistrationPushEnabled"`
 		PhotoReactionPushEnabled      *bool  `json:"photoReactionPushEnabled"`
 		PhotoCommentPushEnabled       *bool  `json:"photoCommentPushEnabled"`
@@ -603,6 +608,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	updates := map[string]any{}
 	if req.ChatPushEnabled != nil {
 		updates["chat_push_enabled"] = *req.ChatPushEnabled
+	}
+	if req.PollPushEnabled != nil {
+		updates["poll_push_enabled"] = *req.PollPushEnabled
 	}
 	if req.InviteRegistrationPushEnabled != nil {
 		updates["invite_registration_push_enabled"] = *req.InviteRegistrationPushEnabled
@@ -955,7 +963,7 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 	}
 	chat := []gin.H{}
 	if includeChat {
-		items, _ := s.chatListPayload(user.ID)
+		items, _ := s.chatListPayload(user)
 		chat = items
 	}
 	community := gin.H{}
@@ -1505,7 +1513,13 @@ func (s *Server) handleAdminCalendarDay(c *gin.Context) {
 
 	var prompt models.DailyPrompt
 	_ = s.DB.Where("day = ?", day).First(&prompt).Error
+	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/feed")
 	momentKind := momentKindFromTriggerSource(prompt.TriggerSource)
+	requestedByUser := strings.TrimSpace(prompt.RequestedBy)
+	if requestedByUser == "" {
+		requestedByUser = strings.TrimSpace(triggerStatus.SpecialRequestedByUser)
+	}
+	specialRequestedByUserColor := strings.TrimSpace(triggerStatus.SpecialRequestedByUserColor)
 
 	c.JSON(http.StatusOK, gin.H{
 		"day":             plan.Day,
@@ -1659,7 +1673,13 @@ func (s *Server) handleFeed(c *gin.Context) {
 
 	var prompt models.DailyPrompt
 	_ = s.DB.Where("day = ?", day).First(&prompt).Error
+	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/feed")
 	momentKind := momentKindFromTriggerSource(prompt.TriggerSource)
+	requestedByUser := strings.TrimSpace(prompt.RequestedBy)
+	if requestedByUser == "" {
+		requestedByUser = strings.TrimSpace(triggerStatus.SpecialRequestedByUser)
+	}
+	specialRequestedByUserColor := strings.TrimSpace(triggerStatus.SpecialRequestedByUserColor)
 
 	var photos []models.Photo
 	if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
@@ -1710,8 +1730,9 @@ func (s *Server) handleFeed(c *gin.Context) {
 			"reactions":       reactions,
 			"comments":        comments,
 			"triggerSource":   prompt.TriggerSource,
-			"requestedByUser": prompt.RequestedBy,
+			"requestedByUser": requestedByUser,
 			"momentKind":      momentKind,
+			"specialRequestedByUserColor": specialRequestedByUserColor,
 		})
 	}
 
@@ -2913,6 +2934,207 @@ func (s *Server) handleAdminSearch(c *gin.Context) {
 	})
 }
 
+func (s *Server) handleAdminPolls(c *gin.Context) {
+	limit := 100
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			if n < 10 {
+				n = 10
+			}
+			if n > 500 {
+				n = 500
+			}
+			limit = n
+		}
+	}
+	var (
+		fromTime *time.Time
+		toTime   *time.Time
+	)
+	day := strings.TrimSpace(c.Query("day"))
+	if day != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", day, s.Location)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid day"})
+			return
+		}
+		start := parsed
+		end := parsed.Add(24 * time.Hour)
+		fromTime = &start
+		toTime = &end
+	} else {
+		if raw := strings.TrimSpace(c.Query("from")); raw != "" {
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from"})
+				return
+			}
+			v := parsed.In(s.Location)
+			fromTime = &v
+		}
+		if raw := strings.TrimSpace(c.Query("to")); raw != "" {
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to"})
+				return
+			}
+			v := parsed.In(s.Location)
+			toTime = &v
+		}
+	}
+	openOnly := false
+	if raw := strings.TrimSpace(c.Query("openOnly")); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			openOnly = parsed
+		}
+	}
+	creatorUserID := uint(0)
+	if raw := strings.TrimSpace(c.Query("creatorUserId")); raw != "" {
+		n, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid creatorUserId"})
+			return
+		}
+		creatorUserID = uint(n)
+	}
+	type pollRow struct {
+		ID               uint       `gorm:"column:id"`
+		UserID           uint       `gorm:"column:user_id"`
+		Username         string     `gorm:"column:username"`
+		FavoriteColor    string     `gorm:"column:favorite_color"`
+		Question         string     `gorm:"column:poll_question"`
+		AllowMultiSelect bool       `gorm:"column:poll_allow_multiple"`
+		ClosedAt         *time.Time `gorm:"column:poll_closed_at"`
+		CreatedAt        time.Time  `gorm:"column:created_at"`
+		Source           string     `gorm:"column:source"`
+		Body             string     `gorm:"column:body"`
+	}
+	query := s.DB.Table("chat_messages AS cm").
+		Select("cm.id, cm.user_id, u.username, u.favorite_color, cm.poll_question, cm.poll_allow_multiple, cm.poll_closed_at, cm.created_at, cm.source, cm.body").
+		Joins("JOIN users u ON u.id = cm.user_id").
+		Where("cm.message_type = ?", "poll")
+	if fromTime != nil {
+		query = query.Where("cm.created_at >= ?", *fromTime)
+	}
+	if toTime != nil {
+		query = query.Where("cm.created_at < ?", *toTime)
+	}
+	if openOnly {
+		query = query.Where("cm.poll_closed_at IS NULL")
+	}
+	if creatorUserID > 0 {
+		query = query.Where("cm.user_id = ?", creatorUserID)
+	}
+	rows := make([]pollRow, 0, limit)
+	if err := query.Order("cm.created_at desc").Limit(limit).Scan(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "poll query failed"})
+		return
+	}
+	if len(rows) == 0 {
+		c.JSON(http.StatusOK, gin.H{"items": []gin.H{}, "count": 0, "limit": limit})
+		return
+	}
+	pollIDs := make([]uint, 0, len(rows))
+	for _, row := range rows {
+		pollIDs = append(pollIDs, row.ID)
+	}
+	type optionRow struct {
+		ID            uint   `gorm:"column:id"`
+		ChatMessageID uint   `gorm:"column:chat_message_id"`
+		OptionText    string `gorm:"column:option_text"`
+		SortOrder     int    `gorm:"column:sort_order"`
+	}
+	var optionRows []optionRow
+	if err := s.DB.Table("chat_poll_options").
+		Select("id, chat_message_id, option_text, sort_order").
+		Where("chat_message_id IN ?", pollIDs).
+		Order("chat_message_id asc, sort_order asc, id asc").
+		Scan(&optionRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "poll options query failed"})
+		return
+	}
+	type voteRow struct {
+		ChatMessageID uint      `gorm:"column:chat_message_id"`
+		OptionID      uint      `gorm:"column:option_id"`
+		UserID        uint      `gorm:"column:user_id"`
+		Username      string    `gorm:"column:username"`
+		FavoriteColor string    `gorm:"column:favorite_color"`
+		CreatedAt     time.Time `gorm:"column:created_at"`
+	}
+	var voteRows []voteRow
+	if err := s.DB.Table("chat_poll_votes AS v").
+		Select("v.chat_message_id, v.option_id, v.user_id, u.username, u.favorite_color, v.created_at").
+		Joins("JOIN users u ON u.id = v.user_id").
+		Where("v.chat_message_id IN ?", pollIDs).
+		Order("v.chat_message_id asc, v.option_id asc, v.created_at asc").
+		Scan(&voteRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "poll votes query failed"})
+		return
+	}
+	optionByPoll := make(map[uint][]optionRow, len(pollIDs))
+	for _, row := range optionRows {
+		optionByPoll[row.ChatMessageID] = append(optionByPoll[row.ChatMessageID], row)
+	}
+	votesByOption := make(map[uint][]voteRow, len(voteRows))
+	uniqueVoterByPoll := make(map[uint]map[uint]struct{}, len(pollIDs))
+	for _, row := range voteRows {
+		votesByOption[row.OptionID] = append(votesByOption[row.OptionID], row)
+		if _, ok := uniqueVoterByPoll[row.ChatMessageID]; !ok {
+			uniqueVoterByPoll[row.ChatMessageID] = map[uint]struct{}{}
+		}
+		uniqueVoterByPoll[row.ChatMessageID][row.UserID] = struct{}{}
+	}
+	items := make([]gin.H, 0, len(rows))
+	for _, poll := range rows {
+		options := make([]gin.H, 0, len(optionByPoll[poll.ID]))
+		totalVotes := 0
+		for _, option := range optionByPoll[poll.ID] {
+			voters := make([]gin.H, 0, len(votesByOption[option.ID]))
+			for _, vote := range votesByOption[option.ID] {
+				voters = append(voters, gin.H{
+					"userId":        vote.UserID,
+					"username":      vote.Username,
+					"favoriteColor": defaultColor(vote.FavoriteColor),
+					"votedAt":       vote.CreatedAt,
+				})
+			}
+			voteCount := len(voters)
+			totalVotes += voteCount
+			options = append(options, gin.H{
+				"id":        option.ID,
+				"text":      strings.TrimSpace(option.OptionText),
+				"sortOrder": option.SortOrder,
+				"votes":     voteCount,
+				"voters":    voters,
+			})
+		}
+		totalVoters := len(uniqueVoterByPoll[poll.ID])
+		items = append(items, gin.H{
+			"id":               poll.ID,
+			"question":         strings.TrimSpace(poll.Question),
+			"allowMultiSelect": poll.AllowMultiSelect,
+			"isClosed":         poll.ClosedAt != nil,
+			"closedAt":         poll.ClosedAt,
+			"createdAt":        poll.CreatedAt,
+			"source":           defaultIfBlank(strings.TrimSpace(poll.Source), "user"),
+			"body":             poll.Body,
+			"totalVotes":       totalVotes,
+			"totalVoters":      totalVoters,
+			"creator": gin.H{
+				"id":            poll.UserID,
+				"username":      poll.Username,
+				"favoriteColor": defaultColor(poll.FavoriteColor),
+			},
+			"options": options,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items": items,
+		"count": len(items),
+		"limit": limit,
+	})
+}
+
 func (s *Server) handleAdminHistory(c *gin.Context) {
 	days := 30
 	if raw := strings.TrimSpace(c.Query("days")); raw != "" {
@@ -3776,12 +3998,14 @@ func (s *Server) handleAdminClearChat(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "chat clear failed"})
 		return
 	}
+	_ = s.DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.ChatPollVote{}).Error
+	_ = s.DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.ChatPollOption{}).Error
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (s *Server) handleChatList(c *gin.Context) {
 	viewer, _ := userFromContext(c)
-	items, err := s.chatListPayload(viewer.ID)
+	items, err := s.chatListPayload(viewer)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -3789,20 +4013,24 @@ func (s *Server) handleChatList(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
-func (s *Server) chatListPayload(viewerID uint) ([]gin.H, error) {
+func (s *Server) chatListPayload(viewer models.User) ([]gin.H, error) {
 	type chatListRow struct {
-		ID            uint      `gorm:"column:id"`
-		Body          string    `gorm:"column:body"`
-		Source        string    `gorm:"column:source"`
-		CreatedAt     time.Time `gorm:"column:created_at"`
-		UserID        uint      `gorm:"column:user_id"`
-		Username      string    `gorm:"column:username"`
-		FavoriteColor string    `gorm:"column:favorite_color"`
+		ID               uint       `gorm:"column:id"`
+		Body             string     `gorm:"column:body"`
+		Source           string     `gorm:"column:source"`
+		MessageType      string     `gorm:"column:message_type"`
+		PollQuestion     string     `gorm:"column:poll_question"`
+		PollAllowMultiple bool      `gorm:"column:poll_allow_multiple"`
+		PollClosedAt     *time.Time `gorm:"column:poll_closed_at"`
+		CreatedAt        time.Time  `gorm:"column:created_at"`
+		UserID           uint       `gorm:"column:user_id"`
+		Username         string     `gorm:"column:username"`
+		FavoriteColor    string     `gorm:"column:favorite_color"`
 	}
 	queryStart := time.Now()
 	rows := make([]chatListRow, 0, 100)
 	err := s.DB.Table("chat_messages AS cm").
-		Select("cm.id, cm.body, cm.source, cm.created_at, u.id AS user_id, u.username, u.favorite_color").
+		Select("cm.id, cm.body, cm.source, cm.message_type, cm.poll_question, cm.poll_allow_multiple, cm.poll_closed_at, cm.created_at, u.id AS user_id, u.username, u.favorite_color").
 		Joins("JOIN users u ON u.id = cm.user_id").
 		Order("cm.created_at desc").
 		Limit(100).
@@ -3813,20 +4041,145 @@ func (s *Server) chatListPayload(viewerID uint) ([]gin.H, error) {
 	if err != nil {
 		return nil, err
 	}
+	pollMessageIDs := make([]uint, 0)
+	for _, r := range rows {
+		if defaultIfBlank(strings.TrimSpace(r.MessageType), "text") == "poll" {
+			pollMessageIDs = append(pollMessageIDs, r.ID)
+		}
+	}
+	pollPayloadByMessageID, err := s.chatPollPayloadByMessageID(viewer, pollMessageIDs)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]gin.H, 0, len(rows))
 	for i := len(rows) - 1; i >= 0; i-- {
 		r := rows[i]
+		msgType := defaultIfBlank(strings.TrimSpace(r.MessageType), "text")
+		pollPayload := any(nil)
+		if msgType == "poll" {
+			poll := pollPayloadByMessageID[r.ID]
+			if poll == nil {
+				poll = gin.H{
+					"options":          []gin.H{},
+					"mySelectedOptionIds": []uint{},
+					"totalVoters":      int64(0),
+				}
+			}
+			poll["question"] = strings.TrimSpace(r.PollQuestion)
+			poll["allowMultiSelect"] = r.PollAllowMultiple
+			poll["isClosed"] = r.PollClosedAt != nil
+			poll["closedAt"] = r.PollClosedAt
+			poll["canClose"] = viewer.IsAdmin || r.UserID == viewer.ID
+			pollPayload = poll
+		}
 		out = append(out, gin.H{
 			"id":        r.ID,
+			"type":      msgType,
 			"body":      r.Body,
 			"source":    defaultIfBlank(strings.TrimSpace(r.Source), "user"),
 			"createdAt": r.CreatedAt,
-			"user": s.userPublicJSON(viewerID, models.User{
+			"poll":      pollPayload,
+			"user": s.userPublicJSON(viewer.ID, models.User{
 				ID:            r.UserID,
 				Username:      r.Username,
 				FavoriteColor: r.FavoriteColor,
 			}),
 		})
+	}
+	return out, nil
+}
+
+func (s *Server) chatPollPayloadByMessageID(viewer models.User, messageIDs []uint) (map[uint]gin.H, error) {
+	out := make(map[uint]gin.H, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return out, nil
+	}
+	type optionRow struct {
+		ID            uint   `gorm:"column:id"`
+		ChatMessageID uint   `gorm:"column:chat_message_id"`
+		OptionText    string `gorm:"column:option_text"`
+		SortOrder     int    `gorm:"column:sort_order"`
+	}
+	var optionRows []optionRow
+	if err := s.DB.Table("chat_poll_options").
+		Select("id, chat_message_id, option_text, sort_order").
+		Where("chat_message_id IN ?", messageIDs).
+		Order("chat_message_id asc, sort_order asc, id asc").
+		Scan(&optionRows).Error; err != nil {
+		return nil, err
+	}
+	type voteCountRow struct {
+		ChatMessageID uint  `gorm:"column:chat_message_id"`
+		OptionID      uint  `gorm:"column:option_id"`
+		Count         int64 `gorm:"column:count"`
+	}
+	var voteCounts []voteCountRow
+	if err := s.DB.Table("chat_poll_votes").
+		Select("chat_message_id, option_id, COUNT(*) as count").
+		Where("chat_message_id IN ?", messageIDs).
+		Group("chat_message_id, option_id").
+		Scan(&voteCounts).Error; err != nil {
+		return nil, err
+	}
+	type voterCountRow struct {
+		ChatMessageID uint  `gorm:"column:chat_message_id"`
+		Count         int64 `gorm:"column:count"`
+	}
+	var voterCounts []voterCountRow
+	if err := s.DB.Table("chat_poll_votes").
+		Select("chat_message_id, COUNT(DISTINCT user_id) as count").
+		Where("chat_message_id IN ?", messageIDs).
+		Group("chat_message_id").
+		Scan(&voterCounts).Error; err != nil {
+		return nil, err
+	}
+	type myVoteRow struct {
+		ChatMessageID uint `gorm:"column:chat_message_id"`
+		OptionID      uint `gorm:"column:option_id"`
+	}
+	var myVotes []myVoteRow
+	if err := s.DB.Table("chat_poll_votes").
+		Select("chat_message_id, option_id").
+		Where("chat_message_id IN ? AND user_id = ?", messageIDs, viewer.ID).
+		Scan(&myVotes).Error; err != nil {
+		return nil, err
+	}
+	voteCountByOptionID := make(map[uint]int64, len(voteCounts))
+	for _, row := range voteCounts {
+		voteCountByOptionID[row.OptionID] = row.Count
+	}
+	totalByMessageID := make(map[uint]int64, len(voterCounts))
+	for _, row := range voterCounts {
+		totalByMessageID[row.ChatMessageID] = row.Count
+	}
+	selectedByMessageID := make(map[uint]map[uint]struct{}, len(messageIDs))
+	selectedIDsByMessageID := make(map[uint][]uint, len(messageIDs))
+	for _, row := range myVotes {
+		if _, ok := selectedByMessageID[row.ChatMessageID]; !ok {
+			selectedByMessageID[row.ChatMessageID] = map[uint]struct{}{}
+		}
+		if _, exists := selectedByMessageID[row.ChatMessageID][row.OptionID]; exists {
+			continue
+		}
+		selectedByMessageID[row.ChatMessageID][row.OptionID] = struct{}{}
+		selectedIDsByMessageID[row.ChatMessageID] = append(selectedIDsByMessageID[row.ChatMessageID], row.OptionID)
+	}
+	optionsByMessageID := make(map[uint][]gin.H, len(messageIDs))
+	for _, row := range optionRows {
+		_, selected := selectedByMessageID[row.ChatMessageID][row.ID]
+		optionsByMessageID[row.ChatMessageID] = append(optionsByMessageID[row.ChatMessageID], gin.H{
+			"id":       row.ID,
+			"text":     strings.TrimSpace(row.OptionText),
+			"votes":    voteCountByOptionID[row.ID],
+			"selected": selected,
+		})
+	}
+	for _, messageID := range messageIDs {
+		out[messageID] = gin.H{
+			"options":            optionsByMessageID[messageID],
+			"mySelectedOptionIds": selectedIDsByMessageID[messageID],
+			"totalVoters":        totalByMessageID[messageID],
+		}
 	}
 	return out, nil
 }
@@ -4064,6 +4417,10 @@ func (s *Server) handleDeleteChatMessage(c *gin.Context) {
 	if err := s.DB.Delete(&msg).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
+	}
+	if defaultIfBlank(strings.TrimSpace(msg.MessageType), "text") == "poll" {
+		_ = s.DB.Where("chat_message_id = ?", msg.ID).Delete(&models.ChatPollVote{}).Error
+		_ = s.DB.Where("chat_message_id = ?", msg.ID).Delete(&models.ChatPollOption{}).Error
 	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deletedId": msg.ID})
@@ -4312,6 +4669,7 @@ func (s *Server) handleChatCreate(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, gin.H{
 		"id":        msg.ID,
+		"type":      "text",
 		"body":      msg.Body,
 		"source":    defaultIfBlank(strings.TrimSpace(msg.Source), "user"),
 		"createdAt": msg.CreatedAt,
@@ -4321,6 +4679,257 @@ func (s *Server) handleChatCreate(c *gin.Context) {
 			"favoriteColor": defaultColor(user.FavoriteColor),
 		},
 	})
+}
+
+func normalizePollOptionText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func normalizePollOptions(raw []string) []string {
+	normalized := make([]string, 0, len(raw))
+	seen := map[string]struct{}{}
+	for _, item := range raw {
+		clean := normalizePollOptionText(item)
+		if clean == "" {
+			continue
+		}
+		key := strings.ToLower(clean)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, clean)
+	}
+	return normalized
+}
+
+func (s *Server) handleChatPollCreate(c *gin.Context) {
+	user, _ := userFromContext(c)
+	var req struct {
+		Question        string   `json:"question" binding:"required,min=3,max=280"`
+		Options         []string `json:"options" binding:"required"`
+		AllowMultiSelect bool    `json:"allowMultiSelect"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	question := strings.TrimSpace(req.Question)
+	if question == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "question empty"})
+		return
+	}
+	options := normalizePollOptions(req.Options)
+	if len(options) < 2 || len(options) > 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "poll options must be between 2 and 8"})
+		return
+	}
+	for _, option := range options {
+		if len(option) > 120 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "poll option too long"})
+			return
+		}
+	}
+	var msg models.ChatMessage
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		msg = models.ChatMessage{
+			UserID:           user.ID,
+			Body:             question,
+			Source:           "user",
+			MessageType:      "poll",
+			PollQuestion:     question,
+			PollAllowMultiple: req.AllowMultiSelect,
+		}
+		if err := tx.Create(&msg).Error; err != nil {
+			return err
+		}
+		pollOptions := make([]models.ChatPollOption, 0, len(options))
+		for idx, option := range options {
+			pollOptions = append(pollOptions, models.ChatPollOption{
+				ChatMessageID: msg.ID,
+				OptionText:    option,
+				SortOrder:     idx,
+			})
+		}
+		return tx.Create(&pollOptions).Error
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+		return
+	}
+	tokens := s.pollNotificationTokens(user.ID)
+	if len(tokens) > 0 {
+		pushText := fmt.Sprintf("%s hat eine Umfrage gestartet", user.Username)
+		sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+			Title:  "Neue Umfrage",
+			Body:   pushText,
+			Type:   "chat_poll",
+			Action: "open_chat",
+		})
+		s.recordPushResult(sendResult, sendErr)
+		s.removeInvalidTokens(sendResult.InvalidTokens)
+	}
+	pollPayloadByID, payloadErr := s.chatPollPayloadByMessageID(user, []uint{msg.ID})
+	if payloadErr != nil {
+		c.JSON(http.StatusCreated, gin.H{
+			"id":        msg.ID,
+			"type":      "poll",
+			"body":      msg.Body,
+			"source":    msg.Source,
+			"createdAt": msg.CreatedAt,
+			"poll": gin.H{
+				"question":         question,
+				"allowMultiSelect": req.AllowMultiSelect,
+				"isClosed":         false,
+				"closedAt":         nil,
+				"canClose":         true,
+			},
+			"user": s.userPublicJSON(user.ID, user),
+		})
+		return
+	}
+	poll := pollPayloadByID[msg.ID]
+	poll["question"] = question
+	poll["allowMultiSelect"] = req.AllowMultiSelect
+	poll["isClosed"] = false
+	poll["closedAt"] = nil
+	poll["canClose"] = true
+	c.JSON(http.StatusCreated, gin.H{
+		"id":        msg.ID,
+		"type":      "poll",
+		"body":      msg.Body,
+		"source":    msg.Source,
+		"createdAt": msg.CreatedAt,
+		"poll":      poll,
+		"user":      s.userPublicJSON(user.ID, user),
+	})
+}
+
+func (s *Server) handleChatPollVote(c *gin.Context) {
+	user, _ := userFromContext(c)
+	chatID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid poll id"})
+		return
+	}
+	var req struct {
+		OptionIDs []uint `json:"optionIds" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	var msg models.ChatMessage
+	if err := s.DB.Where("id = ? AND message_type = ?", chatID, "poll").First(&msg).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "poll not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if msg.PollClosedAt != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "poll closed"})
+		return
+	}
+	seen := map[uint]struct{}{}
+	optionIDs := make([]uint, 0, len(req.OptionIDs))
+	for _, id := range req.OptionIDs {
+		if id == 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		optionIDs = append(optionIDs, id)
+	}
+	if len(optionIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "optionIds required"})
+		return
+	}
+	if !msg.PollAllowMultiple && len(optionIDs) != 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "single choice poll requires exactly one option"})
+		return
+	}
+	var options []models.ChatPollOption
+	if err := s.DB.Where("chat_message_id = ?", msg.ID).Order("sort_order asc, id asc").Find(&options).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	allowed := map[uint]struct{}{}
+	for _, option := range options {
+		allowed[option.ID] = struct{}{}
+	}
+	for _, optionID := range optionIDs {
+		if _, ok := allowed[optionID]; !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid option id"})
+			return
+		}
+	}
+	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("chat_message_id = ? AND user_id = ?", msg.ID, user.ID).Delete(&models.ChatPollVote{}).Error; err != nil {
+			return err
+		}
+		votes := make([]models.ChatPollVote, 0, len(optionIDs))
+		for _, optionID := range optionIDs {
+			votes = append(votes, models.ChatPollVote{
+				ChatMessageID: msg.ID,
+				OptionID:      optionID,
+				UserID:        user.ID,
+			})
+		}
+		return tx.Create(&votes).Error
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "vote failed"})
+		return
+	}
+	payloadByID, payloadErr := s.chatPollPayloadByMessageID(user, []uint{msg.ID})
+	if payloadErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "poll payload failed"})
+		return
+	}
+	poll := payloadByID[msg.ID]
+	poll["question"] = strings.TrimSpace(msg.PollQuestion)
+	poll["allowMultiSelect"] = msg.PollAllowMultiple
+	poll["isClosed"] = msg.PollClosedAt != nil
+	poll["closedAt"] = msg.PollClosedAt
+	poll["canClose"] = user.IsAdmin || msg.UserID == user.ID
+	c.JSON(http.StatusOK, gin.H{
+		"ok":   true,
+		"poll": poll,
+	})
+}
+
+func (s *Server) handleChatPollClose(c *gin.Context) {
+	user, _ := userFromContext(c)
+	chatID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid poll id"})
+		return
+	}
+	var msg models.ChatMessage
+	if err := s.DB.Where("id = ? AND message_type = ?", chatID, "poll").First(&msg).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "poll not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if msg.UserID != user.ID && !user.IsAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not allowed"})
+		return
+	}
+	now := time.Now().In(s.Location)
+	if msg.PollClosedAt == nil {
+		if err := s.DB.Model(&models.ChatMessage{}).Where("id = ?", msg.ID).Update("poll_closed_at", now).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "close failed"})
+			return
+		}
+		msg.PollClosedAt = &now
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "closedAt": msg.PollClosedAt})
 }
 
 func (s *Server) findRecentDuplicateChatMessage(userID uint, body string, window time.Duration) (models.ChatMessage, bool, error) {
@@ -5545,6 +6154,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"isAdmin":                       u.IsAdmin,
 		"favoriteColor":                 defaultColor(u.FavoriteColor),
 		"chatPushEnabled":               u.ChatPushEnabled,
+		"pollPushEnabled":               u.PollPushEnabled,
 		"inviteRegistrationPushEnabled": u.InviteRegistrationPushEnabled,
 		"photoReactionPushEnabled":      u.PhotoReactionPushEnabled,
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
@@ -5576,6 +6186,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"isAdmin":                       u.IsAdmin,
 		"favoriteColor":                 defaultColor(u.FavoriteColor),
 		"chatPushEnabled":               false,
+		"pollPushEnabled":               false,
 		"inviteRegistrationPushEnabled": false,
 		"photoReactionPushEnabled":      false,
 		"photoCommentPushEnabled":       false,
@@ -6317,6 +6928,20 @@ func (s *Server) chatNotificationTokens(senderID uint) []string {
 		Select("device_tokens.token").
 		Joins("JOIN users ON users.id = device_tokens.user_id").
 		Where("users.id <> ? AND users.chat_push_enabled = ?", senderID, true).
+		Find(&rows).Error
+	tokens := make([]string, 0, len(rows))
+	for _, t := range rows {
+		tokens = append(tokens, t.Token)
+	}
+	return tokens
+}
+
+func (s *Server) pollNotificationTokens(senderID uint) []string {
+	var rows []models.DeviceToken
+	_ = s.DB.Table("device_tokens").
+		Select("device_tokens.token").
+		Joins("JOIN users ON users.id = device_tokens.user_id").
+		Where("users.id <> ? AND users.poll_push_enabled = ?", senderID, true).
 		Find(&rows).Error
 	tokens := make([]string, 0, len(rows))
 	for _, t := range rows {

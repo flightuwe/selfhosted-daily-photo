@@ -76,12 +76,14 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.BottomSheetScaffold
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.SheetValue
@@ -209,6 +211,7 @@ data class User(
     val isAdmin: Boolean,
     val favoriteColor: String = "#1F5FBF",
     val chatPushEnabled: Boolean = false,
+    val pollPushEnabled: Boolean = false,
     val inviteRegistrationPushEnabled: Boolean = false,
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
@@ -247,6 +250,7 @@ data class ProfileUpdateRequest(
 )
 data class PreferencesUpdateRequest(
     val chatPushEnabled: Boolean,
+    val pollPushEnabled: Boolean,
     val inviteRegistrationPushEnabled: Boolean,
     val photoReactionPushEnabled: Boolean,
     val photoCommentPushEnabled: Boolean,
@@ -294,6 +298,29 @@ data class ChatSendResponse(
     val reportStatus: String? = null,
     val message: String? = null
 )
+data class ChatPollOption(
+    val id: Long,
+    val text: String,
+    val votes: Long = 0,
+    val selected: Boolean = false
+)
+data class ChatPoll(
+    val question: String = "",
+    val allowMultiSelect: Boolean = false,
+    val options: List<ChatPollOption> = emptyList(),
+    val mySelectedOptionIds: List<Long> = emptyList(),
+    val totalVoters: Long = 0,
+    val isClosed: Boolean = false,
+    val closedAt: String? = null,
+    val canClose: Boolean = false
+)
+data class ChatPollCreateRequest(
+    val question: String,
+    val options: List<String>,
+    val allowMultiSelect: Boolean = false
+)
+data class ChatPollVoteRequest(val optionIds: List<Long>)
+data class ChatPollUpdateResponse(val ok: Boolean = false, val poll: ChatPoll? = null)
 data class DeleteChatResponse(
     val ok: Boolean = false,
     val deletedId: Long? = null
@@ -445,7 +472,9 @@ data class ChatItem(
     val body: String,
     val createdAt: String,
     val user: User,
-    val source: String = "user"
+    val source: String = "user",
+    val type: String = "text",
+    val poll: ChatPoll? = null
 )
 data class ChatResponse(val items: List<ChatItem>)
 data class ReactionCount(val emoji: String, val count: Long)
@@ -652,6 +681,19 @@ interface Api {
 
     @POST("chat")
     suspend fun sendChat(@Header("Authorization") token: String, @Body body: ChatMessageRequest): ChatSendResponse
+
+    @POST("chat/polls")
+    suspend fun createChatPoll(@Header("Authorization") token: String, @Body body: ChatPollCreateRequest): ChatItem
+
+    @POST("chat/polls/{id}/vote")
+    suspend fun voteChatPoll(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long,
+        @Body body: ChatPollVoteRequest
+    ): ChatPollUpdateResponse
+
+    @POST("chat/polls/{id}/close")
+    suspend fun closeChatPoll(@Header("Authorization") token: String, @Path("id") id: Long): ChatPollUpdateResponse
 
     @DELETE("chat/{id}")
     suspend fun deleteChatMessage(@Header("Authorization") token: String, @Path("id") id: Long): DeleteChatResponse
@@ -998,6 +1040,32 @@ class AppRepo(
         prefs.edit().putBoolean("chat_push_enabled_local", enabled).apply()
     }
 
+    fun pollPushLocalEnabled(): Boolean = prefs.getBoolean("poll_push_enabled_local", false)
+
+    fun setPollPushLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("poll_push_enabled_local", enabled).apply()
+    }
+
+    fun ensurePollPushDefaultMigration() {
+        val migratedKey = "poll_push_default_migrated_v1"
+        val pendingKey = "poll_push_default_pending_sync_v1"
+        if (prefs.getBoolean(migratedKey, false)) {
+            return
+        }
+        val desired = notificationMasterEnabled()
+        prefs.edit()
+            .putBoolean("poll_push_enabled_local", desired)
+            .putBoolean(migratedKey, true)
+            .putBoolean(pendingKey, true)
+            .apply()
+    }
+
+    fun pollPushPendingSync(): Boolean = prefs.getBoolean("poll_push_default_pending_sync_v1", false)
+
+    fun clearPollPushPendingSync() {
+        prefs.edit().putBoolean("poll_push_default_pending_sync_v1", false).apply()
+    }
+
     fun inviteRegistrationPushLocalEnabled(): Boolean = prefs.getBoolean("invite_registration_push_enabled_local", false)
 
     fun setInviteRegistrationPushLocalEnabled(enabled: Boolean) {
@@ -1220,6 +1288,7 @@ class AppRepo(
 
     suspend fun updatePreferences(
         chatPushEnabled: Boolean,
+        pollPushEnabled: Boolean,
         inviteRegistrationPushEnabled: Boolean,
         photoReactionPushEnabled: Boolean,
         photoCommentPushEnabled: Boolean,
@@ -1231,6 +1300,7 @@ class AppRepo(
             "Bearer ${token()}",
             PreferencesUpdateRequest(
                 chatPushEnabled = chatPushEnabled,
+                pollPushEnabled = pollPushEnabled,
                 inviteRegistrationPushEnabled = inviteRegistrationPushEnabled,
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
@@ -1278,6 +1348,18 @@ class AppRepo(
             ChatMessageRequest(body = body, clientMessageId = clientMessageId)
         )
     }
+
+    suspend fun createChatPoll(question: String, options: List<String>, allowMultiSelect: Boolean): ChatItem =
+        api.createChatPoll(
+            "Bearer ${token()}",
+            ChatPollCreateRequest(question = question, options = options, allowMultiSelect = allowMultiSelect)
+        )
+
+    suspend fun voteChatPoll(id: Long, optionIds: List<Long>): ChatPollUpdateResponse =
+        api.voteChatPoll("Bearer ${token()}", id, ChatPollVoteRequest(optionIds))
+
+    suspend fun closeChatPoll(id: Long): ChatPollUpdateResponse =
+        api.closeChatPoll("Bearer ${token()}", id)
 
     suspend fun deleteChatMessage(id: Long): DeleteChatResponse =
         api.deleteChatMessage("Bearer ${token()}", id)
@@ -1634,6 +1716,7 @@ data class UiState(
     val autoUpdateEnabled: Boolean = false,
     val notificationMasterEnabled: Boolean = true,
     val feedPostPushEnabled: Boolean = false,
+    val pollPushEnabled: Boolean = false,
     val inviteRegistrationPushEnabled: Boolean = false,
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
@@ -1711,6 +1794,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     )
     private var profileSetupPromptShownInSession = false
 
+    init {
+        repo.ensurePollPushDefaultMigration()
+    }
+
     var state by mutableStateOf(
         UiState(
             token = repo.token(),
@@ -1720,6 +1807,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
+            pollPushEnabled = repo.pollPushLocalEnabled(),
             inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
@@ -1933,6 +2021,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
+            pollPushEnabled = repo.pollPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
@@ -2013,6 +2102,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
+            pollPushEnabled = repo.pollPushLocalEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -2100,6 +2190,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             runCatching {
                 repo.updatePreferences(
                     chatPushEnabled = current.chatPushEnabled,
+                    pollPushEnabled = current.pollPushEnabled,
                     inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
                     photoReactionPushEnabled = current.photoReactionPushEnabled,
                     photoCommentPushEnabled = current.photoCommentPushEnabled,
@@ -2147,6 +2238,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching {
             repo.updatePreferences(
                 chatPushEnabled = current.chatPushEnabled,
+                pollPushEnabled = current.pollPushEnabled,
                 inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
                 photoReactionPushEnabled = current.photoReactionPushEnabled,
                 photoCommentPushEnabled = current.photoCommentPushEnabled,
@@ -2471,10 +2563,30 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     communityStats = communityStats
                 )
             }
-            val me = payload.me
+            var me = payload.me
             val streakDays = payload.streakDays
             val dailyMomentCount = payload.dailyMomentCount
             val inviteCode = payload.inviteCode
+            if (repo.pollPushPendingSync()) {
+                val desiredPollPush = repo.pollPushLocalEnabled()
+                if (me.pollPushEnabled != desiredPollPush) {
+                    runCatching {
+                        repo.updatePreferences(
+                            me.chatPushEnabled,
+                            desiredPollPush,
+                            me.inviteRegistrationPushEnabled,
+                            me.photoReactionPushEnabled,
+                            me.photoCommentPushEnabled,
+                            me.allowPhotoDownload
+                        )
+                    }.onSuccess {
+                        me = it
+                        repo.clearPollPushPendingSync()
+                    }
+                } else {
+                    repo.clearPollPushPendingSync()
+                }
+            }
             val prompt = payload.prompt
             val rules = payload.rules
             val special = payload.special
@@ -2502,12 +2614,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val shouldPopup = prompt.canUpload && !prompt.triggered.isNullOrBlank() && !prompt.hasPromptPostedToday && marker != repo.seenPromptMarker()
             if (shouldPopup) repo.setSeenPromptMarker(marker)
             repo.setChatPushLocalEnabled(me.chatPushEnabled)
+            repo.setPollPushLocalEnabled(me.pollPushEnabled)
             repo.setInviteRegistrationPushLocalEnabled(me.inviteRegistrationPushEnabled)
             repo.syncQuietHoursFromUser(me)
             repo.setPhotoReactionPushLocalEnabled(me.photoReactionPushEnabled)
             repo.setPhotoCommentPushLocalEnabled(me.photoCommentPushEnabled)
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
+            val pollPushEnabled = repo.pollPushLocalEnabled()
             val inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled()
             val photoReactionPushEnabled = repo.photoReactionPushLocalEnabled()
             val photoCommentPushEnabled = repo.photoCommentPushLocalEnabled()
@@ -2535,10 +2649,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 uploadQueue = repo.uploadQueue(),
                 autoUpdateEnabled = autoUpdateEnabled,
                 feedPostPushEnabled = feedPostPushEnabled,
+                pollPushEnabled = pollPushEnabled,
                 inviteRegistrationPushEnabled = inviteRegistrationPushEnabled,
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
-                notificationMasterEnabled = notificationMaster && autoUpdateEnabled && feedPostPushEnabled && me.chatPushEnabled && inviteRegistrationPushEnabled && photoReactionPushEnabled && photoCommentPushEnabled,
+                notificationMasterEnabled = notificationMaster && autoUpdateEnabled && feedPostPushEnabled && me.chatPushEnabled && pollPushEnabled && inviteRegistrationPushEnabled && photoReactionPushEnabled && photoCommentPushEnabled,
                 diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && me.diagnosticsConsentGranted,
                 diagnosticsConsentGranted = me.diagnosticsConsentGranted,
                 diagnosticsConsentUpdatedAt = me.diagnosticsConsentUpdatedAt,
@@ -3013,6 +3128,58 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    suspend fun createChatPoll(question: String, options: List<String>, allowMultiSelect: Boolean): Boolean {
+        val cleanQuestion = question.trim()
+        val cleanOptions = options.map { it.trim() }.filter { it.isNotBlank() }.distinctBy { it.lowercase() }
+        if (cleanQuestion.length < 3 || cleanOptions.size < 2) {
+            state = state.copy(message = "Umfrage braucht eine Frage und mindestens 2 Optionen.")
+            return false
+        }
+        state = state.copy(chatSending = true)
+        return try {
+            runCatching { repo.createChatPoll(cleanQuestion, cleanOptions, allowMultiSelect) }
+                .onSuccess {
+                    refreshAll()
+                    state = state.copy(message = "Umfrage erstellt")
+                }
+                .onFailure {
+                    state = state.copy(message = apiError(it, "Umfrage erstellen fehlgeschlagen"))
+                    logApiFailure("chat_poll_create_failed", "/api/chat/polls", it)
+                }
+                .isSuccess
+        } finally {
+            state = state.copy(chatSending = false)
+        }
+    }
+
+    suspend fun voteChatPoll(messageId: Long, optionIds: List<Long>): Boolean {
+        if (messageId <= 0L || optionIds.isEmpty()) return false
+        return runCatching { repo.voteChatPoll(messageId, optionIds) }
+            .map {
+                refreshAll(showLoading = false, reason = "chat_poll_vote")
+                true
+            }
+            .getOrElse {
+                state = state.copy(message = apiError(it, "Abstimmung fehlgeschlagen"))
+                logApiFailure("chat_poll_vote_failed", "/api/chat/polls/:id/vote", it, "pollId=$messageId")
+                false
+            }
+    }
+
+    suspend fun closeChatPoll(messageId: Long): Boolean {
+        if (messageId <= 0L) return false
+        return runCatching { repo.closeChatPoll(messageId) }
+            .map {
+                refreshAll(showLoading = false, reason = "chat_poll_close")
+                true
+            }
+            .getOrElse {
+                state = state.copy(message = apiError(it, "Umfrage schliessen fehlgeschlagen"))
+                logApiFailure("chat_poll_close_failed", "/api/chat/polls/:id/close", it, "pollId=$messageId")
+                false
+            }
+    }
+
     suspend fun deleteChatMessage(id: Long): Boolean {
         if (id <= 0L) return false
         return runCatching { repo.deleteChatMessage(id) }
@@ -3266,6 +3433,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
+            pollPushEnabled = repo.pollPushLocalEnabled(),
             inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
@@ -3385,8 +3553,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val auto = repo.autoUpdateEnabled()
         val chat = state.user?.chatPushEnabled ?: repo.chatPushLocalEnabled()
         val feed = repo.feedPostPushEnabled()
+        val poll = state.user?.pollPushEnabled ?: repo.pollPushLocalEnabled()
         val invite = state.user?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
-        val master = auto && chat && feed && invite
+        val reaction = state.user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
+        val comment = state.user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
+        val master = auto && chat && feed && poll && invite && reaction && comment
         repo.setNotificationMasterEnabled(master)
         state = state.copy(
             autoUpdateEnabled = auto,
@@ -3399,15 +3570,52 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val auto = repo.autoUpdateEnabled()
         val chat = state.user?.chatPushEnabled ?: repo.chatPushLocalEnabled()
         val feed = repo.feedPostPushEnabled()
+        val poll = state.user?.pollPushEnabled ?: repo.pollPushLocalEnabled()
         val invite = state.user?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
         val reaction = state.user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val comment = state.user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
-        val master = auto && chat && feed && invite && reaction && comment
+        val master = auto && chat && feed && poll && invite && reaction && comment
         repo.setNotificationMasterEnabled(master)
         state = state.copy(
             feedPostPushEnabled = feed,
             notificationMasterEnabled = master
         )
+    }
+
+    suspend fun setPollPushEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                enabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload
+            )
+        }
+            .onSuccess { user ->
+                repo.setChatPushLocalEnabled(user.chatPushEnabled)
+                repo.setPollPushLocalEnabled(user.pollPushEnabled)
+                repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
+                repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
+                repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
+                val auto = repo.autoUpdateEnabled()
+                val feed = repo.feedPostPushEnabled()
+                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                repo.setNotificationMasterEnabled(master)
+                state = state.copy(
+                    user = user,
+                    pollPushEnabled = user.pollPushEnabled,
+                    notificationMasterEnabled = master,
+                    loading = false,
+                    message = "Push bei Umfragen aktualisiert"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Push-Einstellung speichern fehlgeschlagen"))
+            }
     }
 
     fun setCustomNotificationToneEnabled(enabled: Boolean) {
@@ -3499,20 +3707,23 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(loading = true)
         val allowDownload = state.user?.allowPhotoDownload ?: false
         val inviteEnabled = state.user?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
+        val pollEnabled = state.user?.pollPushEnabled ?: repo.pollPushLocalEnabled()
         val reactionEnabled = state.user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val commentEnabled = state.user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
-        runCatching { repo.updatePreferences(enabled, inviteEnabled, reactionEnabled, commentEnabled, allowDownload) }
+        runCatching { repo.updatePreferences(enabled, pollEnabled, inviteEnabled, reactionEnabled, commentEnabled, allowDownload) }
             .onSuccess { user ->
                 repo.setChatPushLocalEnabled(user.chatPushEnabled)
+                repo.setPollPushLocalEnabled(user.pollPushEnabled)
                 repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
                 repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
                 repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
+                    pollPushEnabled = user.pollPushEnabled,
                     inviteRegistrationPushEnabled = user.inviteRegistrationPushEnabled,
                     photoReactionPushEnabled = user.photoReactionPushEnabled,
                     photoCommentPushEnabled = user.photoCommentPushEnabled,
@@ -3529,16 +3740,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setNotificationMasterEnabled(enabled)
         repo.setAutoUpdateEnabled(enabled)
         repo.setFeedPostPushEnabled(enabled)
+        repo.setPollPushLocalEnabled(enabled)
         repo.setInviteRegistrationPushLocalEnabled(enabled)
         repo.setPhotoReactionPushLocalEnabled(enabled)
         repo.setPhotoCommentPushLocalEnabled(enabled)
         var nextUser = state.user
         if (state.user != null) {
             val allowDownload = state.user?.allowPhotoDownload ?: false
-            runCatching { repo.updatePreferences(enabled, enabled, enabled, enabled, allowDownload) }
+            runCatching { repo.updatePreferences(enabled, enabled, enabled, enabled, enabled, allowDownload) }
                 .onSuccess {
                     nextUser = it
                     repo.setChatPushLocalEnabled(it.chatPushEnabled)
+                    repo.setPollPushLocalEnabled(it.pollPushEnabled)
                     repo.setInviteRegistrationPushLocalEnabled(it.inviteRegistrationPushEnabled)
                     repo.setPhotoReactionPushLocalEnabled(it.photoReactionPushEnabled)
                     repo.setPhotoCommentPushLocalEnabled(it.photoCommentPushEnabled)
@@ -3548,6 +3761,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 }
         } else {
             repo.setChatPushLocalEnabled(enabled)
+            repo.setPollPushLocalEnabled(enabled)
             repo.setInviteRegistrationPushLocalEnabled(enabled)
             repo.setPhotoReactionPushLocalEnabled(enabled)
             repo.setPhotoCommentPushLocalEnabled(enabled)
@@ -3555,15 +3769,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val auto = repo.autoUpdateEnabled()
         val feed = repo.feedPostPushEnabled()
         val chat = nextUser?.chatPushEnabled ?: repo.chatPushLocalEnabled()
+        val poll = nextUser?.pollPushEnabled ?: repo.pollPushLocalEnabled()
         val invite = nextUser?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
         val reaction = nextUser?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val comment = nextUser?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
-        val masterEffective = auto && feed && chat && invite && reaction && comment
+        val masterEffective = auto && feed && chat && poll && invite && reaction && comment
         repo.setNotificationMasterEnabled(masterEffective)
         state = state.copy(
             user = nextUser,
             autoUpdateEnabled = auto,
             feedPostPushEnabled = feed,
+            pollPushEnabled = poll,
             inviteRegistrationPushEnabled = invite,
             photoReactionPushEnabled = reaction,
             photoCommentPushEnabled = comment,
@@ -3583,6 +3799,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching {
             repo.updatePreferences(
                 current.chatPushEnabled,
+                current.pollPushEnabled,
                 current.inviteRegistrationPushEnabled,
                 current.photoReactionPushEnabled,
                 current.photoCommentPushEnabled,
@@ -3607,6 +3824,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching {
             repo.updatePreferences(
                 current.chatPushEnabled,
+                current.pollPushEnabled,
                 enabled,
                 current.photoReactionPushEnabled,
                 current.photoCommentPushEnabled,
@@ -3619,10 +3837,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
+                    pollPushEnabled = user.pollPushEnabled,
                     inviteRegistrationPushEnabled = user.inviteRegistrationPushEnabled,
                     photoReactionPushEnabled = user.photoReactionPushEnabled,
                     photoCommentPushEnabled = user.photoCommentPushEnabled,
@@ -3642,6 +3861,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching {
             repo.updatePreferences(
                 current.chatPushEnabled,
+                current.pollPushEnabled,
                 current.inviteRegistrationPushEnabled,
                 enabled,
                 current.photoCommentPushEnabled,
@@ -3655,10 +3875,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
+                    pollPushEnabled = user.pollPushEnabled,
                     photoReactionPushEnabled = user.photoReactionPushEnabled,
                     notificationMasterEnabled = master,
                     loading = false,
@@ -3676,6 +3897,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching {
             repo.updatePreferences(
                 current.chatPushEnabled,
+                current.pollPushEnabled,
                 current.inviteRegistrationPushEnabled,
                 current.photoReactionPushEnabled,
                 enabled,
@@ -3689,10 +3911,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
+                    pollPushEnabled = user.pollPushEnabled,
                     photoCommentPushEnabled = user.photoCommentPushEnabled,
                     notificationMasterEnabled = master,
                     loading = false,
@@ -4702,6 +4925,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 AppTab.CHAT -> ChatTab(
                     items = state.chat,
                     meId = state.user?.id,
+                    isAdmin = state.user?.isAdmin == true,
                     chatDeleteSupported = state.chatDeleteSupported,
                     input = chatInput,
                     sending = state.chatSending,
@@ -4718,6 +4942,15 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                                 if (ok) chatInput = ""
                             }
                         }
+                    },
+                    onCreatePoll = { question, options, allowMulti ->
+                        scope.launch { vm.createChatPoll(question, options, allowMulti) }
+                    },
+                    onVotePoll = { messageId, optionIds ->
+                        scope.launch { vm.voteChatPoll(messageId, optionIds) }
+                    },
+                    onClosePoll = { messageId ->
+                        scope.launch { vm.closeChatPoll(messageId) }
                     }
                 )
 
@@ -4747,6 +4980,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     autoUpdateEnabled = state.autoUpdateEnabled,
                     notificationMasterEnabled = state.notificationMasterEnabled,
                     chatPushEnabled = state.user?.chatPushEnabled ?: false,
+                    pollPushEnabled = state.user?.pollPushEnabled ?: state.pollPushEnabled,
                     inviteRegistrationPushEnabled = state.user?.inviteRegistrationPushEnabled ?: state.inviteRegistrationPushEnabled,
                     photoReactionPushEnabled = state.user?.photoReactionPushEnabled ?: state.photoReactionPushEnabled,
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
@@ -4777,6 +5011,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onUploadQualityChange = { vm.setUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onChatPushEnabledChange = { scope.launch { vm.setChatPushEnabled(it) } },
+                    onPollPushEnabledChange = { scope.launch { vm.setPollPushEnabled(it) } },
                     onInviteRegistrationPushEnabledChange = { scope.launch { vm.setInviteRegistrationPushEnabled(it) } },
                     onPhotoReactionPushEnabledChange = { scope.launch { vm.setPhotoReactionPushEnabled(it) } },
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
@@ -5182,7 +5417,7 @@ fun CameraTab(
                     onClick = { showCapsuleDialog = true },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Fuer spaeter merken")
+                    Text("Timecapsule aufnehmen")
                 }
                 if (showSpecialMomentButton) {
                     SpecialMomentActionButton(
@@ -5336,7 +5571,7 @@ fun CameraTab(
             dismissButton = {
                 TextButton(onClick = { showCapsuleDialog = false }) { Text("Schliessen") }
             },
-            title = { Text("Fuer spaeter merken") },
+        title = { Text("Timecapsule aufnehmen") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -5919,16 +6154,25 @@ fun CalendarTab(
 fun ChatTab(
     items: List<ChatItem>,
     meId: Long?,
+    isAdmin: Boolean,
     chatDeleteSupported: Boolean,
     input: String,
     sending: Boolean,
     onInput: (String) -> Unit,
     onOpenUserProfile: (Long) -> Unit,
     onDeleteMessage: (Long) -> Unit,
-    onSend: () -> Unit
+    onSend: () -> Unit,
+    onCreatePoll: (String, List<String>, Boolean) -> Unit,
+    onVotePoll: (Long, List<Long>) -> Unit,
+    onClosePoll: (Long) -> Unit
 ) {
     val listState = rememberLazyListState()
     var deleteCandidate by remember { mutableStateOf<ChatItem?>(null) }
+    var showPollDialog by remember { mutableStateOf(false) }
+    var pollQuestion by remember { mutableStateOf("") }
+    var pollOptionsText by remember { mutableStateOf("") }
+    var pollAllowMulti by remember { mutableStateOf(false) }
+    val pendingMultiVotes = remember { mutableStateMapOf<Long, Set<Long>>() }
     val rows = remember(items) {
         buildList<ChatRow> {
             var lastDay = ""
@@ -6005,7 +6249,79 @@ fun ChatTab(
                                     color = parseUserColor(item.user.favoriteColor),
                                     modifier = Modifier.clickable { onOpenUserProfile(item.user.id) }
                                 )
-                                Text(item.body)
+                                if (item.type == "poll" && item.poll != null) {
+                                    val poll = item.poll
+                                    Text(
+                                        poll.question.ifBlank { item.body },
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    val selectedSet = pendingMultiVotes[item.id]
+                                        ?: poll.mySelectedOptionIds.map { it.toLong() }.toSet()
+                                    poll.options.forEach { option ->
+                                        val optionSelected = option.id in selectedSet
+                                        val optionLabel = if (poll.isClosed) {
+                                            "${option.text} (${option.votes})"
+                                        } else {
+                                            option.text
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                if (poll.isClosed) return@OutlinedButton
+                                                if (poll.allowMultiSelect) {
+                                                    val next = selectedSet.toMutableSet()
+                                                    if (option.id in next) next.remove(option.id) else next.add(option.id)
+                                                    pendingMultiVotes[item.id] = next
+                                                } else {
+                                                    onVotePoll(item.id, listOf(option.id))
+                                                }
+                                            },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            enabled = !poll.isClosed
+                                        ) {
+                                            Text(
+                                                if (optionSelected) "✓ $optionLabel" else optionLabel,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                        }
+                                    }
+                                    if (poll.allowMultiSelect && !poll.isClosed) {
+                                        val submitEnabled = selectedSet.isNotEmpty()
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Button(
+                                                onClick = { onVotePoll(item.id, selectedSet.toList()) },
+                                                enabled = submitEnabled,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Text("Abstimmen")
+                                            }
+                                            if ((poll.canClose || (meId != null && item.user.id == meId) || isAdmin) && !poll.isClosed) {
+                                                OutlinedButton(
+                                                    onClick = { onClosePoll(item.id) },
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    Text("Umfrage schliessen")
+                                                }
+                                            }
+                                        }
+                                    } else if ((poll.canClose || (meId != null && item.user.id == meId) || isAdmin) && !poll.isClosed) {
+                                        OutlinedButton(
+                                            onClick = { onClosePoll(item.id) },
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text("Umfrage schliessen")
+                                        }
+                                    }
+                                    Text(
+                                        "${poll.totalVoters} Teilnehmende${if (poll.isClosed) " · geschlossen" else ""}",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                } else {
+                                    Text(item.body)
+                                }
                             }
                         }
                     }
@@ -6034,6 +6350,60 @@ fun ChatTab(
                 }
             )
         }
+        if (showPollDialog) {
+            AlertDialog(
+                onDismissRequest = { showPollDialog = false },
+                title = { Text("Umfrage erstellen") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = pollQuestion,
+                            onValueChange = { pollQuestion = it.take(280) },
+                            label = { Text("Frage") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = pollOptionsText,
+                            onValueChange = { pollOptionsText = it },
+                            label = { Text("Optionen (je Zeile eine)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 3
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(checked = pollAllowMulti, onCheckedChange = { pollAllowMulti = it })
+                            Text("Mehrfachantwort erlauben")
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val options = pollOptionsText
+                                .split('\n')
+                                .map { it.trim() }
+                                .filter { it.isNotBlank() }
+                            onCreatePoll(pollQuestion.trim(), options, pollAllowMulti)
+                            showPollDialog = false
+                            pollQuestion = ""
+                            pollOptionsText = ""
+                            pollAllowMulti = false
+                        },
+                        enabled = pollQuestion.trim().length >= 3 && pollOptionsText.lines().map { it.trim() }.count { it.isNotBlank() } >= 2
+                    ) {
+                        Text("Posten")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showPollDialog = false }) {
+                        Text("Abbrechen")
+                    }
+                }
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedTextField(
                 value = input,
@@ -6042,6 +6412,13 @@ fun ChatTab(
                 enabled = !sending,
                 modifier = Modifier.weight(1f)
             )
+            OutlinedButton(
+                onClick = { showPollDialog = true },
+                enabled = !sending,
+                modifier = Modifier.align(Alignment.CenterVertically)
+            ) {
+                Text("Umfrage")
+            }
             Button(
                 onClick = onSend,
                 enabled = !sending && input.trim().isNotEmpty(),
@@ -6148,6 +6525,7 @@ fun ProfileTab(
     autoUpdateEnabled: Boolean,
     notificationMasterEnabled: Boolean,
     chatPushEnabled: Boolean,
+    pollPushEnabled: Boolean,
     inviteRegistrationPushEnabled: Boolean,
     photoReactionPushEnabled: Boolean,
     photoCommentPushEnabled: Boolean,
@@ -6178,6 +6556,7 @@ fun ProfileTab(
     onUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onChatPushEnabledChange: (Boolean) -> Unit,
+    onPollPushEnabledChange: (Boolean) -> Unit,
     onInviteRegistrationPushEnabledChange: (Boolean) -> Unit,
     onPhotoReactionPushEnabledChange: (Boolean) -> Unit,
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
@@ -6772,6 +7151,11 @@ fun ProfileTab(
                         label = "Chat Push bei neuen Nachrichten",
                         checked = chatPushEnabled,
                         onCheckedChange = onChatPushEnabledChange
+                    )
+                    SettingsToggleRow(
+                        label = "Push bei neuen Umfragen",
+                        checked = pollPushEnabled,
+                        onCheckedChange = onPollPushEnabledChange
                     )
                     SettingsToggleRow(
                         label = "Push bei Posts anderer Nutzer",

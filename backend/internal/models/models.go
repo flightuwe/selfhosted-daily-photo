@@ -9,6 +9,7 @@ type User struct {
 	IsAdmin                       bool       `gorm:"default:false" json:"isAdmin"`
 	FavoriteColor                 string     `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
 	ChatPushEnabled               bool       `gorm:"default:false" json:"chatPushEnabled"`
+	PollPushEnabled               bool       `gorm:"default:false" json:"pollPushEnabled"`
 	InviteRegistrationPushEnabled bool       `gorm:"default:false" json:"inviteRegistrationPushEnabled"`
 	PhotoReactionPushEnabled      bool       `gorm:"default:false" json:"photoReactionPushEnabled"`
 	PhotoCommentPushEnabled       bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
@@ -264,8 +265,29 @@ type ChatMessage struct {
 	User            User      `json:"user"`
 	Body            string    `gorm:"size:500;not null" json:"body"`
 	Source          string    `gorm:"size:16;not null;default:'user';index" json:"source"`
+	MessageType     string    `gorm:"size:16;not null;default:'text';index" json:"type"`
+	PollQuestion    string    `gorm:"size:280" json:"pollQuestion"`
+	PollAllowMultiple bool    `gorm:"default:false" json:"pollAllowMultiple"`
+	PollClosedAt    *time.Time `json:"pollClosedAt"`
 	ClientMessageID *string   `gorm:"size:64;index:idx_chat_msg_user_client,unique" json:"-"`
 	CreatedAt       time.Time `json:"createdAt"`
+}
+
+type ChatPollOption struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	ChatMessageID uint      `gorm:"index;not null" json:"chatMessageId"`
+	OptionText    string    `gorm:"size:120;not null" json:"optionText"`
+	SortOrder     int       `gorm:"default:0;index" json:"sortOrder"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+type ChatPollVote struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	ChatMessageID uint      `gorm:"index:idx_poll_vote_unique,unique;not null" json:"chatMessageId"`
+	OptionID      uint      `gorm:"index:idx_poll_vote_unique,unique;index;not null" json:"optionId"`
+	UserID        uint      `gorm:"index:idx_poll_vote_unique,unique;index;not null" json:"userId"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 type ChatCommand struct {
