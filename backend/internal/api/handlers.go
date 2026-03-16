@@ -4176,9 +4176,17 @@ func (s *Server) chatPollPayloadByMessageID(viewer models.User, messageIDs []uin
 		})
 	}
 	for _, messageID := range messageIDs {
+		options := optionsByMessageID[messageID]
+		if options == nil {
+			options = []gin.H{}
+		}
+		selectedIDs := selectedIDsByMessageID[messageID]
+		if selectedIDs == nil {
+			selectedIDs = []uint{}
+		}
 		out[messageID] = gin.H{
-			"options":            optionsByMessageID[messageID],
-			"mySelectedOptionIds": selectedIDsByMessageID[messageID],
+			"options":            options,
+			"mySelectedOptionIds": selectedIDs,
 			"totalVoters":        totalByMessageID[messageID],
 		}
 	}

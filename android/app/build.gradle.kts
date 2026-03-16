@@ -12,8 +12,8 @@ android {
         applicationId = "com.selfhosted.daily"
         minSdk = 26
         targetSdk = 34
-        versionCode = 71
-        versionName = "0.4.20"
+        versionCode = 72
+        versionName = "0.4.21"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "API_BASE_URL", "\"https://daily.teacloud.synology.me/api/\"")

@@ -307,8 +307,8 @@ data class ChatPollOption(
 data class ChatPoll(
     val question: String = "",
     val allowMultiSelect: Boolean = false,
-    val options: List<ChatPollOption> = emptyList(),
-    val mySelectedOptionIds: List<Long> = emptyList(),
+    val options: List<ChatPollOption>? = emptyList(),
+    val mySelectedOptionIds: List<Long>? = emptyList(),
     val totalVoters: Long = 0,
     val isClosed: Boolean = false,
     val closedAt: String? = null,
@@ -6256,9 +6256,10 @@ fun ChatTab(
                                         fontWeight = FontWeight.SemiBold
                                     )
                                     Spacer(modifier = Modifier.height(6.dp))
+                                    val pollOptions = poll.options.orEmpty()
                                     val selectedSet = pendingMultiVotes[item.id]
-                                        ?: poll.mySelectedOptionIds.map { it.toLong() }.toSet()
-                                    poll.options.forEach { option ->
+                                        ?: poll.mySelectedOptionIds.orEmpty().map { it.toLong() }.toSet()
+                                    pollOptions.forEach { option ->
                                         val optionSelected = option.id in selectedSet
                                         val optionLabel = if (poll.isClosed) {
                                             "${option.text} (${option.votes})"
