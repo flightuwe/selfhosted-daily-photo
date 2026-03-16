@@ -2499,11 +2499,23 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     communityStats = bootstrap.communityStats
                 )
             }.getOrElse {
-                val meResp = try {
-                    repo.me()
-                } catch (t: Throwable) {
+                val meResp = runCatching { repo.me() }.getOrElse { meErr ->
                     failedCall = "me"
-                    throw RefreshStageException("me", t)
+                    val cachedUser = state.user
+                    if (cachedUser == null) {
+                        throw RefreshStageException("me", meErr)
+                    }
+                    val failureClass = classifyFailure(meErr)
+                    repo.logDebug(
+                        type = "dashboard_refresh_degraded",
+                        message = debugFailureMessage(meErr),
+                        meta = "failedCall=me;fallback=cached_user;failureClass=$failureClass"
+                    )
+                    MeResponse(
+                        user = cachedUser,
+                        dailyMomentCount = state.dailyMomentCount,
+                        streakDays = state.streakDays
+                    )
                 }
                 val fetchedInviteCode = runCatching { repo.myInviteCode() }.getOrElse {
                     failedCall = "inviteCode"
