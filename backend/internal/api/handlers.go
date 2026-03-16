@@ -891,6 +891,7 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		"dailyPending":         triggerStatus.DailyPending,
 		"specialTriggeredAt":   triggerStatus.SpecialTriggeredAt,
 		"specialRequestedByUser": triggerStatus.SpecialRequestedByUser,
+		"specialRequestedByUserColor": triggerStatus.SpecialRequestedByUserColor,
 	})
 }
 
@@ -993,6 +994,7 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 			"dailyPending":         triggerStatus.DailyPending,
 			"specialTriggeredAt":   triggerStatus.SpecialTriggeredAt,
 			"specialRequestedByUser": triggerStatus.SpecialRequestedByUser,
+			"specialRequestedByUserColor": triggerStatus.SpecialRequestedByUserColor,
 		},
 		"promptRules": gin.H{
 			"promptWindowStartHour": settings.PromptWindowStartHour,
@@ -1527,7 +1529,13 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 
 	var prompt models.DailyPrompt
 	_ = s.DB.Where("day = ?", day).First(&prompt).Error
+	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/feed")
 	momentKind := momentKindFromTriggerSource(prompt.TriggerSource)
+	requestedByUser := strings.TrimSpace(prompt.RequestedBy)
+	if requestedByUser == "" {
+		requestedByUser = strings.TrimSpace(triggerStatus.SpecialRequestedByUser)
+	}
+	specialRequestedByUserColor := strings.TrimSpace(triggerStatus.SpecialRequestedByUserColor)
 
 	var photos []models.Photo
 	photosQueryStart := time.Now()
@@ -1584,8 +1592,9 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 			"reactions":       reactions,
 			"comments":        comments,
 			"triggerSource":   prompt.TriggerSource,
-			"requestedByUser": prompt.RequestedBy,
+			"requestedByUser": requestedByUser,
 			"momentKind":      momentKind,
+			"specialRequestedByUserColor": specialRequestedByUserColor,
 		})
 	}
 
@@ -1717,8 +1726,13 @@ func (s *Server) handleFeed(c *gin.Context) {
 		"triggeredAt":     prompt.TriggeredAt,
 		"uploadUntil":     prompt.UploadUntil,
 		"triggerSource":   prompt.TriggerSource,
-		"requestedByUser": prompt.RequestedBy,
+		"requestedByUser": requestedByUser,
 		"momentKind":      momentKind,
+		"specialRequestedByUser": triggerStatus.SpecialRequestedByUser,
+		"specialRequestedByUserColor": specialRequestedByUserColor,
+		"specialTriggeredAt": triggerStatus.SpecialTriggeredAt,
+		"dailyTriggeredAt": triggerStatus.DailyTriggeredAt,
+		"dailyPending": triggerStatus.DailyPending,
 		"monthRecap":      recap,
 	}
 	if s.shouldUseFeedCache(day, now) {
@@ -5903,6 +5917,7 @@ type dayTriggerStatus struct {
 	DailyPending          bool
 	SpecialTriggeredAt    *time.Time
 	SpecialRequestedByUser string
+	SpecialRequestedByUserColor string
 }
 
 func (s *Server) currentDayTriggerStatus(day string, route string) (dayTriggerStatus, error) {
@@ -5911,12 +5926,14 @@ func (s *Server) currentDayTriggerStatus(day string, route string) (dayTriggerSt
 		OccurredAt    time.Time `gorm:"column:occurred_at"`
 		Source        string    `gorm:"column:source"`
 		ActorUsername string    `gorm:"column:actor_username"`
+		FavoriteColor string    `gorm:"column:favorite_color"`
 	}
 	rows := make([]row, 0, 8)
 	queryStart := time.Now()
 	err := s.DB.
-		Table("daily_trigger_audit_events").
-		Select("occurred_at, source, actor_username").
+		Table("daily_trigger_audit_events dtae").
+		Select("dtae.occurred_at, dtae.source, dtae.actor_username, u.favorite_color").
+		Joins("LEFT JOIN users u ON u.id = dtae.actor_user_id").
 		Where("day = ? AND result = ?", day, "triggered").
 		Order("occurred_at asc").
 		Find(&rows).Error
@@ -5934,6 +5951,7 @@ func (s *Server) currentDayTriggerStatus(day string, route string) (dayTriggerSt
 			if name := strings.TrimSpace(item.ActorUsername); name != "" {
 				status.SpecialRequestedByUser = name
 			}
+			status.SpecialRequestedByUserColor = defaultColor(item.FavoriteColor)
 		default:
 			when := item.OccurredAt
 			status.DailyTriggeredAt = &when

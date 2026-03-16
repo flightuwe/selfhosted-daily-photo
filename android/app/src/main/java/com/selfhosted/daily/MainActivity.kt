@@ -322,6 +322,7 @@ data class PromptResponse(
     val dailyPending: Boolean = true,
     val specialTriggeredAt: String? = null,
     val specialRequestedByUser: String? = null,
+    val specialRequestedByUserColor: String? = null,
     val hasPosted: Boolean = false,
     val hasPromptPostedToday: Boolean = false,
     val hasVisiblePostToday: Boolean = false,
@@ -337,7 +338,9 @@ data class PromptMeta(
     val uploadUntil: String? = null,
     val triggerSource: String? = null,
     val requestedByUser: String? = null,
-    val momentKind: String? = null
+    val momentKind: String? = null,
+    val specialRequestedByUser: String? = null,
+    val specialRequestedByUserColor: String? = null
 )
 data class FeedItem(
     val isEarly: Boolean = false,
@@ -350,7 +353,8 @@ data class FeedItem(
     val comments: List<PhotoCommentItem>? = null,
     val triggerSource: String? = null,
     val requestedByUser: String? = null,
-    val momentKind: String? = null
+    val momentKind: String? = null,
+    val specialRequestedByUserColor: String? = null
 )
 
 data class CapsuleUploadOptions(
@@ -388,6 +392,8 @@ data class FeedResponse(
     val triggerSource: String? = null,
     val requestedByUser: String? = null,
     val momentKind: String? = null,
+    val specialRequestedByUser: String? = null,
+    val specialRequestedByUserColor: String? = null,
     val monthRecap: MonthlyRecap? = null
 )
 data class DayListResponse(val items: List<String>)
@@ -2842,7 +2848,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     uploadUntil = res.uploadUntil,
                     triggerSource = res.triggerSource,
                     requestedByUser = res.requestedByUser,
-                    momentKind = res.momentKind
+                    momentKind = res.momentKind,
+                    specialRequestedByUser = res.specialRequestedByUser,
+                    specialRequestedByUserColor = res.specialRequestedByUserColor
                 ),
                 monthRecap = res.monthRecap
             )
@@ -4044,6 +4052,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
 
     if (state.showPromptDialog) {
         DailyMomentStartOverlay(
+            momentKind = normalizeMomentKind(state.prompt?.momentKind, state.prompt?.triggerSource),
+            requestedByUser = state.prompt?.specialRequestedByUser ?: state.prompt?.requestedByUser,
             onCaptureNow = {
                 vm.dismissPromptDialog()
                 startDualCapture(true)
@@ -4580,6 +4590,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             when (state.activeTab) {
                 AppTab.CAMERA -> CameraTab(
                     prompt = state.prompt,
+                    currentUsername = state.user?.username,
                     promptRules = state.promptRules,
                     updateAvailable = state.updateAvailable,
                     updateCheckInFlight = state.updateCheckInFlight,
@@ -5002,6 +5013,7 @@ fun StartupScreen(serverConnected: Boolean, appVersion: String, startupQuote: St
 @Composable
 fun CameraTab(
     prompt: PromptResponse?,
+    currentUsername: String?,
     promptRules: PromptRulesResponse?,
     updateAvailable: Boolean,
     updateCheckInFlight: Boolean,
@@ -5030,6 +5042,13 @@ fun CameraTab(
     val canSpecial = specialMomentStatus?.canRequest == true
     val activeMomentKind = normalizeMomentKind(prompt?.momentKind, prompt?.triggerSource)
     val activeSpecialRequester = prompt?.requestedByUser?.takeIf { !it.isNullOrBlank() } ?: prompt?.specialRequestedByUser
+    val specialRequesterKey = (prompt?.specialRequestedByUser ?: prompt?.requestedByUser).orEmpty().trim().lowercase()
+    val currentUserKey = currentUsername.orEmpty().trim().lowercase()
+    val specialTriggeredByOtherUserToday = !prompt?.specialTriggeredAt.isNullOrBlank() &&
+        specialRequesterKey.isNotBlank() &&
+        currentUserKey.isNotBlank() &&
+        specialRequesterKey != currentUserKey
+    val showSpecialMomentButton = !specialTriggeredByOtherUserToday
     val activeMomentLabel = when (activeMomentKind) {
         "special" -> if (!activeSpecialRequester.isNullOrBlank()) "Sondermoment von $activeSpecialRequester gerade aktiv." else "Sondermoment gerade aktiv."
         else -> "Daily-Moment gerade aktiv."
@@ -5165,12 +5184,14 @@ fun CameraTab(
                 ) {
                     Text("Fuer spaeter merken")
                 }
-                SpecialMomentActionButton(
-                    text = specialLabel,
-                    onClick = onRequestSpecialMoment,
-                    enabled = canSpecial,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (showSpecialMomentButton) {
+                    SpecialMomentActionButton(
+                        text = specialLabel,
+                        onClick = onRequestSpecialMoment,
+                        enabled = canSpecial,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             } else {
                 Text(
                     "Time Capsule und Sondermoment sind waehrend des aktiven Daily-Fensters gesperrt.",
@@ -5201,12 +5222,14 @@ fun CameraTab(
                     ) { Text("Extra posten") }
                 }
                 if (!canUpload) {
-                    SpecialMomentActionButton(
-                        text = specialLabel,
-                        onClick = onRequestSpecialMoment,
-                        enabled = canSpecial,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    if (showSpecialMomentButton) {
+                        SpecialMomentActionButton(
+                            text = specialLabel,
+                            onClick = onRequestSpecialMoment,
+                            enabled = canSpecial,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             } else {
                 Text("Rueckkamera aufgenommen")
@@ -5660,7 +5683,8 @@ fun FeedTab(
                         meta?.uploadUntil
                     )
                     val postMomentKind = normalizeMomentKind(item.momentKind ?: meta?.momentKind, item.triggerSource ?: meta?.triggerSource)
-                    val requestedByUser = item.requestedByUser ?: meta?.requestedByUser
+                    val requestedByUser = item.requestedByUser ?: meta?.specialRequestedByUser ?: meta?.requestedByUser
+                    val requestedByUserColor = item.specialRequestedByUserColor ?: meta?.specialRequestedByUserColor
                     Card {
                         Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
@@ -5685,7 +5709,7 @@ fun FeedTab(
                                 )
                             } else {
                                 if (postMomentKind == "special") {
-                                    SpecialMomentBadge(requestedByUser)
+                                    SpecialMomentBadge(requestedByUser, requestedByUserColor)
                                 } else {
                                     DailyMomentBadge()
                                 }
@@ -7377,6 +7401,8 @@ private fun formatMomentTime(raw: String?): String {
 
 @Composable
 private fun DailyMomentStartOverlay(
+    momentKind: String = "daily",
+    requestedByUser: String? = null,
     onCaptureNow: () -> Unit,
     onLater: () -> Unit
 ) {
@@ -7400,6 +7426,23 @@ private fun DailyMomentStartOverlay(
         )
     )
 
+    val isSpecial = momentKind == "special"
+    val title = if (isSpecial) {
+        if (!requestedByUser.isNullOrBlank()) "Sondermoment von $requestedByUser" else "Sondermoment gestartet!"
+    } else {
+        "Daily-Moment gestartet!"
+    }
+    val description = if (isSpecial) {
+        if (!requestedByUser.isNullOrBlank()) {
+            "$requestedByUser hat einen Sondermoment angefordert. Jetzt sofort aufnehmen: Rueckkamera + Frontkamera."
+        } else {
+            "Jetzt sofort aufnehmen: Rueckkamera + Frontkamera."
+        }
+    } else {
+        "Jetzt sofort aufnehmen: Rueckkamera + Frontkamera."
+    }
+    val actionLabel = if (isSpecial) "Sondermoment aufnehmen" else "Daily-Moment aufnehmen"
+
     Dialog(onDismissRequest = onLater) {
         Box(
             modifier = Modifier
@@ -7416,13 +7459,13 @@ private fun DailyMomentStartOverlay(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        "Daily-Moment gestartet!",
+                        title,
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
                     )
                     Text(
-                        "Jetzt sofort aufnehmen: Rueckkamera + Frontkamera.",
+                        description,
                         color = Color.White
                     )
                     Row(
@@ -7437,7 +7480,7 @@ private fun DailyMomentStartOverlay(
                                 contentColor = Color(0xFF111111)
                             )
                         ) {
-                            Text("Daily-Moment aufnehmen")
+                            Text(actionLabel)
                         }
                         TextButton(
                             onClick = onLater,
@@ -7643,15 +7686,16 @@ private fun DailyMomentBadge() {
 }
 
 @Composable
-private fun SpecialMomentBadge(requestedByUser: String?) {
+private fun SpecialMomentBadge(requestedByUser: String?, requestedByUserColor: String?) {
     val label = if (!requestedByUser.isNullOrBlank()) {
         "Sondermoment von $requestedByUser"
     } else {
         "Sondermoment"
     }
+    val bg = if (!requestedByUserColor.isNullOrBlank()) parseUserColor(requestedByUserColor) else Color(0xFF0A7A42)
     Box(
         modifier = Modifier
-            .background(Color(0xFF0A7A42), shape = MaterialTheme.shapes.small)
+            .background(bg, shape = MaterialTheme.shapes.small)
             .padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
         Text(label, color = Color.White, fontWeight = FontWeight.SemiBold)
