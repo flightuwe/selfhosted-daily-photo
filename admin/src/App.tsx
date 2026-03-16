@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -267,7 +267,7 @@ function normalizeMomentKind(momentKind?: string, triggerSource?: string): "dail
 
 function momentSourceLabel(momentKind?: string, triggerSource?: string, requestedByUser?: string): string {
   if (normalizeMomentKind(momentKind, triggerSource) === "special") {
-    return requestedByUser ? `Sondermoment (${requestedByUser})` : "Sondermoment";
+    return requestedByUser ? `Sondermoment von ${requestedByUser}` : "Sondermoment";
   }
   if (triggerSource === "admin_manual") return "Admin";
   if (triggerSource === "admin_reset") return "Admin Reset";
@@ -466,7 +466,7 @@ export function App() {
 
   const [resetPassword, setResetPassword] = useState<Record<number, string>>({});
   const [issuingTokenForUserId, setIssuingTokenForUserId] = useState<number>(0);
-  const [broadcastBody, setBroadcastBody] = useState("Server-Test: Bitte App öffnen und Daily Foto posten.");
+  const [broadcastBody, setBroadcastBody] = useState("Server-Test: Bitte App Ã¶ffnen und Daily Foto posten.");
   const [updateNoticeVersion, setUpdateNoticeVersion] = useState("0.2.12");
   const [targetUserId, setTargetUserId] = useState<number>(0);
   const [targetUserSearch, setTargetUserSearch] = useState("");
@@ -1509,11 +1509,11 @@ export function App() {
     try {
       const result = await triggerPrompt(token, opts);
       if (result.mode === "silent") {
-        setMessage("Interner Daily-Test ausgelöst (silent, ohne Push an alle).");
+        setMessage("Interner Daily-Test ausgelÃ¶st (silent, ohne Push an alle).");
       } else if (result.mode === "targeted_users") {
-        setMessage(`Interner Daily-Test ausgelöst. Push nur an Zielnutzer gesendet (sent=${result.sentTo || 0}, failed=${result.failed || 0}).`);
+        setMessage(`Interner Daily-Test ausgelÃ¶st. Push nur an Zielnutzer gesendet (sent=${result.sentTo || 0}, failed=${result.failed || 0}).`);
       } else {
-        setMessage("Daily Event ausgelöst. Nutzer können Prompt-Fotos hochladen.");
+        setMessage("Daily Event ausgelÃ¶st. Nutzer kÃ¶nnen Prompt-Fotos hochladen.");
       }
       await refreshAll();
     } catch (err) {
@@ -1522,7 +1522,7 @@ export function App() {
   }
 
   async function onResetToday() {
-    if (!confirm("Wirklich den heutigen Tag zurücksetzen? Alle heutigen Fotos werden gelöscht.")) return;
+    if (!confirm("Wirklich den heutigen Tag zurÃ¼cksetzen? Alle heutigen Fotos werden gelÃ¶scht.")) return;
     setMessage("");
     try {
       const res = await resetTodayPrompt(token);
@@ -1537,7 +1537,7 @@ export function App() {
     setMessage("");
     try {
       const result = await broadcastNotification(token, broadcastBody);
-      setMessage(`Benachrichtigung an ${result.sentTo} Geräte gesendet (Provider: ${result.provider}).`);
+      setMessage(`Benachrichtigung an ${result.sentTo} GerÃ¤te gesendet (Provider: ${result.provider}).`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1545,7 +1545,7 @@ export function App() {
 
   async function onNotifySingleUser() {
     if (!targetUserId) {
-      setMessage("Bitte einen Benutzer auswählen.");
+      setMessage("Bitte einen Benutzer auswÃ¤hlen.");
       return;
     }
     setMessage("");
@@ -1561,11 +1561,11 @@ export function App() {
   }
 
   async function onSendUpdateNotice() {
-    const text = `Update verfügbar: Version ${updateNoticeVersion}. Bitte App aktualisieren.`;
+    const text = `Update verfÃ¼gbar: Version ${updateNoticeVersion}. Bitte App aktualisieren.`;
     setBroadcastBody(text);
     try {
       const result = await broadcastNotification(token, text);
-      setMessage(`Update-Hinweis an ${result.sentTo} Geräte gesendet (Provider: ${result.provider}).`);
+      setMessage(`Update-Hinweis an ${result.sentTo} GerÃ¤te gesendet (Provider: ${result.provider}).`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1590,7 +1590,7 @@ export function App() {
     setMessage("");
     try {
       await updateUser(token, user.id, { isAdmin });
-      setMessage(`Rolle für ${user.username} aktualisiert`);
+      setMessage(`Rolle fÃ¼r ${user.username} aktualisiert`);
       await refreshAll();
     } catch (err) {
       setMessage((err as Error).message);
@@ -1607,18 +1607,18 @@ export function App() {
     try {
       await updateUser(token, user.id, { password: pwd });
       setResetPassword((prev) => ({ ...prev, [user.id]: "" }));
-      setMessage(`Passwort für ${user.username} geändert`);
+      setMessage(`Passwort fÃ¼r ${user.username} geÃ¤ndert`);
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
   async function onDeleteUser(user: AdminUser) {
-    if (!confirm(`User ${user.username} wirklich löschen?`)) return;
+    if (!confirm(`User ${user.username} wirklich lÃ¶schen?`)) return;
     setMessage("");
     try {
       await deleteUser(token, user.id);
-      setMessage(`User ${user.username} gelöscht`);
+      setMessage(`User ${user.username} gelÃ¶scht`);
       await refreshAll();
     } catch (err) {
       setMessage((err as Error).message);
@@ -1640,7 +1640,7 @@ export function App() {
     ta.select();
     const ok = document.execCommand("copy");
     document.body.removeChild(ta);
-    if (!ok) throw new Error("Kopieren nicht möglich.");
+    if (!ok) throw new Error("Kopieren nicht mÃ¶glich.");
   }
 
   async function onCopyAdminToken() {
@@ -1660,8 +1660,8 @@ export function App() {
     try {
       const issued = await issueUserAccessToken(token, user.id);
       await copyToClipboard(issued.token);
-      const expiry = issued.expiresAt ? ` (gültig bis ${formatDateTime(issued.expiresAt)})` : "";
-      setMessage(`Token für ${user.username} kopiert${expiry}.`);
+      const expiry = issued.expiresAt ? ` (gÃ¼ltig bis ${formatDateTime(issued.expiresAt)})` : "";
+      setMessage(`Token fÃ¼r ${user.username} kopiert${expiry}.`);
     } catch (err) {
       setMessage((err as Error).message);
     } finally {
@@ -1766,7 +1766,7 @@ export function App() {
                   <strong>{item.label}</strong>
                   <span className="small">
                     {item.type}
-                    {item.meta ? ` · ${item.meta}` : ""}
+                    {item.meta ? ` Â· ${item.meta}` : ""}
                   </span>
                 </button>
               ))}
@@ -1873,7 +1873,7 @@ export function App() {
             </article>
             <div className="grid4">
             <CardStat title="Nutzer" value={stats.users} />
-            <CardStat title="Geräte" value={stats.devices} />
+            <CardStat title="GerÃ¤te" value={stats.devices} />
             <CardStat title="Fotos" value={stats.photos} />
             <CardStat title="Prompt-Events" value={stats.prompts} />
             <CardStat title="Tage aktiv" value={stats.runningDays} />
@@ -1963,15 +1963,15 @@ export function App() {
 
         {activeTab === "events" && (
           <div className="stack">
-            <button className="accent" onClick={onTriggerEvent}>Daily Event manuell auslösen</button>
+            <button className="accent" onClick={onTriggerEvent}>Daily Event manuell auslÃ¶sen</button>
             <button onClick={() => onTriggerEvent({ silent: true })}>Interner Daily-Test (ohne Push)</button>
             <button onClick={() => onTriggerEvent({ notifyUserIds: targetUserId ? [targetUserId] : [] })} disabled={!targetUserId}>
-              Daily-Test nur für gewählten Benutzer (mit Push)
+              Daily-Test nur fÃ¼r gewÃ¤hlten Benutzer (mit Push)
             </button>
-            <button className="danger" onClick={onResetToday}>Heutigen Tag zurücksetzen</button>
+            <button className="danger" onClick={onResetToday}>Heutigen Tag zurÃ¼cksetzen</button>
 
             <label>
-              Custom Nachricht an alle Geräte
+              Custom Nachricht an alle GerÃ¤te
               <input value={broadcastBody} onChange={(e) => setBroadcastBody(e.target.value)} />
             </label>
             <button onClick={onBroadcast}>Benachrichtigung senden</button>
@@ -1984,16 +1984,16 @@ export function App() {
                 onChange={(e) => setTargetUserSearch(e.target.value)}
               />
               <select value={targetUserId || ""} onChange={(e) => setTargetUserId(Number(e.target.value || 0))}>
-                <option value="">Benutzer wählen</option>
+                <option value="">Benutzer wÃ¤hlen</option>
                 {filteredTargetUsers.map((u) => (
-                  <option key={u.id} value={u.id}>{u.username} ({u.deviceCount} Geräte)</option>
+                  <option key={u.id} value={u.id}>{u.username} ({u.deviceCount} GerÃ¤te)</option>
                 ))}
               </select>
             </label>
             <button onClick={onNotifySingleUser}>Nur diesen Benutzer benachrichtigen</button>
 
             <label>
-              Update-Version für Hinweis
+              Update-Version fÃ¼r Hinweis
               <input value={updateNoticeVersion} onChange={(e) => setUpdateNoticeVersion(e.target.value)} />
             </label>
             <button onClick={onSendUpdateNotice}>Update-Hinweis senden</button>
@@ -2143,11 +2143,11 @@ export function App() {
                   <th>Registriert am</th>
                   <th>Rolle</th>
                   <th>Fotos</th>
-                  <th>Geräte</th>
+                  <th>GerÃ¤te</th>
                   <th>Letzte App/Fehler</th>
                   <th>Token</th>
-                  <th>Passwort ändern</th>
-                  <th>Löschen</th>
+                  <th>Passwort Ã¤ndern</th>
+                  <th>LÃ¶schen</th>
                 </tr>
               </thead>
               <tbody>
@@ -2204,7 +2204,7 @@ export function App() {
                       </div>
                     </td>
                     <td>
-                      <button className="danger" onClick={() => onDeleteUser(u)}>Löschen</button>
+                      <button className="danger" onClick={() => onDeleteUser(u)}>LÃ¶schen</button>
                     </td>
                   </tr>
                 ))}
@@ -2386,11 +2386,11 @@ export function App() {
                 value={historyTrackingSince ? new Date(`${historyTrackingSince}T00:00:00`).toLocaleDateString() : "-"}
               />
               <CardStat
-                title="Ø Poster"
+                title="Ã˜ Poster"
                 value={historyItems.length > 0 ? (historyItems.reduce((acc, row) => acc + row.postedUsersCount, 0) / historyItems.length).toFixed(1) : "-"}
               />
               <CardStat
-                title="Ø Daily-Poster"
+                title="Ã˜ Daily-Poster"
                 value={historyItems.length > 0 ? (historyItems.reduce((acc, row) => acc + row.dailyMomentUsersCount, 0) / historyItems.length).toFixed(1) : "-"}
               />
             </div>
@@ -2678,9 +2678,11 @@ export function App() {
                     const expanded = !!expandedHistoryDays[item.day];
                     const userRows = item.userActivity ?? [];
                     const hasDetails = !!item.analytics || userRows.length > 0 || !item.onlineTrackingAvailable || item.commentCount > 0 || item.reactionCount > 0 || item.chatMessageCount > 0 || item.timeCapsuleCount > 0;
-                    const sourceLabel = item.source === "manual"
-                      ? "Manuell"
-                      : momentSourceLabel(item.momentKind, item.triggerSource, item.requestedByUser);
+                    const sourceLabel = item.dailyPending && item.specialTriggeredAt
+                      ? "Daily ausstehend (Sondermoment erfolgt)"
+                      : item.source === "manual"
+                        ? "Manuell"
+                        : momentSourceLabel(item.momentKind, item.triggerSource, item.requestedByUser);
                     const rows = [
                       <tr key={item.day}>
                         <td>{new Date(`${item.day}T00:00:00`).toLocaleDateString()}</td>
@@ -3135,10 +3137,22 @@ export function App() {
               <CardStat title="Gateway verfügbar" value={incidentStatus?.status?.gatewayLogAvailable ? "ja" : "nein"} />
             </div>
             <div className="grid4">
+              <CardStat title="Daily Attempts" value={Number(incidentStatus?.status?.dailyAttempts || 0)} />
+              <CardStat title="Daily Triggered" value={Number(incidentStatus?.status?.dailyTriggered || 0)} />
+              <CardStat title="Special Attempts" value={Number(incidentStatus?.status?.specialAttempts || 0)} />
+              <CardStat title="Special Triggered" value={Number(incidentStatus?.status?.specialTriggered || 0)} />
+            </div>
+            <div className="grid4">
               <CardStat title="Backend-Log verfügbar" value={incidentStatus?.status?.backendLogAvailable ? "ja" : "nein"} />
               <CardStat title="Schema" value={incidentStatus?.meta?.schemaVersion || "-"} />
               <CardStat title="Zeitraum von" value={incidentStatus?.meta?.from ? formatDateTime(incidentStatus.meta.from) : "-"} />
+              <CardStat title="Daily ausstehend" value={incidentStatus?.status?.dailyPending ? "ja" : "nein"} />
+            </div>
+            <div className="grid4">
               <CardStat title="Zeitraum bis" value={incidentStatus?.meta?.to ? formatDateTime(incidentStatus.meta.to) : "-"} />
+              <CardStat title="Dup Daily" value={Number(incidentStatus?.status?.duplicateAttemptsDaily || 0)} />
+              <CardStat title="Dup Special" value={Number(incidentStatus?.status?.duplicateAttemptsSpecial || 0)} />
+              <CardStat title="Mehrfach Daily-Tage" value={Number(incidentStatus?.status?.multipleAttemptDaysDaily || 0)} />
             </div>
             <article className="settings-current">
               <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
@@ -3862,7 +3876,7 @@ function formatDuration(sec: number) {
 function truncateText(value: string, maxLen = 80) {
   const text = (value || "").trim();
   if (text.length <= maxLen) return text;
-  return `${text.slice(0, maxLen - 1)}…`;
+  return `${text.slice(0, maxLen - 1)}â€¦`;
 }
 
 function debugTypeLabel(value: string) {
@@ -3902,3 +3916,6 @@ function CardStat({ title, value }: { title: string; value: number | string }) {
     </article>
   );
 }
+
+
+

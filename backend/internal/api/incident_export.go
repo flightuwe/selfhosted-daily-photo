@@ -103,6 +103,19 @@ func (s *Server) handleAdminIncidentExport(c *gin.Context) {
 			"status": gin.H{
 				"duplicateAttempts": triggerSummary["duplicateAttempts"],
 				"multipleAttemptDays": triggerSummary["multipleAttemptDays"],
+				"duplicateAttemptsDaily": triggerSummary["duplicateAttemptsDaily"],
+				"duplicateAttemptsSpecial": triggerSummary["duplicateAttemptsSpecial"],
+				"multipleAttemptDaysDaily": triggerSummary["multipleAttemptDaysDaily"],
+				"multipleAttemptDaysSpecial": triggerSummary["multipleAttemptDaysSpecial"],
+				"dailyAttempts": triggerSummary["dailyAttempts"],
+				"dailyTriggered": triggerSummary["dailyTriggered"],
+				"dailyBlocked": triggerSummary["dailyBlocked"],
+				"dailyFailed": triggerSummary["dailyFailed"],
+				"specialAttempts": triggerSummary["specialAttempts"],
+				"specialTriggered": triggerSummary["specialTriggered"],
+				"specialBlocked": triggerSummary["specialBlocked"],
+				"specialFailed": triggerSummary["specialFailed"],
+				"dailyPending": asInt64(triggerSummary["dailyTriggered"]) == 0,
 				"lastTriggerSource": lastSource,
 				"gatewayLogAvailable": gatewayLog["available"],
 				"backendLogAvailable": backendLog["available"],
@@ -135,6 +148,7 @@ func (s *Server) handleAdminIncidentExport(c *gin.Context) {
 			"triggeredAt":  latestPromptRow.TriggeredAt,
 			"uploadUntil":  latestPromptRow.UploadUntil,
 			"triggerSource": latestPromptRow.TriggerSource,
+			"triggerKind":  triggerKindFromTriggerSource(latestPromptRow.TriggerSource),
 			"requestedBy":  latestPromptRow.RequestedBy,
 		}
 	}
@@ -248,20 +262,49 @@ func summarizeTriggerAuditRows(rows []models.DailyTriggerAuditEvent) gin.H {
 	blocked := 0
 	failed := 0
 	dbLocked := 0
-	byDayAttempts := make(map[string]int, 16)
+	dailyAttempts := 0
+	dailyTriggered := 0
+	dailyBlocked := 0
+	dailyFailed := 0
+	specialAttempts := 0
+	specialTriggered := 0
+	specialBlocked := 0
+	specialFailed := 0
+	byDayKindAttempts := make(map[string]int, 32)
 	for _, row := range rows {
 		dayKey := strings.TrimSpace(row.Day)
 		if dayKey == "" {
 			dayKey = row.OccurredAt.Format("2006-01-02")
 		}
-		byDayAttempts[dayKey]++
+		kind := triggerKindFromTriggerSource(row.Source)
+		byDayKindAttempts[dayKey+"|"+kind]++
+		if kind == "special" {
+			specialAttempts++
+		} else {
+			dailyAttempts++
+		}
 		switch strings.ToLower(strings.TrimSpace(row.Result)) {
 		case "triggered":
 			triggered++
+			if kind == "special" {
+				specialTriggered++
+			} else {
+				dailyTriggered++
+			}
 		case "blocked":
 			blocked++
+			if kind == "special" {
+				specialBlocked++
+			} else {
+				dailyBlocked++
+			}
 		default:
 			failed++
+			if kind == "special" {
+				specialFailed++
+			} else {
+				dailyFailed++
+			}
 		}
 		if strings.EqualFold(strings.TrimSpace(row.Reason), "db_locked") {
 			dbLocked++
@@ -269,12 +312,28 @@ func summarizeTriggerAuditRows(rows []models.DailyTriggerAuditEvent) gin.H {
 	}
 	duplicateAttempts := 0
 	multipleAttemptDays := 0
-	for _, count := range byDayAttempts {
+	duplicateAttemptsDaily := 0
+	duplicateAttemptsSpecial := 0
+	multipleAttemptDaysDaily := 0
+	multipleAttemptDaysSpecial := 0
+	for key, count := range byDayKindAttempts {
 		if count > 1 {
-			multipleAttemptDays++
+			parts := strings.SplitN(key, "|", 2)
+			kind := "daily"
+			if len(parts) == 2 {
+				kind = parts[1]
+			}
 			duplicateAttempts += count - 1
+			if kind == "special" {
+				duplicateAttemptsSpecial += count - 1
+				multipleAttemptDaysSpecial++
+			} else {
+				duplicateAttemptsDaily += count - 1
+				multipleAttemptDaysDaily++
+			}
 		}
 	}
+	multipleAttemptDays = multipleAttemptDaysDaily + multipleAttemptDaysSpecial
 	return gin.H{
 		"attempts":            attempts,
 		"triggered":           triggered,
@@ -282,7 +341,19 @@ func summarizeTriggerAuditRows(rows []models.DailyTriggerAuditEvent) gin.H {
 		"failed":              failed,
 		"dbLocked":            dbLocked,
 		"duplicateAttempts":   duplicateAttempts,
+		"duplicateAttemptsDaily":   duplicateAttemptsDaily,
+		"duplicateAttemptsSpecial": duplicateAttemptsSpecial,
 		"multipleAttemptDays": multipleAttemptDays,
+		"multipleAttemptDaysDaily":   multipleAttemptDaysDaily,
+		"multipleAttemptDaysSpecial": multipleAttemptDaysSpecial,
+		"dailyAttempts":    dailyAttempts,
+		"dailyTriggered":   dailyTriggered,
+		"dailyBlocked":     dailyBlocked,
+		"dailyFailed":      dailyFailed,
+		"specialAttempts":  specialAttempts,
+		"specialTriggered": specialTriggered,
+		"specialBlocked":   specialBlocked,
+		"specialFailed":    specialFailed,
 		"blockedRate":         safeRatio(blocked, maxInt(1, attempts)),
 		"failedRate":          safeRatio(failed, maxInt(1, attempts)),
 	}
@@ -447,26 +518,67 @@ func (s *Server) buildIncidentHistorySlice(from, to time.Time, triggerRows []mod
 		}
 	}
 
-	triggerCounts := make(map[string]gin.H, 16)
+	type dayTriggerStats struct {
+		AttemptCount          int64
+		BlockedCount          int64
+		FailedCount           int64
+		DailyAttemptCount     int64
+		DailyBlockedCount     int64
+		DailyFailedCount      int64
+		DailyTriggeredCount   int64
+		SpecialAttemptCount   int64
+		SpecialBlockedCount   int64
+		SpecialFailedCount    int64
+		SpecialTriggeredCount int64
+		DailyTriggeredAt      *time.Time
+		SpecialTriggeredAt    *time.Time
+	}
+	triggerCounts := make(map[string]*dayTriggerStats, 16)
 	for _, row := range triggerRows {
 		dayKey := strings.TrimSpace(row.Day)
 		if dayKey == "" {
 			dayKey = row.OccurredAt.In(s.Location).Format("2006-01-02")
 		}
 		existing, ok := triggerCounts[dayKey]
-		if !ok {
-			existing = gin.H{
-				"triggerAttemptCount": 0,
-				"triggerBlockedCount": 0,
-				"triggerFailedCount":  0,
-			}
+		if !ok || existing == nil {
+			existing = &dayTriggerStats{}
 		}
-		existing["triggerAttemptCount"] = asInt64(existing["triggerAttemptCount"]) + 1
+		existing.AttemptCount++
+		kind := triggerKindFromTriggerSource(row.Source)
+		if kind == "special" {
+			existing.SpecialAttemptCount++
+		} else {
+			existing.DailyAttemptCount++
+		}
 		switch strings.ToLower(strings.TrimSpace(row.Result)) {
 		case "blocked":
-			existing["triggerBlockedCount"] = asInt64(existing["triggerBlockedCount"]) + 1
+			existing.BlockedCount++
+			if kind == "special" {
+				existing.SpecialBlockedCount++
+			} else {
+				existing.DailyBlockedCount++
+			}
 		case "failed":
-			existing["triggerFailedCount"] = asInt64(existing["triggerFailedCount"]) + 1
+			existing.FailedCount++
+			if kind == "special" {
+				existing.SpecialFailedCount++
+			} else {
+				existing.DailyFailedCount++
+			}
+		case "triggered":
+			if kind == "special" {
+				existing.SpecialTriggeredCount++
+				when := row.OccurredAt
+				if existing.SpecialTriggeredAt == nil || existing.SpecialTriggeredAt.Before(when) {
+					existing.SpecialTriggeredAt = &when
+				}
+			} else {
+				existing.DailyTriggeredCount++
+				when := row.OccurredAt
+				if existing.DailyTriggeredAt == nil || existing.DailyTriggeredAt.Before(when) {
+					existing.DailyTriggeredAt = &when
+				}
+			}
 		}
 		triggerCounts[dayKey] = existing
 	}
@@ -479,21 +591,30 @@ func (s *Server) buildIncidentHistorySlice(from, to time.Time, triggerRows []mod
 		stats := getStats(dayKey)
 		trigger := triggerCounts[dayKey]
 		if trigger == nil {
-			trigger = gin.H{
-				"triggerAttemptCount": 0,
-				"triggerBlockedCount": 0,
-				"triggerFailedCount":  0,
-			}
+			trigger = &dayTriggerStats{}
 		}
 		items = append(items, gin.H{
 			"day":                   dayKey,
 			"photoCount":            stats.PhotoCount,
 			"postedUsersCount":      len(stats.PostedUsers),
 			"dailyMomentUsersCount": len(stats.PromptUsers),
-			"triggerAttemptCount":   trigger["triggerAttemptCount"],
-			"triggerBlockedCount":   trigger["triggerBlockedCount"],
-			"triggerFailedCount":    trigger["triggerFailedCount"],
-			"multipleTriggerAlert":  asInt64(trigger["triggerAttemptCount"]) > 1,
+			"triggerAttemptCount":   trigger.AttemptCount,
+			"triggerBlockedCount":   trigger.BlockedCount,
+			"triggerFailedCount":    trigger.FailedCount,
+			"dailyTriggerAttemptCount":   trigger.DailyAttemptCount,
+			"dailyTriggerBlockedCount":   trigger.DailyBlockedCount,
+			"dailyTriggerFailedCount":    trigger.DailyFailedCount,
+			"dailyTriggeredCount":        trigger.DailyTriggeredCount,
+			"specialTriggerAttemptCount": trigger.SpecialAttemptCount,
+			"specialTriggerBlockedCount": trigger.SpecialBlockedCount,
+			"specialTriggerFailedCount":  trigger.SpecialFailedCount,
+			"specialTriggeredCount":      trigger.SpecialTriggeredCount,
+			"dailyTriggeredAt":           trigger.DailyTriggeredAt,
+			"specialTriggeredAt":         trigger.SpecialTriggeredAt,
+			"dailyPending":               trigger.DailyTriggeredCount == 0,
+			"multipleTriggerAlert":       trigger.DailyAttemptCount > 1,
+			"dailyMultipleTriggerAlert":  trigger.DailyAttemptCount > 1,
+			"specialMultipleTriggerAlert": trigger.SpecialAttemptCount > 1,
 		})
 		dayCursor = dayCursor.AddDate(0, 0, 1)
 	}
@@ -548,9 +669,25 @@ func buildRootCauseHints(rows []models.DailyTriggerAuditEvent, summary gin.H) []
 	if asInt64(summary["duplicateAttempts"]) > 0 {
 		hints = append(hints, gin.H{
 			"id":       "duplicate_attempts",
-			"severity": "high",
-			"message":  "Multiple trigger attempts detected for same day window.",
+			"severity": "medium",
+			"message":  "Multiple trigger attempts detected in selected window.",
 			"count":    summary["duplicateAttempts"],
+		})
+	}
+	if asInt64(summary["duplicateAttemptsDaily"]) > 0 {
+		hints = append(hints, gin.H{
+			"id":       "duplicate_attempts_daily",
+			"severity": "high",
+			"message":  "Multiple DAILY trigger attempts detected for same day window.",
+			"count":    summary["duplicateAttemptsDaily"],
+		})
+	}
+	if asInt64(summary["duplicateAttemptsSpecial"]) > 0 {
+		hints = append(hints, gin.H{
+			"id":       "duplicate_attempts_special",
+			"severity": "medium",
+			"message":  "Multiple SPECIAL trigger attempts detected for same day window.",
+			"count":    summary["duplicateAttemptsSpecial"],
 		})
 	}
 	if reasonCounts["race_lost"] > 0 {
@@ -571,9 +708,9 @@ func buildRootCauseHints(rows []models.DailyTriggerAuditEvent, summary gin.H) []
 	}
 	if reasonCounts["not_lease_owner"] > 0 {
 		hints = append(hints, gin.H{
-			"id":       "lease_flap",
-			"severity": "medium",
-			"message":  "Scheduler lease contention detected (not lease owner).",
+			"id":       "lease_coordination",
+			"severity": "low",
+			"message":  "Scheduler lease coordination observed (not lease owner).",
 			"count":    reasonCounts["not_lease_owner"],
 		})
 	}

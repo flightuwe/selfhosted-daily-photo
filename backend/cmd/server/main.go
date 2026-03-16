@@ -1,10 +1,16 @@
 package main
 
 import (
-    "log"
-    "os"
-    "strings"
-    "time"
+	"context"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
 
     "github.com/yosho/selfhosted-bereal/backend/internal/api"
     "github.com/yosho/selfhosted-bereal/backend/internal/auth"
@@ -20,42 +26,49 @@ import (
 var buildVersion = "dev"
 
 func main() {
-    cfg := config.Load()
-    if (cfg.AppVersion == "" || strings.EqualFold(cfg.AppVersion, "dev")) && buildVersion != "" && !strings.EqualFold(buildVersion, "dev") {
-        cfg.AppVersion = buildVersion
-    }
+	cfg := config.Load()
+	if (cfg.AppVersion == "" || strings.EqualFold(cfg.AppVersion, "dev")) && buildVersion != "" && !strings.EqualFold(buildVersion, "dev") {
+		cfg.AppVersion = buildVersion
+	}
+	closeLogFile := configureBackendLogging(cfg.ForensicBackendLogPath)
+	defer closeLogFile()
 
-    location, err := time.LoadLocation(cfg.Timezone)
-    if err != nil {
-        log.Fatalf("load timezone: %v", err)
-    }
+	location, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		log.Fatalf("load timezone: %v", err)
+	}
 
-    database, err := db.Connect(cfg.DatabasePath)
-    if err != nil {
-        log.Fatalf("db connect: %v", err)
-    }
+	database, err := db.Connect(cfg.DatabasePath)
+	if err != nil {
+		log.Fatalf("db connect: %v", err)
+	}
 
-    ensureBootstrapAdmin(database)
+	ensureBootstrapAdmin(database)
 
-    store, err := storage.NewLocalStore(cfg.UploadDir)
-    if err != nil {
-        log.Fatalf("storage: %v", err)
-    }
+	store, err := storage.NewLocalStore(cfg.UploadDir)
+	if err != nil {
+		log.Fatalf("storage: %v", err)
+	}
 
-    notifier := notify.Sender(notify.NewNoop())
-    if cfg.FCMEnabled {
-        fcmSender, fcmErr := notify.NewFCMSender(cfg.FCMProjectID, cfg.FCMServiceAccountFile)
-        if fcmErr != nil {
-            log.Printf("FCM init failed, fallback to noop: %v", fcmErr)
-        } else {
-            notifier = fcmSender
-            log.Printf("notifications: provider=%s", notifier.Name())
-        }
-    } else {
-        log.Printf("notifications: provider=%s", notifier.Name())
-    }
+	notifier := notify.Sender(notify.NewNoop())
+	if cfg.FCMEnabled {
+		fcmSender, fcmErr := notify.NewFCMSender(cfg.FCMProjectID, cfg.FCMServiceAccountFile)
+		if fcmErr != nil {
+			log.Printf("FCM init failed, fallback to noop: %v", fcmErr)
+		} else {
+			notifier = fcmSender
+			log.Printf("notifications: provider=%s", notifier.Name())
+		}
+	} else {
+		log.Printf("notifications: provider=%s", notifier.Name())
+	}
 	hostName, _ := os.Hostname()
-    promptService := &scheduler.DailyPromptService{DB: database, Location: location, ServerInstance: hostName}
+	promptService := &scheduler.DailyPromptService{
+		DB:             database,
+		Location:       location,
+		ServerInstance: hostName,
+		LeaseTimeout:   time.Duration(cfg.SchedulerLeaseTimeoutSec) * time.Second,
+	}
 	monitor := api.NewMonitor(database, location)
 	server := &api.Server{
 		DB:       database,
@@ -69,11 +82,11 @@ func main() {
 		FeedCache:   api.NewFeedDayCache(12 * time.Second),
 		FeedLimiter: api.NewFeedPollLimiter(28, 30*time.Second),
 	}
-    if fixed, cleanupErr := server.CleanupInvalidPromptOnlyPhotosRecent(14); cleanupErr != nil {
-        log.Printf("prompt cleanup failed: %v", cleanupErr)
-    } else if fixed > 0 {
-        log.Printf("prompt cleanup fixed invalid prompt_only rows: %d", fixed)
-    }
+	if fixed, cleanupErr := server.CleanupInvalidPromptOnlyPhotosRecent(14); cleanupErr != nil {
+		log.Printf("prompt cleanup failed: %v", cleanupErr)
+	} else if fixed > 0 {
+		log.Printf("prompt cleanup fixed invalid prompt_only rows: %d", fixed)
+	}
 
 	promptService.Start(cfg.SchedulerEnabled, func(prompt models.DailyPrompt, settings models.AppSettings) {
 		server.TrackDailyPromptSpikeIfEnabled(prompt)
@@ -114,13 +127,47 @@ func main() {
         if result.Failed > 0 || len(result.InvalidTokens) > 0 {
             log.Printf("notify summary: requested=%d sent=%d failed=%d invalid_removed=%d", result.Requested, result.Sent, result.Failed, len(result.InvalidTokens))
         }
-    })
+	})
 
-    r := server.Router()
-    log.Printf("listening on %s", cfg.Address)
-    if err := r.Run(cfg.Address); err != nil {
-        log.Fatalf("server run: %v", err)
-    }
+	r := server.Router()
+	httpServer := &http.Server{
+		Addr:    cfg.Address,
+		Handler: r,
+	}
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		log.Printf("listening on %s", cfg.Address)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErrCh <- err
+		}
+		close(serverErrCh)
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case sig := <-sigCh:
+		log.Printf("shutdown signal received: %s", sig.String())
+	case err := <-serverErrCh:
+		if err != nil {
+			log.Fatalf("server run: %v", err)
+		}
+		return
+	}
+
+	if err := promptService.ReleaseLease(); err != nil {
+		log.Printf("scheduler lease release on shutdown failed: %v", err)
+	} else {
+		log.Printf("scheduler lease released")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("http shutdown failed: %v", err)
+	}
 }
 
 func errorString(err error) string {
@@ -152,4 +199,25 @@ func ensureBootstrapAdmin(database *gorm.DB) {
     if err := database.Create(&admin).Error; err != nil {
         log.Printf("bootstrap admin create failed: %v", err)
     }
+}
+
+func configureBackendLogging(path string) func() {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return func() {}
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("backend log dir create failed (%s): %v", dir, err)
+		return func() {}
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("backend log open failed (%s): %v", path, err)
+		return func() {}
+	}
+	log.SetOutput(io.MultiWriter(os.Stdout, file))
+	return func() {
+		_ = file.Close()
+	}
 }

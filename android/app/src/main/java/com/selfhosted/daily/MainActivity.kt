@@ -318,6 +318,10 @@ data class PromptResponse(
     val day: String,
     val canUpload: Boolean,
     val triggered: String? = null,
+    val dailyTriggeredAt: String? = null,
+    val dailyPending: Boolean = true,
+    val specialTriggeredAt: String? = null,
+    val specialRequestedByUser: String? = null,
     val hasPosted: Boolean = false,
     val hasPromptPostedToday: Boolean = false,
     val hasVisiblePostToday: Boolean = false,
@@ -471,6 +475,19 @@ data class PromptRulesResponse(
     val maxUploadBytes: Long,
     val timezone: String
 )
+data class DashboardBootstrapResponse(
+    val schemaVersion: String = "dashboard_bootstrap_v1",
+    val serverNow: String? = null,
+    val me: MeResponse,
+    val inviteCode: String = "",
+    val prompt: PromptResponse,
+    val promptRules: PromptRulesResponse,
+    val specialMomentStatus: SpecialMomentStatus,
+    val photos: List<PromptPhoto> = emptyList(),
+    val chat: List<ChatItem> = emptyList(),
+    val feedDays: List<String> = emptyList(),
+    val communityStats: CommunityStatsResponse? = null
+)
 
 data class ClientDebugLogUploadRequest(
     val type: String,
@@ -541,6 +558,14 @@ interface Api {
 
     @GET("prompt/rules")
     suspend fun promptRules(@Header("Authorization") token: String): PromptRulesResponse
+
+    @GET("dashboard/bootstrap")
+    suspend fun dashboardBootstrap(
+        @Header("Authorization") token: String,
+        @Query("includeChat") includeChat: Boolean = true,
+        @Query("includePhotos") includePhotos: Boolean = true,
+        @Query("includeCommunity") includeCommunity: Boolean = true
+    ): DashboardBootstrapResponse
 
     @GET("moment/special/status")
     suspend fun specialMomentStatus(@Header("Authorization") token: String): SpecialMomentStatus
@@ -648,6 +673,7 @@ interface Api {
     suspend fun commentPhoto(
         @Header("Authorization") token: String,
         @Path("id") id: Long,
+        @Query("full") full: Int = 0,
         @Body body: PhotoCommentRequest
     ): PhotoInteractionsResponse
 }
@@ -1210,6 +1236,16 @@ class AppRepo(
 
     suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
     suspend fun promptRules(): PromptRulesResponse = api.promptRules("Bearer ${token()}")
+    suspend fun dashboardBootstrap(
+        includeChat: Boolean = true,
+        includePhotos: Boolean = true,
+        includeCommunity: Boolean = true
+    ): DashboardBootstrapResponse = api.dashboardBootstrap(
+        "Bearer ${token()}",
+        includeChat = includeChat,
+        includePhotos = includePhotos,
+        includeCommunity = includeCommunity
+    )
     suspend fun specialMomentStatus(): SpecialMomentStatus = api.specialMomentStatus("Bearer ${token()}")
     suspend fun requestSpecialMoment() { api.requestSpecialMoment("Bearer ${token()}") }
 
@@ -1247,7 +1283,7 @@ class AppRepo(
         api.reactPhoto("Bearer ${token()}", photoId, PhotoReactionRequest(emoji))
 
     suspend fun commentPhoto(photoId: Long, body: String): PhotoInteractionsResponse =
-        api.commentPhoto("Bearer ${token()}", photoId, PhotoCommentRequest(body))
+        api.commentPhoto("Bearer ${token()}", photoId, 0, PhotoCommentRequest(body))
 
     suspend fun changePassword(currentPassword: String, newPassword: String) {
         api.changePassword("Bearer ${token()}", PasswordChangeRequest(currentPassword, newPassword))
@@ -1635,13 +1671,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val refreshAllCooldownMs = 2_000L
     private val feedAutoRefreshBaseMs = 25_000L
     private val feedAutoRefreshJitterMs = 15_000L
-    private val globalRefreshSuccessBaseMs = 20_000L
-    private val globalRefreshSuccessJitterMs = 8_000L
+    private val globalRefreshSuccessBaseMs = 45_000L
+    private val globalRefreshSuccessJitterMs = 30_000L
+    private val globalRefreshActiveBaseMs = 20_000L
+    private val globalRefreshActiveJitterMs = 15_000L
+    private val launchIntentRefreshMinIntervalMs = 5_000L
     private val networkFailureBackoffStagesMs = longArrayOf(30_000L, 60_000L, 120_000L, 300_000L)
     private val circuitBreakerActivationThreshold = 3
     private val manualRefreshDuringNetworkFailureMinIntervalMs = 4_000L
     private val dashboardFailureDedupMs = 5 * 60 * 1000L
     private var lastRefreshAllStartedAt = 0L
+    private var lastLaunchIntentRefreshAtMs = 0L
     private var lastManualRefreshAtMs = 0L
     private var consecutiveNetworkRefreshFailures = 0
     private var lastRefreshFailureClass: String = ""
@@ -2341,69 +2381,90 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         var failedCall = "none"
         try {
             repo.syncDeviceTokenIfNeeded()
-            val meResp = try {
-                repo.me()
-            } catch (t: Throwable) {
-                failedCall = "me"
-                throw RefreshStageException("me", t)
-            }
-            val fetchedInviteCode = runCatching { repo.myInviteCode() }.getOrElse {
-                failedCall = "inviteCode"
-                state.myInviteCode
-            }
-            val fetchedPrompt = runCatching { repo.prompt() }.getOrElse {
-                failedCall = "prompt"
-                state.prompt ?: throw RefreshStageException("prompt", it)
-            }
-            val fetchedRules = runCatching { repo.promptRules() }.getOrElse {
-                failedCall = "promptRules"
-                state.promptRules ?: PromptRulesResponse(
-                    promptWindowStartHour = 8,
-                    promptWindowEndHour = 20,
-                    uploadWindowMinutes = 60,
-                    maxUploadBytes = 0,
-                    timezone = "UTC"
+            val payload = runCatching {
+                val bootstrap = repo.dashboardBootstrap(
+                    includeChat = true,
+                    includePhotos = true,
+                    includeCommunity = true
+                )
+                DashboardData(
+                    me = bootstrap.me.user,
+                    streakDays = bootstrap.me.streakDays,
+                    dailyMomentCount = bootstrap.me.dailyMomentCount,
+                    inviteCode = bootstrap.inviteCode,
+                    prompt = bootstrap.prompt,
+                    rules = bootstrap.promptRules,
+                    special = bootstrap.specialMomentStatus,
+                    photos = bootstrap.photos,
+                    chat = bootstrap.chat,
+                    feedDays = bootstrap.feedDays,
+                    communityStats = bootstrap.communityStats
+                )
+            }.getOrElse {
+                val meResp = try {
+                    repo.me()
+                } catch (t: Throwable) {
+                    failedCall = "me"
+                    throw RefreshStageException("me", t)
+                }
+                val fetchedInviteCode = runCatching { repo.myInviteCode() }.getOrElse {
+                    failedCall = "inviteCode"
+                    state.myInviteCode
+                }
+                val fetchedPrompt = runCatching { repo.prompt() }.getOrElse {
+                    failedCall = "prompt"
+                    state.prompt ?: throw RefreshStageException("prompt", it)
+                }
+                val fetchedRules = runCatching { repo.promptRules() }.getOrElse {
+                    failedCall = "promptRules"
+                    state.promptRules ?: PromptRulesResponse(
+                        promptWindowStartHour = 8,
+                        promptWindowEndHour = 20,
+                        uploadWindowMinutes = 60,
+                        maxUploadBytes = 0,
+                        timezone = "UTC"
+                    )
+                }
+                val fetchedSpecial = runCatching { repo.specialMomentStatus() }.getOrElse {
+                    failedCall = "specialMoment"
+                    state.specialMomentStatus ?: SpecialMomentStatus(
+                        canRequest = false,
+                        requestedThisWeek = false,
+                        remainingSeconds = 0L,
+                        nextAllowedAt = null,
+                        lastRequestedAt = null
+                    )
+                }
+                val fetchedPhotos = runCatching { repo.myPhotos() }.getOrElse {
+                    failedCall = "myPhotos"
+                    state.photos
+                }
+                val fetchedChat = runCatching { repo.listChat() }.getOrElse {
+                    failedCall = "chat"
+                    state.chat
+                }
+                val feedDays = runCatching { repo.feedDays() }.getOrElse {
+                    failedCall = "feedDays"
+                    state.calendarDays
+                }
+                val communityStats = runCatching { repo.communityStats() }.getOrElse {
+                    failedCall = "communityStats"
+                    state.communityStats
+                }
+                DashboardData(
+                    me = meResp.user,
+                    streakDays = meResp.streakDays,
+                    dailyMomentCount = meResp.dailyMomentCount,
+                    inviteCode = fetchedInviteCode,
+                    prompt = fetchedPrompt,
+                    rules = fetchedRules,
+                    special = fetchedSpecial,
+                    photos = fetchedPhotos,
+                    chat = fetchedChat,
+                    feedDays = feedDays,
+                    communityStats = communityStats
                 )
             }
-            val fetchedSpecial = runCatching { repo.specialMomentStatus() }.getOrElse {
-                failedCall = "specialMoment"
-                state.specialMomentStatus ?: SpecialMomentStatus(
-                    canRequest = false,
-                    requestedThisWeek = false,
-                    remainingSeconds = 0L,
-                    nextAllowedAt = null,
-                    lastRequestedAt = null
-                )
-            }
-            val fetchedPhotos = runCatching { repo.myPhotos() }.getOrElse {
-                failedCall = "myPhotos"
-                state.photos
-            }
-            val fetchedChat = runCatching { repo.listChat() }.getOrElse {
-                failedCall = "chat"
-                state.chat
-            }
-            val feedDays = runCatching { repo.feedDays() }.getOrElse {
-                failedCall = "feedDays"
-                state.calendarDays
-            }
-            val communityStats = runCatching { repo.communityStats() }.getOrElse {
-                failedCall = "communityStats"
-                state.communityStats
-            }
-            val payload = DashboardData(
-                me = meResp.user,
-                streakDays = meResp.streakDays,
-                dailyMomentCount = meResp.dailyMomentCount,
-                inviteCode = fetchedInviteCode,
-                prompt = fetchedPrompt,
-                rules = fetchedRules,
-                special = fetchedSpecial,
-                photos = fetchedPhotos,
-                chat = fetchedChat,
-                feedDays = feedDays,
-                communityStats = communityStats
-            )
             val me = payload.me
             val streakDays = payload.streakDays
             val dailyMomentCount = payload.dailyMomentCount
@@ -3000,31 +3061,34 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (photoId <= 0 || trimmed.isBlank()) return
         val startedAt = System.currentTimeMillis()
         state = state.copy(interactionsLoading = true)
-        runCatching { repo.commentPhoto(photoId, trimmed) }
-            .onSuccess {
-                val touchedDay = state.feedByDay.entries.firstOrNull { (_, items) ->
-                    items.any { feedItem -> feedItem.photo.id == photoId }
-                }?.key
-                if (!touchedDay.isNullOrBlank()) {
-                    staleFeedDays.add(touchedDay)
-                }
-                state = state.copy(interactionsLoading = false, photoInteractions = it)
-                logPerfEvent(
-                    event = "comment_submit",
-                    durationMs = System.currentTimeMillis() - startedAt,
-                    success = true,
-                    extra = "photoId=$photoId;bodyLen=${trimmed.length}"
-                )
+        try {
+            val response = repo.commentPhoto(photoId, trimmed)
+            val touchedDay = state.feedByDay.entries.firstOrNull { (_, items) ->
+                items.any { feedItem -> feedItem.photo.id == photoId }
+            }?.key
+            if (!touchedDay.isNullOrBlank()) {
+                staleFeedDays.add(touchedDay)
             }
-            .onFailure {
-                state = state.copy(interactionsLoading = false, message = apiError(it, "Kommentar fehlgeschlagen"))
-                logPerfEvent(
-                    event = "comment_submit",
-                    durationMs = System.currentTimeMillis() - startedAt,
-                    success = false,
-                    extra = "photoId=$photoId;error=${it::class.java.simpleName}"
-                )
+            val needsFullReload = response.comments.isEmpty()
+            state = state.copy(interactionsLoading = false, photoInteractions = response)
+            if (needsFullReload) {
+                loadPhotoInteractions(photoId)
             }
+            logPerfEvent(
+                event = "comment_submit",
+                durationMs = System.currentTimeMillis() - startedAt,
+                success = true,
+                extra = "photoId=$photoId;bodyLen=${trimmed.length}"
+            )
+        } catch (t: Throwable) {
+            state = state.copy(interactionsLoading = false, message = apiError(t, "Kommentar fehlgeschlagen"))
+            logPerfEvent(
+                event = "comment_submit",
+                durationMs = System.currentTimeMillis() - startedAt,
+                success = false,
+                extra = "photoId=$photoId;error=${t::class.java.simpleName}"
+            )
+        }
     }
 
     fun feedAutoRefreshIntervalMs(): Long = feedAutoRefreshBaseMs + Random.nextLong(feedAutoRefreshJitterMs + 1L)
@@ -3038,7 +3102,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (isNetworkFailureClass(lastRefreshFailureClass) && consecutiveNetworkRefreshFailures > 0) {
             return nextNetworkBackoffDelayMs()
         }
-        return globalRefreshSuccessBaseMs + Random.nextLong(globalRefreshSuccessJitterMs + 1L)
+        val activeMoment = state.prompt?.let { isActiveMomentWindow(it) } == true
+        val isFeedFocus = state.activeTab == AppTab.FEED
+        return if (activeMoment || isFeedFocus) {
+            globalRefreshActiveBaseMs + Random.nextLong(globalRefreshActiveJitterMs + 1L)
+        } else {
+            globalRefreshSuccessBaseMs + Random.nextLong(globalRefreshSuccessJitterMs + 1L)
+        }
+    }
+
+    fun shouldRunLaunchIntentRefresh(nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (nowMs - lastLaunchIntentRefreshAtMs < launchIntentRefreshMinIntervalMs) {
+            return false
+        }
+        lastLaunchIntentRefreshAtMs = nowMs
+        return true
     }
 
     fun shouldPauseFeedAutoRefresh(): Boolean {
@@ -3925,6 +4003,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     LaunchedEffect(launchIntentTick, state.token, state.startupDone) {
         if (launchIntentTick <= 0) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
+        if (!vm.shouldRunLaunchIntentRefresh()) return@LaunchedEffect
         vm.refreshAll()
     }
 
@@ -4949,6 +5028,12 @@ fun CameraTab(
     val hasVisiblePosted = prompt?.hasVisiblePostToday == true
     val canUpload = prompt?.canUpload == true
     val canSpecial = specialMomentStatus?.canRequest == true
+    val activeMomentKind = normalizeMomentKind(prompt?.momentKind, prompt?.triggerSource)
+    val activeSpecialRequester = prompt?.requestedByUser?.takeIf { !it.isNullOrBlank() } ?: prompt?.specialRequestedByUser
+    val activeMomentLabel = when (activeMomentKind) {
+        "special" -> if (!activeSpecialRequester.isNullOrBlank()) "Sondermoment von $activeSpecialRequester gerade aktiv." else "Sondermoment gerade aktiv."
+        else -> "Daily-Moment gerade aktiv."
+    }
     var showCapsuleDialog by remember { mutableStateOf(false) }
     var pendingCapsule by remember { mutableStateOf<CapsuleUploadOptions?>(null) }
     val dayLabel = formatDayLabel(prompt?.day ?: LocalDate.now().toString())
@@ -5013,10 +5098,22 @@ fun CameraTab(
             }
             Text(dayLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (!prompt?.triggered.isNullOrBlank()) {
-            Text("Der heutige Moment war um ${formatMomentTime(prompt?.triggered)}.")
+        if (!prompt?.specialTriggeredAt.isNullOrBlank()) {
+            val requester = prompt?.specialRequestedByUser
+            if (!requester.isNullOrBlank()) {
+                Text("Sondermoment heute um ${formatMomentTime(prompt?.specialTriggeredAt)} von $requester.")
+            } else {
+                Text("Sondermoment heute um ${formatMomentTime(prompt?.specialTriggeredAt)}.")
+            }
         } else {
-            Text("Der heutige Moment ist noch nicht gekommen.")
+            Text("Sondermoment heute noch nicht ausgeloest.")
+        }
+        if (!prompt?.dailyTriggeredAt.isNullOrBlank()) {
+            Text("Daily-Moment heute war um ${formatMomentTime(prompt?.dailyTriggeredAt)}.")
+        } else if (prompt?.dailyPending == false) {
+            Text("Daily-Moment heute war bereits.")
+        } else {
+            Text("Daily-Moment heute steht noch aus.")
         }
         if (promptRules != null) {
             Text("Zeitfenster heute: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
@@ -5024,10 +5121,10 @@ fun CameraTab(
 
         if (hasVisiblePosted) {
             if (canUpload) {
-                Text("Daily-Moment gerade aktiv.", fontWeight = FontWeight.Bold)
+                Text(activeMomentLabel, fontWeight = FontWeight.Bold)
                 Text(
                     if (hasPromptPosted) "Du hast dein Daily-Moment heute schon gepostet."
-                    else "Du kannst jetzt noch dein echtes Daily-Moment fuer den aktiven Moment aufnehmen.",
+                    else "Du kannst jetzt noch dein Foto fuer den aktiven Moment aufnehmen.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
@@ -5085,7 +5182,7 @@ fun CameraTab(
             if (prompt?.triggered.isNullOrBlank()) {
                 Text("Der Moment ist noch nicht gestartet. Du kannst jetzt schon ein Extra posten.")
             } else if (canUpload) {
-                Text("Daily-Moment gerade aktiv.", fontWeight = FontWeight.Bold)
+                Text(activeMomentLabel, fontWeight = FontWeight.Bold)
             } else {
                 Text("Momentfenster vorbei. Du kannst trotzdem ein Extra posten.")
             }

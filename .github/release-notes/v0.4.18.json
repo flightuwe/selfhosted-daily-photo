@@ -1,0 +1,28 @@
+{
+  "version": "0.4.18",
+  "releasedAt": "2026-03-16T00:00:00Z",
+  "highlights": [
+    "Kamera-Reiter trennt Sondermoment und Daily-Moment klar inklusive Ausloesername",
+    "Neuer Dashboard-Bootstrap reduziert Request-Faecherung beim App-Refresh",
+    "Backend-Hotpaths optimiert (Auth-Activity-Touch, Prompt/Invite/Chat/Photos/Feed-Days)",
+    "Leichtgewichtige Kommentar-POST-Antwort fuer geringere Latenzspitzen",
+    "Performance-Observability um Bootstrap-P95 und Top-Non-Feed-Routen erweitert"
+  ],
+  "details": [
+    {
+      "title": "Produktlogik",
+      "items": [
+        "Sondermoment und Daily-Moment werden in Statusanzeigen und Auswertung strikt getrennt",
+        "Sondermoment-Badge und Kamera-Status koennen den Ausloeser explizit anzeigen"
+      ]
+    },
+    {
+      "title": "Performance",
+      "items": [
+        "Dashboard-Daten koennen gebuendelt ueber /api/dashboard/bootstrap geladen werden",
+        "Auth-Middleware schreibt User-Aktivitaet nicht mehr bei jedem einzelnen Request",
+        "Mehrere Query- und Payload-Pfade wurden fuer geringere P95/P99-Latenzen verschlankt"
+      ]
+    }
+  ]
+}

@@ -244,6 +244,19 @@ export type AdminHistoryDay = {
   triggerBlockedCount?: number;
   triggerFailedCount?: number;
   multipleTriggerAlert?: boolean;
+  dailyTriggerAttemptCount?: number;
+  dailyTriggerBlockedCount?: number;
+  dailyTriggerFailedCount?: number;
+  dailyTriggeredCount?: number;
+  specialTriggerAttemptCount?: number;
+  specialTriggerBlockedCount?: number;
+  specialTriggerFailedCount?: number;
+  specialTriggeredCount?: number;
+  dailyTriggeredAt?: string | null;
+  specialTriggeredAt?: string | null;
+  dailyPending?: boolean;
+  dailyMultipleTriggerAlert?: boolean;
+  specialMultipleTriggerAlert?: boolean;
   onlineTrackingAvailable: boolean;
   userActivity?: AdminHistoryUserActivity[] | null;
   analytics?: AdminHistoryAnalytics;
@@ -289,6 +302,18 @@ export type AdminTriggerAuditSummary = {
     dbLocked: number;
     duplicateAttempts: number;
     multipleAttemptDays: number;
+    duplicateAttemptsDaily?: number;
+    duplicateAttemptsSpecial?: number;
+    multipleAttemptDaysDaily?: number;
+    multipleAttemptDaysSpecial?: number;
+    dailyAttempts?: number;
+    dailyTriggered?: number;
+    dailyBlocked?: number;
+    dailyFailed?: number;
+    specialAttempts?: number;
+    specialTriggered?: number;
+    specialBlocked?: number;
+    specialFailed?: number;
     blockedRate: number;
     failedRate: number;
   };
@@ -317,6 +342,19 @@ export type AdminIncidentExportStatus = {
   status: {
     duplicateAttempts: number;
     multipleAttemptDays: number;
+    duplicateAttemptsDaily?: number;
+    duplicateAttemptsSpecial?: number;
+    multipleAttemptDaysDaily?: number;
+    multipleAttemptDaysSpecial?: number;
+    dailyAttempts?: number;
+    dailyTriggered?: number;
+    dailyBlocked?: number;
+    dailyFailed?: number;
+    specialAttempts?: number;
+    specialTriggered?: number;
+    specialBlocked?: number;
+    specialFailed?: number;
+    dailyPending?: boolean;
     lastTriggerSource?: string;
     gatewayLogAvailable: boolean;
     backendLogAvailable: boolean;
@@ -1356,6 +1394,19 @@ export async function getAdminIncidentExportStatus(
     status: {
       duplicateAttempts: Number(data.status?.duplicateAttempts || 0),
       multipleAttemptDays: Number(data.status?.multipleAttemptDays || 0),
+      duplicateAttemptsDaily: Number(data.status?.duplicateAttemptsDaily || 0),
+      duplicateAttemptsSpecial: Number(data.status?.duplicateAttemptsSpecial || 0),
+      multipleAttemptDaysDaily: Number(data.status?.multipleAttemptDaysDaily || 0),
+      multipleAttemptDaysSpecial: Number(data.status?.multipleAttemptDaysSpecial || 0),
+      dailyAttempts: Number(data.status?.dailyAttempts || 0),
+      dailyTriggered: Number(data.status?.dailyTriggered || 0),
+      dailyBlocked: Number(data.status?.dailyBlocked || 0),
+      dailyFailed: Number(data.status?.dailyFailed || 0),
+      specialAttempts: Number(data.status?.specialAttempts || 0),
+      specialTriggered: Number(data.status?.specialTriggered || 0),
+      specialBlocked: Number(data.status?.specialBlocked || 0),
+      specialFailed: Number(data.status?.specialFailed || 0),
+      dailyPending: Boolean(data.status?.dailyPending),
       lastTriggerSource: data.status?.lastTriggerSource || "",
       gatewayLogAvailable: Boolean(data.status?.gatewayLogAvailable),
       backendLogAvailable: Boolean(data.status?.backendLogAvailable),

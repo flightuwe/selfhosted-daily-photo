@@ -33,13 +33,13 @@ type User struct {
 
 type InviteCode struct {
 	ID        uint       `gorm:"primaryKey" json:"id"`
-	UserID    uint       `gorm:"index;not null" json:"userId"`
+	UserID    uint       `gorm:"index;index:idx_invite_user_active_unused_created,priority:1;not null" json:"userId"`
 	User      User       `json:"user"`
 	Code      string     `gorm:"uniqueIndex;size:24;not null" json:"code"`
-	UsedByID  *uint      `gorm:"index" json:"usedById"`
+	UsedByID  *uint      `gorm:"index;index:idx_invite_user_active_unused_created,priority:3" json:"usedById"`
 	UsedAt    *time.Time `json:"usedAt"`
-	Active    bool       `gorm:"default:true;index" json:"active"`
-	CreatedAt time.Time  `json:"createdAt"`
+	Active    bool       `gorm:"default:true;index;index:idx_invite_user_active_unused_created,priority:2" json:"active"`
+	CreatedAt time.Time  `gorm:"index:idx_invite_user_active_unused_created,priority:4" json:"createdAt"`
 	UpdatedAt time.Time  `json:"updatedAt"`
 }
 

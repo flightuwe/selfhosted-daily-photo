@@ -21,6 +21,7 @@ type DailyPromptService struct {
 	DB             *gorm.DB
 	Location       *time.Location
 	ServerInstance string
+	LeaseTimeout   time.Duration
 	tickRunning    int32
 	lastTickAt     atomic.Int64
 	lastTickResult atomic.Value
@@ -37,7 +38,6 @@ type TriggerAttemptMeta struct {
 
 const (
 	schedulerLeaseName               = "daily_trigger_scheduler"
-	schedulerLeaseTimeout            = 90 * time.Second
 	schedulerAutoPauseWindow         = 3 * time.Minute
 	schedulerAutoPauseAttemptLimit   = 4
 	dispatchKindDailyPromptPush      = "daily_prompt_push"
@@ -493,7 +493,7 @@ func (s *DailyPromptService) recordTick(result string) {
 
 func (s *DailyPromptService) acquireOrRenewSchedulerLease(now time.Time) (owner string, granted bool, err error) {
 	ownerID := s.resolvedServerInstance()
-	expiresAt := now.Add(schedulerLeaseTimeout)
+	expiresAt := now.Add(s.resolvedLeaseTimeout())
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
 		var lease models.SchedulerLease
 		findErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -608,7 +608,7 @@ func (s *DailyPromptService) RuntimeState(now time.Time) map[string]any {
 	state := map[string]any{
 		"serverInstance": s.resolvedServerInstance(),
 		"leaseName":      schedulerLeaseName,
-		"leaseTimeoutSec": int64(schedulerLeaseTimeout / time.Second),
+		"leaseTimeoutSec": int64(s.resolvedLeaseTimeout() / time.Second),
 	}
 	lastTickUnix := s.lastTickAt.Load()
 	if lastTickUnix > 0 {
@@ -643,6 +643,19 @@ func (s *DailyPromptService) RuntimeState(now time.Time) map[string]any {
 
 func (s *DailyPromptService) ReleaseLease() error {
 	return s.DB.Where("lease_name = ?", schedulerLeaseName).Delete(&models.SchedulerLease{}).Error
+}
+
+func (s *DailyPromptService) resolvedLeaseTimeout() time.Duration {
+	if s == nil || s.LeaseTimeout <= 0 {
+		return 60 * time.Second
+	}
+	if s.LeaseTimeout < 15*time.Second {
+		return 15 * time.Second
+	}
+	if s.LeaseTimeout > 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return s.LeaseTimeout
 }
 
 func (s *DailyPromptService) ReserveDispatch(day string, kind string, source string, requestID string) (bool, models.DailyDispatch, error) {

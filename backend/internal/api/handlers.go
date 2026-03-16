@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -57,6 +58,8 @@ type Server struct {
 	Monitor  *Monitor
 	FeedCache   *FeedDayCache
 	FeedLimiter *FeedPollLimiter
+	activityTouchMu   sync.Mutex
+	activityTouchLast map[uint]time.Time
 }
 
 func (s *Server) Router() *gin.Engine {
@@ -102,6 +105,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.POST("/devices", s.handleDevice)
 			protected.GET("/prompt/current", s.handleCurrentPrompt)
 			protected.GET("/prompt/rules", s.handlePromptRules)
+			protected.GET("/dashboard/bootstrap", s.handleDashboardBootstrap)
 			protected.GET("/moment/special/status", s.handleSpecialMomentStatus)
 			protected.POST("/moment/special/request", s.handleSpecialMomentRequest)
 			protected.POST("/uploads", s.handleUpload)
@@ -355,74 +359,7 @@ func (s *Server) handleMe(c *gin.Context) {
 		user.FavoriteColor = "#1F5FBF"
 	}
 
-	// Keep this count in Go instead of SQL datetime comparisons.
-	// SQLite can store mixed datetime formats/timezones, and direct SQL comparisons
-	// may undercount even though a post is inside the prompt window.
-	var photos []models.Photo
-	dailyMomentCount := int64(0)
-	streakDays := int64(0)
-	if err := s.DB.Where("user_id = ?", user.ID).Order("created_at desc").Limit(500).Find(&photos).Error; err == nil {
-		days := make([]string, 0, len(photos))
-		daySeen := make(map[string]struct{}, len(photos))
-		postedDaySet := make(map[string]struct{}, len(photos))
-		for _, p := range photos {
-			postedDaySet[p.Day] = struct{}{}
-			if _, exists := daySeen[p.Day]; exists {
-				continue
-			}
-			daySeen[p.Day] = struct{}{}
-			days = append(days, p.Day)
-		}
-
-		promptByDay := make(map[string]models.DailyPrompt, len(days))
-		if len(days) > 0 {
-			var prompts []models.DailyPrompt
-			if err := s.DB.Where("day IN ?", days).Find(&prompts).Error; err == nil {
-				for _, pr := range prompts {
-					promptByDay[pr.Day] = pr
-				}
-			}
-		}
-
-		countedDays := map[string]struct{}{}
-		for _, p := range photos {
-			if _, exists := countedDays[p.Day]; exists {
-				continue
-			}
-			prompt, ok := promptByDay[p.Day]
-			if !ok || prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
-				continue
-			}
-			if !p.CreatedAt.Before(*prompt.TriggeredAt) && !p.CreatedAt.After(*prompt.UploadUntil) {
-				dailyMomentCount++
-				countedDays[p.Day] = struct{}{}
-			}
-		}
-
-		today := time.Now().In(s.Location).Format("2006-01-02")
-		anchor := ""
-		if _, ok := postedDaySet[today]; ok {
-			anchor = today
-		} else {
-			yesterday := time.Now().In(s.Location).AddDate(0, 0, -1).Format("2006-01-02")
-			if _, ok := postedDaySet[yesterday]; ok {
-				anchor = yesterday
-			}
-		}
-		if anchor != "" {
-			dayCursor, err := time.ParseInLocation("2006-01-02", anchor, s.Location)
-			if err == nil {
-				for {
-					dayKey := dayCursor.Format("2006-01-02")
-					if _, ok := postedDaySet[dayKey]; !ok {
-						break
-					}
-					streakDays++
-					dayCursor = dayCursor.AddDate(0, 0, -1)
-				}
-			}
-		}
-	}
+	dailyMomentCount, streakDays, _ := s.computeUserMomentStats(user.ID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"user":             s.userOwnJSON(user),
@@ -431,9 +368,84 @@ func (s *Server) handleMe(c *gin.Context) {
 	})
 }
 
+func (s *Server) computeUserMomentStats(userID uint) (int64, int64, error) {
+	// Keep this count in Go instead of SQL datetime comparisons.
+	// SQLite can store mixed datetime formats/timezones, and direct SQL comparisons
+	// may undercount even though a post is inside the prompt window.
+	var photos []models.Photo
+	if err := s.DB.Where("user_id = ?", userID).Order("created_at desc").Limit(500).Find(&photos).Error; err != nil {
+		return 0, 0, err
+	}
+	days := make([]string, 0, len(photos))
+	daySeen := make(map[string]struct{}, len(photos))
+	postedDaySet := make(map[string]struct{}, len(photos))
+	for _, p := range photos {
+		postedDaySet[p.Day] = struct{}{}
+		if _, exists := daySeen[p.Day]; exists {
+			continue
+		}
+		daySeen[p.Day] = struct{}{}
+		days = append(days, p.Day)
+	}
+
+	promptByDay := make(map[string]models.DailyPrompt, len(days))
+	if len(days) > 0 {
+		var prompts []models.DailyPrompt
+		if err := s.DB.Where("day IN ?", days).Find(&prompts).Error; err != nil {
+			return 0, 0, err
+		}
+		for _, pr := range prompts {
+			promptByDay[pr.Day] = pr
+		}
+	}
+
+	dailyMomentCount := int64(0)
+	countedDays := map[string]struct{}{}
+	for _, p := range photos {
+		if _, exists := countedDays[p.Day]; exists {
+			continue
+		}
+		prompt, ok := promptByDay[p.Day]
+		if !ok || prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
+			continue
+		}
+		if !p.CreatedAt.Before(*prompt.TriggeredAt) && !p.CreatedAt.After(*prompt.UploadUntil) {
+			dailyMomentCount++
+			countedDays[p.Day] = struct{}{}
+		}
+	}
+
+	streakDays := int64(0)
+	now := time.Now().In(s.Location)
+	today := now.Format("2006-01-02")
+	anchor := ""
+	if _, ok := postedDaySet[today]; ok {
+		anchor = today
+	} else {
+		yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
+		if _, ok := postedDaySet[yesterday]; ok {
+			anchor = yesterday
+		}
+	}
+	if anchor != "" {
+		dayCursor, err := time.ParseInLocation("2006-01-02", anchor, s.Location)
+		if err == nil {
+			for {
+				dayKey := dayCursor.Format("2006-01-02")
+				if _, ok := postedDaySet[dayKey]; !ok {
+					break
+				}
+				streakDays++
+				dayCursor = dayCursor.AddDate(0, 0, -1)
+			}
+		}
+	}
+	return dailyMomentCount, streakDays, nil
+}
+
 func (s *Server) handleMyInvite(c *gin.Context) {
 	user, _ := userFromContext(c)
-	invite, err := s.ensureActiveInviteCode(user.ID)
+	invite, err := s.loadOrCreateInviteCode(user.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "invite load failed"})
 		return
@@ -817,21 +829,48 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	day := now.Format("2006-01-02")
 
 	var prompt models.DailyPrompt
+	promptQueryStart := time.Now()
 	err := s.DB.Where("day = ?", day).First(&prompt).Error
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/prompt/current", "prompt_current_prompt_query", time.Since(promptQueryStart))
+	}
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
 
 	canUpload := isPromptWindowActive(prompt, now)
-	hasPromptPosted, _ := s.userHasPostedForDay(user.ID, day)
-	hasAnyPost, _ := s.userHasAnyPhotoForDay(user.ID, day)
-	hasVisiblePost, _ := s.userHasVisiblePhotoForDay(user.ID, day, now)
+	type dayStatsRow struct {
+		HasPromptPosted int64 `gorm:"column:has_prompt_posted"`
+		PostCount       int64 `gorm:"column:post_count"`
+		VisibleCount    int64 `gorm:"column:visible_count"`
+	}
+	stats := dayStatsRow{}
+	statsQueryStart := time.Now()
+	_ = s.DB.Raw(`
+		SELECT
+			COALESCE(MAX(CASE WHEN prompt_only = 1 THEN 1 ELSE 0 END), 0) AS has_prompt_posted,
+			COALESCE(COUNT(*), 0) AS post_count,
+			COALESCE(SUM(CASE WHEN capsule_visible_at IS NULL OR capsule_visible_at <= ? THEN 1 ELSE 0 END), 0) AS visible_count
+		FROM photos
+		WHERE user_id = ? AND day = ?
+	`, now, user.ID, day).Scan(&stats).Error
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/prompt/current", "prompt_current_user_day_stats", time.Since(statsQueryStart))
+	}
+	hasPromptPosted := stats.HasPromptPosted > 0
+	hasAnyPost := stats.PostCount > 0
+	hasVisiblePost := stats.VisibleCount > 0
+	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/prompt/current")
 	var ownPhoto gin.H
 	if hasPromptPosted {
 		var p models.Photo
+		ownPhotoQueryStart := time.Now()
 		if err := s.DB.Where("user_id = ? AND day = ? AND prompt_only = ?", user.ID, day, true).Order("created_at desc").First(&p).Error; err == nil {
 			ownPhoto = s.photoJSON(p)
+		}
+		if s.Monitor != nil {
+			s.Monitor.RecordDBQuery("/api/prompt/current", "prompt_current_own_photo_query", time.Since(ownPhotoQueryStart))
 		}
 	}
 
@@ -848,6 +887,125 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		"triggerSource":        prompt.TriggerSource,
 		"requestedByUser":      prompt.RequestedBy,
 		"momentKind":           momentKindFromTriggerSource(prompt.TriggerSource),
+		"dailyTriggeredAt":     triggerStatus.DailyTriggeredAt,
+		"dailyPending":         triggerStatus.DailyPending,
+		"specialTriggeredAt":   triggerStatus.SpecialTriggeredAt,
+		"specialRequestedByUser": triggerStatus.SpecialRequestedByUser,
+	})
+}
+
+func (s *Server) handleDashboardBootstrap(c *gin.Context) {
+	user, _ := userFromContext(c)
+	now := time.Now().In(s.Location)
+	includeChat := parseQueryBool(c.Query("includeChat"), true)
+	includePhotos := parseQueryBool(c.Query("includePhotos"), true)
+	includeCommunity := parseQueryBool(c.Query("includeCommunity"), true)
+
+	dailyMomentCount, streakDays, _ := s.computeUserMomentStats(user.ID)
+
+	inviteCode := ""
+	if invite, err := s.loadOrCreateInviteCode(user.ID); err == nil {
+		inviteCode = invite.Code
+	}
+
+	day := now.Format("2006-01-02")
+	var prompt models.DailyPrompt
+	_ = s.DB.Where("day = ?", day).First(&prompt).Error
+	canUpload := isPromptWindowActive(prompt, now)
+
+	type dayStatsRow struct {
+		HasPromptPosted int64 `gorm:"column:has_prompt_posted"`
+		PostCount       int64 `gorm:"column:post_count"`
+		VisibleCount    int64 `gorm:"column:visible_count"`
+	}
+	stats := dayStatsRow{}
+	_ = s.DB.Raw(`
+		SELECT
+			COALESCE(MAX(CASE WHEN prompt_only = 1 THEN 1 ELSE 0 END), 0) AS has_prompt_posted,
+			COALESCE(COUNT(*), 0) AS post_count,
+			COALESCE(SUM(CASE WHEN capsule_visible_at IS NULL OR capsule_visible_at <= ? THEN 1 ELSE 0 END), 0) AS visible_count
+		FROM photos
+		WHERE user_id = ? AND day = ?
+	`, now, user.ID, day).Scan(&stats).Error
+	hasPromptPosted := stats.HasPromptPosted > 0
+	hasAnyPost := stats.PostCount > 0
+	hasVisiblePost := stats.VisibleCount > 0
+	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/dashboard/bootstrap")
+
+	var ownPhoto gin.H
+	if hasPromptPosted {
+		var p models.Photo
+		if err := s.DB.Where("user_id = ? AND day = ? AND prompt_only = ?", user.ID, day, true).Order("created_at desc").First(&p).Error; err == nil {
+			ownPhoto = s.photoJSON(p)
+		}
+	}
+
+	var settings models.AppSettings
+	_ = s.DB.First(&settings).Error
+	settings = normalizeSettings(settings)
+
+	specialStatus, _ := s.specialMomentStatus(user.ID)
+	feedDays, _ := s.feedDaysForUser(user.ID, "", "", now)
+
+	photos := []gin.H{}
+	if includePhotos {
+		items, _ := s.myPhotosPayload(user.ID, now)
+		photos = items
+	}
+	chat := []gin.H{}
+	if includeChat {
+		items, _ := s.chatListPayload(user.ID)
+		chat = items
+	}
+	community := gin.H{}
+	if includeCommunity {
+		stats, _ := s.communityStatsPayload(now)
+		community = stats
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"schemaVersion": "dashboard_bootstrap_v1",
+		"serverNow":     now,
+		"capabilities": gin.H{
+			"bootstrap":             true,
+			"lightweightCommentPost": true,
+		},
+		"me": gin.H{
+			"user":             s.userOwnJSON(user),
+			"dailyMomentCount": dailyMomentCount,
+			"streakDays":       streakDays,
+		},
+		"inviteCode": inviteCode,
+		"prompt": gin.H{
+			"day":                  day,
+			"triggered":            prompt.TriggeredAt,
+			"uploadUntil":          prompt.UploadUntil,
+			"canUpload":            canUpload,
+			"hasPosted":            hasPromptPosted,
+			"hasPromptPostedToday": hasPromptPosted,
+			"hasVisiblePostToday":  hasVisiblePost,
+			"hasAnyPostToday":      hasAnyPost,
+			"ownPhoto":             ownPhoto,
+			"triggerSource":        prompt.TriggerSource,
+			"requestedByUser":      prompt.RequestedBy,
+			"momentKind":           momentKindFromTriggerSource(prompt.TriggerSource),
+			"dailyTriggeredAt":     triggerStatus.DailyTriggeredAt,
+			"dailyPending":         triggerStatus.DailyPending,
+			"specialTriggeredAt":   triggerStatus.SpecialTriggeredAt,
+			"specialRequestedByUser": triggerStatus.SpecialRequestedByUser,
+		},
+		"promptRules": gin.H{
+			"promptWindowStartHour": settings.PromptWindowStartHour,
+			"promptWindowEndHour":   settings.PromptWindowEndHour,
+			"uploadWindowMinutes":   settings.UploadWindowMinutes,
+			"maxUploadBytes":        settings.MaxUploadBytes,
+			"timezone":              s.Config.Timezone,
+		},
+		"specialMomentStatus": specialStatus,
+		"feedDays":            feedDays,
+		"photos":              photos,
+		"chat":                chat,
+		"communityStats":      community,
 	})
 }
 
@@ -2717,14 +2875,24 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 	}
 
 	type dayTriggerAuditCounts struct {
-		Attempts int
-		Blocked  int
-		Failed   int
+		Attempts          int
+		Blocked           int
+		Failed            int
+		DailyAttempts     int
+		DailyBlocked      int
+		DailyFailed       int
+		DailyTriggered    int
+		SpecialAttempts   int
+		SpecialBlocked    int
+		SpecialFailed     int
+		SpecialTriggered  int
+		DailyTriggeredAt  *time.Time
+		SpecialTriggeredAt *time.Time
 	}
 	triggerAuditByDay := make(map[string]dayTriggerAuditCounts, len(dayList))
 	var triggerAudits []models.DailyTriggerAuditEvent
 	if err := s.DB.
-		Select("day, result").
+		Select("day, source, result, occurred_at").
 		Where("day >= ? AND day <= ?", oldest, newest).
 		Find(&triggerAudits).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "history query failed"})
@@ -2733,11 +2901,41 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 	for _, ev := range triggerAudits {
 		counts := triggerAuditByDay[ev.Day]
 		counts.Attempts++
+		kind := triggerKindFromTriggerSource(ev.Source)
+		if kind == "special" {
+			counts.SpecialAttempts++
+		} else {
+			counts.DailyAttempts++
+		}
 		switch strings.ToLower(strings.TrimSpace(ev.Result)) {
 		case "blocked":
 			counts.Blocked++
+			if kind == "special" {
+				counts.SpecialBlocked++
+			} else {
+				counts.DailyBlocked++
+			}
 		case "failed":
 			counts.Failed++
+			if kind == "special" {
+				counts.SpecialFailed++
+			} else {
+				counts.DailyFailed++
+			}
+		case "triggered":
+			if kind == "special" {
+				counts.SpecialTriggered++
+				when := ev.OccurredAt
+				if counts.SpecialTriggeredAt == nil || counts.SpecialTriggeredAt.Before(when) {
+					counts.SpecialTriggeredAt = &when
+				}
+			} else {
+				counts.DailyTriggered++
+				when := ev.OccurredAt
+				if counts.DailyTriggeredAt == nil || counts.DailyTriggeredAt.Before(when) {
+					counts.DailyTriggeredAt = &when
+				}
+			}
 		}
 		triggerAuditByDay[ev.Day] = counts
 	}
@@ -3026,7 +3224,20 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			"triggerAttemptCount":     triggerAuditByDay[day].Attempts,
 			"triggerBlockedCount":     triggerAuditByDay[day].Blocked,
 			"triggerFailedCount":      triggerAuditByDay[day].Failed,
-			"multipleTriggerAlert":    triggerAuditByDay[day].Attempts > 1,
+			"dailyTriggerAttemptCount":   triggerAuditByDay[day].DailyAttempts,
+			"dailyTriggerBlockedCount":   triggerAuditByDay[day].DailyBlocked,
+			"dailyTriggerFailedCount":    triggerAuditByDay[day].DailyFailed,
+			"dailyTriggeredCount":        triggerAuditByDay[day].DailyTriggered,
+			"specialTriggerAttemptCount": triggerAuditByDay[day].SpecialAttempts,
+			"specialTriggerBlockedCount": triggerAuditByDay[day].SpecialBlocked,
+			"specialTriggerFailedCount":  triggerAuditByDay[day].SpecialFailed,
+			"specialTriggeredCount":      triggerAuditByDay[day].SpecialTriggered,
+			"dailyTriggeredAt":           triggerAuditByDay[day].DailyTriggeredAt,
+			"specialTriggeredAt":         triggerAuditByDay[day].SpecialTriggeredAt,
+			"dailyPending":               triggerAuditByDay[day].DailyTriggered == 0,
+			"multipleTriggerAlert":       triggerAuditByDay[day].DailyAttempts > 1,
+			"dailyMultipleTriggerAlert":  triggerAuditByDay[day].DailyAttempts > 1,
+			"specialMultipleTriggerAlert": triggerAuditByDay[day].SpecialAttempts > 1,
 			"userActivity":            userActivityRows,
 			"analytics": gin.H{
 				"promptPhotoRatio":      promptPhotoRatio,
@@ -3476,84 +3687,69 @@ func (s *Server) handleAdminClearChat(c *gin.Context) {
 
 func (s *Server) handleChatList(c *gin.Context) {
 	viewer, _ := userFromContext(c)
-	var messages []models.ChatMessage
-	if err := s.DB.Preload("User").Order("created_at desc").Limit(100).Find(&messages).Error; err != nil {
+	items, err := s.chatListPayload(viewer.ID)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
-	out := make([]gin.H, 0, len(messages))
-	for i := len(messages) - 1; i >= 0; i-- {
-		m := messages[i]
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) chatListPayload(viewerID uint) ([]gin.H, error) {
+	type chatListRow struct {
+		ID            uint      `gorm:"column:id"`
+		Body          string    `gorm:"column:body"`
+		Source        string    `gorm:"column:source"`
+		CreatedAt     time.Time `gorm:"column:created_at"`
+		UserID        uint      `gorm:"column:user_id"`
+		Username      string    `gorm:"column:username"`
+		FavoriteColor string    `gorm:"column:favorite_color"`
+	}
+	queryStart := time.Now()
+	rows := make([]chatListRow, 0, 100)
+	err := s.DB.Table("chat_messages AS cm").
+		Select("cm.id, cm.body, cm.source, cm.created_at, u.id AS user_id, u.username, u.favorite_color").
+		Joins("JOIN users u ON u.id = cm.user_id").
+		Order("cm.created_at desc").
+		Limit(100).
+		Scan(&rows).Error
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/chat", "chat_list_query", time.Since(queryStart))
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]gin.H, 0, len(rows))
+	for i := len(rows) - 1; i >= 0; i-- {
+		r := rows[i]
 		out = append(out, gin.H{
-			"id":        m.ID,
-			"body":      m.Body,
-			"source":    defaultIfBlank(strings.TrimSpace(m.Source), "user"),
-			"createdAt": m.CreatedAt,
-			"user":      s.userPublicJSON(viewer.ID, m.User),
+			"id":        r.ID,
+			"body":      r.Body,
+			"source":    defaultIfBlank(strings.TrimSpace(r.Source), "user"),
+			"createdAt": r.CreatedAt,
+			"user": s.userPublicJSON(viewerID, models.User{
+				ID:            r.UserID,
+				Username:      r.Username,
+				FavoriteColor: r.FavoriteColor,
+			}),
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"items": out})
+	return out, nil
 }
 
 func (s *Server) handleFeedDays(c *gin.Context) {
 	user, _ := userFromContext(c)
 	fromDay := strings.TrimSpace(c.Query("from"))
 	toDay := strings.TrimSpace(c.Query("to"))
-	if (fromDay == "") != (toDay == "") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "from/to must be provided together"})
-		return
-	}
-	if fromDay != "" {
-		fromParsed, err := time.ParseInLocation("2006-01-02", fromDay, s.Location)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from date"})
-			return
-		}
-		toParsed, err := time.ParseInLocation("2006-01-02", toDay, s.Location)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to date"})
-			return
-		}
-		if fromParsed.After(toParsed) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "from must be before or equal to to"})
-			return
-		}
-	}
-	type row struct {
-		Day string
-	}
-	var rows []row
 	now := time.Now().In(s.Location)
-	query := s.DB.Model(&models.Photo{}).
-		Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", user.ID, now)
-	if fromDay != "" {
-		query = query.Where("day >= ? AND day <= ?", fromDay, toDay)
-	}
-	if err := query.
-		Select("DISTINCT day").
-		Order("day desc").
-		Limit(365).
-		Scan(&rows).Error; err != nil {
+	days, err := s.feedDaysForUser(user.ID, fromDay, toDay, now)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid from") || strings.Contains(err.Error(), "invalid to") || strings.Contains(err.Error(), "from/to") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
-	}
-	today := now.Format("2006-01-02")
-	hasPostedToday := true
-	includeToday := fromDay == "" || (fromDay <= today && today <= toDay)
-	if includeToday {
-		var err error
-		hasPostedToday, err = s.userHasVisiblePhotoForDay(user.ID, today, now)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-			return
-		}
-	}
-	days := make([]string, 0, len(rows))
-	for _, r := range rows {
-		if r.Day == today && !hasPostedToday {
-			continue
-		}
-		days = append(days, r.Day)
 	}
 	c.JSON(http.StatusOK, gin.H{"items": days})
 }
@@ -3781,29 +3977,46 @@ func (s *Server) handleDeleteChatMessage(c *gin.Context) {
 
 func (s *Server) handleCommunityStats(c *gin.Context) {
 	now := time.Now().In(s.Location)
+	payload, err := s.communityStatsPayload(now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+func (s *Server) communityStatsPayload(now time.Time) (gin.H, error) {
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, s.Location)
 	todayDay := now.Format("2006-01-02")
 	sinceDay := now.AddDate(0, 0, -6).Format("2006-01-02")
 	sinceTime := now.AddDate(0, 0, -7)
 
 	var registeredUsers int64
-	_ = s.DB.Model(&models.User{}).Count(&registeredUsers).Error
+	if err := s.DB.Model(&models.User{}).Count(&registeredUsers).Error; err != nil {
+		return nil, err
+	}
 
 	var activeUsersToday int64
-	_ = s.DB.Model(&models.Photo{}).
+	if err := s.DB.Model(&models.Photo{}).
 		Select("COUNT(DISTINCT user_id)").
 		Where("day = ?", todayDay).
-		Scan(&activeUsersToday).Error
+		Scan(&activeUsersToday).Error; err != nil {
+		return nil, err
+	}
 
 	var postsToday int64
-	_ = s.DB.Model(&models.Photo{}).
+	if err := s.DB.Model(&models.Photo{}).
 		Where("day = ?", todayDay).
-		Count(&postsToday).Error
+		Count(&postsToday).Error; err != nil {
+		return nil, err
+	}
 
 	var chatMessagesToday int64
-	_ = s.DB.Model(&models.ChatMessage{}).
+	if err := s.DB.Model(&models.ChatMessage{}).
 		Where("created_at >= ?", todayStart).
-		Count(&chatMessagesToday).Error
+		Count(&chatMessagesToday).Error; err != nil {
+		return nil, err
+	}
 
 	type latestRow struct {
 		Username  string    `gorm:"column:username"`
@@ -3822,27 +4035,33 @@ func (s *Server) handleCommunityStats(c *gin.Context) {
 		Count int64  `gorm:"column:count"`
 	}
 	var reactionRows []reactionRow
-	_ = s.DB.Model(&models.PhotoReaction{}).
+	if err := s.DB.Model(&models.PhotoReaction{}).
 		Select("emoji, COUNT(*) as count").
 		Where("created_at >= ?", sinceTime).
 		Group("emoji").
 		Order("count desc").
 		Limit(5).
-		Scan(&reactionRows).Error
+		Scan(&reactionRows).Error; err != nil {
+		return nil, err
+	}
 
 	var prompts []models.DailyPrompt
-	_ = s.DB.
+	if err := s.DB.
 		Where("day >= ? AND day <= ?", sinceDay, todayDay).
-		Find(&prompts).Error
+		Find(&prompts).Error; err != nil {
+		return nil, err
+	}
 	promptByDay := make(map[string]models.DailyPrompt, len(prompts))
 	for _, p := range prompts {
 		promptByDay[p.Day] = p
 	}
 
 	var photos []models.Photo
-	_ = s.DB.
+	if err := s.DB.
 		Where("day >= ? AND day <= ?", sinceDay, todayDay).
-		Find(&photos).Error
+		Find(&photos).Error; err != nil {
+		return nil, err
+	}
 	dailyMomentUsers := map[uint]struct{}{}
 	for _, p := range photos {
 		prompt, ok := promptByDay[p.Day]
@@ -3875,8 +4094,7 @@ func (s *Server) handleCommunityStats(c *gin.Context) {
 			"createdAt": latest.CreatedAt,
 		}
 	}
-
-	c.JSON(http.StatusOK, gin.H{
+	return gin.H{
 		"registeredUsers":   registeredUsers,
 		"activeUsersToday":  activeUsersToday,
 		"latestActiveUser":  latestActive,
@@ -3888,7 +4106,7 @@ func (s *Server) handleCommunityStats(c *gin.Context) {
 			"totalUsers":   registeredUsers,
 			"percent":      percent,
 		},
-	})
+	}, nil
 }
 
 func (s *Server) handleChatCreate(c *gin.Context) {
@@ -4557,11 +4775,22 @@ func (s *Server) handleHealth(c *gin.Context) {
 func (s *Server) handleMyPhotos(c *gin.Context) {
 	user, _ := userFromContext(c)
 	now := time.Now().In(s.Location)
-
-	var photos []models.Photo
-	if err := s.DB.Where("user_id = ?", user.ID).Order("created_at desc").Limit(120).Find(&photos).Error; err != nil {
+	items, err := s.myPhotosPayload(user.ID, now)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) myPhotosPayload(userID uint, now time.Time) ([]gin.H, error) {
+	queryStart := time.Now()
+	var photos []models.Photo
+	if err := s.DB.Where("user_id = ?", userID).Order("created_at desc").Limit(120).Find(&photos).Error; err != nil {
+		return nil, err
+	}
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/me/photos", "my_photos_query", time.Since(queryStart))
 	}
 
 	days := make([]string, 0, len(photos))
@@ -4577,9 +4806,12 @@ func (s *Server) handleMyPhotos(c *gin.Context) {
 	var prompts []models.DailyPrompt
 	promptByDay := make(map[string]models.DailyPrompt, len(days))
 	if len(days) > 0 {
+		promptQueryStart := time.Now()
 		if err := s.DB.Where("day IN ?", days).Find(&prompts).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-			return
+			return nil, err
+		}
+		if s.Monitor != nil {
+			s.Monitor.RecordDBQuery("/api/me/photos", "my_photos_prompt_query", time.Since(promptQueryStart))
 		}
 		for _, pr := range prompts {
 			promptByDay[pr.Day] = pr
@@ -4599,7 +4831,66 @@ func (s *Server) handleMyPhotos(c *gin.Context) {
 		row["dailyMoment"] = dailyMoment
 		out = append(out, row)
 	}
-	c.JSON(http.StatusOK, gin.H{"items": out})
+	return out, nil
+}
+
+func (s *Server) feedDaysForUser(userID uint, fromDay string, toDay string, now time.Time) ([]string, error) {
+	fromDay = strings.TrimSpace(fromDay)
+	toDay = strings.TrimSpace(toDay)
+	if (fromDay == "") != (toDay == "") {
+		return nil, errors.New("from/to must be provided together")
+	}
+	if fromDay != "" {
+		fromParsed, err := time.ParseInLocation("2006-01-02", fromDay, s.Location)
+		if err != nil {
+			return nil, errors.New("invalid from date")
+		}
+		toParsed, err := time.ParseInLocation("2006-01-02", toDay, s.Location)
+		if err != nil {
+			return nil, errors.New("invalid to date")
+		}
+		if fromParsed.After(toParsed) {
+			return nil, errors.New("from must be before or equal to to")
+		}
+	}
+	type row struct {
+		Day string
+	}
+	var rows []row
+	queryStart := time.Now()
+	query := s.DB.Model(&models.Photo{}).
+		Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", userID, now)
+	if fromDay != "" {
+		query = query.Where("day >= ? AND day <= ?", fromDay, toDay)
+	}
+	if err := query.
+		Select("DISTINCT day").
+		Order("day desc").
+		Limit(365).
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/feed/days", "feed_days_query", time.Since(queryStart))
+	}
+	today := now.Format("2006-01-02")
+	hasPostedToday := true
+	includeToday := fromDay == "" || (fromDay <= today && today <= toDay)
+	if includeToday {
+		var err error
+		hasPostedToday, err = s.userHasVisiblePhotoForDay(userID, today, now)
+		if err != nil {
+			return nil, err
+		}
+	}
+	days := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.Day == today && !hasPostedToday {
+			continue
+		}
+		days = append(days, r.Day)
+	}
+	return days, nil
 }
 
 func (s *Server) handleDeleteMyPhoto(c *gin.Context) {
@@ -4788,13 +5079,33 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 		UserID:  user.ID,
 		Body:    body,
 	}
+	createStart := time.Now()
 	if err := s.DB.Create(&comment).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "comment create failed"})
 		return
 	}
-
-	out, err := s.photoInteractionsPayload(photo, user.ID)
-	if err != nil {
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/photos/:id/comments", "photo_comment_insert", time.Since(createStart))
+	}
+	fullResponse := parseQueryBool(c.Query("full"), false)
+	var (
+		out gin.H
+		payloadErr error
+	)
+	payloadStart := time.Now()
+	if fullResponse {
+		out, payloadErr = s.photoInteractionsPayload(photo, user.ID)
+	} else {
+		out, payloadErr = s.photoInteractionsLightPayload(photo, user)
+	}
+	if s.Monitor != nil {
+		queryGroup := "photo_comment_light_payload"
+		if fullResponse {
+			queryGroup = "photo_comment_full_payload"
+		}
+		s.Monitor.RecordDBQuery("/api/photos/:id/comments", queryGroup, time.Since(payloadStart))
+	}
+	if payloadErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
@@ -5507,6 +5818,51 @@ func (s *Server) isPromptUploadAllowed(day string, now time.Time) bool {
 	return isPromptWindowActive(prompt, now)
 }
 
+type dayTriggerStatus struct {
+	DailyTriggeredAt      *time.Time
+	DailyPending          bool
+	SpecialTriggeredAt    *time.Time
+	SpecialRequestedByUser string
+}
+
+func (s *Server) currentDayTriggerStatus(day string, route string) (dayTriggerStatus, error) {
+	status := dayTriggerStatus{DailyPending: true}
+	type row struct {
+		OccurredAt    time.Time `gorm:"column:occurred_at"`
+		Source        string    `gorm:"column:source"`
+		ActorUsername string    `gorm:"column:actor_username"`
+	}
+	rows := make([]row, 0, 8)
+	queryStart := time.Now()
+	err := s.DB.
+		Table("daily_trigger_audit_events").
+		Select("occurred_at, source, actor_username").
+		Where("day = ? AND result = ?", day, "triggered").
+		Order("occurred_at asc").
+		Find(&rows).Error
+	if s.Monitor != nil && route != "" {
+		s.Monitor.RecordDBQuery(route, "prompt_day_trigger_status_query", time.Since(queryStart))
+	}
+	if err != nil {
+		return status, err
+	}
+	for _, item := range rows {
+		switch triggerKindFromTriggerSource(item.Source) {
+		case "special":
+			when := item.OccurredAt
+			status.SpecialTriggeredAt = &when
+			if name := strings.TrimSpace(item.ActorUsername); name != "" {
+				status.SpecialRequestedByUser = name
+			}
+		default:
+			when := item.OccurredAt
+			status.DailyTriggeredAt = &when
+			status.DailyPending = false
+		}
+	}
+	return status, nil
+}
+
 func isPromptWindowActive(prompt models.DailyPrompt, now time.Time) bool {
 	if prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
 		return false
@@ -5515,6 +5871,10 @@ func isPromptWindowActive(prompt models.DailyPrompt, now time.Time) bool {
 }
 
 func momentKindFromTriggerSource(triggerSource string) string {
+	return triggerKindFromTriggerSource(triggerSource)
+}
+
+func triggerKindFromTriggerSource(triggerSource string) string {
 	switch strings.TrimSpace(strings.ToLower(triggerSource)) {
 	case "special_request", "chat_command":
 		return "special"
@@ -5681,6 +6041,18 @@ func parseFormBool(v string) bool {
 	}
 }
 
+func parseQueryBool(v string, fallback bool) bool {
+	raw := strings.ToLower(strings.TrimSpace(v))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
 func (s *Server) photoInteractionsPayload(photo models.Photo, viewerID uint) (gin.H, error) {
 	photoID := photo.ID
 	canDownload := false
@@ -5742,6 +6114,52 @@ func (s *Server) photoInteractionsPayload(photo models.Photo, viewerID uint) (gi
 		"myReaction":  myReaction,
 		"comments":    commentItems,
 		"canDownload": canDownload,
+	}, nil
+}
+
+func (s *Server) photoInteractionsLightPayload(photo models.Photo, commenter models.User) (gin.H, error) {
+	photoID := photo.ID
+	var (
+		reactionsTotal int64
+		commentsTotal  int64
+	)
+	if err := s.DB.Model(&models.PhotoReaction{}).Where("photo_id = ?", photoID).Count(&reactionsTotal).Error; err != nil {
+		return nil, err
+	}
+	if err := s.DB.Model(&models.PhotoComment{}).Where("photo_id = ?", photoID).Count(&commentsTotal).Error; err != nil {
+		return nil, err
+	}
+	var my models.PhotoReaction
+	myReaction := ""
+	_ = s.DB.Where("photo_id = ? AND user_id = ?", photoID, commenter.ID).First(&my).Error
+	if my.ID != 0 {
+		myReaction = my.Emoji
+	}
+	canDownload := false
+	var owner models.User
+	if err := s.DB.Select("id", "allow_photo_download").First(&owner, photo.UserID).Error; err == nil {
+		canDownload = owner.AllowPhotoDownload
+	}
+
+	return gin.H{
+		"photoId":     photoID,
+		"reactions":   []gin.H{},
+		"comments":    []gin.H{},
+		"myReaction":  myReaction,
+		"canDownload": canDownload,
+		"counts": gin.H{
+			"reactions": reactionsTotal,
+			"comments":  commentsTotal,
+		},
+		"commentCreated": gin.H{
+			"user": gin.H{
+				"id":            commenter.ID,
+				"username":      commenter.Username,
+				"favoriteColor": defaultColor(commenter.FavoriteColor),
+			},
+			"createdAt": time.Now().In(s.Location),
+		},
+		"full": false,
 	}, nil
 }
 
@@ -6027,6 +6445,38 @@ func (s *Server) ensureActiveInviteCode(userID uint) (models.InviteCode, error) 
 		invite, txCreateErr = s.createInviteCodeTx(tx, userID)
 		return txCreateErr
 	})
+	if txErr != nil {
+		return models.InviteCode{}, txErr
+	}
+	return invite, nil
+}
+
+func (s *Server) loadOrCreateInviteCode(userID uint) (models.InviteCode, error) {
+	var invite models.InviteCode
+	queryStart := time.Now()
+	err := s.DB.
+		Select("id", "user_id", "code", "active", "used_by_id", "created_at", "updated_at").
+		Where("user_id = ? AND active = ? AND used_by_id IS NULL", userID, true).
+		Order("created_at desc").
+		First(&invite).Error
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/me/invite", "my_invite_lookup", time.Since(queryStart))
+	}
+	if err == nil {
+		return invite, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.InviteCode{}, err
+	}
+	createStart := time.Now()
+	txErr := s.DB.Transaction(func(tx *gorm.DB) error {
+		var txCreateErr error
+		invite, txCreateErr = s.createInviteCodeTx(tx, userID)
+		return txCreateErr
+	})
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/me/invite", "my_invite_create", time.Since(createStart))
+	}
 	if txErr != nil {
 		return models.InviteCode{}, txErr
 	}

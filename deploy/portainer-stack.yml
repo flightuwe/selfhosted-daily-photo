@@ -26,15 +26,20 @@ services:
       - PUBLIC_BASE_URL=https://daily.teacloud.synology.me
       - APP_TIMEZONE=Europe/Berlin
       - SCHEDULER_ENABLED=true
+      - SCHEDULER_LEASE_TIMEOUT_SEC=60
       - APP_VERSION=dev
       - BOOTSTRAP_ADMIN_USER=admin
       - BOOTSTRAP_ADMIN_PASSWORD=HIER_STARKES_ADMIN_PASSWORT_EINTRAGEN
       - FCM_ENABLED=true
       - FCM_PROJECT_ID=HIER_DEIN_FIREBASE_PROJECT_ID
       - FCM_SERVICE_ACCOUNT_FILE=/app/secrets/firebase-service-account.json
+      - FORENSIC_BACKEND_LOG_PATH=/app/logs/backend.log
+      - FORENSIC_GATEWAY_LOG_PATH=/app/gateway-logs/access.log
     volumes:
       - /volume1/docker/selfhosted-daily-photo/backend-data:/app/data:rw
       - /volume1/docker/selfhosted-daily-photo/secrets:/app/secrets:ro
+      - /volume1/docker/selfhosted-daily-photo/logs/backend:/app/logs:rw
+      - /volume1/docker/selfhosted-daily-photo/logs/nginx:/app/gateway-logs:ro
     networks:
       - shp-net
 
@@ -60,6 +65,7 @@ services:
       - "13379:80"
     volumes:
       - /volume1/docker/selfhosted-daily-photo/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - /volume1/docker/selfhosted-daily-photo/logs/nginx:/var/log/nginx
     networks:
       - shp-net
 

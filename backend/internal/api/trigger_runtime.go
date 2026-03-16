@@ -21,18 +21,25 @@ func (s *Server) handleAdminTriggerRuntime(c *gin.Context) {
 		}
 	}
 	from := now.Add(-time.Duration(windowMinutes) * time.Minute)
+	dailyFilter := "source NOT IN ?"
+	specialSources := []string{"special_request", "chat_command"}
 	var attempts int64
 	var blocked int64
 	var failed int64
 	var dbLocked int64
+	var dailyTodayAttempts int64
 	var duplicateToday int64
-	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ?", from).Count(&attempts).Error
-	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND result = ?", from, "blocked").Count(&blocked).Error
-	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND result = ?", from, "failed").Count(&failed).Error
-	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND reason = ?", from, "db_locked").Count(&dbLocked).Error
+	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ?", from).Where(dailyFilter, specialSources).Count(&attempts).Error
+	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND result = ?", from, "blocked").Where(dailyFilter, specialSources).Count(&blocked).Error
+	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND result = ?", from, "failed").Where(dailyFilter, specialSources).Count(&failed).Error
+	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND reason = ?", from, "db_locked").Where(dailyFilter, specialSources).Count(&dbLocked).Error
 	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).
-		Where("day = ? AND result IN ?", now.Format("2006-01-02"), []string{"blocked", "failed"}).
-		Count(&duplicateToday).Error
+		Where("day = ?", now.Format("2006-01-02")).
+		Where(dailyFilter, specialSources).
+		Count(&dailyTodayAttempts).Error
+	if dailyTodayAttempts > 1 {
+		duplicateToday = dailyTodayAttempts - 1
+	}
 
 	reasonCounts := map[string]int64{}
 	type reasonRow struct {
@@ -43,6 +50,7 @@ func (s *Server) handleAdminTriggerRuntime(c *gin.Context) {
 	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).
 		Select("reason, count(*) as count").
 		Where("occurred_at >= ?", from).
+		Where(dailyFilter, specialSources).
 		Group("reason").
 		Scan(&grouped).Error
 	for _, row := range grouped {

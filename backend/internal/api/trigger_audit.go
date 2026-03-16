@@ -78,11 +78,20 @@ func (s *Server) handleAdminTriggerAuditSummary(c *gin.Context) {
 	}
 	byDay := make(map[string]*dayAgg, days)
 	bySource := make(map[string]int, 12)
+	byDayKindAttempts := make(map[string]int, 32)
 	attempts := 0
 	triggered := 0
 	blocked := 0
 	failed := 0
 	dbLocked := 0
+	dailyAttempts := 0
+	dailyTriggered := 0
+	dailyBlocked := 0
+	dailyFailed := 0
+	specialAttempts := 0
+	specialTriggered := 0
+	specialBlocked := 0
+	specialFailed := 0
 	for _, row := range rows {
 		dayKey := strings.TrimSpace(row.Day)
 		if dayKey == "" {
@@ -95,17 +104,39 @@ func (s *Server) handleAdminTriggerAuditSummary(c *gin.Context) {
 		}
 		entry.Attempts++
 		attempts++
+		kind := triggerKindFromTriggerSource(row.Source)
+		byDayKindAttempts[dayKey+"|"+kind]++
+		if kind == "special" {
+			specialAttempts++
+		} else {
+			dailyAttempts++
+		}
 		result := strings.ToLower(strings.TrimSpace(row.Result))
 		switch result {
 		case "triggered":
 			entry.Triggered++
 			triggered++
+			if kind == "special" {
+				specialTriggered++
+			} else {
+				dailyTriggered++
+			}
 		case "blocked":
 			entry.Blocked++
 			blocked++
+			if kind == "special" {
+				specialBlocked++
+			} else {
+				dailyBlocked++
+			}
 		default:
 			entry.Failed++
 			failed++
+			if kind == "special" {
+				specialFailed++
+			} else {
+				dailyFailed++
+			}
 		}
 		if strings.EqualFold(strings.TrimSpace(row.Reason), "db_locked") {
 			entry.DBLock++
@@ -121,11 +152,11 @@ func (s *Server) handleAdminTriggerAuditSummary(c *gin.Context) {
 	dayRows := make([]gin.H, 0, len(byDay))
 	duplicateAttempts := 0
 	multipleAttemptDays := 0
+	duplicateAttemptsDaily := 0
+	duplicateAttemptsSpecial := 0
+	multipleAttemptDaysDaily := 0
+	multipleAttemptDaysSpecial := 0
 	for dayKey, agg := range byDay {
-		if agg.Attempts > 1 {
-			multipleAttemptDays++
-			duplicateAttempts += agg.Attempts - 1
-		}
 		dayRows = append(dayRows, gin.H{
 			"day":       dayKey,
 			"attempts":  agg.Attempts,
@@ -135,6 +166,25 @@ func (s *Server) handleAdminTriggerAuditSummary(c *gin.Context) {
 			"dbLocked":  agg.DBLock,
 		})
 	}
+	for key, count := range byDayKindAttempts {
+		if count <= 1 {
+			continue
+		}
+		parts := strings.SplitN(key, "|", 2)
+		kind := "daily"
+		if len(parts) == 2 {
+			kind = parts[1]
+		}
+		duplicateAttempts += count - 1
+		if kind == "special" {
+			duplicateAttemptsSpecial += count - 1
+			multipleAttemptDaysSpecial++
+		} else {
+			duplicateAttemptsDaily += count - 1
+			multipleAttemptDaysDaily++
+		}
+	}
+	multipleAttemptDays = multipleAttemptDaysDaily + multipleAttemptDaysSpecial
 	sort.Slice(dayRows, func(i, j int) bool {
 		return fmt.Sprint(dayRows[i]["day"]) > fmt.Sprint(dayRows[j]["day"])
 	})
@@ -162,6 +212,18 @@ func (s *Server) handleAdminTriggerAuditSummary(c *gin.Context) {
 			"dbLocked":            dbLocked,
 			"duplicateAttempts":   duplicateAttempts,
 			"multipleAttemptDays": multipleAttemptDays,
+			"duplicateAttemptsDaily":   duplicateAttemptsDaily,
+			"duplicateAttemptsSpecial": duplicateAttemptsSpecial,
+			"multipleAttemptDaysDaily":   multipleAttemptDaysDaily,
+			"multipleAttemptDaysSpecial": multipleAttemptDaysSpecial,
+			"dailyAttempts":    dailyAttempts,
+			"dailyTriggered":   dailyTriggered,
+			"dailyBlocked":     dailyBlocked,
+			"dailyFailed":      dailyFailed,
+			"specialAttempts":  specialAttempts,
+			"specialTriggered": specialTriggered,
+			"specialBlocked":   specialBlocked,
+			"specialFailed":    specialFailed,
 			"blockedRate":         safeRatio(blocked, maxInt(1, attempts)),
 			"failedRate":          safeRatio(failed, maxInt(1, attempts)),
 		},

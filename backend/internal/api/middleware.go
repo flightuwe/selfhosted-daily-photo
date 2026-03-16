@@ -11,6 +11,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+const activityTouchThrottleWindow = 45 * time.Second
+
 func (s *Server) requireAuth(c *gin.Context) {
 	header := c.GetHeader("Authorization")
 	if header == "" || !strings.HasPrefix(header, "Bearer ") {
@@ -26,13 +28,28 @@ func (s *Server) requireAuth(c *gin.Context) {
 	}
 
 	var user models.User
+	lookupStart := time.Now()
 	if err := s.DB.First(&user, claims.UserID).Error; err != nil {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
 		return
 	}
+	route := c.FullPath()
+	if route == "" {
+		route = c.Request.URL.Path
+	}
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery(route, "auth_user_lookup", time.Since(lookupStart))
+	}
 
 	c.Set("user", user)
-	s.touchDailyUserActivity(user.ID, time.Now().In(s.Location))
+	now := time.Now().In(s.Location)
+	if s.shouldTouchDailyUserActivity(user.ID, now) {
+		touchStart := time.Now()
+		s.touchDailyUserActivity(user.ID, now)
+		if s.Monitor != nil {
+			s.Monitor.RecordDBQuery(route, "auth_activity_touch", time.Since(touchStart))
+		}
+	}
 	c.Next()
 }
 
@@ -77,4 +94,28 @@ func (s *Server) touchDailyUserActivity(userID uint, now time.Time) {
 			"updated_at":    now,
 		}),
 	}).Create(&entry).Error
+}
+
+func (s *Server) shouldTouchDailyUserActivity(userID uint, now time.Time) bool {
+	if userID == 0 {
+		return false
+	}
+	s.activityTouchMu.Lock()
+	defer s.activityTouchMu.Unlock()
+	if s.activityTouchLast == nil {
+		s.activityTouchLast = make(map[uint]time.Time, 64)
+	}
+	if last, ok := s.activityTouchLast[userID]; ok && now.Sub(last) < activityTouchThrottleWindow {
+		return false
+	}
+	s.activityTouchLast[userID] = now
+	if len(s.activityTouchLast) > 5000 {
+		cutoff := now.Add(-24 * time.Hour)
+		for id, ts := range s.activityTouchLast {
+			if ts.Before(cutoff) {
+				delete(s.activityTouchLast, id)
+			}
+		}
+	}
+	return true
 }

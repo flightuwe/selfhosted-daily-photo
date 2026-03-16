@@ -9,7 +9,7 @@ services:
     volumes:
       - ./data/backend:/app/data
       - ./secrets:/app/secrets:ro
-      - ./logs/backend:/app/logs:ro
+      - ./logs/backend:/app/logs
       - ./logs/nginx:/app/gateway-logs:ro
     restart: unless-stopped
 

@@ -1030,6 +1030,9 @@ func buildSLOState(rows []models.APIMinuteMetric, now time.Time, loc *time.Locat
 
 		uploadReq int64
 		uploadErr int64
+		bootstrapP95Peak float64
+		routePeakByKey = make(map[string]float64, 16)
+		routeReqByKey = make(map[string]int64, 16)
 	)
 	for _, row := range rows {
 		totalReq += row.Count
@@ -1043,6 +1046,16 @@ func buildSLOState(rows []models.APIMinuteMetric, now time.Time, loc *time.Locat
 			}
 			if row.P95Latency > feedP95Peak {
 				feedP95Peak = row.P95Latency
+			}
+		}
+		if row.Route == "/api/dashboard/bootstrap" && row.P95Latency > bootstrapP95Peak {
+			bootstrapP95Peak = row.P95Latency
+		}
+		if !strings.Contains(row.Route, "/feed") {
+			key := row.Route + "|" + row.Method
+			routeReqByKey[key] += row.Count
+			if row.P95Latency > routePeakByKey[key] {
+				routePeakByKey[key] = row.P95Latency
 			}
 		}
 		if strings.Contains(row.Route, "/uploads") {
@@ -1093,6 +1106,36 @@ func buildSLOState(rows []models.APIMinuteMetric, now time.Time, loc *time.Locat
 			"unit": "ratio",
 		})
 	}
+	type nonFeedRoute struct {
+		Route string `json:"route"`
+		Method string `json:"method"`
+		P95PeakMs float64 `json:"p95PeakMs"`
+		Requests int64 `json:"requests"`
+	}
+	topNonFeedRoutes := make([]nonFeedRoute, 0, len(routePeakByKey))
+	for key, peak := range routePeakByKey {
+		parts := strings.SplitN(key, "|", 2)
+		route := parts[0]
+		method := ""
+		if len(parts) == 2 {
+			method = parts[1]
+		}
+		topNonFeedRoutes = append(topNonFeedRoutes, nonFeedRoute{
+			Route: route,
+			Method: method,
+			P95PeakMs: perfRoundFloat(peak, 3),
+			Requests: routeReqByKey[key],
+		})
+	}
+	sort.Slice(topNonFeedRoutes, func(i, j int) bool {
+		if topNonFeedRoutes[i].P95PeakMs == topNonFeedRoutes[j].P95PeakMs {
+			return topNonFeedRoutes[i].Requests > topNonFeedRoutes[j].Requests
+		}
+		return topNonFeedRoutes[i].P95PeakMs > topNonFeedRoutes[j].P95PeakMs
+	})
+	if len(topNonFeedRoutes) > 5 {
+		topNonFeedRoutes = topNonFeedRoutes[:5]
+	}
 
 	return gin.H{
 		"evaluatedAt": now.In(loc),
@@ -1100,6 +1143,7 @@ func buildSLOState(rows []models.APIMinuteMetric, now time.Time, loc *time.Locat
 		"status": map[bool]string{true: "breach", false: "ok"}[len(violations) > 0],
 		"metrics": gin.H{
 			"feedP95PeakMs": perfRoundFloat(feedP95Peak, 3),
+			"bootstrapP95PeakMs": perfRoundFloat(bootstrapP95Peak, 3),
 			"global5xxRate": perfRoundFloat(global5xxRate, 4),
 			"uploadErrorRate": perfRoundFloat(uploadErrorRate, 4),
 			"feed4xxRate": perfRoundFloat(feed4xxRate, 4),
@@ -1111,6 +1155,7 @@ func buildSLOState(rows []models.APIMinuteMetric, now time.Time, loc *time.Locat
 			"uploadErrorRate": uploadErrorRateThreshold,
 			"feed4xxRate": feed4xxRateThreshold,
 		},
+		"topNonFeedRoutes": topNonFeedRoutes,
 		"violations": violations,
 	}
 }

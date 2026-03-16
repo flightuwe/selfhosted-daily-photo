@@ -17,6 +17,7 @@ type Config struct {
     PublicBaseURL         string
     Timezone              string
     SchedulerEnabled      bool
+	SchedulerLeaseTimeoutSec int
 	AppVersion            string
 	FCMEnabled            bool
 	FCMProjectID          string
@@ -36,12 +37,13 @@ func Load() Config {
         PublicBaseURL:         getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
         Timezone:              getEnv("APP_TIMEZONE", "Europe/Berlin"),
         SchedulerEnabled:      getBool("SCHEDULER_ENABLED", true),
+		SchedulerLeaseTimeoutSec: getInt("SCHEDULER_LEASE_TIMEOUT_SEC", 60),
 		AppVersion:            getEnv("APP_VERSION", "dev"),
 		FCMEnabled:            getBool("FCM_ENABLED", false),
 		FCMProjectID:          getEnv("FCM_PROJECT_ID", ""),
 		FCMServiceAccountFile: getEnv("FCM_SERVICE_ACCOUNT_FILE", ""),
-		ForensicBackendLogPath: getEnv("FORENSIC_BACKEND_LOG_PATH", ""),
-		ForensicGatewayLogPath: getEnv("FORENSIC_GATEWAY_LOG_PATH", ""),
+		ForensicBackendLogPath: getEnv("FORENSIC_BACKEND_LOG_PATH", "/app/logs/backend.log"),
+		ForensicGatewayLogPath: getEnv("FORENSIC_GATEWAY_LOG_PATH", "/app/gateway-logs/access.log"),
 	}
 }
 
