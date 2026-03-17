@@ -21,7 +21,8 @@ services:
       - DB_PATH=/app/data/app.db
       - UPLOAD_DIR=/app/data/uploads
       - JWT_SECRET=HIER_LANGES_RANDOM_SECRET_EINTRAGEN
-      - TOKEN_TTL_HOURS=72
+      - TOKEN_TTL_HOURS=24
+      - REFRESH_TOKEN_TTL_DAYS=3650
       - CORS_ORIGINS=https://daily.teacloud.synology.me
       - PUBLIC_BASE_URL=https://daily.teacloud.synology.me
       - APP_TIMEZONE=Europe/Berlin

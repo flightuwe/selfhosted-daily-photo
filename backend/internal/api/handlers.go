@@ -86,10 +86,13 @@ func (s *Server) Router() *gin.Engine {
 		api.POST("/auth/register/preview", s.handleInvitePreview)
 		api.POST("/auth/register/confirm", s.handleInviteRegister)
 		api.POST("/auth/login", s.handleLogin)
+		api.POST("/auth/refresh", s.handleAuthRefresh)
 
 		protected := api.Group("")
 		protected.Use(s.requireAuth)
 		{
+			protected.POST("/auth/logout", s.handleAuthLogout)
+			protected.POST("/auth/logout-all", s.handleAuthLogoutAll)
 			protected.GET("/me", s.handleMe)
 			protected.GET("/me/user-prompts/evaluate", s.handleEvaluateUserPrompts)
 			protected.GET("/users/:id/profile", s.handleUserProfile)
@@ -183,8 +186,9 @@ func (s *Server) Router() *gin.Engine {
 }
 
 type authRequest struct {
-	Username string `json:"username" binding:"required,min=3,max=64"`
-	Password string `json:"password" binding:"required,min=6,max=128"`
+	Username   string `json:"username" binding:"required,min=3,max=64"`
+	Password   string `json:"password" binding:"required,min=6,max=128"`
+	DeviceName string `json:"deviceName" binding:"max=120"`
 }
 
 type invitePreviewRequest struct {
@@ -195,6 +199,7 @@ type inviteRegisterRequest struct {
 	InviteCode string `json:"inviteCode" binding:"required,min=6,max=32"`
 	Username   string `json:"username" binding:"required,min=3,max=64"`
 	Password   string `json:"password" binding:"required,min=6,max=128"`
+	DeviceName string `json:"deviceName" binding:"max=120"`
 }
 
 func (s *Server) handleRegister(c *gin.Context) {
@@ -323,10 +328,17 @@ func (s *Server) handleInviteRegister(c *gin.Context) {
 		s.removeInvalidTokens(sendResult.InvalidTokens)
 	}
 
-	token, _ := s.Auth.Sign(user.ID, user.Username, user.IsAdmin)
+	tokens, tokenErr := s.issueSessionTokens(user, req.DeviceName)
+	if tokenErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "session create failed"})
+		return
+	}
 	c.JSON(http.StatusCreated, gin.H{
-		"token": token,
-		"user":  s.userOwnJSON(user),
+		"token":        tokens.AccessToken,
+		"accessToken":  tokens.AccessToken,
+		"refreshToken": tokens.RefreshToken,
+		"sessionId":    tokens.SessionID,
+		"user":         s.userOwnJSON(user),
 		"inviter": gin.H{
 			"id":            inviter.ID,
 			"username":      inviter.Username,
@@ -344,17 +356,27 @@ func (s *Server) handleLogin(c *gin.Context) {
 
 	var user models.User
 	if err := s.DB.Where("username = ?", strings.ToLower(req.Username)).First(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_credentials"})
 		return
 	}
 
 	if !auth.CheckPassword(user.PasswordHash, req.Password) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_credentials"})
 		return
 	}
 
-	token, _ := s.Auth.Sign(user.ID, user.Username, user.IsAdmin)
-	c.JSON(http.StatusOK, gin.H{"token": token, "user": s.userOwnJSON(user)})
+	tokens, tokenErr := s.issueSessionTokens(user, req.DeviceName)
+	if tokenErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "session create failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"token":        tokens.AccessToken,
+		"accessToken":  tokens.AccessToken,
+		"refreshToken": tokens.RefreshToken,
+		"sessionId":    tokens.SessionID,
+		"user":         s.userOwnJSON(user),
+	})
 }
 
 func (s *Server) handleMe(c *gin.Context) {
@@ -746,6 +768,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
 		return
 	}
+	s.revokeAllSessionsByUserID(user.ID)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

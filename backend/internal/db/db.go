@@ -28,6 +28,7 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.User{},
 		&models.InviteCode{},
 		&models.DeviceToken{},
+		&models.UserSession{},
 		&models.AppSettings{},
 		&models.SchedulerLease{},
 		&models.DailyDispatch{},

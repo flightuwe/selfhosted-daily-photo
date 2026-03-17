@@ -53,6 +53,21 @@ type DeviceToken struct {
 	CreatedAt  time.Time
 }
 
+type UserSession struct {
+	ID               uint       `gorm:"primaryKey" json:"id"`
+	SessionID        string     `gorm:"uniqueIndex;size:64;not null" json:"sessionId"`
+	UserID           uint       `gorm:"index;not null" json:"userId"`
+	RefreshTokenHash string     `gorm:"uniqueIndex;size:128;not null" json:"-"`
+	DeviceID         string     `gorm:"size:120;index" json:"deviceId"`
+	DeviceName       string     `gorm:"size:120" json:"deviceName"`
+	LastUsedAt       time.Time  `gorm:"index;not null" json:"lastUsedAt"`
+	ExpiresAt        *time.Time `gorm:"index" json:"expiresAt"`
+	RevokedAt        *time.Time `gorm:"index" json:"revokedAt"`
+	ReplacedByID     *uint      `gorm:"index" json:"replacedById"`
+	CreatedAt        time.Time  `gorm:"index" json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+}
+
 type AppSettings struct {
 	ID                      uint      `gorm:"primaryKey" json:"id"`
 	PromptWindowStartHour   int       `gorm:"default:8" json:"promptWindowStartHour"`

@@ -13,6 +13,7 @@ type Config struct {
 	UploadDir             string
     JWTSecret             string
     TokenTTL              time.Duration
+	RefreshTokenTTL       time.Duration
     AllowedOrigins        []string
     PublicBaseURL         string
     Timezone              string
@@ -32,7 +33,8 @@ func Load() Config {
         DatabasePath:          getEnv("DB_PATH", "./data/app.db"),
         UploadDir:             getEnv("UPLOAD_DIR", "./data/uploads"),
         JWTSecret:             getEnv("JWT_SECRET", "dev-secret-change-me"),
-        TokenTTL:              time.Duration(getInt("TOKEN_TTL_HOURS", 72)) * time.Hour,
+        TokenTTL:              time.Duration(getInt("TOKEN_TTL_HOURS", 24)) * time.Hour,
+		RefreshTokenTTL:       time.Duration(getInt("REFRESH_TOKEN_TTL_DAYS", 3650)) * 24 * time.Hour,
         AllowedOrigins:        splitCSV(getEnv("CORS_ORIGINS", "*")),
         PublicBaseURL:         getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
         Timezone:              getEnv("APP_TIMEZONE", "Europe/Berlin"),

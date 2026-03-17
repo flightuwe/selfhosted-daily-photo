@@ -261,6 +261,17 @@ function debugMetaHint(meta: string): string {
   return "";
 }
 
+function debugMetaValue(meta: string, key: string): string {
+  const token = `${key}=`;
+  const parts = (meta || "").split(";");
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed.toLowerCase().startsWith(token.toLowerCase())) continue;
+    return trimmed.slice(token.length).trim();
+  }
+  return "";
+}
+
 function normalizeMomentKind(momentKind?: string, triggerSource?: string): "daily" | "special" {
   const kind = (momentKind || "").trim().toLowerCase();
   if (kind === "special" || kind === "daily") return kind;
@@ -503,6 +514,39 @@ export function App() {
       uniqueUsers,
       topType,
       newestAt: debugLogs[0]?.createdAt || "",
+    };
+  }, [debugLogs]);
+  const authFailureSummary = useMemo(() => {
+    const authRows = debugLogs.filter((row) => {
+      const t = (row.type || "").toLowerCase();
+      return t.startsWith("auth_") || t === "dashboard_load_failed";
+    });
+    const failureRows = authRows.filter((row) => {
+      const type = (row.type || "").toLowerCase();
+      if (type.includes("failed")) return true;
+      const failureClass = debugMetaValue(row.meta || "", "failureClass").toLowerCase();
+      const http = debugMetaValue(row.meta || "", "http");
+      return failureClass.startsWith("http_4") || failureClass.startsWith("http_5") || http.startsWith("4") || http.startsWith("5");
+    });
+    const reasonCounts = failureRows.reduce<Record<string, number>>((acc, row) => {
+      const reason =
+        debugMetaValue(row.meta || "", "failureClass") ||
+        debugMetaValue(row.meta || "", "error") ||
+        row.type ||
+        "unknown";
+      acc[reason] = (acc[reason] || 0) + 1;
+      return acc;
+    }, {});
+    const versionCounts = failureRows.reduce<Record<string, number>>((acc, row) => {
+      const version = (row.appVersion || "").trim() || "-";
+      acc[version] = (acc[version] || 0) + 1;
+      return acc;
+    }, {});
+    return {
+      total: failureRows.length,
+      uniqueUsers: new Set(failureRows.map((row) => row.user?.id).filter(Boolean)).size,
+      topReason: Object.entries(reasonCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "-",
+      topVersion: Object.entries(versionCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "-",
     };
   }, [debugLogs]);
   const reduceMotion = useMemo(() => {
@@ -3608,6 +3652,10 @@ export function App() {
                 <CardStat title="Betroffene Nutzer" value={debugSummary.uniqueUsers} />
                 <CardStat title="Haeufigster Typ" value={debugTypeLabel(debugSummary.topType)} />
                 <CardStat title="Juengster Eintrag" value={debugSummary.newestAt ? formatDateTime(debugSummary.newestAt) : "-"} />
+                <CardStat title="Auth-Fehler" value={authFailureSummary.total} />
+                <CardStat title="Auth Nutzer" value={authFailureSummary.uniqueUsers} />
+                <CardStat title="Auth Top-Reason" value={authFailureSummary.topReason} />
+                <CardStat title="Auth Top-Version" value={authFailureSummary.topVersion} />
               </div>
               <p className="small">
                 {debugFilterInfo.since
@@ -4036,6 +4084,16 @@ function debugTypeLabel(value: string) {
   switch (value) {
     case "dashboard_load_failed":
       return "Dashboard";
+    case "auth_login_failed":
+      return "Auth Login Fehler";
+    case "auth_refresh_failed":
+      return "Auth Refresh Fehler";
+    case "auth_register_failed":
+      return "Auth Register Fehler";
+    case "auth_logout_failed":
+      return "Auth Logout Fehler";
+    case "auth_logout_all_failed":
+      return "Auth Logout-All Fehler";
     case "profile_open_failed":
       return "Profil Fehler";
     case "crash_unhandled":
@@ -4050,6 +4108,12 @@ function debugTypeLabel(value: string) {
 function debugTypeClass(value: string) {
   switch (value) {
     case "dashboard_load_failed":
+    case "auth_login_failed":
+    case "auth_refresh_failed":
+    case "auth_register_failed":
+      return "warn";
+    case "auth_logout_failed":
+    case "auth_logout_all_failed":
       return "warn";
     case "profile_open_failed":
     case "crash_unhandled":

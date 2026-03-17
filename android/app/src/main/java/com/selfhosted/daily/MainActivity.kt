@@ -273,10 +273,22 @@ data class UserPromptEvaluationResponse(
     val items: List<UserPromptRule> = emptyList(),
     val appVersion: String = ""
 )
-data class AuthResponse(val token: String, val user: User)
-data class LoginRequest(val username: String, val password: String)
+data class AuthResponse(
+    val token: String = "",
+    val accessToken: String = "",
+    val refreshToken: String = "",
+    val sessionId: String = "",
+    val user: User
+)
+data class LoginRequest(val username: String, val password: String, val deviceName: String? = null)
 data class InviteCodeRequest(val inviteCode: String)
-data class InviteRegisterRequest(val inviteCode: String, val username: String, val password: String)
+data class InviteRegisterRequest(
+    val inviteCode: String,
+    val username: String,
+    val password: String,
+    val deviceName: String? = null
+)
+data class RefreshRequest(val refreshToken: String)
 data class InviteOwner(val id: Long, val username: String, val favoriteColor: String = "#1F5FBF")
 data class InvitePreviewResponse(val inviteCode: String, val inviter: InviteOwner)
 data class InviteCodeResponse(val inviteCode: String)
@@ -549,11 +561,20 @@ interface Api {
     @POST("auth/login")
     suspend fun login(@Body body: LoginRequest): AuthResponse
 
+    @POST("auth/refresh")
+    suspend fun refresh(@Body body: RefreshRequest): AuthResponse
+
     @POST("auth/register/preview")
     suspend fun previewInvite(@Body body: InviteCodeRequest): InvitePreviewResponse
 
     @POST("auth/register/confirm")
     suspend fun registerWithInvite(@Body body: InviteRegisterRequest): AuthResponse
+
+    @POST("auth/logout")
+    suspend fun logout(@Header("Authorization") token: String)
+
+    @POST("auth/logout-all")
+    suspend fun logoutAll(@Header("Authorization") token: String)
 
     @GET("me")
     suspend fun me(@Header("Authorization") token: String): MeResponse
@@ -743,8 +764,19 @@ class AppRepo(
     private val promptSeenVersionPrefix = "user_prompt_seen_version_"
     private val debugMaxEntries = 500
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
+    private val refreshMutex = Mutex()
 
-    fun token(): String = prefs.getString("token", "") ?: ""
+    fun token(): String = accessToken()
+
+    private fun accessToken(): String {
+        val access = prefs.getString("access_token", "") ?: ""
+        if (access.isNotBlank()) return access
+        return prefs.getString("token", "") ?: ""
+    }
+
+    private fun refreshToken(): String = prefs.getString("refresh_token", "") ?: ""
+
+    private fun currentSessionId(): String = prefs.getString("session_id", "") ?: ""
 
     fun resolvedApiBaseUrl(): String = resolveApiBaseUrl(context)
 
@@ -775,12 +807,78 @@ class AppRepo(
     }
 
     fun saveToken(token: String) {
-        prefs.edit().putString("token", token).apply()
+        val clean = token.trim()
+        prefs.edit()
+            .putString("token", clean)
+            .putString("access_token", clean)
+            .apply()
+    }
+
+    private fun saveAuthSession(auth: AuthResponse) {
+        val access = auth.accessToken.trim().ifBlank { auth.token.trim() }
+        val refresh = auth.refreshToken.trim()
+        val sessionId = auth.sessionId.trim()
+        prefs.edit().apply {
+            putString("token", access)
+            putString("access_token", access)
+            if (refresh.isNotBlank()) putString("refresh_token", refresh) else remove("refresh_token")
+            if (sessionId.isNotBlank()) putString("session_id", sessionId) else remove("session_id")
+        }.apply()
     }
 
     fun clearToken() {
-        prefs.edit().remove("token").apply()
+        prefs.edit()
+            .remove("token")
+            .remove("access_token")
+            .remove("refresh_token")
+            .remove("session_id")
+            .apply()
         UploadQueueManager.clear(context)
+    }
+
+    private fun authHeader(): String = "Bearer ${accessToken()}"
+
+    private suspend fun tryRefreshSessionLocked(): Boolean {
+        val oldRefresh = refreshToken().trim()
+        if (oldRefresh.isBlank()) return false
+        val response = runCatching { api.refresh(RefreshRequest(oldRefresh)) }.getOrElse { return false }
+        val nextAccess = response.accessToken.trim().ifBlank { response.token.trim() }
+        val nextRefresh = response.refreshToken.trim()
+        if (nextAccess.isBlank() || nextRefresh.isBlank()) return false
+        saveAuthSession(response)
+        return true
+    }
+
+    private suspend fun tryRefreshSession(): Boolean {
+        refreshMutex.lock()
+        return try {
+            tryRefreshSessionLocked()
+        } finally {
+            refreshMutex.unlock()
+        }
+    }
+
+    private suspend fun <T> authorizedCall(endpoint: String, block: suspend (header: String) -> T): T {
+        val firstHeader = authHeader()
+        if (firstHeader.length <= "Bearer ".length) {
+            throw IllegalStateException("missing_access_token")
+        }
+        try {
+            return block(firstHeader)
+        } catch (http: HttpException) {
+            if (http.code() != 401) throw http
+            val refreshed = tryRefreshSession()
+            if (!refreshed) {
+                logDebug(
+                    type = "auth_refresh_failed",
+                    message = "Session-Refresh fehlgeschlagen",
+                    meta = "endpoint=$endpoint;http=401;failureClass=token_expired_refresh_failed;sessionId=${currentSessionId().ifBlank { "-" }}"
+                )
+                clearToken()
+                throw IllegalStateException("token_expired_refresh_failed", http)
+            }
+            return block(authHeader())
+        }
     }
 
     fun diagnosticsUploadEnabled(): Boolean = prefs.getBoolean(debugUploadEnabledKey, false)
@@ -916,18 +1014,20 @@ class AppRepo(
             runCatching {
                 val inferredRequestId = extractRequestIdFromMeta(row.meta)
                 val requestId = inferredRequestId.ifBlank { "dbg_${row.id}" }
-                api.uploadClientDebugLog(
-                    "Bearer ${token()}",
-                    ClientDebugLogUploadRequest(
-                        type = row.type,
-                        message = row.message,
-                        meta = row.meta,
-                        appVersion = BuildConfig.VERSION_NAME,
-                        deviceName = currentDeviceName(),
-                        sessionId = sessionId,
-                        requestId = requestId
+                authorizedCall("/api/debug/client-log") { token ->
+                    api.uploadClientDebugLog(
+                        token,
+                        ClientDebugLogUploadRequest(
+                            type = row.type,
+                            message = row.message,
+                            meta = row.meta,
+                            appVersion = BuildConfig.VERSION_NAME,
+                            deviceName = currentDeviceName(),
+                            sessionId = sessionId,
+                            requestId = requestId
+                        )
                     )
-                )
+                }
             }.onSuccess { sent += 1 }
         }
         if (sent > 0) {
@@ -1020,6 +1120,35 @@ class AppRepo(
 
     fun syncAutoUpdateScheduler() {
         UpdateCheckScheduler.syncFromPrefs(context)
+    }
+
+    fun markUpdateInstallPending(targetVersion: String) {
+        val clean = targetVersion.trim()
+        if (clean.isBlank()) return
+        prefs.edit()
+            .putString("update_pending_target_version", clean)
+            .putLong("update_pending_started_at", System.currentTimeMillis())
+            .apply()
+    }
+
+    fun clearPendingUpdateMarker() {
+        prefs.edit()
+            .remove("update_pending_target_version")
+            .remove("update_pending_started_at")
+            .apply()
+    }
+
+    fun pendingUpdateInstallWarning(currentVersion: String): String? {
+        val target = prefs.getString("update_pending_target_version", "")?.trim().orEmpty()
+        if (target.isBlank()) return null
+        if (isVersionNewer(currentVersion, target) || currentVersion.trim().equals(target, ignoreCase = true)) {
+            clearPendingUpdateMarker()
+            return null
+        }
+        val startedAt = prefs.getLong("update_pending_started_at", 0L)
+        val ageMin = if (startedAt > 0L) ((System.currentTimeMillis() - startedAt) / 60_000L).coerceAtLeast(0L) else 0L
+        return "Update auf $target noch nicht aktiv (installiert: $currentVersion). APK bitte erneut installieren und Installer-Bestaetigung abschliessen."
+            .let { if (ageMin > 0L) "$it (gestartet vor ${ageMin}m)" else it }
     }
 
     fun notificationMasterEnabled(): Boolean = prefs.getBoolean("notifications_master_enabled", true)
@@ -1220,8 +1349,8 @@ class AppRepo(
     }
 
     suspend fun login(username: String, password: String): User {
-        val res = api.login(LoginRequest(username, password))
-        saveToken(res.token)
+        val res = api.login(LoginRequest(username, password, deviceName = currentDeviceName()))
+        saveAuthSession(res)
         return res.user
     }
 
@@ -1229,19 +1358,28 @@ class AppRepo(
         api.previewInvite(InviteCodeRequest(inviteCode.trim()))
 
     suspend fun registerWithInvite(inviteCode: String, username: String, password: String): User {
-        val res = api.registerWithInvite(InviteRegisterRequest(inviteCode.trim(), username, password))
-        saveToken(res.token)
+        val res = api.registerWithInvite(
+            InviteRegisterRequest(
+                inviteCode = inviteCode.trim(),
+                username = username,
+                password = password,
+                deviceName = currentDeviceName()
+            )
+        )
+        saveAuthSession(res)
         return res.user
     }
 
     suspend fun health(): HealthResponse = api.health()
     suspend fun probeHealth(baseUrl: String): HealthResponse =
         buildApiService(baseUrl, httpClient).health()
-    suspend fun me(): MeResponse = api.me("Bearer ${token()}")
+    suspend fun me(): MeResponse = authorizedCall("/api/me") { token -> api.me(token) }
     suspend fun evaluateUserPrompts(appVersion: String): UserPromptEvaluationResponse =
-        api.evaluateUserPrompts("Bearer ${token()}", appVersion)
-    suspend fun myInviteCode(): String = api.myInviteCode("Bearer ${token()}").inviteCode
-    suspend fun rollMyInviteCode(): String = api.rollInviteCode("Bearer ${token()}").inviteCode
+        authorizedCall("/api/me/user-prompts/evaluate") { token -> api.evaluateUserPrompts(token, appVersion) }
+    suspend fun myInviteCode(): String =
+        authorizedCall("/api/me/invite") { token -> api.myInviteCode(token).inviteCode }
+    suspend fun rollMyInviteCode(): String =
+        authorizedCall("/api/me/invite/roll") { token -> api.rollInviteCode(token).inviteCode }
     suspend fun updateProfile(
         username: String,
         favoriteColor: String,
@@ -1257,8 +1395,8 @@ class AppRepo(
         quietHoursStart: String,
         quietHoursEnd: String
     ): User =
-        api.updateProfile(
-            "Bearer ${token()}",
+        authorizedCall("/api/me/profile") { token -> api.updateProfile(
+            token,
             ProfileUpdateRequest(
                 username = username,
                 favoriteColor = favoriteColor,
@@ -1274,7 +1412,7 @@ class AppRepo(
                 quietHoursStart = quietHoursStart,
                 quietHoursEnd = quietHoursEnd
             )
-        ).user
+        ) }.user
 
     suspend fun uploadAvatar(uri: Uri): User {
         val file = copyUriToTemp(uri)
@@ -1283,7 +1421,7 @@ class AppRepo(
             file.name,
             file.asRequestBody("image/*".toMediaTypeOrNull())
         )
-        return api.uploadAvatar("Bearer ${token()}", part).user
+        return authorizedCall("/api/me/avatar") { token -> api.uploadAvatar(token, part) }.user
     }
 
     suspend fun updatePreferences(
@@ -1296,8 +1434,8 @@ class AppRepo(
         diagnosticsConsentGranted: Boolean? = null,
         diagnosticsConsentSource: String? = null
     ): User =
-        api.updatePreferences(
-            "Bearer ${token()}",
+        authorizedCall("/api/me/preferences") { token -> api.updatePreferences(
+            token,
             PreferencesUpdateRequest(
                 chatPushEnabled = chatPushEnabled,
                 pollPushEnabled = pollPushEnabled,
@@ -1308,73 +1446,106 @@ class AppRepo(
                 diagnosticsConsentGranted = diagnosticsConsentGranted,
                 diagnosticsConsentSource = diagnosticsConsentSource
             )
-        ).user
+        ) }.user
 
-    suspend fun prompt(): PromptResponse = api.prompt("Bearer ${token()}")
-    suspend fun promptRules(): PromptRulesResponse = api.promptRules("Bearer ${token()}")
+    suspend fun prompt(): PromptResponse = authorizedCall("/api/prompt/current") { token -> api.prompt(token) }
+    suspend fun promptRules(): PromptRulesResponse =
+        authorizedCall("/api/prompt/rules") { token -> api.promptRules(token) }
     suspend fun dashboardBootstrap(
         includeChat: Boolean = true,
         includePhotos: Boolean = true,
         includeCommunity: Boolean = true
-    ): DashboardBootstrapResponse = api.dashboardBootstrap(
-        "Bearer ${token()}",
-        includeChat = includeChat,
-        includePhotos = includePhotos,
-        includeCommunity = includeCommunity
-    )
-    suspend fun specialMomentStatus(): SpecialMomentStatus = api.specialMomentStatus("Bearer ${token()}")
-    suspend fun requestSpecialMoment() { api.requestSpecialMoment("Bearer ${token()}") }
-
-    suspend fun feedByDay(day: String): FeedResponse = api.feed("Bearer ${token()}", day)
-    suspend fun feedDays(from: String? = null, to: String? = null): List<String> =
-        api.feedDays("Bearer ${token()}", from, to).items
-    suspend fun feedDayStats(from: String? = null, to: String? = null): List<DayStatItem> =
-        api.feedDayStats("Bearer ${token()}", from, to).items
-    suspend fun communityStats(): CommunityStatsResponse = api.communityStats("Bearer ${token()}")
-
-    suspend fun myPhotos(): List<PromptPhoto> = api.myPhotos("Bearer ${token()}").items
-
-    suspend fun userProfile(userId: Long): UserProfileResponse = api.userProfile("Bearer ${token()}", userId)
-
-    suspend fun deleteMyPhoto(photoId: Long) {
-        api.deleteMyPhoto("Bearer ${token()}", photoId)
+    ): DashboardBootstrapResponse = authorizedCall("/api/dashboard/bootstrap") { token ->
+        api.dashboardBootstrap(
+            token,
+            includeChat = includeChat,
+            includePhotos = includePhotos,
+            includeCommunity = includeCommunity
+        )
+    }
+    suspend fun specialMomentStatus(): SpecialMomentStatus =
+        authorizedCall("/api/moment/special/status") { token -> api.specialMomentStatus(token) }
+    suspend fun requestSpecialMoment() {
+        authorizedCall("/api/moment/special/request") { token -> api.requestSpecialMoment(token) }
     }
 
-    suspend fun listChat(): List<ChatItem> = api.chat("Bearer ${token()}").items
+    suspend fun feedByDay(day: String): FeedResponse = authorizedCall("/api/feed") { token -> api.feed(token, day) }
+    suspend fun feedDays(from: String? = null, to: String? = null): List<String> =
+        authorizedCall("/api/feed/days") { token -> api.feedDays(token, from, to).items }
+    suspend fun feedDayStats(from: String? = null, to: String? = null): List<DayStatItem> =
+        authorizedCall("/api/feed/day-stats") { token -> api.feedDayStats(token, from, to).items }
+    suspend fun communityStats(): CommunityStatsResponse =
+        authorizedCall("/api/community/stats") { token -> api.communityStats(token) }
+
+    suspend fun myPhotos(): List<PromptPhoto> = authorizedCall("/api/me/photos") { token -> api.myPhotos(token).items }
+
+    suspend fun userProfile(userId: Long): UserProfileResponse =
+        authorizedCall("/api/users/:id/profile") { token -> api.userProfile(token, userId) }
+
+    suspend fun deleteMyPhoto(photoId: Long) {
+        authorizedCall("/api/me/photos/:id") { token -> api.deleteMyPhoto(token, photoId) }
+    }
+
+    suspend fun listChat(): List<ChatItem> = authorizedCall("/api/chat") { token -> api.chat(token).items }
 
     suspend fun sendChat(body: String, clientMessageId: String): ChatSendResponse {
-        return api.sendChat(
-            "Bearer ${token()}",
+        return authorizedCall("/api/chat") { token -> api.sendChat(
+            token,
             ChatMessageRequest(body = body, clientMessageId = clientMessageId)
-        )
+        ) }
     }
 
     suspend fun createChatPoll(question: String, options: List<String>, allowMultiSelect: Boolean): ChatItem =
-        api.createChatPoll(
-            "Bearer ${token()}",
+        authorizedCall("/api/chat/polls") { token -> api.createChatPoll(
+            token,
             ChatPollCreateRequest(question = question, options = options, allowMultiSelect = allowMultiSelect)
-        )
+        ) }
 
     suspend fun voteChatPoll(id: Long, optionIds: List<Long>): ChatPollUpdateResponse =
-        api.voteChatPoll("Bearer ${token()}", id, ChatPollVoteRequest(optionIds))
+        authorizedCall("/api/chat/polls/:id/vote") { token -> api.voteChatPoll(token, id, ChatPollVoteRequest(optionIds)) }
 
     suspend fun closeChatPoll(id: Long): ChatPollUpdateResponse =
-        api.closeChatPoll("Bearer ${token()}", id)
+        authorizedCall("/api/chat/polls/:id/close") { token -> api.closeChatPoll(token, id) }
 
     suspend fun deleteChatMessage(id: Long): DeleteChatResponse =
-        api.deleteChatMessage("Bearer ${token()}", id)
+        authorizedCall("/api/chat/:id") { token -> api.deleteChatMessage(token, id) }
 
     suspend fun photoInteractions(photoId: Long): PhotoInteractionsResponse =
-        api.photoInteractions("Bearer ${token()}", photoId)
+        authorizedCall("/api/photos/:id/interactions") { token -> api.photoInteractions(token, photoId) }
 
     suspend fun reactPhoto(photoId: Long, emoji: String): PhotoInteractionsResponse =
-        api.reactPhoto("Bearer ${token()}", photoId, PhotoReactionRequest(emoji))
+        authorizedCall("/api/photos/:id/reaction") { token -> api.reactPhoto(token, photoId, PhotoReactionRequest(emoji)) }
 
     suspend fun commentPhoto(photoId: Long, body: String): PhotoInteractionsResponse =
-        api.commentPhoto("Bearer ${token()}", photoId, 0, PhotoCommentRequest(body))
+        authorizedCall("/api/photos/:id/comments") { token -> api.commentPhoto(token, photoId, 0, PhotoCommentRequest(body)) }
 
     suspend fun changePassword(currentPassword: String, newPassword: String) {
-        api.changePassword("Bearer ${token()}", PasswordChangeRequest(currentPassword, newPassword))
+        authorizedCall("/api/me/password") { token -> api.changePassword(token, PasswordChangeRequest(currentPassword, newPassword)) }
+    }
+
+    suspend fun logoutRemoteSafe(accessTokenOverride: String = "") {
+        val effectiveToken = accessTokenOverride.trim().ifBlank { token() }
+        if (effectiveToken.isBlank()) return
+        runCatching { api.logout("Bearer $effectiveToken") }
+            .onFailure {
+                logDebug(
+                    type = "auth_logout_failed",
+                    message = it.message ?: "logout failed",
+                    meta = "endpoint=/api/auth/logout;failureClass=${it::class.java.simpleName}"
+                )
+            }
+    }
+
+    suspend fun logoutAllRemoteSafe() {
+        if (token().isBlank()) return
+        runCatching { authorizedCall("/api/auth/logout-all") { token -> api.logoutAll(token) } }
+            .onFailure {
+                logDebug(
+                    type = "auth_logout_all_failed",
+                    message = it.message ?: "logout-all failed",
+                    meta = "endpoint=/api/auth/logout-all;failureClass=${it::class.java.simpleName}"
+                )
+            }
     }
 
     suspend fun syncDeviceTokenIfNeeded(force: Boolean = false) {
@@ -1387,7 +1558,7 @@ class AppRepo(
         val recentSync = (System.currentTimeMillis() - lastSyncedDeviceTokenAt()) < 6 * 60 * 60 * 1000L
         if (!force && sameToken && recentSync) return
 
-        api.registerDevice("Bearer ${token()}", DeviceTokenRequest(deviceToken, currentDeviceName()))
+        authorizedCall("/api/devices") { token -> api.registerDevice(token, DeviceTokenRequest(deviceToken, currentDeviceName())) }
         setLastSyncedDeviceToken(deviceToken)
         prefs.edit().remove("pending_fcm_token").apply()
     }
@@ -1415,7 +1586,7 @@ class AppRepo(
         val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
-        api.upload("Bearer ${token()}", part, kind, capsuleMode, capsulePrivate, capsuleGroup)
+        authorizedCall("/api/uploads") { token -> api.upload(token, part, kind, capsuleMode, capsulePrivate, capsuleGroup) }
     }
 
     suspend fun uploadDual(
@@ -1459,7 +1630,9 @@ class AppRepo(
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         emit()
-        api.uploadDual("Bearer ${token()}", backPart, frontPart, kind, capsuleMode, capsulePrivate, capsuleGroup)
+        authorizedCall("/api/uploads/dual") { token ->
+            api.uploadDual(token, backPart, frontPart, kind, capsuleMode, capsulePrivate, capsuleGroup)
+        }
         onProgress(totalBytes, totalBytes)
     }
 
@@ -1505,7 +1678,9 @@ class AppRepo(
             .setAllowedOverMetered(true)
             .setAllowedOverRoaming(true)
         val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        return dm.enqueue(request)
+        val id = dm.enqueue(request)
+        markUpdateInstallPending(update.latestVersion)
+        return id
     }
 
     fun downloadPhotoToDownloads(photoUrl: String): Long {
@@ -2031,6 +2206,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             debugLogs = repo.recentDebugLogs(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         )
+        repo.pendingUpdateInstallWarning(BuildConfig.VERSION_NAME)?.let { warning ->
+            state = state.copy(message = warning)
+        }
         runCatching { checkForUpdate(silent = true) }
         logPerfEvent(
             event = "app_start",
@@ -2048,6 +2226,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
             refreshAll()
         } catch (t: Throwable) {
+            logApiFailure("auth_login_failed", "/api/auth/login", t, "username=${username.trim().lowercase()}")
             state = state.copy(loading = false, message = apiError(t, "Login fehlgeschlagen"))
         }
     }
@@ -2076,6 +2255,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 refreshAll()
             }
             .onFailure {
+                logApiFailure("auth_register_failed", "/api/auth/register/confirm", it, "username=${username.trim().lowercase()}")
                 state = state.copy(loading = false, message = apiError(it, "Registrierung fehlgeschlagen"))
             }
     }
@@ -2089,6 +2269,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun logout() {
+        val tokenSnapshot = repo.token()
+        viewModelScope.launch {
+            repo.logoutRemoteSafe(tokenSnapshot)
+        }
         repo.clearToken()
         profileSetupPromptShownInSession = false
         state = UiState(
@@ -8160,11 +8344,22 @@ private fun hsvToHex(h: Float, s: Float, v: Float): String {
 }
 
 private fun apiError(t: Throwable, fallback: String): String {
+    if (t is IllegalStateException) {
+        return when (t.message?.trim().orEmpty()) {
+            "token_expired_refresh_failed" -> "Sitzung abgelaufen. Bitte erneut einloggen."
+            "missing_access_token" -> "Bitte einloggen."
+            else -> fallback
+        }
+    }
     if (t is HttpException) {
         val raw = runCatching { t.response()?.errorBody()?.string().orEmpty() }.getOrDefault("").lowercase()
         return when (t.code()) {
             400 -> "Ungueltige Eingabe"
-            401 -> "Login fehlgeschlagen"
+            401 -> when {
+                raw.contains("invalid_credentials") -> "Login fehlgeschlagen"
+                raw.contains("session_revoked") -> "Sitzung wurde beendet. Bitte erneut einloggen."
+                else -> "Nicht autorisiert. Bitte erneut einloggen."
+            }
             404 -> when {
                 raw.contains("invite code not found") -> "Invite-Code nicht gefunden oder bereits benutzt."
                 else -> fallback

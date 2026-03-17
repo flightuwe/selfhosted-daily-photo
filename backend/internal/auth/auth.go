@@ -17,6 +17,8 @@ type Claims struct {
     UserID   uint   `json:"userId"`
     Username string `json:"username"`
     IsAdmin  bool   `json:"isAdmin"`
+	SessionID string `json:"sid,omitempty"`
+	TokenType string `json:"typ,omitempty"`
     jwt.RegisteredClaims
 }
 
@@ -34,11 +36,17 @@ func CheckPassword(hash, raw string) bool {
 }
 
 func (m *Manager) Sign(userID uint, username string, isAdmin bool) (string, error) {
+    return m.SignAccess(userID, username, isAdmin, "")
+}
+
+func (m *Manager) SignAccess(userID uint, username string, isAdmin bool, sessionID string) (string, error) {
     now := time.Now().UTC()
     claims := Claims{
         UserID:   userID,
         Username: username,
         IsAdmin:  isAdmin,
+        SessionID: sessionID,
+        TokenType: "access",
         RegisteredClaims: jwt.RegisteredClaims{
             IssuedAt:  jwt.NewNumericDate(now),
             ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl)),
