@@ -43,6 +43,8 @@ import {
   downloadIncidentExport,
   downloadTriggerAuditExport,
   downloadAdminMigrationExport,
+  exportAdminMigrationLinkToken,
+  importAdminMigrationLinkToken,
   getReports,
   getAdminPerformanceOverview,
   getAdminPerformanceRoutes,
@@ -84,6 +86,7 @@ import {
   type AdminIncidentExportStatus,
   type AdminTriggerRuntimeResponse,
   type AdminMigrationInfo,
+  type AdminMigrationLinkExportResponse,
   type AdminTriggerAuditItem,
   type AdminTriggerAuditSummary,
   type AdminSearchResult,
@@ -487,6 +490,13 @@ export function App() {
   const [migrationAutoOffEnabled, setMigrationAutoOffEnabled] = useState(true);
   const [migrationExpectedSource, setMigrationExpectedSource] = useState("");
   const [migrationCallbackSecret, setMigrationCallbackSecret] = useState("");
+  const [migrationReportEnabled, setMigrationReportEnabled] = useState(false);
+  const [migrationReportTarget, setMigrationReportTarget] = useState("");
+  const [migrationReportSource, setMigrationReportSource] = useState("");
+  const [migrationReportSecret, setMigrationReportSecret] = useState("");
+  const [migrationLinkRole, setMigrationLinkRole] = useState<"old" | "new">("old");
+  const [migrationLinkExport, setMigrationLinkExport] = useState<AdminMigrationLinkExportResponse | null>(null);
+  const [migrationLinkImportToken, setMigrationLinkImportToken] = useState("");
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
@@ -922,6 +932,9 @@ export function App() {
       setMigrationRequirePromptFirst(Boolean(migration.migration.requirePromptFirst));
       setMigrationAutoOffEnabled(Boolean(migration.migration.autoOffEnabled));
       setMigrationExpectedSource(migration.migration.callbackExpectedSource || "");
+      setMigrationReportEnabled(Boolean(migration.migration.reportEnabled));
+      setMigrationReportTarget(migration.migration.reportTarget || "");
+      setMigrationReportSource(migration.migration.reportSource || "");
     } catch (err) {
       setMessage((err as Error).message);
       setToken("");
@@ -1438,6 +1451,9 @@ export function App() {
     if (activeTab === "migration") {
       const migration = await getAdminMigration(token);
       setMigrationInfo(migration.migration);
+      setMigrationReportEnabled(Boolean(migration.migration.reportEnabled));
+      setMigrationReportTarget(migration.migration.reportTarget || "");
+      setMigrationReportSource(migration.migration.reportSource || "");
     }
   }
 
@@ -1565,9 +1581,14 @@ export function App() {
         migrationRequirePromptFirst,
         migrationExpectedSource: migrationExpectedSource,
         migrationCallbackSecret: migrationCallbackSecret.trim() || undefined,
+        migrationReportEnabled,
+        migrationReportTarget: migrationReportTarget,
+        migrationReportSource: migrationReportSource,
+        migrationReportSecret: migrationReportSecret.trim() || undefined,
       });
       setMigrationInfo(next.migration);
       setMigrationCallbackSecret("");
+      setMigrationReportSecret("");
       setMessage("Migrations-Einstellungen gespeichert.");
     } catch (err) {
       setMessage((err as Error).message);
@@ -1605,6 +1626,39 @@ export function App() {
         body: migrationPushBody,
       });
       setMessage(`Migrations-Push gesendet (sent=${result.sentTo}, failed=${result.failed}).`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onExportMigrationLinkToken() {
+    setMessage("");
+    try {
+      const data = await exportAdminMigrationLinkToken(token, migrationLinkRole);
+      setMigrationLinkExport(data);
+      setMessage(`Kopplungs-Token erzeugt (${data.instanceRole} -> ${data.hints?.pasteTokenOn || "-"})`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onImportMigrationLinkToken() {
+    setMessage("");
+    const raw = migrationLinkImportToken.trim();
+    if (!raw) {
+      setMessage("Bitte zuerst einen Token einfuegen.");
+      return;
+    }
+    try {
+      const data = await importAdminMigrationLinkToken(token, raw);
+      setMigrationInfo(data.migration);
+      setMigrationTargetUrl(data.migration.targetBaseUrl || "");
+      setMigrationExpectedSource(data.migration.callbackExpectedSource || "");
+      setMigrationReportEnabled(Boolean(data.migration.reportEnabled));
+      setMigrationReportTarget(data.migration.reportTarget || "");
+      setMigrationReportSource(data.migration.reportSource || "");
+      setMigrationLinkImportToken("");
+      setMessage(`Instanz gekoppelt. Importiert: ${data.imported}, Remote: ${data.remoteUrl}`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -3971,6 +4025,8 @@ export function App() {
                 <p><strong>Quote:</strong> {Math.round(Number(migrationInfo?.migrationRatio || 0) * 100)}%</p>
                 <p><strong>Auto-Off:</strong> {migrationInfo?.autoOffEnabled ? "an" : "aus"} {migrationInfo?.autoOffReason ? `(${migrationInfo.autoOffReason})` : ""}</p>
                 <p><strong>Callback Secret:</strong> {migrationInfo?.callbackSecretConfigured ? "gesetzt" : "nicht gesetzt"}</p>
+                <p><strong>Sync-Report:</strong> {migrationInfo?.reportEnabled ? "an" : "aus"}</p>
+                <p><strong>Report Secret:</strong> {migrationInfo?.reportSecretConfigured ? "gesetzt" : "nicht gesetzt"}</p>
               </div>
             </article>
 
@@ -4031,6 +4087,58 @@ export function App() {
                 <input value={migrationCallbackSecret} onChange={(e) => setMigrationCallbackSecret(e.target.value)} />
               </label>
               <p className="small">Das Secret wird aus Sicherheitsgruenden nicht im Klartext zurückgegeben.</p>
+            </article>
+
+            <article className="settings-current">
+              <h3>Neue Instanz -> Alte Instanz Sync-Report</h3>
+              <label className="checkbox">
+                <input type="checkbox" checked={migrationReportEnabled} onChange={(e) => setMigrationReportEnabled(e.target.checked)} />
+                Login-Quote auf alte Instanz melden
+              </label>
+              <label>
+                Report Target URL
+                <input value={migrationReportTarget} onChange={(e) => setMigrationReportTarget(e.target.value)} placeholder="https://old.daily.example/api/migration/sync/login" />
+              </label>
+              <label>
+                Report Source URL
+                <input value={migrationReportSource} onChange={(e) => setMigrationReportSource(e.target.value)} placeholder="https://new.daily.example" />
+              </label>
+              <label>
+                Report Secret (nur setzen/aendern)
+                <input value={migrationReportSecret} onChange={(e) => setMigrationReportSecret(e.target.value)} />
+              </label>
+              <p className="small">Wenn aktiviert, meldet die neue Instanz erfolgreiche Logins signiert an die alte Instanz.</p>
+            </article>
+
+            <article className="settings-current">
+              <h3>Instanz-Kopplung per Token</h3>
+              <div className="row">
+                <label>
+                  Diese Instanz ist
+                  <select value={migrationLinkRole} onChange={(e) => setMigrationLinkRole((e.target.value === "new" ? "new" : "old"))}>
+                    <option value="old">Alte Instanz</option>
+                    <option value="new">Neue Instanz</option>
+                  </select>
+                </label>
+                <button onClick={() => void onExportMigrationLinkToken()}>Token erzeugen</button>
+              </div>
+              {migrationLinkExport?.token ? (
+                <>
+                  <label>
+                    Export-Token (auf Gegeninstanz importieren)
+                    <textarea rows={4} value={migrationLinkExport.token} readOnly />
+                  </label>
+                  <p className="small">
+                    Rolle: {migrationLinkExport.instanceRole} | Basis: {migrationLinkExport.instanceBase} | Gueltig bis: {migrationLinkExport.expiresAt ? formatDateTime(migrationLinkExport.expiresAt) : "-"}
+                  </p>
+                </>
+              ) : null}
+              <label>
+                Import-Token von Gegeninstanz
+                <textarea rows={4} value={migrationLinkImportToken} onChange={(e) => setMigrationLinkImportToken(e.target.value)} />
+              </label>
+              <button onClick={() => void onImportMigrationLinkToken()}>Token importieren</button>
+              <p className="small">Du kannst damit Ziel-URL, Expected Source, Callback/Report-Secret und Report-Target automatisch setzen.</p>
             </article>
 
             <div className="row">

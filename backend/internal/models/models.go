@@ -103,6 +103,10 @@ type AppSettings struct {
 	MigrationRequirePromptFirst      bool       `gorm:"default:true" json:"migrationRequirePromptFirst"`
 	MigrationCallbackSecret          string     `gorm:"size:255" json:"migrationCallbackSecret"`
 	MigrationExpectedSource          string     `gorm:"size:120" json:"migrationExpectedSource"`
+	MigrationReportEnabled           bool       `gorm:"default:false" json:"migrationReportEnabled"`
+	MigrationReportTarget            string     `gorm:"size:500" json:"migrationReportTarget"`
+	MigrationReportSecret            string     `gorm:"size:255" json:"migrationReportSecret"`
+	MigrationReportSource            string     `gorm:"size:500" json:"migrationReportSource"`
 	MigrationBaselineUserCount       int64      `gorm:"default:0" json:"migrationBaselineUserCount"`
 	CreatedAt                        time.Time  `json:"createdAt"`
 	UpdatedAt                        time.Time  `json:"updatedAt"`

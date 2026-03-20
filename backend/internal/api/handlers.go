@@ -188,6 +188,8 @@ func (s *Server) Router() *gin.Engine {
 			admin.POST("/migration/activate", s.handleAdminMigrationActivate)
 			admin.POST("/migration/deactivate", s.handleAdminMigrationDeactivate)
 			admin.POST("/migration/push", s.handleAdminMigrationPush)
+			admin.POST("/migration/link/export", s.handleAdminMigrationLinkExport)
+			admin.POST("/migration/link/import", s.handleAdminMigrationLinkImport)
 			admin.GET("/migration/export", s.handleAdminMigrationExport)
 		}
 	}
@@ -7456,6 +7458,9 @@ func normalizeSettings(settings models.AppSettings) models.AppSettings {
 		settings.PerformanceTrackingWindowMinutes = 180
 	}
 	settings.MigrationTargetBaseURL = normalizeMigrationURL(settings.MigrationTargetBaseURL)
+	settings.MigrationExpectedSource = normalizeMigrationURL(settings.MigrationExpectedSource)
+	settings.MigrationReportTarget = normalizeMigrationURL(settings.MigrationReportTarget)
+	settings.MigrationReportSource = normalizeMigrationURL(settings.MigrationReportSource)
 	settings.MigrationDownloadURL = strings.TrimSpace(settings.MigrationDownloadURL)
 	settings.MigrationPushTitle = defaultIfBlank(settings.MigrationPushTitle, "Daily umgezogen")
 	settings.MigrationPushBody = defaultIfBlank(settings.MigrationPushBody, "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.")
@@ -7496,6 +7501,9 @@ func settingsJSON(settings models.AppSettings) gin.H {
 		"migrationScreenBody":              settings.MigrationScreenBody,
 		"migrationRequirePromptFirst":      settings.MigrationRequirePromptFirst,
 		"migrationExpectedSource":          settings.MigrationExpectedSource,
+		"migrationReportEnabled":           settings.MigrationReportEnabled,
+		"migrationReportTarget":            settings.MigrationReportTarget,
+		"migrationReportSource":            settings.MigrationReportSource,
 		"migrationBaselineUserCount":       settings.MigrationBaselineUserCount,
 		"userPromptRulesJson":              settings.UserPromptRulesJSON,
 		"userPromptRules":                  parseUserPromptRulesJSON(settings.UserPromptRulesJSON),

@@ -162,6 +162,7 @@ func ensureDefaultSettings(database *gorm.DB) error {
 		MigrationScreenTitle:             "Daily ist umgezogen",
 		MigrationScreenBody:              "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.",
 		MigrationRequirePromptFirst:      true,
+		MigrationReportEnabled:           false,
 	}
 	return database.Create(&s).Error
 }

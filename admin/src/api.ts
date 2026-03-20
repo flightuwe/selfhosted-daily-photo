@@ -813,9 +813,28 @@ export type AdminMigrationInfo = {
   remainingSeconds: number;
   callbackExpectedSource?: string;
   callbackSecretConfigured?: boolean;
+  reportEnabled?: boolean;
+  reportTarget?: string;
+  reportSource?: string;
+  reportSecretConfigured?: boolean;
 };
 
 export type AdminMigrationResponse = {
+  migration: AdminMigrationInfo;
+};
+
+export type AdminMigrationLinkExportResponse = {
+  instanceRole: "old" | "new";
+  token: string;
+  expiresAt: string;
+  instanceBase: string;
+  hints?: { pasteTokenOn?: string };
+};
+
+export type AdminMigrationLinkImportResponse = {
+  ok: boolean;
+  imported: "old" | "new";
+  remoteUrl: string;
   migration: AdminMigrationInfo;
 };
 
@@ -944,6 +963,10 @@ function normalizeMigrationInfo(raw: any): AdminMigrationInfo {
     remainingSeconds: Number(raw?.remainingSeconds ?? 0),
     callbackExpectedSource: String(raw?.callbackExpectedSource ?? ""),
     callbackSecretConfigured: Boolean(raw?.callbackSecretConfigured),
+    reportEnabled: Boolean(raw?.reportEnabled),
+    reportTarget: String(raw?.reportTarget ?? ""),
+    reportSource: String(raw?.reportSource ?? ""),
+    reportSecretConfigured: Boolean(raw?.reportSecretConfigured),
   };
 }
 
@@ -1645,6 +1668,10 @@ export async function updateAdminMigration(
     migrationRequirePromptFirst?: boolean;
     migrationCallbackSecret?: string;
     migrationExpectedSource?: string;
+    migrationReportEnabled?: boolean;
+    migrationReportTarget?: string;
+    migrationReportSecret?: string;
+    migrationReportSource?: string;
   }
 ): Promise<AdminMigrationResponse> {
   const res = await fetch(`${apiBase}/admin/migration`, {
@@ -1721,6 +1748,49 @@ export async function downloadAdminMigrationExport(
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+export async function exportAdminMigrationLinkToken(
+  token: string,
+  instanceRole: "old" | "new"
+): Promise<AdminMigrationLinkExportResponse> {
+  const res = await fetch(`${apiBase}/admin/migration/link/export`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ instanceRole }),
+  });
+  const data = await parse<any>(res);
+  return {
+    instanceRole: (data.instanceRole === "new" ? "new" : "old"),
+    token: String(data.token || ""),
+    expiresAt: String(data.expiresAt || ""),
+    instanceBase: String(data.instanceBase || ""),
+    hints: data.hints || {},
+  };
+}
+
+export async function importAdminMigrationLinkToken(
+  token: string,
+  linkToken: string
+): Promise<AdminMigrationLinkImportResponse> {
+  const res = await fetch(`${apiBase}/admin/migration/link/import`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ token: linkToken }),
+  });
+  const data = await parse<any>(res);
+  return {
+    ok: Boolean(data.ok),
+    imported: data.imported === "new" ? "new" : "old",
+    remoteUrl: String(data.remoteUrl || ""),
+    migration: normalizeMigrationInfo(data.migration || {}),
+  };
 }
 
 export async function downloadIncidentExport(

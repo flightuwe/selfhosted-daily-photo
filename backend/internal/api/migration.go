@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/csv"
@@ -55,6 +56,7 @@ type migrationHandoffClaims struct {
 }
 
 const migrationHandoffTTL = 5 * time.Minute
+const migrationLinkTTL = 24 * time.Hour
 
 type migrationSettingsRequest struct {
 	MigrationAutoOffEnabled     *bool   `json:"migrationAutoOffEnabled"`
@@ -67,6 +69,27 @@ type migrationSettingsRequest struct {
 	MigrationRequirePromptFirst *bool   `json:"migrationRequirePromptFirst"`
 	MigrationCallbackSecret     *string `json:"migrationCallbackSecret"`
 	MigrationExpectedSource     *string `json:"migrationExpectedSource"`
+	MigrationReportEnabled      *bool   `json:"migrationReportEnabled"`
+	MigrationReportTarget       *string `json:"migrationReportTarget"`
+	MigrationReportSecret       *string `json:"migrationReportSecret"`
+	MigrationReportSource       *string `json:"migrationReportSource"`
+}
+
+type migrationLinkExportRequest struct {
+	InstanceRole string `json:"instanceRole"`
+}
+
+type migrationLinkImportRequest struct {
+	Token string `json:"token"`
+}
+
+type migrationLinkTokenClaims struct {
+	SchemaVersion  string `json:"sv"`
+	TokenType      string `json:"type"`
+	InstanceBase   string `json:"instanceBase"`
+	CallbackSecret string `json:"callbackSecret,omitempty"`
+	IssuedAtUnix   int64  `json:"iat"`
+	ExpiresAtUnix  int64  `json:"exp"`
 }
 
 type migrationActivateRequest struct {
@@ -159,6 +182,10 @@ func (s *Server) migrationInfoJSON(settings models.AppSettings, active bool, now
 		"remainingSeconds":         remainingSec,
 		"callbackExpectedSource":   strings.TrimSpace(settings.MigrationExpectedSource),
 		"callbackSecretConfigured": strings.TrimSpace(settings.MigrationCallbackSecret) != "",
+		"reportEnabled":            settings.MigrationReportEnabled,
+		"reportTarget":             strings.TrimSpace(settings.MigrationReportTarget),
+		"reportSource":             strings.TrimSpace(settings.MigrationReportSource),
+		"reportSecretConfigured":   strings.TrimSpace(settings.MigrationReportSecret) != "",
 	}
 }
 
@@ -201,6 +228,53 @@ func signMigrationHandoffToken(secret string, claims migrationHandoffClaims) (st
 	_, _ = mac.Write([]byte(encoded))
 	sig := hex.EncodeToString(mac.Sum(nil))
 	return encoded + "." + sig, nil
+}
+
+func generateMigrationSecret() string {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(buf)
+}
+
+func signMigrationLinkToken(secret string, claims migrationLinkTokenClaims) (string, error) {
+	raw, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(raw)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(encoded))
+	sig := hex.EncodeToString(mac.Sum(nil))
+	return encoded + "." + sig, nil
+}
+
+func verifyMigrationLinkToken(secret string, token string) (migrationLinkTokenClaims, error) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 2 {
+		return migrationLinkTokenClaims{}, errors.New("invalid link token")
+	}
+	payload := parts[0]
+	providedSig := strings.ToLower(strings.TrimSpace(parts[1]))
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(payload))
+	expectedSig := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(providedSig), []byte(strings.ToLower(expectedSig))) {
+		return migrationLinkTokenClaims{}, errors.New("link signature invalid")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return migrationLinkTokenClaims{}, errors.New("link payload invalid")
+	}
+	var claims migrationLinkTokenClaims
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		return migrationLinkTokenClaims{}, errors.New("link payload invalid")
+	}
+	if claims.ExpiresAtUnix <= time.Now().Unix() {
+		return migrationLinkTokenClaims{}, errors.New("link token expired")
+	}
+	return claims, nil
 }
 
 func verifyMigrationHandoffToken(secret string, token string) (migrationHandoffClaims, error) {
@@ -358,8 +432,23 @@ func (s *Server) handleAdminMigrationPut(c *gin.Context) {
 	if req.MigrationExpectedSource != nil {
 		settings.MigrationExpectedSource = strings.TrimSpace(*req.MigrationExpectedSource)
 	}
+	if req.MigrationReportEnabled != nil {
+		settings.MigrationReportEnabled = *req.MigrationReportEnabled
+	}
+	if req.MigrationReportTarget != nil {
+		settings.MigrationReportTarget = strings.TrimSpace(*req.MigrationReportTarget)
+	}
+	if req.MigrationReportSecret != nil {
+		settings.MigrationReportSecret = strings.TrimSpace(*req.MigrationReportSecret)
+	}
+	if req.MigrationReportSource != nil {
+		settings.MigrationReportSource = strings.TrimSpace(*req.MigrationReportSource)
+	}
 	settings.MigrationTargetBaseURL = normalizeMigrationURL(settings.MigrationTargetBaseURL)
+	settings.MigrationExpectedSource = normalizeMigrationURL(settings.MigrationExpectedSource)
 	settings.MigrationDownloadURL = strings.TrimSpace(settings.MigrationDownloadURL)
+	settings.MigrationReportTarget = normalizeMigrationURL(settings.MigrationReportTarget)
+	settings.MigrationReportSource = normalizeMigrationURL(settings.MigrationReportSource)
 	settings.MigrationPushTitle = defaultIfBlank(settings.MigrationPushTitle, "Daily umgezogen")
 	settings.MigrationPushBody = defaultIfBlank(settings.MigrationPushBody, "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.")
 	settings.MigrationScreenTitle = defaultIfBlank(settings.MigrationScreenTitle, "Daily ist umgezogen")
@@ -544,6 +633,129 @@ func (s *Server) handleAdminMigrationExport(c *gin.Context) {
 	})
 }
 
+func (s *Server) handleAdminMigrationLinkExport(c *gin.Context) {
+	var req migrationLinkExportRequest
+	_ = c.ShouldBindJSON(&req)
+	role := strings.ToLower(strings.TrimSpace(req.InstanceRole))
+	if role != "old" && role != "new" {
+		role = "old"
+	}
+	settings, err := s.migrationSettingsRow()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+		return
+	}
+	instanceBase := normalizeMigrationURL(strings.TrimSpace(s.Config.PublicBaseURL))
+	if instanceBase == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "public base url missing"})
+		return
+	}
+	callbackSecret := strings.TrimSpace(settings.MigrationCallbackSecret)
+	if role == "old" && callbackSecret == "" {
+		callbackSecret = generateMigrationSecret()
+		if callbackSecret != "" {
+			settings.MigrationCallbackSecret = callbackSecret
+			_ = s.DB.Model(&models.AppSettings{}).Where("id = ?", settings.ID).Update("migration_callback_secret", callbackSecret).Error
+		}
+	}
+	claims := migrationLinkTokenClaims{
+		SchemaVersion:  "migration_link_v1",
+		TokenType:      role,
+		InstanceBase:   instanceBase,
+		CallbackSecret: callbackSecret,
+		IssuedAtUnix:   time.Now().Unix(),
+		ExpiresAtUnix:  time.Now().Add(migrationLinkTTL).Unix(),
+	}
+	token, signErr := signMigrationLinkToken(strings.TrimSpace(s.Config.JWTSecret), claims)
+	if signErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "link token generation failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"instanceRole": role,
+		"token":        token,
+		"expiresAt":    time.Unix(claims.ExpiresAtUnix, 0).In(s.Location),
+		"instanceBase": instanceBase,
+		"hints": gin.H{
+			"pasteTokenOn": map[string]string{
+				"old": "new",
+				"new": "old",
+			}[role],
+		},
+	})
+}
+
+func (s *Server) handleAdminMigrationLinkImport(c *gin.Context) {
+	var req migrationLinkImportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	claims, err := verifyMigrationLinkToken(strings.TrimSpace(s.Config.JWTSecret), req.Token)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	settings, err := s.migrationSettingsRow()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+		return
+	}
+	localBase := normalizeMigrationURL(strings.TrimSpace(s.Config.PublicBaseURL))
+	remoteBase := normalizeMigrationURL(claims.InstanceBase)
+	if remoteBase == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token missing remote instance base"})
+		return
+	}
+	if localBase != "" && strings.EqualFold(localBase, remoteBase) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token belongs to same instance"})
+		return
+	}
+	updated := map[string]any{}
+	switch strings.ToLower(strings.TrimSpace(claims.TokenType)) {
+	case "new":
+		settings.MigrationTargetBaseURL = remoteBase
+		settings.MigrationExpectedSource = remoteBase
+		updated["migration_target_base_url"] = settings.MigrationTargetBaseURL
+		updated["migration_expected_source"] = settings.MigrationExpectedSource
+	case "old":
+		if strings.TrimSpace(claims.CallbackSecret) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "old token missing callback secret"})
+			return
+		}
+		settings.MigrationCallbackSecret = strings.TrimSpace(claims.CallbackSecret)
+		settings.MigrationExpectedSource = remoteBase
+		settings.MigrationReportEnabled = true
+		settings.MigrationReportSecret = strings.TrimSpace(claims.CallbackSecret)
+		settings.MigrationReportTarget = normalizeMigrationURL(remoteBase + "/api/migration/sync/login")
+		settings.MigrationReportSource = localBase
+		updated["migration_callback_secret"] = settings.MigrationCallbackSecret
+		updated["migration_expected_source"] = settings.MigrationExpectedSource
+		updated["migration_report_enabled"] = settings.MigrationReportEnabled
+		updated["migration_report_secret"] = settings.MigrationReportSecret
+		updated["migration_report_target"] = settings.MigrationReportTarget
+		updated["migration_report_source"] = settings.MigrationReportSource
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported token type"})
+		return
+	}
+	if len(updated) > 0 {
+		if err := s.DB.Model(&models.AppSettings{}).Where("id = ?", settings.ID).Updates(updated).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+			return
+		}
+	}
+	settings, _ = s.migrationSettingsRow()
+	now := time.Now().In(s.Location)
+	settings, active, reason, migratedCount, baseline := s.migrationResolved(settings, now)
+	c.JSON(http.StatusOK, gin.H{
+		"ok":        true,
+		"imported":  strings.ToLower(strings.TrimSpace(claims.TokenType)),
+		"remoteUrl": remoteBase,
+		"migration": s.migrationInfoJSON(settings, active, now, reason, migratedCount, baseline),
+	})
+}
+
 func (s *Server) handleMigrationHandoff(c *gin.Context) {
 	user, ok := userFromContext(c)
 	if !ok || user.ID == 0 {
@@ -698,18 +910,35 @@ func (s *Server) enforceMigrationLock(c *gin.Context, user models.User) bool {
 }
 
 func (s *Server) maybeReportMigratedLogin(user models.User, appVersion string) {
-	if !s.Config.MigrationReportEnabled {
+	settings, err := s.migrationSettingsRow()
+	if err != nil {
 		return
 	}
-	target := strings.TrimSpace(s.Config.MigrationReportTarget)
-	secret := strings.TrimSpace(s.Config.MigrationReportSecret)
+	enabled := settings.MigrationReportEnabled
+	target := normalizeMigrationURL(settings.MigrationReportTarget)
+	secret := strings.TrimSpace(settings.MigrationReportSecret)
+	source := normalizeMigrationURL(settings.MigrationReportSource)
+	if !enabled && s.Config.MigrationReportEnabled {
+		enabled = true
+		if target == "" {
+			target = normalizeMigrationURL(s.Config.MigrationReportTarget)
+		}
+		if secret == "" {
+			secret = strings.TrimSpace(s.Config.MigrationReportSecret)
+		}
+		if source == "" {
+			source = normalizeMigrationURL(s.Config.MigrationReportSource)
+		}
+	}
+	if !enabled {
+		return
+	}
 	if target == "" || secret == "" || user.ID == 0 {
 		return
 	}
 	occurredAt := time.Now().In(s.Location).Format(time.RFC3339)
-	source := strings.TrimSpace(s.Config.MigrationReportSource)
 	if source == "" {
-		source = strings.TrimSpace(s.Config.PublicBaseURL)
+		source = normalizeMigrationURL(strings.TrimSpace(s.Config.PublicBaseURL))
 	}
 	payload := migrationSyncRequest{
 		UserID:         user.ID,
