@@ -69,29 +69,55 @@ type UserSession struct {
 }
 
 type AppSettings struct {
-	ID                      uint      `gorm:"primaryKey" json:"id"`
-	PromptWindowStartHour   int       `gorm:"default:8" json:"promptWindowStartHour"`
-	PromptWindowEndHour     int       `gorm:"default:20" json:"promptWindowEndHour"`
-	UploadWindowMinutes     int       `gorm:"default:10" json:"uploadWindowMinutes"`
-	FeedCommentPreviewLimit int       `gorm:"default:10" json:"feedCommentPreviewLimit"`
-	PromptNotificationText  string    `gorm:"size:255;default:'Zeit fuer dein Daily Foto'" json:"promptNotificationText"`
-	MaxUploadBytes          int64     `gorm:"default:0" json:"maxUploadBytes"`
-	ChatCommandEnabled      bool      `gorm:"default:false" json:"chatCommandEnabled"`
-	ChatCommandValue        string    `gorm:"size:64;default:'-moment'" json:"chatCommandValue"`
-	ChatCommandTrigger      bool      `gorm:"default:true" json:"chatCommandTrigger"`
-	ChatCommandSendPush     bool      `gorm:"default:true" json:"chatCommandSendPush"`
-	ChatCommandPushText     string    `gorm:"size:255;default:'{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.'" json:"chatCommandPushText"`
-	ChatCommandEchoChat     bool      `gorm:"default:true" json:"chatCommandEchoChat"`
-	ChatCommandEchoText     string    `gorm:"size:255;default:'Moment wurde von {user} angefordert.'" json:"chatCommandEchoText"`
-	PerformanceTrackingEnabled       bool      `gorm:"default:false" json:"performanceTrackingEnabled"`
-	PerformanceTrackingWindowMinutes int       `gorm:"default:30" json:"performanceTrackingWindowMinutes"`
-	PerformanceTrackingOneShot       bool      `gorm:"default:false" json:"performanceTrackingOneShot"`
-	SchedulerAutoPaused              bool      `gorm:"default:false" json:"schedulerAutoPaused"`
-	SchedulerAutoPauseReason         string    `gorm:"size:120" json:"schedulerAutoPauseReason"`
+	ID                               uint       `gorm:"primaryKey" json:"id"`
+	PromptWindowStartHour            int        `gorm:"default:8" json:"promptWindowStartHour"`
+	PromptWindowEndHour              int        `gorm:"default:20" json:"promptWindowEndHour"`
+	UploadWindowMinutes              int        `gorm:"default:10" json:"uploadWindowMinutes"`
+	FeedCommentPreviewLimit          int        `gorm:"default:10" json:"feedCommentPreviewLimit"`
+	PromptNotificationText           string     `gorm:"size:255;default:'Zeit fuer dein Daily Foto'" json:"promptNotificationText"`
+	MaxUploadBytes                   int64      `gorm:"default:0" json:"maxUploadBytes"`
+	ChatCommandEnabled               bool       `gorm:"default:false" json:"chatCommandEnabled"`
+	ChatCommandValue                 string     `gorm:"size:64;default:'-moment'" json:"chatCommandValue"`
+	ChatCommandTrigger               bool       `gorm:"default:true" json:"chatCommandTrigger"`
+	ChatCommandSendPush              bool       `gorm:"default:true" json:"chatCommandSendPush"`
+	ChatCommandPushText              string     `gorm:"size:255;default:'{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.'" json:"chatCommandPushText"`
+	ChatCommandEchoChat              bool       `gorm:"default:true" json:"chatCommandEchoChat"`
+	ChatCommandEchoText              string     `gorm:"size:255;default:'Moment wurde von {user} angefordert.'" json:"chatCommandEchoText"`
+	PerformanceTrackingEnabled       bool       `gorm:"default:false" json:"performanceTrackingEnabled"`
+	PerformanceTrackingWindowMinutes int        `gorm:"default:30" json:"performanceTrackingWindowMinutes"`
+	PerformanceTrackingOneShot       bool       `gorm:"default:false" json:"performanceTrackingOneShot"`
+	SchedulerAutoPaused              bool       `gorm:"default:false" json:"schedulerAutoPaused"`
+	SchedulerAutoPauseReason         string     `gorm:"size:120" json:"schedulerAutoPauseReason"`
 	SchedulerAutoPausedAt            *time.Time `json:"schedulerAutoPausedAt"`
-	UserPromptRulesJSON     string    `gorm:"type:text" json:"userPromptRulesJson"`
-	CreatedAt               time.Time `json:"createdAt"`
-	UpdatedAt               time.Time `json:"updatedAt"`
+	UserPromptRulesJSON              string     `gorm:"type:text" json:"userPromptRulesJson"`
+	MigrationEnabled                 bool       `gorm:"default:false" json:"migrationEnabled"`
+	MigrationStartedAt               *time.Time `json:"migrationStartedAt"`
+	MigrationUntil                   *time.Time `json:"migrationUntil"`
+	MigrationAutoOffEnabled          bool       `gorm:"default:true" json:"migrationAutoOffEnabled"`
+	MigrationTargetBaseURL           string     `gorm:"size:500" json:"migrationTargetBaseUrl"`
+	MigrationDownloadURL             string     `gorm:"size:500" json:"migrationDownloadUrl"`
+	MigrationPushTitle               string     `gorm:"size:255" json:"migrationPushTitle"`
+	MigrationPushBody                string     `gorm:"size:500" json:"migrationPushBody"`
+	MigrationScreenTitle             string     `gorm:"size:255" json:"migrationScreenTitle"`
+	MigrationScreenBody              string     `gorm:"size:2000" json:"migrationScreenBody"`
+	MigrationRequirePromptFirst      bool       `gorm:"default:true" json:"migrationRequirePromptFirst"`
+	MigrationCallbackSecret          string     `gorm:"size:255" json:"migrationCallbackSecret"`
+	MigrationExpectedSource          string     `gorm:"size:120" json:"migrationExpectedSource"`
+	MigrationBaselineUserCount       int64      `gorm:"default:0" json:"migrationBaselineUserCount"`
+	CreatedAt                        time.Time  `json:"createdAt"`
+	UpdatedAt                        time.Time  `json:"updatedAt"`
+}
+
+type MigrationUserStatus struct {
+	ID               uint       `gorm:"primaryKey" json:"id"`
+	UserID           uint       `gorm:"uniqueIndex;not null" json:"userId"`
+	Username         string     `gorm:"size:64;index" json:"username"`
+	FirstSeenOnNewAt *time.Time `gorm:"index" json:"firstSeenOnNewAt"`
+	LastSeenOnNewAt  *time.Time `gorm:"index" json:"lastSeenOnNewAt"`
+	SourceInstance   string     `gorm:"size:255" json:"sourceInstance"`
+	LastAppVersion   string     `gorm:"size:64" json:"lastAppVersion"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	CreatedAt        time.Time  `json:"createdAt"`
 }
 
 type SchedulerLease struct {
@@ -105,18 +131,18 @@ type SchedulerLease struct {
 }
 
 type DailyDispatch struct {
-	ID           uint      `gorm:"primaryKey" json:"id"`
-	Day          string    `gorm:"size:10;not null;uniqueIndex:idx_daily_dispatch_day_kind" json:"day"`
-	Kind         string    `gorm:"size:32;not null;uniqueIndex:idx_daily_dispatch_day_kind" json:"kind"`
-	RequestID    string    `gorm:"size:64;index" json:"requestId"`
-	Source       string    `gorm:"size:32;index" json:"source"`
-	ServerInstance string  `gorm:"size:120;index" json:"serverInstance"`
-	Status       string    `gorm:"size:24;index;not null;default:'reserved'" json:"status"`
-	SentCount    int64     `gorm:"default:0" json:"sentCount"`
-	FailedCount  int64     `gorm:"default:0" json:"failedCount"`
-	ErrorMessage string    `gorm:"size:500" json:"errorMessage"`
-	CreatedAt    time.Time `gorm:"index" json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	Day            string    `gorm:"size:10;not null;uniqueIndex:idx_daily_dispatch_day_kind" json:"day"`
+	Kind           string    `gorm:"size:32;not null;uniqueIndex:idx_daily_dispatch_day_kind" json:"kind"`
+	RequestID      string    `gorm:"size:64;index" json:"requestId"`
+	Source         string    `gorm:"size:32;index" json:"source"`
+	ServerInstance string    `gorm:"size:120;index" json:"serverInstance"`
+	Status         string    `gorm:"size:24;index;not null;default:'reserved'" json:"status"`
+	SentCount      int64     `gorm:"default:0" json:"sentCount"`
+	FailedCount    int64     `gorm:"default:0" json:"failedCount"`
+	ErrorMessage   string    `gorm:"size:500" json:"errorMessage"`
+	CreatedAt      time.Time `gorm:"index" json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 type DailyPrompt struct {
@@ -218,24 +244,24 @@ type DailySpikeEvent struct {
 }
 
 type DailyTriggerAuditEvent struct {
-	ID                 uint       `gorm:"primaryKey" json:"id"`
-	Day                string     `gorm:"size:10;index" json:"day"`
-	OccurredAt         time.Time  `gorm:"index;not null" json:"occurredAt"`
-	RequestID          string     `gorm:"size:64;index" json:"requestId"`
-	Source             string     `gorm:"size:32;index" json:"source"`
-	ActorUserID        *uint      `gorm:"index" json:"actorUserId"`
-	ActorUsername      string     `gorm:"size:64" json:"actorUsername"`
-	AttemptType        string     `gorm:"size:16;index" json:"attemptType"`
-	Result             string     `gorm:"size:16;index" json:"result"`
-	Reason             string     `gorm:"size:64;index" json:"reason"`
-	BeforeTriggeredAt  *time.Time `json:"beforeTriggeredAt"`
-	AfterTriggeredAt   *time.Time `json:"afterTriggeredAt"`
-	BeforeTriggerSource string    `gorm:"size:32" json:"beforeTriggerSource"`
-	AfterTriggerSource  string    `gorm:"size:32" json:"afterTriggerSource"`
-	ErrorMessage       string     `gorm:"size:500" json:"errorMessage"`
-	ServerInstance     string     `gorm:"size:120;index" json:"serverInstance"`
-	MetaJSON           string     `gorm:"type:text" json:"metaJson"`
-	CreatedAt          time.Time  `gorm:"index" json:"createdAt"`
+	ID                  uint       `gorm:"primaryKey" json:"id"`
+	Day                 string     `gorm:"size:10;index" json:"day"`
+	OccurredAt          time.Time  `gorm:"index;not null" json:"occurredAt"`
+	RequestID           string     `gorm:"size:64;index" json:"requestId"`
+	Source              string     `gorm:"size:32;index" json:"source"`
+	ActorUserID         *uint      `gorm:"index" json:"actorUserId"`
+	ActorUsername       string     `gorm:"size:64" json:"actorUsername"`
+	AttemptType         string     `gorm:"size:16;index" json:"attemptType"`
+	Result              string     `gorm:"size:16;index" json:"result"`
+	Reason              string     `gorm:"size:64;index" json:"reason"`
+	BeforeTriggeredAt   *time.Time `json:"beforeTriggeredAt"`
+	AfterTriggeredAt    *time.Time `json:"afterTriggeredAt"`
+	BeforeTriggerSource string     `gorm:"size:32" json:"beforeTriggerSource"`
+	AfterTriggerSource  string     `gorm:"size:32" json:"afterTriggerSource"`
+	ErrorMessage        string     `gorm:"size:500" json:"errorMessage"`
+	ServerInstance      string     `gorm:"size:120;index" json:"serverInstance"`
+	MetaJSON            string     `gorm:"type:text" json:"metaJson"`
+	CreatedAt           time.Time  `gorm:"index" json:"createdAt"`
 }
 
 type Photo struct {
@@ -275,17 +301,17 @@ type PhotoComment struct {
 }
 
 type ChatMessage struct {
-	ID              uint      `gorm:"primaryKey" json:"id"`
-	UserID          uint      `gorm:"index;not null;index:idx_chat_msg_user_client,unique" json:"userId"`
-	User            User      `json:"user"`
-	Body            string    `gorm:"size:500;not null" json:"body"`
-	Source          string    `gorm:"size:16;not null;default:'user';index" json:"source"`
-	MessageType     string    `gorm:"size:16;not null;default:'text';index" json:"type"`
-	PollQuestion    string    `gorm:"size:280" json:"pollQuestion"`
-	PollAllowMultiple bool    `gorm:"default:false" json:"pollAllowMultiple"`
-	PollClosedAt    *time.Time `json:"pollClosedAt"`
-	ClientMessageID *string   `gorm:"size:64;index:idx_chat_msg_user_client,unique" json:"-"`
-	CreatedAt       time.Time `json:"createdAt"`
+	ID                uint       `gorm:"primaryKey" json:"id"`
+	UserID            uint       `gorm:"index;not null;index:idx_chat_msg_user_client,unique" json:"userId"`
+	User              User       `json:"user"`
+	Body              string     `gorm:"size:500;not null" json:"body"`
+	Source            string     `gorm:"size:16;not null;default:'user';index" json:"source"`
+	MessageType       string     `gorm:"size:16;not null;default:'text';index" json:"type"`
+	PollQuestion      string     `gorm:"size:280" json:"pollQuestion"`
+	PollAllowMultiple bool       `gorm:"default:false" json:"pollAllowMultiple"`
+	PollClosedAt      *time.Time `json:"pollClosedAt"`
+	ClientMessageID   *string    `gorm:"size:64;index:idx_chat_msg_user_client,unique" json:"-"`
+	CreatedAt         time.Time  `json:"createdAt"`
 }
 
 type ChatPollOption struct {

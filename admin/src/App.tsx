@@ -42,6 +42,7 @@ import {
   downloadPerformanceTrackingExport,
   downloadIncidentExport,
   downloadTriggerAuditExport,
+  downloadAdminMigrationExport,
   getReports,
   getAdminPerformanceOverview,
   getAdminPerformanceRoutes,
@@ -50,6 +51,7 @@ import {
   getAdminPerformanceSpikes,
   getAdminIncidentExportStatus,
   getAdminTriggerRuntime,
+  getAdminMigration,
   getAdminTriggerAudit,
   getAdminTriggerAuditSummary,
   getSystemHealth,
@@ -64,6 +66,10 @@ import {
   triggerPrompt,
   updateAdminPerformanceTracking,
   updateAdminTriggerRuntime,
+  updateAdminMigration,
+  activateAdminMigration,
+  deactivateAdminMigration,
+  pushAdminMigration,
   updateCalendarDay,
   updateChatCommand,
   updateReport,
@@ -77,6 +83,7 @@ import {
   type AdminPerformanceTrackingState,
   type AdminIncidentExportStatus,
   type AdminTriggerRuntimeResponse,
+  type AdminMigrationInfo,
   type AdminTriggerAuditItem,
   type AdminTriggerAuditSummary,
   type AdminSearchResult,
@@ -105,11 +112,11 @@ import {
   type UserPromptRule,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "reports" | "debug" | "settings";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "reports" | "debug" | "settings" | "migration";
 type AdminArea = "operations" | "analytics" | "config";
 type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "polls" | "time_capsules" | "reports";
 type AnalyticsSubtab = "history" | "performance" | "incident_export" | "trigger_audit" | "debug" | "system";
-type ConfigSubtab = "users" | "events" | "commands" | "settings";
+type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
 
 type SavedView = {
@@ -143,6 +150,19 @@ const DEFAULT_SETTINGS: Settings = {
   chatCommandPushText: "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
   chatCommandEchoChat: true,
   chatCommandEchoText: "Moment wurde von {user} angefordert.",
+  migrationEnabled: false,
+  migrationStartedAt: null,
+  migrationUntil: null,
+  migrationAutoOffEnabled: true,
+  migrationTargetBaseUrl: "",
+  migrationDownloadUrl: "",
+  migrationPushTitle: "Daily umgezogen",
+  migrationPushBody: "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.",
+  migrationScreenTitle: "Daily ist umgezogen",
+  migrationScreenBody: "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.",
+  migrationRequirePromptFirst: true,
+  migrationExpectedSource: "",
+  migrationBaselineUserCount: 0,
   userPromptRules: [
     {
       id: "diagnostics_consent_v1",
@@ -188,6 +208,7 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
     events: "events",
     commands: "commands",
     settings: "settings",
+    migration: "migration",
   },
 };
 
@@ -214,6 +235,7 @@ const areaSubtabs: Record<AdminArea, Array<{ key: AdminSubtab; label: string }>>
     { key: "events", label: "Events & Notifications" },
     { key: "commands", label: "Chat-Commands" },
     { key: "settings", label: "Einstellungen" },
+    { key: "migration", label: "Migration" },
   ],
 };
 
@@ -323,6 +345,8 @@ function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
       return { area: "config", subtab: "events" };
     case "commands":
       return { area: "config", subtab: "commands" };
+    case "migration":
+      return { area: "config", subtab: "migration" };
     case "settings":
     default:
       return { area: "config", subtab: "settings" };
@@ -451,6 +475,18 @@ export function App() {
   const [triggerAuditRequestId, setTriggerAuditRequestId] = useState("");
   const [triggerAuditActorUserId, setTriggerAuditActorUserId] = useState<number>(0);
   const [triggerAuditLimit, setTriggerAuditLimit] = useState<number>(200);
+  const [migrationInfo, setMigrationInfo] = useState<AdminMigrationInfo | null>(null);
+  const [migrationDays, setMigrationDays] = useState<number>(7);
+  const [migrationTargetUrl, setMigrationTargetUrl] = useState("");
+  const [migrationDownloadUrl, setMigrationDownloadUrl] = useState("");
+  const [migrationPushTitle, setMigrationPushTitle] = useState("Daily umgezogen");
+  const [migrationPushBody, setMigrationPushBody] = useState("Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.");
+  const [migrationScreenTitle, setMigrationScreenTitle] = useState("Daily ist umgezogen");
+  const [migrationScreenBody, setMigrationScreenBody] = useState("Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.");
+  const [migrationRequirePromptFirst, setMigrationRequirePromptFirst] = useState(true);
+  const [migrationAutoOffEnabled, setMigrationAutoOffEnabled] = useState(true);
+  const [migrationExpectedSource, setMigrationExpectedSource] = useState("");
+  const [migrationCallbackSecret, setMigrationCallbackSecret] = useState("");
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
@@ -845,7 +881,7 @@ export function App() {
 
   async function loadAdminData(authToken: string) {
     try {
-      const [s, st, u, cmds, cal, sys, openReports, triggerSummary, runtime] = await Promise.all([
+      const [s, st, u, cmds, cal, sys, openReports, triggerSummary, runtime, migration] = await Promise.all([
         getSettings(authToken),
         getStats(authToken),
         listUsers(authToken),
@@ -855,6 +891,7 @@ export function App() {
         getReports(authToken, { status: "open", limit: 200 }),
         getAdminTriggerAuditSummary(authToken, 7),
         getAdminTriggerRuntime(authToken, { windowMinutes: triggerRuntimeWindowMinutes }),
+        getAdminMigration(authToken),
       ]);
       setSettings(s);
       setSavedSettings(s);
@@ -875,6 +912,16 @@ export function App() {
       setOpenReportsCount(openReports.length);
       setTriggerAuditSummary(triggerSummary);
       setTriggerRuntime(runtime);
+      setMigrationInfo(migration.migration);
+      setMigrationTargetUrl(migration.migration.targetBaseUrl || "");
+      setMigrationDownloadUrl(migration.migration.downloadUrl || "");
+      setMigrationPushTitle(migration.migration.pushTitle || "Daily umgezogen");
+      setMigrationPushBody(migration.migration.pushBody || "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.");
+      setMigrationScreenTitle(migration.migration.screenTitle || "Daily ist umgezogen");
+      setMigrationScreenBody(migration.migration.screenBody || "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.");
+      setMigrationRequirePromptFirst(Boolean(migration.migration.requirePromptFirst));
+      setMigrationAutoOffEnabled(Boolean(migration.migration.autoOffEnabled));
+      setMigrationExpectedSource(migration.migration.callbackExpectedSource || "");
     } catch (err) {
       setMessage((err as Error).message);
       setToken("");
@@ -1388,6 +1435,10 @@ export function App() {
     if (activeTab === "reports") await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
     if (activeTab === "commands") await loadCommands(token);
     if (activeTab === "system") await loadSystemHealth(token);
+    if (activeTab === "migration") {
+      const migration = await getAdminMigration(token);
+      setMigrationInfo(migration.migration);
+    }
   }
 
   function commandPayloadFromDraft(d: CommandDraft) {
@@ -1495,6 +1546,65 @@ export function App() {
       setSettings(next);
       setSavedSettings(next);
       setMessage("Settings gespeichert");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onSaveMigrationSettings() {
+    setMessage("");
+    try {
+      const next = await updateAdminMigration(token, {
+        migrationAutoOffEnabled,
+        migrationTargetBaseUrl: migrationTargetUrl,
+        migrationDownloadUrl: migrationDownloadUrl,
+        migrationPushTitle: migrationPushTitle,
+        migrationPushBody: migrationPushBody,
+        migrationScreenTitle: migrationScreenTitle,
+        migrationScreenBody: migrationScreenBody,
+        migrationRequirePromptFirst,
+        migrationExpectedSource: migrationExpectedSource,
+        migrationCallbackSecret: migrationCallbackSecret.trim() || undefined,
+      });
+      setMigrationInfo(next.migration);
+      setMigrationCallbackSecret("");
+      setMessage("Migrations-Einstellungen gespeichert.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onActivateMigration() {
+    setMessage("");
+    try {
+      const next = await activateAdminMigration(token, migrationDays);
+      setMigrationInfo(next.migration);
+      setMessage("Migrationsmodus aktiviert.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDeactivateMigration() {
+    if (!confirm("Migrationsmodus wirklich beenden?")) return;
+    setMessage("");
+    try {
+      const next = await deactivateAdminMigration(token);
+      setMigrationInfo(next.migration);
+      setMessage("Migrationsmodus deaktiviert.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onPushMigrationNotice() {
+    setMessage("");
+    try {
+      const result = await pushAdminMigration(token, {
+        title: migrationPushTitle,
+        body: migrationPushBody,
+      });
+      setMessage(`Migrations-Push gesendet (sent=${result.sentTo}, failed=${result.failed}).`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1869,6 +1979,7 @@ export function App() {
             <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => navigateTab("reports")}>Reports</button>
             <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => navigateTab("debug")}>Debug</button>
             <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => navigateTab("settings")}>Einstellungen</button>
+            <button className={activeTab === "migration" ? "tab active" : "tab"} onClick={() => navigateTab("migration")}>Migration</button>
           </div>
         ) : (
           <div className="ia-nav">
@@ -3834,6 +3945,98 @@ export function App() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {activeTab === "migration" && (
+          <div className="stack">
+            <div className="row">
+              <h2>Migration</h2>
+              <div className="row">
+                <button className="accent" onClick={() => void onSaveMigrationSettings()}>Speichern</button>
+                <button onClick={() => void onActivateMigration()}>Aktivieren</button>
+                <button className="danger" onClick={() => void onDeactivateMigration()}>Deaktivieren</button>
+                <button onClick={() => void onPushMigrationNotice()}>Push senden</button>
+              </div>
+            </div>
+
+            <article className="settings-current">
+              <h3>Status</h3>
+              <div className="settings-grid">
+                <p><strong>Aktiv:</strong> {migrationInfo?.enabled ? "ja" : "nein"}</p>
+                <p><strong>Start:</strong> {migrationInfo?.startedAt ? formatDateTime(migrationInfo.startedAt) : "-"}</p>
+                <p><strong>Bis:</strong> {migrationInfo?.until ? formatDateTime(migrationInfo.until) : "-"}</p>
+                <p><strong>Restzeit:</strong> {formatDuration(Number(migrationInfo?.remainingSeconds || 0))}</p>
+                <p><strong>Migriert:</strong> {Number(migrationInfo?.migratedUserCount || 0)} / {Number(migrationInfo?.baselineUserCount || 0)}</p>
+                <p><strong>Quote:</strong> {Math.round(Number(migrationInfo?.migrationRatio || 0) * 100)}%</p>
+                <p><strong>Auto-Off:</strong> {migrationInfo?.autoOffEnabled ? "an" : "aus"} {migrationInfo?.autoOffReason ? `(${migrationInfo.autoOffReason})` : ""}</p>
+                <p><strong>Callback Secret:</strong> {migrationInfo?.callbackSecretConfigured ? "gesetzt" : "nicht gesetzt"}</p>
+              </div>
+            </article>
+
+            <article className="settings-current">
+              <h3>One-Shot Steuerung</h3>
+              <div className="row">
+                <label>
+                  Laufzeit (Tage)
+                  <input type="number" min={1} max={30} value={migrationDays} onChange={(e) => setMigrationDays(Number(e.target.value) || 7)} />
+                </label>
+                <label className="checkbox">
+                  <input type="checkbox" checked={migrationAutoOffEnabled} onChange={(e) => setMigrationAutoOffEnabled(e.target.checked)} />
+                  Auto-Off aktiv
+                </label>
+                <label className="checkbox">
+                  <input type="checkbox" checked={migrationRequirePromptFirst} onChange={(e) => setMigrationRequirePromptFirst(e.target.checked)} />
+                  Migration vor Login zeigen
+                </label>
+              </div>
+            </article>
+
+            <article className="settings-current">
+              <h3>Nutzerkommunikation</h3>
+              <label>
+                Ziel-Server URL
+                <input value={migrationTargetUrl} onChange={(e) => setMigrationTargetUrl(e.target.value)} placeholder="https://new.daily.example" />
+              </label>
+              <label>
+                Download URL
+                <input value={migrationDownloadUrl} onChange={(e) => setMigrationDownloadUrl(e.target.value)} placeholder="https://.../releases/latest" />
+              </label>
+              <label>
+                Push Titel
+                <input value={migrationPushTitle} onChange={(e) => setMigrationPushTitle(e.target.value)} />
+              </label>
+              <label>
+                Push Text
+                <textarea rows={2} value={migrationPushBody} onChange={(e) => setMigrationPushBody(e.target.value)} />
+              </label>
+              <label>
+                Screen Titel
+                <input value={migrationScreenTitle} onChange={(e) => setMigrationScreenTitle(e.target.value)} />
+              </label>
+              <label>
+                Screen Text
+                <textarea rows={4} value={migrationScreenBody} onChange={(e) => setMigrationScreenBody(e.target.value)} />
+              </label>
+            </article>
+
+            <article className="settings-current">
+              <h3>Sync Sicherheit</h3>
+              <label>
+                Erwartete Source-Instanz (optional)
+                <input value={migrationExpectedSource} onChange={(e) => setMigrationExpectedSource(e.target.value)} />
+              </label>
+              <label>
+                Callback Secret (nur setzen/aendern)
+                <input value={migrationCallbackSecret} onChange={(e) => setMigrationCallbackSecret(e.target.value)} />
+              </label>
+              <p className="small">Das Secret wird aus Sicherheitsgruenden nicht im Klartext zurückgegeben.</p>
+            </article>
+
+            <div className="row">
+              <button onClick={() => void downloadAdminMigrationExport(token, "json")}>Export JSON</button>
+              <button onClick={() => void downloadAdminMigrationExport(token, "csv")}>Export CSV</button>
+            </div>
           </div>
         )}
 

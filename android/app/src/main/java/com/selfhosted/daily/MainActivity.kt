@@ -515,6 +515,28 @@ data class HealthResponse(
     val provider: String = "unknown",
     val features: HealthFeatures = HealthFeatures()
 )
+data class MigrationInfo(
+    val enabled: Boolean = false,
+    val startedAt: String? = null,
+    val until: String? = null,
+    val autoOffEnabled: Boolean = true,
+    val autoOffReason: String? = null,
+    val targetBaseUrl: String? = null,
+    val downloadUrl: String? = null,
+    val pushTitle: String? = null,
+    val pushBody: String? = null,
+    val screenTitle: String? = null,
+    val screenBody: String? = null,
+    val requirePromptFirst: Boolean = true,
+    val baselineUserCount: Int = 0,
+    val migratedUserCount: Int = 0,
+    val migrationRatio: Double = 0.0,
+    val remainingSeconds: Long = 0L
+)
+data class MigrationInfoResponse(
+    val migration: MigrationInfo = MigrationInfo(),
+    val serverNow: String? = null
+)
 data class PromptRulesResponse(
     val promptWindowStartHour: Int,
     val promptWindowEndHour: Int,
@@ -557,6 +579,9 @@ data class DebugLogEntry(
 interface Api {
     @GET("health")
     suspend fun health(): HealthResponse
+
+    @GET("migration/info")
+    suspend fun migrationInfo(): MigrationInfoResponse
 
     @POST("auth/login")
     suspend fun login(@Body body: LoginRequest): AuthResponse
@@ -866,6 +891,10 @@ class AppRepo(
         try {
             return block(firstHeader)
         } catch (http: HttpException) {
+            if (http.code() == 423) {
+                clearToken()
+                throw IllegalStateException("migration_required", http)
+            }
             if (http.code() != 401) throw http
             val refreshed = tryRefreshSession()
             if (!refreshed) {
@@ -1371,6 +1400,7 @@ class AppRepo(
     }
 
     suspend fun health(): HealthResponse = api.health()
+    suspend fun migrationInfoPublic(): MigrationInfo = api.migrationInfo().migration
     suspend fun probeHealth(baseUrl: String): HealthResponse =
         buildApiService(baseUrl, httpClient).health()
     suspend fun me(): MeResponse = authorizedCall("/api/me") { token -> api.me(token) }
@@ -1861,6 +1891,7 @@ data class UiState(
     val activeTab: AppTab = AppTab.CAMERA,
     val startupDone: Boolean = false,
     val startupQuote: String = "",
+    val migrationInfo: MigrationInfo? = null,
     val serverConnected: Boolean = false,
     val serverVersion: String = "unbekannt",
     val pushProvider: String = "unknown",
@@ -2226,6 +2257,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
             refreshAll()
         } catch (t: Throwable) {
+            if (t is IllegalStateException && t.message == "migration_required") {
+                handleMigrationRequiredState()
+                return
+            }
             logApiFailure("auth_login_failed", "/api/auth/login", t, "username=${username.trim().lowercase()}")
             state = state.copy(loading = false, message = apiError(t, "Login fehlgeschlagen"))
         }
@@ -2255,6 +2290,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 refreshAll()
             }
             .onFailure {
+                if (it is IllegalStateException && it.message == "migration_required") {
+                    handleMigrationRequiredState()
+                    return@onFailure
+                }
                 logApiFailure("auth_register_failed", "/api/auth/register/confirm", it, "username=${username.trim().lowercase()}")
                 state = state.copy(loading = false, message = apiError(it, "Registrierung fehlgeschlagen"))
             }
@@ -2277,6 +2316,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         profileSetupPromptShownInSession = false
         state = UiState(
             startupDone = true,
+            migrationInfo = state.migrationInfo,
             serverConnected = state.serverConnected,
             serverVersion = state.serverVersion,
             pushProvider = state.pushProvider,
@@ -2900,6 +2940,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val actual = if (t is RefreshStageException) t.cause ?: t else t
             if (t is RefreshStageException) {
                 failedCall = t.failedCall
+            }
+            if (actual is IllegalStateException && actual.message == "migration_required") {
+                handleMigrationRequiredState()
+                return false
             }
             if (isBenignCancellation(t)) {
                 state = state.copy(loading = if (showLoading) false else state.loading, communityStatsLoading = false)
@@ -3574,6 +3618,42 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     message = apiError(it, "Verbindung pruefen fehlgeschlagen")
                 )
             }
+    }
+
+    suspend fun refreshPublicMigrationInfo() {
+        val info = runCatching { repo.migrationInfoPublic() }.getOrNull()
+        state = state.copy(migrationInfo = info)
+    }
+
+    private suspend fun handleMigrationRequiredState(message: String = "Diese Instanz ist im Migrationsmodus. Bitte Zielserver eintragen und neu anmelden.") {
+        val info = runCatching { repo.migrationInfoPublic() }.getOrNull()
+        profileSetupPromptShownInSession = false
+        state = UiState(
+            startupDone = true,
+            migrationInfo = info,
+            serverConnected = state.serverConnected,
+            serverVersion = state.serverVersion,
+            pushProvider = state.pushProvider,
+            darkMode = state.darkMode,
+            oledMode = state.oledMode,
+            uploadQuality = state.uploadQuality,
+            autoUpdateEnabled = repo.autoUpdateEnabled(),
+            notificationMasterEnabled = repo.notificationMasterEnabled(),
+            feedPostPushEnabled = repo.feedPostPushEnabled(),
+            pollPushEnabled = repo.pollPushLocalEnabled(),
+            inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
+            photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
+            photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
+            customNotificationToneEnabled = repo.customNotificationToneEnabled(),
+            customNotificationToneUri = repo.customNotificationToneUri(),
+            diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
+            diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
+            activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+            apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
+            allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
+            debugLogs = repo.recentDebugLogs(),
+            message = message
+        )
     }
 
     fun setAllowInsecureHttpOverride(enabled: Boolean) {
@@ -4451,6 +4531,11 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         vm.autoUploadDebugLogsIfEnabled()
     }
 
+    LaunchedEffect(state.token, state.activeApiBaseUrl) {
+        if (state.token.isNotBlank()) return@LaunchedEffect
+        vm.refreshPublicMigrationInfo()
+    }
+
     LaunchedEffect(state.user?.id, state.user?.username, state.user?.favoriteColor) {
         val u = state.user ?: return@LaunchedEffect
         profileUsername = u.username
@@ -4846,6 +4931,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     if (state.token.isBlank()) {
         var loginPasswordVisible by rememberSaveable { mutableStateOf(false) }
         var registerPasswordVisible by rememberSaveable { mutableStateOf(false) }
+        var showServerEditor by rememberSaveable { mutableStateOf(false) }
+        var serverOverrideInput by rememberSaveable(state.apiBaseUrlOverride) { mutableStateOf(state.apiBaseUrlOverride) }
+        val localContext = LocalContext.current
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -4869,6 +4957,68 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         color = if (state.updateAvailable) Color(0xFFD32F2F) else Color(0xFF2E7D32),
                         fontWeight = FontWeight.SemiBold
                     )
+                }
+            }
+
+            state.migrationInfo?.takeIf { it.enabled }?.let { migration ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(migration.screenTitle?.ifBlank { "Daily ist umgezogen" } ?: "Daily ist umgezogen", fontWeight = FontWeight.SemiBold)
+                        Text(migration.screenBody?.ifBlank { "Bitte App aktualisieren und neuen Server eintragen." } ?: "Bitte App aktualisieren und neuen Server eintragen.")
+                        if (!migration.targetBaseUrl.isNullOrBlank()) {
+                            Text("Neuer Server: ${migration.targetBaseUrl}", color = MaterialTheme.colorScheme.primary)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (!migration.downloadUrl.isNullOrBlank()) {
+                                OutlinedButton(
+                                    onClick = {
+                                        runCatching {
+                                            localContext.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(migration.downloadUrl)))
+                                        }
+                                    }
+                                ) { Text("Update öffnen") }
+                            }
+                            Button(
+                                onClick = {
+                                    if (!migration.targetBaseUrl.isNullOrBlank()) {
+                                        serverOverrideInput = migration.targetBaseUrl
+                                    }
+                                    showServerEditor = true
+                                }
+                            ) { Text("Server setzen") }
+                        }
+                    }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Server", fontWeight = FontWeight.SemiBold)
+                    Text("Aktiv: ${state.activeApiBaseUrl}")
+                    TextButton(onClick = { showServerEditor = !showServerEditor }) {
+                        Text(if (showServerEditor) "Server-Eingabe ausblenden" else "Server-URL eingeben")
+                    }
+                    if (showServerEditor) {
+                        OutlinedTextField(
+                            value = serverOverrideInput,
+                            onValueChange = { serverOverrideInput = it },
+                            label = { Text("Server-URL (leer = Standard)") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(
+                                onClick = { serverOverrideInput = "" },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Standard") }
+                            Button(
+                                onClick = { scope.launch { vm.applyServerBaseUrlOverride(serverOverrideInput) } },
+                                modifier = Modifier.weight(1f),
+                                enabled = !state.applyServerOverrideInFlight
+                            ) {
+                                Text(if (state.applyServerOverrideInFlight) "Prüfe..." else "Speichern")
+                            }
+                        }
+                    }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -8374,6 +8524,10 @@ private fun apiError(t: Throwable, fallback: String): String {
             409 -> when {
                 raw.contains("username exists") -> "Benutzername ist bereits vergeben."
                 else -> "Du hast heute bereits gepostet"
+            }
+            423 -> when {
+                raw.contains("migration_required") || raw.contains("migration required") -> "Diese Instanz ist im Migrationsmodus. Bitte Zielserver eintragen."
+                else -> "Instanz gesperrt"
             }
             429 -> when {
                 raw.contains("sondermoment") -> "Sondermoment diese Woche bereits angefordert."

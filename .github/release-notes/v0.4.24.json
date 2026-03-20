@@ -1,0 +1,12 @@
+{
+  "version": "0.4.24",
+  "releasedAt": "2026-03-20T22:30:00Z",
+  "highlights": [
+    "Migrationsmodus v1 mit serverseitigem Lock fuer normale User-API-Aufrufe (423 migration_required).",
+    "Neuer Admin-Reiter Migration mit Aktivierung, Quote-Status, Push-Steuerung und JSON/CSV-Export.",
+    "Neue Endpunkte /api/migration/info und /api/migration/sync/login fuer Nutzerfuehrung und Quote-Sync.",
+    "Android-Startup mit direkter Server-URL-Eingabe ohne Login und Migrations-Hinweis im Startscreen.",
+    "Best-effort Login/Register-Callback von neuer Instanz zur alten fuer Auto-Off bei 100% Migration."
+  ],
+  "details": []
+}

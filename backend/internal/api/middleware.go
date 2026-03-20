@@ -78,6 +78,9 @@ func (s *Server) requireAuth(c *gin.Context) {
 			s.Monitor.RecordDBQuery(route, "auth_activity_touch", time.Since(touchStart))
 		}
 	}
+	if !s.enforceMigrationLock(c, user) {
+		return
+	}
 	c.Next()
 }
 

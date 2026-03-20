@@ -48,16 +48,16 @@ type userPromptRule struct {
 }
 
 type Server struct {
-	DB       *gorm.DB
-	Config   config.Config
-	Auth     *auth.Manager
-	Store    *storage.LocalStore
-	Notifier notify.Sender
-	Prompt   *scheduler.DailyPromptService
-	Location *time.Location
-	Monitor  *Monitor
-	FeedCache   *FeedDayCache
-	FeedLimiter *FeedPollLimiter
+	DB                *gorm.DB
+	Config            config.Config
+	Auth              *auth.Manager
+	Store             *storage.LocalStore
+	Notifier          notify.Sender
+	Prompt            *scheduler.DailyPromptService
+	Location          *time.Location
+	Monitor           *Monitor
+	FeedCache         *FeedDayCache
+	FeedLimiter       *FeedPollLimiter
 	activityTouchMu   sync.Mutex
 	activityTouchLast map[uint]time.Time
 }
@@ -82,6 +82,8 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/health/live", s.handleLiveHealth)
 		api.GET("/health/ready", s.handleReadyHealth)
 		api.GET("/metrics", s.handleMetrics)
+		api.GET("/migration/info", s.handleMigrationInfo)
+		api.POST("/migration/sync/login", s.handleMigrationSyncLogin)
 		api.POST("/auth/register", s.handleRegister)
 		api.POST("/auth/register/preview", s.handleInvitePreview)
 		api.POST("/auth/register/confirm", s.handleInviteRegister)
@@ -179,6 +181,12 @@ func (s *Server) Router() *gin.Engine {
 			admin.POST("/users/:id/token", s.handleAdminIssueUserToken)
 			admin.PUT("/users/:id", s.handleAdminUpdateUser)
 			admin.DELETE("/users/:id", s.handleAdminDeleteUser)
+			admin.GET("/migration", s.handleAdminMigrationGet)
+			admin.PUT("/migration", s.handleAdminMigrationPut)
+			admin.POST("/migration/activate", s.handleAdminMigrationActivate)
+			admin.POST("/migration/deactivate", s.handleAdminMigrationDeactivate)
+			admin.POST("/migration/push", s.handleAdminMigrationPush)
+			admin.GET("/migration/export", s.handleAdminMigrationExport)
 		}
 	}
 
@@ -345,6 +353,7 @@ func (s *Server) handleInviteRegister(c *gin.Context) {
 			"favoriteColor": defaultColor(inviter.FavoriteColor),
 		},
 	})
+	s.maybeReportMigratedLogin(user, s.Config.AppVersion)
 }
 
 func (s *Server) handleLogin(c *gin.Context) {
@@ -377,6 +386,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 		"sessionId":    tokens.SessionID,
 		"user":         s.userOwnJSON(user),
 	})
+	s.maybeReportMigratedLogin(user, s.Config.AppVersion)
 }
 
 func (s *Server) handleMe(c *gin.Context) {
@@ -906,22 +916,22 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"day":                  day,
-		"triggered":            prompt.TriggeredAt,
-		"uploadUntil":          prompt.UploadUntil,
-		"canUpload":            canUpload,
-		"hasPosted":            hasPromptPosted,
-		"hasPromptPostedToday": hasPromptPosted,
-		"hasVisiblePostToday":  hasVisiblePost,
-		"hasAnyPostToday":      hasAnyPost,
-		"ownPhoto":             ownPhoto,
-		"triggerSource":        prompt.TriggerSource,
-		"requestedByUser":      prompt.RequestedBy,
-		"momentKind":           momentKindFromTriggerSource(prompt.TriggerSource),
-		"dailyTriggeredAt":     triggerStatus.DailyTriggeredAt,
-		"dailyPending":         triggerStatus.DailyPending,
-		"specialTriggeredAt":   triggerStatus.SpecialTriggeredAt,
-		"specialRequestedByUser": triggerStatus.SpecialRequestedByUser,
+		"day":                         day,
+		"triggered":                   prompt.TriggeredAt,
+		"uploadUntil":                 prompt.UploadUntil,
+		"canUpload":                   canUpload,
+		"hasPosted":                   hasPromptPosted,
+		"hasPromptPostedToday":        hasPromptPosted,
+		"hasVisiblePostToday":         hasVisiblePost,
+		"hasAnyPostToday":             hasAnyPost,
+		"ownPhoto":                    ownPhoto,
+		"triggerSource":               prompt.TriggerSource,
+		"requestedByUser":             prompt.RequestedBy,
+		"momentKind":                  momentKindFromTriggerSource(prompt.TriggerSource),
+		"dailyTriggeredAt":            triggerStatus.DailyTriggeredAt,
+		"dailyPending":                triggerStatus.DailyPending,
+		"specialTriggeredAt":          triggerStatus.SpecialTriggeredAt,
+		"specialRequestedByUser":      triggerStatus.SpecialRequestedByUser,
 		"specialRequestedByUserColor": triggerStatus.SpecialRequestedByUserColor,
 	})
 }
@@ -999,7 +1009,7 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 		"schemaVersion": "dashboard_bootstrap_v1",
 		"serverNow":     now,
 		"capabilities": gin.H{
-			"bootstrap":             true,
+			"bootstrap":              true,
 			"lightweightCommentPost": true,
 		},
 		"me": gin.H{
@@ -1009,22 +1019,22 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 		},
 		"inviteCode": inviteCode,
 		"prompt": gin.H{
-			"day":                  day,
-			"triggered":            prompt.TriggeredAt,
-			"uploadUntil":          prompt.UploadUntil,
-			"canUpload":            canUpload,
-			"hasPosted":            hasPromptPosted,
-			"hasPromptPostedToday": hasPromptPosted,
-			"hasVisiblePostToday":  hasVisiblePost,
-			"hasAnyPostToday":      hasAnyPost,
-			"ownPhoto":             ownPhoto,
-			"triggerSource":        prompt.TriggerSource,
-			"requestedByUser":      prompt.RequestedBy,
-			"momentKind":           momentKindFromTriggerSource(prompt.TriggerSource),
-			"dailyTriggeredAt":     triggerStatus.DailyTriggeredAt,
-			"dailyPending":         triggerStatus.DailyPending,
-			"specialTriggeredAt":   triggerStatus.SpecialTriggeredAt,
-			"specialRequestedByUser": triggerStatus.SpecialRequestedByUser,
+			"day":                         day,
+			"triggered":                   prompt.TriggeredAt,
+			"uploadUntil":                 prompt.UploadUntil,
+			"canUpload":                   canUpload,
+			"hasPosted":                   hasPromptPosted,
+			"hasPromptPostedToday":        hasPromptPosted,
+			"hasVisiblePostToday":         hasVisiblePost,
+			"hasAnyPostToday":             hasAnyPost,
+			"ownPhoto":                    ownPhoto,
+			"triggerSource":               prompt.TriggerSource,
+			"requestedByUser":             prompt.RequestedBy,
+			"momentKind":                  momentKindFromTriggerSource(prompt.TriggerSource),
+			"dailyTriggeredAt":            triggerStatus.DailyTriggeredAt,
+			"dailyPending":                triggerStatus.DailyPending,
+			"specialTriggeredAt":          triggerStatus.SpecialTriggeredAt,
+			"specialRequestedByUser":      triggerStatus.SpecialRequestedByUser,
 			"specialRequestedByUserColor": triggerStatus.SpecialRequestedByUserColor,
 		},
 		"promptRules": gin.H{
@@ -1621,17 +1631,17 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 			comments = []gin.H{}
 		}
 		out = append(out, gin.H{
-			"isEarly":         isEarly,
-			"isLate":          isLate,
-			"capsuleLocked":   capsuleLocked,
-			"capsuleReleased": capsuleReleased,
-			"photo":           s.photoJSON(p),
-			"user":            s.userPublicJSON(adminUser.ID, p.User),
-			"reactions":       reactions,
-			"comments":        comments,
-			"triggerSource":   prompt.TriggerSource,
-			"requestedByUser": requestedByUser,
-			"momentKind":      momentKind,
+			"isEarly":                     isEarly,
+			"isLate":                      isLate,
+			"capsuleLocked":               capsuleLocked,
+			"capsuleReleased":             capsuleReleased,
+			"photo":                       s.photoJSON(p),
+			"user":                        s.userPublicJSON(adminUser.ID, p.User),
+			"reactions":                   reactions,
+			"comments":                    comments,
+			"triggerSource":               prompt.TriggerSource,
+			"requestedByUser":             requestedByUser,
+			"momentKind":                  momentKind,
 			"specialRequestedByUserColor": specialRequestedByUserColor,
 		})
 	}
@@ -1745,17 +1755,17 @@ func (s *Server) handleFeed(c *gin.Context) {
 			comments = []gin.H{}
 		}
 		out = append(out, gin.H{
-			"isEarly":         isEarly,
-			"isLate":          isLate,
-			"capsuleLocked":   capsuleLocked,
-			"capsuleReleased": capsuleReleased,
-			"photo":           s.photoJSON(p),
-			"user":            s.userPublicJSON(user.ID, p.User),
-			"reactions":       reactions,
-			"comments":        comments,
-			"triggerSource":   prompt.TriggerSource,
-			"requestedByUser": requestedByUser,
-			"momentKind":      momentKind,
+			"isEarly":                     isEarly,
+			"isLate":                      isLate,
+			"capsuleLocked":               capsuleLocked,
+			"capsuleReleased":             capsuleReleased,
+			"photo":                       s.photoJSON(p),
+			"user":                        s.userPublicJSON(user.ID, p.User),
+			"reactions":                   reactions,
+			"comments":                    comments,
+			"triggerSource":               prompt.TriggerSource,
+			"requestedByUser":             requestedByUser,
+			"momentKind":                  momentKind,
 			"specialRequestedByUserColor": specialRequestedByUserColor,
 		})
 	}
@@ -1766,19 +1776,19 @@ func (s *Server) handleFeed(c *gin.Context) {
 		s.Monitor.RecordDBQuery("/api/feed", "feed_monthly_recap", time.Since(recapStart))
 	}
 	payload := gin.H{
-		"items":           out,
-		"day":             day,
-		"triggeredAt":     prompt.TriggeredAt,
-		"uploadUntil":     prompt.UploadUntil,
-		"triggerSource":   prompt.TriggerSource,
-		"requestedByUser": requestedByUser,
-		"momentKind":      momentKind,
-		"specialRequestedByUser": triggerStatus.SpecialRequestedByUser,
+		"items":                       out,
+		"day":                         day,
+		"triggeredAt":                 prompt.TriggeredAt,
+		"uploadUntil":                 prompt.UploadUntil,
+		"triggerSource":               prompt.TriggerSource,
+		"requestedByUser":             requestedByUser,
+		"momentKind":                  momentKind,
+		"specialRequestedByUser":      triggerStatus.SpecialRequestedByUser,
 		"specialRequestedByUserColor": specialRequestedByUserColor,
-		"specialTriggeredAt": triggerStatus.SpecialTriggeredAt,
-		"dailyTriggeredAt": triggerStatus.DailyTriggeredAt,
-		"dailyPending": triggerStatus.DailyPending,
-		"monthRecap":      recap,
+		"specialTriggeredAt":          triggerStatus.SpecialTriggeredAt,
+		"dailyTriggeredAt":            triggerStatus.DailyTriggeredAt,
+		"dailyPending":                triggerStatus.DailyPending,
+		"monthRecap":                  recap,
 	}
 	if s.shouldUseFeedCache(day, now) {
 		s.putFeedCachedPayload(user.ID, day, payload, now)
@@ -1797,23 +1807,23 @@ func (s *Server) handleGetSettings(c *gin.Context) {
 }
 
 type settingsRequest struct {
-	PromptWindowStartHour   int              `json:"promptWindowStartHour"`
-	PromptWindowEndHour     int              `json:"promptWindowEndHour"`
-	UploadWindowMinutes     int              `json:"uploadWindowMinutes"`
-	FeedCommentPreviewLimit int              `json:"feedCommentPreviewLimit"`
-	PromptNotificationText  string           `json:"promptNotificationText"`
-	MaxUploadBytes          int64            `json:"maxUploadBytes"`
-	ChatCommandEnabled      bool             `json:"chatCommandEnabled"`
-	ChatCommandValue        string           `json:"chatCommandValue"`
-	ChatCommandTrigger      bool             `json:"chatCommandTrigger"`
-	ChatCommandSendPush     bool             `json:"chatCommandSendPush"`
-	ChatCommandPushText     string           `json:"chatCommandPushText"`
-	ChatCommandEchoChat     bool             `json:"chatCommandEchoChat"`
-	ChatCommandEchoText     string           `json:"chatCommandEchoText"`
+	PromptWindowStartHour            int              `json:"promptWindowStartHour"`
+	PromptWindowEndHour              int              `json:"promptWindowEndHour"`
+	UploadWindowMinutes              int              `json:"uploadWindowMinutes"`
+	FeedCommentPreviewLimit          int              `json:"feedCommentPreviewLimit"`
+	PromptNotificationText           string           `json:"promptNotificationText"`
+	MaxUploadBytes                   int64            `json:"maxUploadBytes"`
+	ChatCommandEnabled               bool             `json:"chatCommandEnabled"`
+	ChatCommandValue                 string           `json:"chatCommandValue"`
+	ChatCommandTrigger               bool             `json:"chatCommandTrigger"`
+	ChatCommandSendPush              bool             `json:"chatCommandSendPush"`
+	ChatCommandPushText              string           `json:"chatCommandPushText"`
+	ChatCommandEchoChat              bool             `json:"chatCommandEchoChat"`
+	ChatCommandEchoText              string           `json:"chatCommandEchoText"`
 	PerformanceTrackingEnabled       *bool            `json:"performanceTrackingEnabled"`
 	PerformanceTrackingWindowMinutes *int             `json:"performanceTrackingWindowMinutes"`
 	PerformanceTrackingOneShot       *bool            `json:"performanceTrackingOneShot"`
-	UserPromptRules         []userPromptRule `json:"userPromptRules"`
+	UserPromptRules                  []userPromptRule `json:"userPromptRules"`
 }
 
 func (s *Server) handleUpdateSettings(c *gin.Context) {
@@ -3215,18 +3225,18 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 	}
 
 	type dayTriggerAuditCounts struct {
-		Attempts          int
-		Blocked           int
-		Failed            int
-		DailyAttempts     int
-		DailyBlocked      int
-		DailyFailed       int
-		DailyTriggered    int
-		SpecialAttempts   int
-		SpecialBlocked    int
-		SpecialFailed     int
-		SpecialTriggered  int
-		DailyTriggeredAt  *time.Time
+		Attempts           int
+		Blocked            int
+		Failed             int
+		DailyAttempts      int
+		DailyBlocked       int
+		DailyFailed        int
+		DailyTriggered     int
+		SpecialAttempts    int
+		SpecialBlocked     int
+		SpecialFailed      int
+		SpecialTriggered   int
+		DailyTriggeredAt   *time.Time
 		SpecialTriggeredAt *time.Time
 	}
 	triggerAuditByDay := make(map[string]dayTriggerAuditCounts, len(dayList))
@@ -3539,46 +3549,46 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			continue
 		}
 		row := gin.H{
-			"day":                     day,
-			"plannedAt":               nil,
-			"triggeredAt":             nil,
-			"uploadUntil":             nil,
-			"source":                  "auto",
-			"triggerSource":           "",
-			"requestedByUser":         "",
-			"momentKind":              "daily",
-			"onlineUsersCount":        nil,
-			"postedUsersCount":        len(metrics.postedUsers),
-			"dailyMomentUsersCount":   len(metrics.promptUsers),
-			"extraUsersCount":         len(metrics.extraUsers),
-			"photoCount":              metrics.photoCount,
-			"dailyMomentPhotoCount":   metrics.dailyMomentPhotos,
-			"extraPhotoCount":         metrics.extraPhotos,
-			"timeCapsuleCount":        metrics.timeCapsules,
-			"privateCapsuleCount":     metrics.privateCapsules,
-			"commentCount":            metrics.commentCount,
-			"reactionCount":           metrics.reactionCount,
-			"chatMessageCount":        metrics.chatMessageCount,
-			"debugErrorCount":         metrics.debugErrorCount,
-			"onlineTrackingAvailable": onlineTrackingAvailable,
-			"triggerAttemptCount":     triggerAuditByDay[day].Attempts,
-			"triggerBlockedCount":     triggerAuditByDay[day].Blocked,
-			"triggerFailedCount":      triggerAuditByDay[day].Failed,
-			"dailyTriggerAttemptCount":   triggerAuditByDay[day].DailyAttempts,
-			"dailyTriggerBlockedCount":   triggerAuditByDay[day].DailyBlocked,
-			"dailyTriggerFailedCount":    triggerAuditByDay[day].DailyFailed,
-			"dailyTriggeredCount":        triggerAuditByDay[day].DailyTriggered,
-			"specialTriggerAttemptCount": triggerAuditByDay[day].SpecialAttempts,
-			"specialTriggerBlockedCount": triggerAuditByDay[day].SpecialBlocked,
-			"specialTriggerFailedCount":  triggerAuditByDay[day].SpecialFailed,
-			"specialTriggeredCount":      triggerAuditByDay[day].SpecialTriggered,
-			"dailyTriggeredAt":           triggerAuditByDay[day].DailyTriggeredAt,
-			"specialTriggeredAt":         triggerAuditByDay[day].SpecialTriggeredAt,
-			"dailyPending":               triggerAuditByDay[day].DailyTriggered == 0,
-			"multipleTriggerAlert":       triggerAuditByDay[day].DailyAttempts > 1,
-			"dailyMultipleTriggerAlert":  triggerAuditByDay[day].DailyAttempts > 1,
+			"day":                         day,
+			"plannedAt":                   nil,
+			"triggeredAt":                 nil,
+			"uploadUntil":                 nil,
+			"source":                      "auto",
+			"triggerSource":               "",
+			"requestedByUser":             "",
+			"momentKind":                  "daily",
+			"onlineUsersCount":            nil,
+			"postedUsersCount":            len(metrics.postedUsers),
+			"dailyMomentUsersCount":       len(metrics.promptUsers),
+			"extraUsersCount":             len(metrics.extraUsers),
+			"photoCount":                  metrics.photoCount,
+			"dailyMomentPhotoCount":       metrics.dailyMomentPhotos,
+			"extraPhotoCount":             metrics.extraPhotos,
+			"timeCapsuleCount":            metrics.timeCapsules,
+			"privateCapsuleCount":         metrics.privateCapsules,
+			"commentCount":                metrics.commentCount,
+			"reactionCount":               metrics.reactionCount,
+			"chatMessageCount":            metrics.chatMessageCount,
+			"debugErrorCount":             metrics.debugErrorCount,
+			"onlineTrackingAvailable":     onlineTrackingAvailable,
+			"triggerAttemptCount":         triggerAuditByDay[day].Attempts,
+			"triggerBlockedCount":         triggerAuditByDay[day].Blocked,
+			"triggerFailedCount":          triggerAuditByDay[day].Failed,
+			"dailyTriggerAttemptCount":    triggerAuditByDay[day].DailyAttempts,
+			"dailyTriggerBlockedCount":    triggerAuditByDay[day].DailyBlocked,
+			"dailyTriggerFailedCount":     triggerAuditByDay[day].DailyFailed,
+			"dailyTriggeredCount":         triggerAuditByDay[day].DailyTriggered,
+			"specialTriggerAttemptCount":  triggerAuditByDay[day].SpecialAttempts,
+			"specialTriggerBlockedCount":  triggerAuditByDay[day].SpecialBlocked,
+			"specialTriggerFailedCount":   triggerAuditByDay[day].SpecialFailed,
+			"specialTriggeredCount":       triggerAuditByDay[day].SpecialTriggered,
+			"dailyTriggeredAt":            triggerAuditByDay[day].DailyTriggeredAt,
+			"specialTriggeredAt":          triggerAuditByDay[day].SpecialTriggeredAt,
+			"dailyPending":                triggerAuditByDay[day].DailyTriggered == 0,
+			"multipleTriggerAlert":        triggerAuditByDay[day].DailyAttempts > 1,
+			"dailyMultipleTriggerAlert":   triggerAuditByDay[day].DailyAttempts > 1,
 			"specialMultipleTriggerAlert": triggerAuditByDay[day].SpecialAttempts > 1,
-			"userActivity":            userActivityRows,
+			"userActivity":                userActivityRows,
 			"analytics": gin.H{
 				"promptPhotoRatio":      promptPhotoRatio,
 				"extraPhotoRatio":       extraPhotoRatio,
@@ -4039,17 +4049,17 @@ func (s *Server) handleChatList(c *gin.Context) {
 
 func (s *Server) chatListPayload(viewer models.User) ([]gin.H, error) {
 	type chatListRow struct {
-		ID               uint       `gorm:"column:id"`
-		Body             string     `gorm:"column:body"`
-		Source           string     `gorm:"column:source"`
-		MessageType      string     `gorm:"column:message_type"`
-		PollQuestion     string     `gorm:"column:poll_question"`
-		PollAllowMultiple bool      `gorm:"column:poll_allow_multiple"`
-		PollClosedAt     *time.Time `gorm:"column:poll_closed_at"`
-		CreatedAt        time.Time  `gorm:"column:created_at"`
-		UserID           uint       `gorm:"column:user_id"`
-		Username         string     `gorm:"column:username"`
-		FavoriteColor    string     `gorm:"column:favorite_color"`
+		ID                uint       `gorm:"column:id"`
+		Body              string     `gorm:"column:body"`
+		Source            string     `gorm:"column:source"`
+		MessageType       string     `gorm:"column:message_type"`
+		PollQuestion      string     `gorm:"column:poll_question"`
+		PollAllowMultiple bool       `gorm:"column:poll_allow_multiple"`
+		PollClosedAt      *time.Time `gorm:"column:poll_closed_at"`
+		CreatedAt         time.Time  `gorm:"column:created_at"`
+		UserID            uint       `gorm:"column:user_id"`
+		Username          string     `gorm:"column:username"`
+		FavoriteColor     string     `gorm:"column:favorite_color"`
 	}
 	queryStart := time.Now()
 	rows := make([]chatListRow, 0, 100)
@@ -4084,9 +4094,9 @@ func (s *Server) chatListPayload(viewer models.User) ([]gin.H, error) {
 			poll := pollPayloadByMessageID[r.ID]
 			if poll == nil {
 				poll = gin.H{
-					"options":          []gin.H{},
+					"options":             []gin.H{},
 					"mySelectedOptionIds": []uint{},
-					"totalVoters":      int64(0),
+					"totalVoters":         int64(0),
 				}
 			}
 			poll["question"] = strings.TrimSpace(r.PollQuestion)
@@ -4208,9 +4218,9 @@ func (s *Server) chatPollPayloadByMessageID(viewer models.User, messageIDs []uin
 			selectedIDs = []uint{}
 		}
 		out[messageID] = gin.H{
-			"options":            options,
+			"options":             options,
 			"mySelectedOptionIds": selectedIDs,
-			"totalVoters":        totalByMessageID[messageID],
+			"totalVoters":         totalByMessageID[messageID],
 		}
 	}
 	return out, nil
@@ -4738,9 +4748,9 @@ func normalizePollOptions(raw []string) []string {
 func (s *Server) handleChatPollCreate(c *gin.Context) {
 	user, _ := userFromContext(c)
 	var req struct {
-		Question        string   `json:"question" binding:"required,min=3,max=280"`
-		Options         []string `json:"options" binding:"required"`
-		AllowMultiSelect bool    `json:"allowMultiSelect"`
+		Question         string   `json:"question" binding:"required,min=3,max=280"`
+		Options          []string `json:"options" binding:"required"`
+		AllowMultiSelect bool     `json:"allowMultiSelect"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
@@ -4765,11 +4775,11 @@ func (s *Server) handleChatPollCreate(c *gin.Context) {
 	var msg models.ChatMessage
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
 		msg = models.ChatMessage{
-			UserID:           user.ID,
-			Body:             question,
-			Source:           "user",
-			MessageType:      "poll",
-			PollQuestion:     question,
+			UserID:            user.ID,
+			Body:              question,
+			Source:            "user",
+			MessageType:       "poll",
+			PollQuestion:      question,
 			PollAllowMultiple: req.AllowMultiSelect,
 		}
 		if err := tx.Create(&msg).Error; err != nil {
@@ -5824,7 +5834,7 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 	}
 	fullResponse := parseQueryBool(c.Query("full"), false)
 	var (
-		out gin.H
+		out        gin.H
 		payloadErr error
 	)
 	payloadStart := time.Now()
@@ -6556,10 +6566,10 @@ func (s *Server) isPromptUploadAllowed(day string, now time.Time) bool {
 }
 
 type dayTriggerStatus struct {
-	DailyTriggeredAt      *time.Time
-	DailyPending          bool
-	SpecialTriggeredAt    *time.Time
-	SpecialRequestedByUser string
+	DailyTriggeredAt            *time.Time
+	DailyPending                bool
+	SpecialTriggeredAt          *time.Time
+	SpecialRequestedByUser      string
 	SpecialRequestedByUserColor string
 }
 
@@ -7443,33 +7453,52 @@ func normalizeSettings(settings models.AppSettings) models.AppSettings {
 	if settings.PerformanceTrackingWindowMinutes > 180 {
 		settings.PerformanceTrackingWindowMinutes = 180
 	}
+	settings.MigrationTargetBaseURL = normalizeMigrationURL(settings.MigrationTargetBaseURL)
+	settings.MigrationDownloadURL = strings.TrimSpace(settings.MigrationDownloadURL)
+	settings.MigrationPushTitle = defaultIfBlank(settings.MigrationPushTitle, "Daily umgezogen")
+	settings.MigrationPushBody = defaultIfBlank(settings.MigrationPushBody, "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.")
+	settings.MigrationScreenTitle = defaultIfBlank(settings.MigrationScreenTitle, "Daily ist umgezogen")
+	settings.MigrationScreenBody = defaultIfBlank(settings.MigrationScreenBody, "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.")
 	settings.UserPromptRulesJSON = encodeUserPromptRulesJSON(parseUserPromptRulesJSON(settings.UserPromptRulesJSON))
 	return settings
 }
 
 func settingsJSON(settings models.AppSettings) gin.H {
 	return gin.H{
-		"id":                      settings.ID,
-		"promptWindowStartHour":   settings.PromptWindowStartHour,
-		"promptWindowEndHour":     settings.PromptWindowEndHour,
-		"uploadWindowMinutes":     settings.UploadWindowMinutes,
-		"feedCommentPreviewLimit": settings.FeedCommentPreviewLimit,
-		"promptNotificationText":  settings.PromptNotificationText,
-		"maxUploadBytes":          settings.MaxUploadBytes,
-		"chatCommandEnabled":      settings.ChatCommandEnabled,
-		"chatCommandValue":        settings.ChatCommandValue,
-		"chatCommandTrigger":      settings.ChatCommandTrigger,
-		"chatCommandSendPush":     settings.ChatCommandSendPush,
-		"chatCommandPushText":     settings.ChatCommandPushText,
-		"chatCommandEchoChat":     settings.ChatCommandEchoChat,
-		"chatCommandEchoText":     settings.ChatCommandEchoText,
+		"id":                               settings.ID,
+		"promptWindowStartHour":            settings.PromptWindowStartHour,
+		"promptWindowEndHour":              settings.PromptWindowEndHour,
+		"uploadWindowMinutes":              settings.UploadWindowMinutes,
+		"feedCommentPreviewLimit":          settings.FeedCommentPreviewLimit,
+		"promptNotificationText":           settings.PromptNotificationText,
+		"maxUploadBytes":                   settings.MaxUploadBytes,
+		"chatCommandEnabled":               settings.ChatCommandEnabled,
+		"chatCommandValue":                 settings.ChatCommandValue,
+		"chatCommandTrigger":               settings.ChatCommandTrigger,
+		"chatCommandSendPush":              settings.ChatCommandSendPush,
+		"chatCommandPushText":              settings.ChatCommandPushText,
+		"chatCommandEchoChat":              settings.ChatCommandEchoChat,
+		"chatCommandEchoText":              settings.ChatCommandEchoText,
 		"performanceTrackingEnabled":       settings.PerformanceTrackingEnabled,
 		"performanceTrackingWindowMinutes": settings.PerformanceTrackingWindowMinutes,
 		"performanceTrackingOneShot":       settings.PerformanceTrackingOneShot,
-		"userPromptRulesJson":     settings.UserPromptRulesJSON,
-		"userPromptRules":         parseUserPromptRulesJSON(settings.UserPromptRulesJSON),
-		"createdAt":               settings.CreatedAt,
-		"updatedAt":               settings.UpdatedAt,
+		"migrationEnabled":                 settings.MigrationEnabled,
+		"migrationStartedAt":               settings.MigrationStartedAt,
+		"migrationUntil":                   settings.MigrationUntil,
+		"migrationAutoOffEnabled":          settings.MigrationAutoOffEnabled,
+		"migrationTargetBaseUrl":           settings.MigrationTargetBaseURL,
+		"migrationDownloadUrl":             settings.MigrationDownloadURL,
+		"migrationPushTitle":               settings.MigrationPushTitle,
+		"migrationPushBody":                settings.MigrationPushBody,
+		"migrationScreenTitle":             settings.MigrationScreenTitle,
+		"migrationScreenBody":              settings.MigrationScreenBody,
+		"migrationRequirePromptFirst":      settings.MigrationRequirePromptFirst,
+		"migrationExpectedSource":          settings.MigrationExpectedSource,
+		"migrationBaselineUserCount":       settings.MigrationBaselineUserCount,
+		"userPromptRulesJson":              settings.UserPromptRulesJSON,
+		"userPromptRules":                  parseUserPromptRulesJSON(settings.UserPromptRulesJSON),
+		"createdAt":                        settings.CreatedAt,
+		"updatedAt":                        settings.UpdatedAt,
 	}
 }
 

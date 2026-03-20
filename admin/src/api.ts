@@ -33,6 +33,19 @@ export type Settings = {
   chatCommandEchoChat: boolean;
   chatCommandEchoText: string;
   userPromptRules: UserPromptRule[];
+  migrationEnabled?: boolean;
+  migrationStartedAt?: string | null;
+  migrationUntil?: string | null;
+  migrationAutoOffEnabled?: boolean;
+  migrationTargetBaseUrl?: string;
+  migrationDownloadUrl?: string;
+  migrationPushTitle?: string;
+  migrationPushBody?: string;
+  migrationScreenTitle?: string;
+  migrationScreenBody?: string;
+  migrationRequirePromptFirst?: boolean;
+  migrationExpectedSource?: string;
+  migrationBaselineUserCount?: number;
 };
 
 export type AdminStats = {
@@ -781,6 +794,31 @@ export type AdminPerformanceTrackingState = {
   serverNow?: string;
 };
 
+export type AdminMigrationInfo = {
+  enabled: boolean;
+  startedAt?: string | null;
+  until?: string | null;
+  autoOffEnabled: boolean;
+  autoOffReason?: string;
+  targetBaseUrl?: string;
+  downloadUrl?: string;
+  pushTitle?: string;
+  pushBody?: string;
+  screenTitle?: string;
+  screenBody?: string;
+  requirePromptFirst: boolean;
+  baselineUserCount: number;
+  migratedUserCount: number;
+  migrationRatio: number;
+  remainingSeconds: number;
+  callbackExpectedSource?: string;
+  callbackSecretConfigured?: boolean;
+};
+
+export type AdminMigrationResponse = {
+  migration: AdminMigrationInfo;
+};
+
 const apiBase = import.meta.env.VITE_API_BASE || "/api";
 
 const settingsDefaults: Settings = {
@@ -800,6 +838,19 @@ const settingsDefaults: Settings = {
   chatCommandPushText: "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
   chatCommandEchoChat: true,
   chatCommandEchoText: "Moment wurde von {user} angefordert.",
+  migrationEnabled: false,
+  migrationStartedAt: null,
+  migrationUntil: null,
+  migrationAutoOffEnabled: true,
+  migrationTargetBaseUrl: "",
+  migrationDownloadUrl: "",
+  migrationPushTitle: "Daily umgezogen",
+  migrationPushBody: "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.",
+  migrationScreenTitle: "Daily ist umgezogen",
+  migrationScreenBody: "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.",
+  migrationRequirePromptFirst: true,
+  migrationExpectedSource: "",
+  migrationBaselineUserCount: 0,
   userPromptRules: [
     {
       id: "diagnostics_consent_v1",
@@ -856,7 +907,43 @@ function normalizeSettings(raw: any): Settings {
     chatCommandPushText: String(raw?.chatCommandPushText ?? raw?.ChatCommandPushText ?? settingsDefaults.chatCommandPushText),
     chatCommandEchoChat: Boolean(raw?.chatCommandEchoChat ?? raw?.ChatCommandEchoChat ?? settingsDefaults.chatCommandEchoChat),
     chatCommandEchoText: String(raw?.chatCommandEchoText ?? raw?.ChatCommandEchoText ?? settingsDefaults.chatCommandEchoText),
+    migrationEnabled: Boolean(raw?.migrationEnabled ?? raw?.MigrationEnabled ?? settingsDefaults.migrationEnabled),
+    migrationStartedAt: raw?.migrationStartedAt ?? raw?.MigrationStartedAt ?? settingsDefaults.migrationStartedAt,
+    migrationUntil: raw?.migrationUntil ?? raw?.MigrationUntil ?? settingsDefaults.migrationUntil,
+    migrationAutoOffEnabled: Boolean(raw?.migrationAutoOffEnabled ?? raw?.MigrationAutoOffEnabled ?? settingsDefaults.migrationAutoOffEnabled),
+    migrationTargetBaseUrl: String(raw?.migrationTargetBaseUrl ?? raw?.MigrationTargetBaseURL ?? settingsDefaults.migrationTargetBaseUrl),
+    migrationDownloadUrl: String(raw?.migrationDownloadUrl ?? raw?.MigrationDownloadURL ?? settingsDefaults.migrationDownloadUrl),
+    migrationPushTitle: String(raw?.migrationPushTitle ?? raw?.MigrationPushTitle ?? settingsDefaults.migrationPushTitle),
+    migrationPushBody: String(raw?.migrationPushBody ?? raw?.MigrationPushBody ?? settingsDefaults.migrationPushBody),
+    migrationScreenTitle: String(raw?.migrationScreenTitle ?? raw?.MigrationScreenTitle ?? settingsDefaults.migrationScreenTitle),
+    migrationScreenBody: String(raw?.migrationScreenBody ?? raw?.MigrationScreenBody ?? settingsDefaults.migrationScreenBody),
+    migrationRequirePromptFirst: Boolean(raw?.migrationRequirePromptFirst ?? raw?.MigrationRequirePromptFirst ?? settingsDefaults.migrationRequirePromptFirst),
+    migrationExpectedSource: String(raw?.migrationExpectedSource ?? raw?.MigrationExpectedSource ?? settingsDefaults.migrationExpectedSource),
+    migrationBaselineUserCount: Number(raw?.migrationBaselineUserCount ?? raw?.MigrationBaselineUserCount ?? settingsDefaults.migrationBaselineUserCount),
     userPromptRules: normalizedRules,
+  };
+}
+
+function normalizeMigrationInfo(raw: any): AdminMigrationInfo {
+  return {
+    enabled: Boolean(raw?.enabled),
+    startedAt: raw?.startedAt ?? null,
+    until: raw?.until ?? null,
+    autoOffEnabled: Boolean(raw?.autoOffEnabled ?? true),
+    autoOffReason: String(raw?.autoOffReason ?? ""),
+    targetBaseUrl: String(raw?.targetBaseUrl ?? ""),
+    downloadUrl: String(raw?.downloadUrl ?? ""),
+    pushTitle: String(raw?.pushTitle ?? ""),
+    pushBody: String(raw?.pushBody ?? ""),
+    screenTitle: String(raw?.screenTitle ?? ""),
+    screenBody: String(raw?.screenBody ?? ""),
+    requirePromptFirst: Boolean(raw?.requirePromptFirst ?? true),
+    baselineUserCount: Number(raw?.baselineUserCount ?? 0),
+    migratedUserCount: Number(raw?.migratedUserCount ?? 0),
+    migrationRatio: Number(raw?.migrationRatio ?? 0),
+    remainingSeconds: Number(raw?.remainingSeconds ?? 0),
+    callbackExpectedSource: String(raw?.callbackExpectedSource ?? ""),
+    callbackSecretConfigured: Boolean(raw?.callbackSecretConfigured),
   };
 }
 
@@ -1535,6 +1622,105 @@ export async function updateAdminTriggerRuntime(
     body: JSON.stringify(payload),
   });
   return parse<AdminTriggerRuntimeResponse>(res);
+}
+
+export async function getAdminMigration(token: string): Promise<AdminMigrationResponse> {
+  const res = await fetch(`${apiBase}/admin/migration`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<any>(res);
+  return { migration: normalizeMigrationInfo(data?.migration || {}) };
+}
+
+export async function updateAdminMigration(
+  token: string,
+  payload: {
+    migrationAutoOffEnabled?: boolean;
+    migrationTargetBaseUrl?: string;
+    migrationDownloadUrl?: string;
+    migrationPushTitle?: string;
+    migrationPushBody?: string;
+    migrationScreenTitle?: string;
+    migrationScreenBody?: string;
+    migrationRequirePromptFirst?: boolean;
+    migrationCallbackSecret?: string;
+    migrationExpectedSource?: string;
+  }
+): Promise<AdminMigrationResponse> {
+  const res = await fetch(`${apiBase}/admin/migration`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await parse<any>(res);
+  return { migration: normalizeMigrationInfo(data?.migration || {}) };
+}
+
+export async function activateAdminMigration(token: string, days = 7): Promise<AdminMigrationResponse> {
+  const res = await fetch(`${apiBase}/admin/migration/activate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ days }),
+  });
+  const data = await parse<any>(res);
+  return { migration: normalizeMigrationInfo(data?.migration || {}) };
+}
+
+export async function deactivateAdminMigration(token: string): Promise<AdminMigrationResponse> {
+  const res = await fetch(`${apiBase}/admin/migration/deactivate`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<any>(res);
+  return { migration: normalizeMigrationInfo(data?.migration || {}) };
+}
+
+export async function pushAdminMigration(
+  token: string,
+  payload: { title?: string; body?: string; testUserId?: number }
+): Promise<{ ok: boolean; sentTo: number; failed: number; invalidRemoved: number }> {
+  const res = await fetch(`${apiBase}/admin/migration/push`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  return parse<{ ok: boolean; sentTo: number; failed: number; invalidRemoved: number }>(res);
+}
+
+export async function downloadAdminMigrationExport(
+  token: string,
+  format: "json" | "csv" = "json"
+): Promise<void> {
+  const qs = new URLSearchParams();
+  qs.set("format", format);
+  const res = await fetch(`${apiBase}/admin/migration/export?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    throw new Error(body.error || "Download fehlgeschlagen");
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") || "";
+  const fileMatch = disposition.match(/filename=\"?([^\"]+)\"?/i);
+  const filename = fileMatch?.[1] || `migration-export.${format}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function downloadIncidentExport(
