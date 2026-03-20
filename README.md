@@ -77,6 +77,21 @@ Dann erreichbar:
 - Admin Web: `https://daily.deine-domain.tld`
 - API: `https://daily.deine-domain.tld/api/health`
 
+### CORS_ORIGINS
+`CORS_ORIGINS` muss jede Browser-Origin enthalten, die das Backend anspricht.
+
+Wenn oeffentliche URL und interne Admin-URL unterschiedlich sind, muessen beide enthalten sein:
+
+```env
+PUBLIC_BASE_URL=https://daily.broutschek.de
+ADMIN_BASE_URL=http://10.20.10.30:13379
+CORS_ORIGINS=http://10.20.10.30:13379,https://daily.broutschek.de
+```
+
+Hinweis:
+- Das Backend fuegt die Origins aus `PUBLIC_BASE_URL` und optional `ADMIN_BASE_URL` zusaetzlich automatisch hinzu (wenn gueltig).
+- Fehlende Origins fuehren im Browser oft zu `403 Forbidden` bei Login/Requests trotz korrekter Credentials.
+
 ## GitHub Setup (CI/CD)
 
 ### Workflows

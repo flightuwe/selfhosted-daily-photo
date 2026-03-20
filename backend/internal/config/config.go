@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ type Config struct {
 	RefreshTokenTTL          time.Duration
 	AllowedOrigins           []string
 	PublicBaseURL            string
+	AdminBaseURL             string
 	Timezone                 string
 	SchedulerEnabled         bool
 	SchedulerLeaseTimeoutSec int
@@ -32,6 +34,13 @@ type Config struct {
 }
 
 func Load() Config {
+	publicBaseURL := getEnv("PUBLIC_BASE_URL", "http://localhost:8080")
+	adminBaseURL := getEnv("ADMIN_BASE_URL", "")
+	allowedOrigins := withDerivedOrigins(
+		splitCSV(getEnv("CORS_ORIGINS", "*")),
+		publicBaseURL,
+		adminBaseURL,
+	)
 	return Config{
 		Address:                  getEnv("APP_ADDRESS", ":8080"),
 		DatabasePath:             getEnv("DB_PATH", "./data/app.db"),
@@ -39,8 +48,9 @@ func Load() Config {
 		JWTSecret:                getEnv("JWT_SECRET", "dev-secret-change-me"),
 		TokenTTL:                 time.Duration(getInt("TOKEN_TTL_HOURS", 24)) * time.Hour,
 		RefreshTokenTTL:          time.Duration(getInt("REFRESH_TOKEN_TTL_DAYS", 3650)) * 24 * time.Hour,
-		AllowedOrigins:           splitCSV(getEnv("CORS_ORIGINS", "*")),
-		PublicBaseURL:            getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
+		AllowedOrigins:           allowedOrigins,
+		PublicBaseURL:            publicBaseURL,
+		AdminBaseURL:             adminBaseURL,
 		Timezone:                 getEnv("APP_TIMEZONE", "Europe/Berlin"),
 		SchedulerEnabled:         getBool("SCHEDULER_ENABLED", true),
 		SchedulerLeaseTimeoutSec: getInt("SCHEDULER_LEASE_TIMEOUT_SEC", 60),
@@ -78,6 +88,57 @@ func splitCSV(v string) []string {
 		return []string{"*"}
 	}
 	return out
+}
+
+func withDerivedOrigins(origins []string, publicBaseURL string, adminBaseURL string) []string {
+	if containsWildcardOrigin(origins) {
+		return origins
+	}
+	out := append([]string{}, origins...)
+	if origin := originFromBaseURL(publicBaseURL); origin != "" {
+		out = appendUnique(out, origin)
+	}
+	if origin := originFromBaseURL(adminBaseURL); origin != "" {
+		out = appendUnique(out, origin)
+	}
+	if len(out) == 0 {
+		return []string{"*"}
+	}
+	return out
+}
+
+func containsWildcardOrigin(origins []string) bool {
+	for _, origin := range origins {
+		if strings.TrimSpace(origin) == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func appendUnique(items []string, value string) []string {
+	target := strings.TrimSpace(value)
+	if target == "" {
+		return items
+	}
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item), target) {
+			return items
+		}
+	}
+	return append(items, target)
+}
+
+func originFromBaseURL(raw string) string {
+	clean := strings.TrimSpace(raw)
+	if clean == "" {
+		return ""
+	}
+	u, err := url.Parse(clean)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func getInt(key string, fallback int) int {

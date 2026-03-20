@@ -23,8 +23,9 @@ services:
       - JWT_SECRET=HIER_LANGES_RANDOM_SECRET_EINTRAGEN
       - TOKEN_TTL_HOURS=24
       - REFRESH_TOKEN_TTL_DAYS=3650
-      - CORS_ORIGINS=https://daily.teacloud.synology.me
-      - PUBLIC_BASE_URL=https://daily.teacloud.synology.me
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://daily.example.tld}
+      - ADMIN_BASE_URL=${ADMIN_BASE_URL:-http://10.20.10.30:13379}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://10.20.10.30:13379,https://daily.example.tld}
       - APP_TIMEZONE=Europe/Berlin
       - SCHEDULER_ENABLED=true
       - SCHEDULER_LEASE_TIMEOUT_SEC=60
