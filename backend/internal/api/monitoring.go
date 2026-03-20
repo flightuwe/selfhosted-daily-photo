@@ -703,6 +703,11 @@ func (s *Server) handleAdminSystemHealth(c *gin.Context) {
 		"components":      components,
 		"latestPrompt":    latestPrompt,
 		"uploadSizeBytes": dataSizeBytes,
+		"cors": gin.H{
+			"allowedOrigins": s.Config.AllowedOrigins,
+			"publicBaseUrl":  s.Config.PublicBaseURL,
+			"adminBaseUrl":   s.Config.AdminBaseURL,
+		},
 	}
 	var latestSystem models.SystemMinuteMetric
 	if err := s.DB.Order("minute desc").Limit(1).First(&latestSystem).Error; err == nil {

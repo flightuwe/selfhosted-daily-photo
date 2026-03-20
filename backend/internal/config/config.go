@@ -79,7 +79,7 @@ func splitCSV(v string) []string {
 	parts := strings.Split(v, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		p = strings.TrimSpace(p)
+		p = normalizeOriginCandidate(p)
 		if p != "" {
 			out = append(out, p)
 		}
@@ -117,12 +117,12 @@ func containsWildcardOrigin(origins []string) bool {
 }
 
 func appendUnique(items []string, value string) []string {
-	target := strings.TrimSpace(value)
+	target := normalizeOriginCandidate(value)
 	if target == "" {
 		return items
 	}
 	for _, item := range items {
-		if strings.EqualFold(strings.TrimSpace(item), target) {
+		if strings.EqualFold(normalizeOriginCandidate(item), target) {
 			return items
 		}
 	}
@@ -130,7 +130,7 @@ func appendUnique(items []string, value string) []string {
 }
 
 func originFromBaseURL(raw string) string {
-	clean := strings.TrimSpace(raw)
+	clean := normalizeOriginCandidate(raw)
 	if clean == "" {
 		return ""
 	}
@@ -139,6 +139,29 @@ func originFromBaseURL(raw string) string {
 		return ""
 	}
 	return u.Scheme + "://" + u.Host
+}
+
+func normalizeOriginCandidate(raw string) string {
+	clean := strings.TrimSpace(raw)
+	if clean == "" {
+		return ""
+	}
+	if len(clean) >= 2 {
+		if (strings.HasPrefix(clean, "\"") && strings.HasSuffix(clean, "\"")) ||
+			(strings.HasPrefix(clean, "'") && strings.HasSuffix(clean, "'")) {
+			clean = strings.TrimSpace(clean[1 : len(clean)-1])
+		}
+	}
+	if clean == "*" {
+		return clean
+	}
+	if strings.Contains(clean, "://") {
+		u, err := url.Parse(clean)
+		if err == nil && u.Scheme != "" && u.Host != "" {
+			return u.Scheme + "://" + u.Host
+		}
+	}
+	return strings.TrimRight(clean, "/")
 }
 
 func getInt(key string, fallback int) int {

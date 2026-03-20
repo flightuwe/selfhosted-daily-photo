@@ -90,6 +90,7 @@ CORS_ORIGINS=http://10.20.10.30:13379,https://daily.broutschek.de
 
 Hinweis:
 - Das Backend fuegt die Origins aus `PUBLIC_BASE_URL` und optional `ADMIN_BASE_URL` zusaetzlich automatisch hinzu (wenn gueltig).
+- Origins werden robust normalisiert (z. B. mit/ohne Quotes, ohne Pfad, ohne trailing `/`).
 - Fehlende Origins fuehren im Browser oft zu `403 Forbidden` bei Login/Requests trotz korrekter Credentials.
 
 ## GitHub Setup (CI/CD)

@@ -67,7 +67,7 @@ func (s *Server) Router() *gin.Engine {
 	r.Use(s.requestIDMiddleware(), s.metricsMiddleware())
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     s.Config.AllowedOrigins,
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-ID"},
 		ExposeHeaders:    []string{"Content-Length", "X-Request-ID"},
 		AllowCredentials: true,
