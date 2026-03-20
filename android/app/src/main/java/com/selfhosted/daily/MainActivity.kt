@@ -537,6 +537,20 @@ data class MigrationInfoResponse(
     val migration: MigrationInfo = MigrationInfo(),
     val serverNow: String? = null
 )
+data class MigrationHandoffRequest(
+    val appVersion: String = BuildConfig.VERSION_NAME,
+    val deviceName: String? = null
+)
+data class MigrationHandoffResponse(
+    val handoffToken: String,
+    val targetBaseUrl: String,
+    val expiresAt: String? = null
+)
+data class MigrationHandoffConsumeRequest(
+    val handoffToken: String,
+    val appVersion: String = BuildConfig.VERSION_NAME,
+    val deviceName: String? = null
+)
 data class PromptRulesResponse(
     val promptWindowStartHour: Int,
     val promptWindowEndHour: Int,
@@ -582,6 +596,9 @@ interface Api {
 
     @GET("migration/info")
     suspend fun migrationInfo(): MigrationInfoResponse
+
+    @POST("migration/handoff/consume")
+    suspend fun migrationHandoffConsume(@Body body: MigrationHandoffConsumeRequest): AuthResponse
 
     @POST("auth/login")
     suspend fun login(@Body body: LoginRequest): AuthResponse
@@ -691,6 +708,12 @@ interface Api {
         @Header("Authorization") token: String,
         @Body body: DeviceTokenRequest
     )
+
+    @POST("migration/handoff")
+    suspend fun migrationHandoff(
+        @Header("Authorization") token: String,
+        @Body body: MigrationHandoffRequest
+    ): MigrationHandoffResponse
 
     @Multipart
     @POST("uploads")
@@ -849,6 +872,10 @@ class AppRepo(
             if (refresh.isNotBlank()) putString("refresh_token", refresh) else remove("refresh_token")
             if (sessionId.isNotBlank()) putString("session_id", sessionId) else remove("session_id")
         }.apply()
+    }
+
+    fun adoptAuthSession(auth: AuthResponse) {
+        saveAuthSession(auth)
     }
 
     fun clearToken() {
@@ -1401,6 +1428,25 @@ class AppRepo(
 
     suspend fun health(): HealthResponse = api.health()
     suspend fun migrationInfoPublic(): MigrationInfo = api.migrationInfo().migration
+    suspend fun requestMigrationHandoff(accessTokenOverride: String = ""): MigrationHandoffResponse {
+        val token = accessTokenOverride.trim().ifBlank { accessToken().trim() }
+        if (token.isBlank()) throw IllegalStateException("missing_access_token")
+        return api.migrationHandoff(
+            "Bearer $token",
+            MigrationHandoffRequest(
+                appVersion = BuildConfig.VERSION_NAME,
+                deviceName = currentDeviceName()
+            )
+        )
+    }
+    suspend fun consumeMigrationHandoff(baseUrl: String, handoffToken: String): AuthResponse =
+        buildApiService(baseUrl, httpClient).migrationHandoffConsume(
+            MigrationHandoffConsumeRequest(
+                handoffToken = handoffToken,
+                appVersion = BuildConfig.VERSION_NAME,
+                deviceName = currentDeviceName()
+            )
+        )
     suspend fun probeHealth(baseUrl: String): HealthResponse =
         buildApiService(baseUrl, httpClient).health()
     suspend fun me(): MeResponse = authorizedCall("/api/me") { token -> api.me(token) }
@@ -1892,6 +1938,7 @@ data class UiState(
     val startupDone: Boolean = false,
     val startupQuote: String = "",
     val migrationInfo: MigrationInfo? = null,
+    val migrationCanUseSessionShortcut: Boolean = false,
     val serverConnected: Boolean = false,
     val serverVersion: String = "unbekannt",
     val pushProvider: String = "unknown",
@@ -1999,6 +2046,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         "past_posts"
     )
     private var profileSetupPromptShownInSession = false
+    private var migrationSessionTokenSnapshot: String = ""
 
     init {
         repo.ensurePollPushDefaultMigration()
@@ -2253,7 +2301,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(loading = true, message = "")
         try {
             val user = repo.login(username, password)
-            state = state.copy(user = user, token = repo.token(), loading = false, invitePreview = null)
+            migrationSessionTokenSnapshot = ""
+            state = state.copy(
+                user = user,
+                token = repo.token(),
+                loading = false,
+                invitePreview = null,
+                migrationCanUseSessionShortcut = false
+            )
             runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
             refreshAll()
         } catch (t: Throwable) {
@@ -2285,7 +2340,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(loading = true, message = "")
         runCatching { repo.registerWithInvite(inviteCode, username, password) }
             .onSuccess { user ->
-                state = state.copy(user = user, token = repo.token(), loading = false, invitePreview = null)
+                migrationSessionTokenSnapshot = ""
+                state = state.copy(
+                    user = user,
+                    token = repo.token(),
+                    loading = false,
+                    invitePreview = null,
+                    migrationCanUseSessionShortcut = false
+                )
                 runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
                 refreshAll()
             }
@@ -2313,10 +2375,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.logoutRemoteSafe(tokenSnapshot)
         }
         repo.clearToken()
+        migrationSessionTokenSnapshot = ""
         profileSetupPromptShownInSession = false
         state = UiState(
             startupDone = true,
             migrationInfo = state.migrationInfo,
+            migrationCanUseSessionShortcut = false,
             serverConnected = state.serverConnected,
             serverVersion = state.serverVersion,
             pushProvider = state.pushProvider,
@@ -3626,11 +3690,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private suspend fun handleMigrationRequiredState(message: String = "Diese Instanz ist im Migrationsmodus. Bitte Zielserver eintragen und neu anmelden.") {
+        migrationSessionTokenSnapshot = repo.token().trim()
+        repo.clearToken()
         val info = runCatching { repo.migrationInfoPublic() }.getOrNull()
         profileSetupPromptShownInSession = false
         state = UiState(
             startupDone = true,
             migrationInfo = info,
+            migrationCanUseSessionShortcut = migrationSessionTokenSnapshot.isNotBlank(),
             serverConnected = state.serverConnected,
             serverVersion = state.serverVersion,
             pushProvider = state.pushProvider,
@@ -3696,6 +3763,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             "API-Server gewechselt",
             "target=${repo.resolvedApiBaseUrl()};custom=${repo.isApiBaseUrlOverrideActive()}"
         )
+        migrationSessionTokenSnapshot = ""
         profileSetupPromptShownInSession = false
         repo.clearToken()
         state = UiState(
@@ -3703,6 +3771,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverConnected = false,
             serverVersion = "unbekannt",
             pushProvider = "unknown",
+            migrationCanUseSessionShortcut = false,
             darkMode = state.darkMode,
             oledMode = state.oledMode,
             uploadQuality = state.uploadQuality,
@@ -3728,6 +3797,63 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 "Custom-Server gespeichert. Bitte neu anmelden."
             }
         )
+    }
+
+    suspend fun migrateWithSessionShortcut() {
+        val tokenSnapshot = migrationSessionTokenSnapshot.trim()
+        if (tokenSnapshot.isBlank()) {
+            state = state.copy(message = "Kein gueltiger Migrations-Shortcut verfuegbar. Bitte normal anmelden.")
+            return
+        }
+        val targetRaw = state.migrationInfo?.targetBaseUrl?.trim().orEmpty()
+        if (targetRaw.isBlank()) {
+            state = state.copy(message = "Kein Zielserver konfiguriert. Bitte Server-URL manuell setzen.")
+            return
+        }
+        val validation = repo.validateApiBaseUrlInput(targetRaw)
+        if (validation.errorMessage != null || validation.normalizedBaseUrl.isNullOrBlank()) {
+            state = state.copy(message = validation.errorMessage ?: "Zielserver-URL ist ungueltig.")
+            return
+        }
+        val normalizedTarget = validation.normalizedBaseUrl.orEmpty()
+        state = state.copy(loading = true, applyServerOverrideInFlight = true, message = "")
+        runCatching {
+            val health = repo.probeHealth(normalizedTarget)
+            if (!health.ok) throw IllegalStateException("target_health_not_ok")
+            val handoff = repo.requestMigrationHandoff(tokenSnapshot)
+            val finalTarget = repo.validateApiBaseUrlInput(handoff.targetBaseUrl).normalizedBaseUrl
+                ?.takeIf { it.isNotBlank() }
+                ?: normalizedTarget
+            val consumeAuth = repo.consumeMigrationHandoff(finalTarget, handoff.handoffToken)
+            repo.setApiBaseUrlOverride(finalTarget)
+            repo.adoptAuthSession(consumeAuth)
+            Pair(consumeAuth.user, finalTarget)
+        }.onSuccess { (user, finalTarget) ->
+            migrationSessionTokenSnapshot = ""
+            profileSetupPromptShownInSession = false
+            state = state.copy(
+                loading = false,
+                applyServerOverrideInFlight = false,
+                user = user,
+                token = repo.token(),
+                migrationInfo = null,
+                migrationCanUseSessionShortcut = false,
+                activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+                apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
+                serverConnected = true,
+                serverVersion = "verbunden",
+                message = "Migration abgeschlossen. Verbunden mit $finalTarget"
+            )
+            runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
+            refreshAll()
+        }.onFailure {
+            logApiFailure("migration_handoff_failed", "/api/migration/handoff", it, "target=$normalizedTarget")
+            state = state.copy(
+                loading = false,
+                applyServerOverrideInFlight = false,
+                message = apiError(it, "Direkte Migration fehlgeschlagen. Bitte URL setzen und anmelden.")
+            )
+        }
     }
 
     suspend fun requestSpecialMoment() {
@@ -4977,6 +5103,12 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                                         }
                                     }
                                 ) { Text("Update öffnen") }
+                            }
+                            if (state.migrationCanUseSessionShortcut) {
+                                OutlinedButton(
+                                    onClick = { scope.launch { vm.migrateWithSessionShortcut() } },
+                                    enabled = !state.loading && !state.applyServerOverrideInFlight
+                                ) { Text("Direkt migrieren") }
                             }
                             Button(
                                 onClick = {

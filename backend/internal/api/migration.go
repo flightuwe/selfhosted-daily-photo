@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
@@ -31,6 +32,29 @@ type migrationSyncRequest struct {
 	SourceInstance string `json:"sourceInstance"`
 	Signature      string `json:"signature"`
 }
+
+type migrationHandoffRequest struct {
+	AppVersion string `json:"appVersion"`
+	DeviceName string `json:"deviceName"`
+}
+
+type migrationHandoffConsumeRequest struct {
+	HandoffToken string `json:"handoffToken"`
+	AppVersion   string `json:"appVersion"`
+	DeviceName   string `json:"deviceName"`
+}
+
+type migrationHandoffClaims struct {
+	UserID        uint   `json:"uid"`
+	Username      string `json:"usr"`
+	SourceBaseURL string `json:"src"`
+	TargetBaseURL string `json:"tgt"`
+	IssuedAtUnix  int64  `json:"iat"`
+	ExpiresAtUnix int64  `json:"exp"`
+	AppVersion    string `json:"appVersion"`
+}
+
+const migrationHandoffTTL = 5 * time.Minute
 
 type migrationSettingsRequest struct {
 	MigrationAutoOffEnabled     *bool   `json:"migrationAutoOffEnabled"`
@@ -165,6 +189,49 @@ func migrationSignPayload(secret string, userID uint, username, occurredAt, appV
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(payload))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func signMigrationHandoffToken(secret string, claims migrationHandoffClaims) (string, error) {
+	raw, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(raw)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(encoded))
+	sig := hex.EncodeToString(mac.Sum(nil))
+	return encoded + "." + sig, nil
+}
+
+func verifyMigrationHandoffToken(secret string, token string) (migrationHandoffClaims, error) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 2 {
+		return migrationHandoffClaims{}, errors.New("invalid handoff token")
+	}
+	payload := parts[0]
+	providedSig := strings.ToLower(strings.TrimSpace(parts[1]))
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(payload))
+	expectedSig := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(providedSig), []byte(strings.ToLower(expectedSig))) {
+		return migrationHandoffClaims{}, errors.New("handoff signature invalid")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return migrationHandoffClaims{}, errors.New("handoff payload invalid")
+	}
+	var claims migrationHandoffClaims
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		return migrationHandoffClaims{}, errors.New("handoff payload invalid")
+	}
+	nowUnix := time.Now().Unix()
+	if claims.ExpiresAtUnix <= nowUnix {
+		return migrationHandoffClaims{}, errors.New("handoff token expired")
+	}
+	if claims.UserID == 0 || strings.TrimSpace(claims.Username) == "" {
+		return migrationHandoffClaims{}, errors.New("handoff payload incomplete")
+	}
+	return claims, nil
 }
 
 func (s *Server) handleMigrationSyncLogin(c *gin.Context) {
@@ -477,9 +544,125 @@ func (s *Server) handleAdminMigrationExport(c *gin.Context) {
 	})
 }
 
+func (s *Server) handleMigrationHandoff(c *gin.Context) {
+	user, ok := userFromContext(c)
+	if !ok || user.ID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	settings, err := s.migrationSettingsRow()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+		return
+	}
+	now := time.Now().In(s.Location)
+	settings, active, _, _, _ := s.migrationResolved(settings, now)
+	if !active {
+		c.JSON(http.StatusForbidden, gin.H{"error": "migration inactive"})
+		return
+	}
+	secret := strings.TrimSpace(settings.MigrationCallbackSecret)
+	if secret == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "migration callback secret missing"})
+		return
+	}
+	targetURL := normalizeMigrationURL(settings.MigrationTargetBaseURL)
+	if targetURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "migration target missing"})
+		return
+	}
+	var req migrationHandoffRequest
+	_ = c.ShouldBindJSON(&req)
+	issuedAt := now
+	expiresAt := issuedAt.Add(migrationHandoffTTL)
+	claims := migrationHandoffClaims{
+		UserID:        user.ID,
+		Username:      strings.TrimSpace(user.Username),
+		SourceBaseURL: strings.TrimSpace(s.Config.PublicBaseURL),
+		TargetBaseURL: targetURL,
+		IssuedAtUnix:  issuedAt.Unix(),
+		ExpiresAtUnix: expiresAt.Unix(),
+		AppVersion:    strings.TrimSpace(req.AppVersion),
+	}
+	token, signErr := signMigrationHandoffToken(secret, claims)
+	if signErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handoff sign failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"handoffToken":  token,
+		"targetBaseUrl": targetURL,
+		"expiresAt":     expiresAt,
+	})
+}
+
+func (s *Server) handleMigrationHandoffConsume(c *gin.Context) {
+	var req migrationHandoffConsumeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	settings, err := s.migrationSettingsRow()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+		return
+	}
+	secret := strings.TrimSpace(settings.MigrationCallbackSecret)
+	if secret == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "migration callback secret missing"})
+		return
+	}
+	claims, verifyErr := verifyMigrationHandoffToken(secret, req.HandoffToken)
+	if verifyErr != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": verifyErr.Error()})
+		return
+	}
+	currentBase := normalizeMigrationURL(strings.TrimSpace(s.Config.PublicBaseURL))
+	if currentBase != "" {
+		claimTarget := normalizeMigrationURL(claims.TargetBaseURL)
+		if claimTarget == "" || !strings.EqualFold(currentBase, claimTarget) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "handoff target mismatch"})
+			return
+		}
+	}
+	if expectedSource := normalizeMigrationURL(strings.TrimSpace(settings.MigrationExpectedSource)); expectedSource != "" {
+		claimSource := normalizeMigrationURL(claims.SourceBaseURL)
+		if claimSource == "" || !strings.EqualFold(expectedSource, claimSource) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "handoff source mismatch"})
+			return
+		}
+	}
+	var user models.User
+	if err := s.DB.Where("id = ? AND username = ?", claims.UserID, claims.Username).First(&user).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "handoff user not found"})
+		return
+	}
+	tokens, tokenErr := s.issueSessionTokens(user, req.DeviceName)
+	if tokenErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "session create failed"})
+		return
+	}
+	appVersion := strings.TrimSpace(req.AppVersion)
+	if appVersion == "" {
+		appVersion = strings.TrimSpace(claims.AppVersion)
+	}
+	s.maybeReportMigratedLogin(user, appVersion)
+	c.JSON(http.StatusOK, gin.H{
+		"token":         tokens.AccessToken,
+		"accessToken":   tokens.AccessToken,
+		"refreshToken":  tokens.RefreshToken,
+		"sessionId":     tokens.SessionID,
+		"user":          s.userOwnJSON(user),
+		"sourceBaseUrl": claims.SourceBaseURL,
+		"targetBaseUrl": claims.TargetBaseURL,
+	})
+}
+
 func (s *Server) isMigrationRouteAllowed(path string) bool {
 	switch strings.TrimSpace(path) {
 	case "/api/devices":
+		return true
+	case "/api/migration/handoff":
 		return true
 	default:
 		return false
