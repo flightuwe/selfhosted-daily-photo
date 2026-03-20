@@ -1,0 +1,11 @@
+{
+  "version": "0.4.25",
+  "releasedAt": "2026-03-20T23:20:00Z",
+  "highlights": [
+    "Direkt-Migration in der App: im Migrationsmodus ohne erneute Passwort-Eingabe zur Zielinstanz wechseln.",
+    "Signierter Session-Handoff zwischen alter und neuer Instanz mit Ziel-/Quellvalidierung.",
+    "CORS-Haertung: Origin-Normalisierung und robustere Preflight-Kompatibilitaet.",
+    "Migration jetzt im Admin-WebUI komplett konfigurierbar inklusive Instanz-Kopplung per Token."
+  ],
+  "details": []
+}
