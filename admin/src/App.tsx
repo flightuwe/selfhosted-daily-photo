@@ -4090,7 +4090,7 @@ export function App() {
             </article>
 
             <article className="settings-current">
-              <h3>Neue Instanz -> Alte Instanz Sync-Report</h3>
+              <h3>Neue Instanz zu Alte Instanz Sync-Report</h3>
               <label className="checkbox">
                 <input type="checkbox" checked={migrationReportEnabled} onChange={(e) => setMigrationReportEnabled(e.target.checked)} />
                 Login-Quote auf alte Instanz melden
