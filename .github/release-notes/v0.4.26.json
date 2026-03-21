@@ -1,0 +1,27 @@
+{
+  "version": "0.4.26",
+  "releasedAt": "2026-03-21T20:50:00Z",
+  "highlights": [
+    "Fix fuer Login-Folgefehler auf migrierten Instanzen: Auth-Fehler werden nicht mehr als missing_access_token maskiert.",
+    "Android-Auth-Flow gehaertet mit auth_state_transition Diagnoseevents und klaren Token-Clear-Gruenden.",
+    "refreshAll bricht bei auth-kritischen Fehlern sauber ab statt degradiert weiterzulaufen.",
+    "Backend liefert X-Server-Instance und X-App-Version fuer schnelle Instanz-Mix-Analyse.",
+    "Auth-Responses enthalten konsistente errorCode-Felder mit requestId/serverInstance fuer bessere Forensik."
+  ],
+  "details": [
+    {
+      "title": "Auth robustness",
+      "items": [
+        "Post-login Token-Validierung (invalid_auth_payload) ergaenzt.",
+        "derivedFrom-Metadaten fuer missing_access_token aufgenommen."
+      ]
+    },
+    {
+      "title": "Backend observability",
+      "items": [
+        "Response-Header fuer Instanz und App-Version in allen API-Antworten.",
+        "401-Fehler einheitlich mit errorCode und strukturierter Auth-Fehlerlogik."
+      ]
+    }
+  ]
+}
