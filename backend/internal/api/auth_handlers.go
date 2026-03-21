@@ -23,7 +23,7 @@ func (s *Server) handleAuthRefresh(c *gin.Context) {
 	tokens, user, err := s.rotateSessionTokens(req.RefreshToken)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "session_revoked"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "session_revoked", "errorCode": "session_revoked"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "refresh failed"})
@@ -41,7 +41,7 @@ func (s *Server) handleAuthRefresh(c *gin.Context) {
 func (s *Server) handleAuthLogout(c *gin.Context) {
 	user, ok := userFromContext(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "errorCode": "unauthorized"})
 		return
 	}
 	claims, hasClaims := userClaimsFromContext(c)
@@ -54,7 +54,7 @@ func (s *Server) handleAuthLogout(c *gin.Context) {
 func (s *Server) handleAuthLogoutAll(c *gin.Context) {
 	user, ok := userFromContext(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "errorCode": "unauthorized"})
 		return
 	}
 	s.revokeAllSessionsByUserID(user.ID)

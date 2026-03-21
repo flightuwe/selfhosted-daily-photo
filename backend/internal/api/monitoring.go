@@ -40,9 +40,9 @@ type Monitor struct {
 	ThrottleTotal     int64
 	ThrottleByReason  map[string]int64
 
-	minuteBuckets map[minuteBucketKey]*minuteBucket
-	dbQueryBuckets map[dbQueryBucketKey]*dbQueryBucket
-	activeSpike   *spikeWindow
+	minuteBuckets     map[minuteBucketKey]*minuteBucket
+	dbQueryBuckets    map[dbQueryBucketKey]*dbQueryBucket
+	activeSpike       *spikeWindow
 	lastMaintenanceAt time.Time
 	lastSystemMinute  time.Time
 }
@@ -283,9 +283,9 @@ func (m *Monitor) finalizeSpikeLocked(now time.Time) {
 	if m.DB != nil && m.activeSpike.EventID != 0 {
 		finalizedAt := now
 		_ = m.DB.Model(&models.DailySpikeEvent{}).Where("id = ?", m.activeSpike.EventID).Updates(map[string]any{
-			"p95_peak_ms": m.activeSpike.P95PeakMs,
+			"p95_peak_ms":  m.activeSpike.P95PeakMs,
 			"finalized_at": &finalizedAt,
-			"updated_at":  now,
+			"updated_at":   now,
 		}).Error
 	}
 	m.activeSpike = nil
@@ -454,8 +454,8 @@ func (m *Monitor) RecordPush(sent, failed, invalid int, hadError bool) {
 	}
 	if m.DB != nil && m.activeSpike != nil && m.activeSpike.EventID != 0 {
 		_ = m.DB.Model(&models.DailySpikeEvent{}).Where("id = ?", m.activeSpike.EventID).Updates(map[string]any{
-			"push_sent":   gorm.Expr("push_sent + ?", sent),
-			"updated_at":  time.Now().In(m.Location),
+			"push_sent":    gorm.Expr("push_sent + ?", sent),
+			"updated_at":   time.Now().In(m.Location),
 			"finalized_at": nil,
 		}).Error
 	}
@@ -592,6 +592,14 @@ func (s *Server) requestIDMiddleware() gin.HandlerFunc {
 		}
 		c.Set("requestId", reqID)
 		c.Writer.Header().Set("X-Request-ID", reqID)
+		c.Next()
+	}
+}
+
+func (s *Server) responseMetaMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("X-Server-Instance", s.serverInstanceID())
+		c.Writer.Header().Set("X-App-Version", strings.TrimSpace(s.Config.AppVersion))
 		c.Next()
 	}
 }

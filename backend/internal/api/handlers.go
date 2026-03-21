@@ -64,12 +64,12 @@ type Server struct {
 
 func (s *Server) Router() *gin.Engine {
 	r := gin.Default()
-	r.Use(s.requestIDMiddleware(), s.metricsMiddleware())
+	r.Use(s.requestIDMiddleware(), s.responseMetaMiddleware(), s.metricsMiddleware())
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     s.Config.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-ID"},
-		ExposeHeaders:    []string{"Content-Length", "X-Request-ID"},
+		ExposeHeaders:    []string{"Content-Length", "X-Request-ID", "X-Server-Instance", "X-App-Version"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))

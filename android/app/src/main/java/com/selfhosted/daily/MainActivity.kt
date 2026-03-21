@@ -813,6 +813,8 @@ class AppRepo(
     private val debugMaxEntries = 500
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
     private val refreshMutex = Mutex()
+    @Volatile
+    private var lastAuthTransitionReason: String = "startup"
 
     fun token(): String = accessToken()
 
@@ -862,7 +864,27 @@ class AppRepo(
             .apply()
     }
 
-    private fun saveAuthSession(auth: AuthResponse) {
+    private fun recordAuthStateTransition(
+        reason: String,
+        endpoint: String = "",
+        httpCode: Int? = null,
+        rootCause: String = "",
+        beforeTokenPresent: Boolean,
+        afterTokenPresent: Boolean
+    ) {
+        val cleanReason = reason.trim().ifBlank { "unknown" }.take(64)
+        lastAuthTransitionReason = cleanReason
+        logDebug(
+            type = "auth_state_transition",
+            message = cleanReason,
+            meta = "beforeTokenPresent=$beforeTokenPresent;afterTokenPresent=$afterTokenPresent;endpoint=${endpoint.ifBlank { "-" }};http=${httpCode ?: -1};sessionId=${currentSessionId().ifBlank { "-" }};rootCause=${rootCause.ifBlank { "-" }}"
+        )
+    }
+
+    fun authStateTransitionReason(): String = lastAuthTransitionReason.ifBlank { "unknown" }
+
+    private fun saveAuthSession(auth: AuthResponse, source: String = "auth_response") {
+        val beforeTokenPresent = accessToken().trim().isNotBlank()
         val access = auth.accessToken.trim().ifBlank { auth.token.trim() }
         val refresh = auth.refreshToken.trim()
         val sessionId = auth.sessionId.trim()
@@ -872,13 +894,21 @@ class AppRepo(
             if (refresh.isNotBlank()) putString("refresh_token", refresh) else remove("refresh_token")
             if (sessionId.isNotBlank()) putString("session_id", sessionId) else remove("session_id")
         }.apply()
+        val afterTokenPresent = accessToken().trim().isNotBlank()
+        recordAuthStateTransition(
+            reason = source,
+            endpoint = "/api/auth",
+            beforeTokenPresent = beforeTokenPresent,
+            afterTokenPresent = afterTokenPresent
+        )
     }
 
     fun adoptAuthSession(auth: AuthResponse) {
-        saveAuthSession(auth)
+        saveAuthSession(auth, source = "adopt_auth_session")
     }
 
-    fun clearToken() {
+    fun clearToken(reason: String = "clear_token", endpoint: String = "") {
+        val beforeTokenPresent = accessToken().trim().isNotBlank()
         prefs.edit()
             .remove("token")
             .remove("access_token")
@@ -886,6 +916,13 @@ class AppRepo(
             .remove("session_id")
             .apply()
         UploadQueueManager.clear(context)
+        val afterTokenPresent = accessToken().trim().isNotBlank()
+        recordAuthStateTransition(
+            reason = reason,
+            endpoint = endpoint,
+            beforeTokenPresent = beforeTokenPresent,
+            afterTokenPresent = afterTokenPresent
+        )
     }
 
     private fun authHeader(): String = "Bearer ${accessToken()}"
@@ -897,7 +934,7 @@ class AppRepo(
         val nextAccess = response.accessToken.trim().ifBlank { response.token.trim() }
         val nextRefresh = response.refreshToken.trim()
         if (nextAccess.isBlank() || nextRefresh.isBlank()) return false
-        saveAuthSession(response)
+        saveAuthSession(response, source = "refresh_session_success")
         return true
     }
 
@@ -913,13 +950,18 @@ class AppRepo(
     private suspend fun <T> authorizedCall(endpoint: String, block: suspend (header: String) -> T): T {
         val firstHeader = authHeader()
         if (firstHeader.length <= "Bearer ".length) {
+            logDebug(
+                type = "auth_guard",
+                message = "missing access token before authorized call",
+                meta = "endpoint=$endpoint;derivedFrom=${authStateTransitionReason()};sessionId=${currentSessionId().ifBlank { "-" }}"
+            )
             throw IllegalStateException("missing_access_token")
         }
         try {
             return block(firstHeader)
         } catch (http: HttpException) {
             if (http.code() == 423) {
-                clearToken()
+                clearToken(reason = "after_423_migration_required", endpoint = endpoint)
                 throw IllegalStateException("migration_required", http)
             }
             if (http.code() != 401) throw http
@@ -930,7 +972,7 @@ class AppRepo(
                     message = "Session-Refresh fehlgeschlagen",
                     meta = "endpoint=$endpoint;http=401;failureClass=token_expired_refresh_failed;sessionId=${currentSessionId().ifBlank { "-" }}"
                 )
-                clearToken()
+                clearToken(reason = "after_401_refresh_failed", endpoint = endpoint)
                 throw IllegalStateException("token_expired_refresh_failed", http)
             }
             return block(authHeader())
@@ -1406,7 +1448,15 @@ class AppRepo(
 
     suspend fun login(username: String, password: String): User {
         val res = api.login(LoginRequest(username, password, deviceName = currentDeviceName()))
-        saveAuthSession(res)
+        saveAuthSession(res, source = "login_success")
+        if (token().isBlank()) {
+            logDebug(
+                type = "auth_invalid_payload",
+                message = "login response without access token",
+                meta = "endpoint=/api/auth/login;rootCause=invalid_auth_payload;sessionId=${currentSessionId().ifBlank { "-" }}"
+            )
+            throw IllegalStateException("invalid_auth_payload")
+        }
         return res.user
     }
 
@@ -1422,7 +1472,15 @@ class AppRepo(
                 deviceName = currentDeviceName()
             )
         )
-        saveAuthSession(res)
+        saveAuthSession(res, source = "register_success")
+        if (token().isBlank()) {
+            logDebug(
+                type = "auth_invalid_payload",
+                message = "register response without access token",
+                meta = "endpoint=/api/auth/register/confirm;rootCause=invalid_auth_payload;sessionId=${currentSessionId().ifBlank { "-" }}"
+            )
+            throw IllegalStateException("invalid_auth_payload")
+        }
         return res.user
     }
 
@@ -2149,6 +2207,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         return Random.nextInt(100) < 25
     }
 
+    private fun isAuthCriticalFailure(throwable: Throwable): Boolean {
+        val root = rootCause(throwable)
+        if (root is IllegalStateException) {
+            return root.message == "missing_access_token" ||
+                root.message == "token_expired_refresh_failed" ||
+                root.message == "migration_required" ||
+                root.message == "invalid_auth_payload"
+        }
+        val http = root as? HttpException
+        return http?.code() == 401 || http?.code() == 423
+    }
+
     private fun isNetworkFailureClass(failureClass: String): Boolean =
         failureClass == "dns" || failureClass == "connect" || failureClass == "timeout" || failureClass == "offline"
 
@@ -2427,6 +2497,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             if (network != null) {
                 append(";network=").append(network)
+            }
+            if (throwable is IllegalStateException && throwable.message == "missing_access_token") {
+                append(";derivedFrom=").append(repo.authStateTransitionReason())
             }
         }
         val meta = if (extraMeta.isBlank()) base else "$base;$extraMeta"
@@ -2787,8 +2860,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     communityStats = bootstrap.communityStats
                 )
             }.getOrElse {
+                if (isAuthCriticalFailure(it)) {
+                    failedCall = "dashboardBootstrap"
+                    throw RefreshStageException("dashboardBootstrap", it)
+                }
                 val meResp = runCatching { repo.me() }.getOrElse { meErr ->
                     failedCall = "me"
+                    if (isAuthCriticalFailure(meErr)) {
+                        throw RefreshStageException("me", meErr)
+                    }
                     val cachedUser = state.user
                     if (cachedUser == null) {
                         throw RefreshStageException("me", meErr)
@@ -2811,10 +2891,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 }
                 val fetchedPrompt = runCatching { repo.prompt() }.getOrElse {
                     failedCall = "prompt"
+                    if (isAuthCriticalFailure(it)) {
+                        throw RefreshStageException("prompt", it)
+                    }
                     state.prompt ?: throw RefreshStageException("prompt", it)
                 }
                 val fetchedRules = runCatching { repo.promptRules() }.getOrElse {
                     failedCall = "promptRules"
+                    if (isAuthCriticalFailure(it)) {
+                        throw RefreshStageException("promptRules", it)
+                    }
                     state.promptRules ?: PromptRulesResponse(
                         promptWindowStartHour = 8,
                         promptWindowEndHour = 20,
@@ -3030,7 +3116,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.logDebug(
                 type = "feed_refresh_failed",
                 message = debugFailureMessage(actual),
-                meta = "reason=$reason;forced=$forceFeedReload;durationMs=$durationMs;failedCall=$failedCall;failureClass=$failureClass;refreshMode=full;backoffStage=$backoffStage;nextDelayMs=$delayMs;root=${rootCause(actual)::class.java.simpleName}"
+                meta = "reason=$reason;forced=$forceFeedReload;durationMs=$durationMs;failedCall=$failedCall;failureClass=$failureClass;refreshMode=full;backoffStage=$backoffStage;nextDelayMs=$delayMs;root=${rootCause(actual)::class.java.simpleName};derivedFrom=${if (actual is IllegalStateException && actual.message == "missing_access_token") repo.authStateTransitionReason() else "-"}"
             )
         } finally {
             refreshAllMutex.unlock()
@@ -8630,6 +8716,8 @@ private fun apiError(t: Throwable, fallback: String): String {
         return when (t.message?.trim().orEmpty()) {
             "token_expired_refresh_failed" -> "Sitzung abgelaufen. Bitte erneut einloggen."
             "missing_access_token" -> "Bitte einloggen."
+            "migration_required" -> "Diese Instanz ist im Migrationsmodus. Bitte Zielserver eintragen."
+            "invalid_auth_payload" -> "Login unvollstaendig. Bitte erneut einloggen."
             else -> fallback
         }
     }

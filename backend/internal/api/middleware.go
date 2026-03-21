@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -17,25 +18,25 @@ const activityTouchThrottleWindow = 45 * time.Second
 func (s *Server) requireAuth(c *gin.Context) {
 	header := c.GetHeader("Authorization")
 	if header == "" || !strings.HasPrefix(header, "Bearer ") {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
+		s.abortAuth(c, "missing_token", "missing token")
 		return
 	}
 
 	token := strings.TrimPrefix(header, "Bearer ")
 	claims, err := s.Auth.Parse(token)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+		s.abortAuth(c, "invalid_token", "invalid token")
 		return
 	}
 	if strings.TrimSpace(claims.TokenType) != "" && strings.TrimSpace(claims.TokenType) != "access" {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+		s.abortAuth(c, "invalid_token_type", "invalid token")
 		return
 	}
 
 	var user models.User
 	lookupStart := time.Now()
 	if err := s.DB.First(&user, claims.UserID).Error; err != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		s.abortAuth(c, "user_not_found", "user not found")
 		return
 	}
 	route := c.FullPath()
@@ -52,15 +53,15 @@ func (s *Server) requireAuth(c *gin.Context) {
 			Select("id", "session_id", "user_id", "revoked_at", "expires_at").
 			Where("session_id = ? AND user_id = ?", sid, user.ID).
 			First(&session).Error; err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session_revoked"})
+			s.abortAuth(c, "session_revoked", "session_revoked")
 			return
 		}
 		if session.RevokedAt != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session_revoked"})
+			s.abortAuth(c, "session_revoked", "session_revoked")
 			return
 		}
 		if session.ExpiresAt != nil && session.ExpiresAt.Before(time.Now().In(s.Location)) {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session_revoked"})
+			s.abortAuth(c, "session_expired", "session_revoked")
 			return
 		}
 		if s.Monitor != nil {
@@ -82,6 +83,30 @@ func (s *Server) requireAuth(c *gin.Context) {
 		return
 	}
 	c.Next()
+}
+
+func (s *Server) abortAuth(c *gin.Context, reason string, message string) {
+	requestID := requestIDFromContext(c)
+	route := c.FullPath()
+	if strings.TrimSpace(route) == "" {
+		route = c.Request.URL.Path
+	}
+	serverInstance := s.serverInstanceID()
+	log.Printf(
+		"auth_failure reason=%s requestId=%s route=%s method=%s serverInstance=%s remoteIP=%s",
+		strings.TrimSpace(reason),
+		requestID,
+		route,
+		c.Request.Method,
+		serverInstance,
+		c.ClientIP(),
+	)
+	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+		"error":          strings.TrimSpace(message),
+		"errorCode":      strings.TrimSpace(reason),
+		"requestId":      requestID,
+		"serverInstance": serverInstance,
+	})
 }
 
 func (s *Server) requireAdmin(c *gin.Context) {
