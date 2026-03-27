@@ -856,6 +856,25 @@ class AppRepo(
         return hasInternet
     }
 
+    fun networkSnapshotMeta(): String {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return "activeNetwork=false;capabilities=false;reason=no_connectivity_manager"
+        val network = cm.activeNetwork ?: return "activeNetwork=false;capabilities=false;reason=no_active_network"
+        val caps = cm.getNetworkCapabilities(network)
+            ?: return "activeNetwork=true;capabilities=false;reason=no_capabilities"
+        val transports = mutableListOf<String>()
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) transports += "wifi"
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) transports += "cellular"
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) transports += "ethernet"
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) transports += "vpn"
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) transports += "bluetooth"
+        val transport = if (transports.isEmpty()) "unknown" else transports.joinToString("|")
+        val internet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        val metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+        return "activeNetwork=true;capabilities=true;internet=$internet;validated=$validated;metered=$metered;transport=$transport"
+    }
+
     fun saveToken(token: String) {
         val clean = token.trim()
         prefs.edit()
@@ -2815,15 +2834,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 return false
             }
         }
-        if (!repo.hasUsableNetwork() && reason != "feed_pull") {
-            val (backoffStage, delayMs) = markRefreshFailure("offline", now)
-            repo.logDebug(
-                type = "refresh_skipped",
-                message = "no usable network",
-                meta = "reason=$reason;failureClass=offline;backoffStage=$backoffStage;nextDelayMs=$delayMs"
-            )
-            return false
-        }
         if (!refreshAllMutex.tryLock()) return false
         if (!bypassCooldown && now - lastRefreshAllStartedAt < refreshAllCooldownMs) {
             refreshAllMutex.unlock()
@@ -3101,6 +3111,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             val failureClass = classifyFailure(actual)
             val (backoffStage, delayMs) = markRefreshFailure(failureClass, System.currentTimeMillis())
+            if (isNetworkFailureClass(failureClass)) {
+                repo.logDebug(
+                    type = "network_snapshot",
+                    message = "refresh failure network snapshot",
+                    meta = "reason=$reason;failureClass=$failureClass;snapshot=${repo.networkSnapshotMeta()}"
+                )
+            }
             state = state.copy(
                 loading = if (showLoading) false else state.loading,
                 communityStatsLoading = false,
@@ -5378,6 +5395,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 AppTab.CAMERA -> CameraTab(
                     prompt = state.prompt,
                     currentUsername = state.user?.username,
+                    networkUnstable = vm.shouldPauseFeedAutoRefresh(),
                     promptRules = state.promptRules,
                     updateAvailable = state.updateAvailable,
                     updateCheckInFlight = state.updateCheckInFlight,
@@ -5813,6 +5831,7 @@ fun StartupScreen(serverConnected: Boolean, appVersion: String, startupQuote: St
 fun CameraTab(
     prompt: PromptResponse?,
     currentUsername: String?,
+    networkUnstable: Boolean,
     promptRules: PromptRulesResponse?,
     updateAvailable: Boolean,
     updateCheckInFlight: Boolean,
@@ -5885,6 +5904,12 @@ fun CameraTab(
         modifier = Modifier.verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        if (networkUnstable) {
+            Text(
+                "Verbindung gerade instabil. Uploads gehen trotzdem in die Queue und werden automatisch erneut versucht.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,

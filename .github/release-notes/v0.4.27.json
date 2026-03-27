@@ -1,0 +1,24 @@
+{
+  "version": "0.4.27",
+  "releasedAt": "2026-03-27T15:30:00Z",
+  "highlights": [
+    "False-Offline-Gate in refreshAll entfernt, damit Refresh nicht mehr lokal vorzeitig blockiert wird.",
+    "Neues Debug-Event network_snapshot fuer echte Netzfehler bei Refresh.",
+    "Kamera-Hinweis bei instabiler Verbindung: Uploads laufen weiter ueber die Queue."
+  ],
+  "details": [
+    {
+      "title": "Refresh robustness",
+      "items": [
+        "Lokalen no-usable-network Kurzschluss entfernt.",
+        "Backoff/Circuit-Breaker fuer echte Fehler unveraendert aktiv."
+      ]
+    },
+    {
+      "title": "Diagnostics",
+      "items": [
+        "Network-Capabilities-Snapshot (transport, validated, metered) in Debuglogs aufgenommen."
+      ]
+    }
+  ]
+}
