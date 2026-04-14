@@ -1,4 +1,4 @@
-# Daily
+﻿# Daily
 
 ![Daily Logo](assets/daily-logo.png)
 
@@ -83,9 +83,9 @@ Dann erreichbar:
 Wenn oeffentliche URL und interne Admin-URL unterschiedlich sind, muessen beide enthalten sein:
 
 ```env
-PUBLIC_BASE_URL=https://daily.broutschek.de
-ADMIN_BASE_URL=http://10.20.10.30:13379
-CORS_ORIGINS=http://10.20.10.30:13379,https://daily.broutschek.de
+PUBLIC_BASE_URL=https://daily.example.tld
+ADMIN_BASE_URL=http://admin.daily.local:13379
+CORS_ORIGINS=http://admin.daily.local:13379,https://daily.example.tld
 ```
 
 Hinweis:
@@ -156,9 +156,9 @@ Hinweis:
 - Vollstaendige Checkliste:
   - `docs/testing/RELEASE_E2E_CHECKLIST.md`
 - Smoke-Skript:
-  - `pwsh scripts/test-e2e-smoke.ps1 -BaseUrl https://daily.teacloud.synology.me -AdminToken <token>`
+  - `pwsh scripts/test-e2e-smoke.ps1 -BaseUrl https://daily.example.tld -AdminToken <token>`
 - Feed-Burst-Skript (Rate-Limit/5xx-Guard):
-  - `pwsh scripts/test-feed-rate-limit.ps1 -BaseUrl https://daily.teacloud.synology.me -UserToken <token> -Requests 80 -Concurrency 8`
+  - `pwsh scripts/test-feed-rate-limit.ps1 -BaseUrl https://daily.example.tld -UserToken <token> -Requests 80 -Concurrency 8`
 - Interner Daily-Test-Trigger (ohne Broadcast an alle):
   - silent: `pwsh scripts/trigger-daily-test.ps1 -AdminToken <adminToken> -Silent`
   - nur Testnutzer pushen: `pwsh scripts/trigger-daily-test.ps1 -AdminToken <adminToken> -NotifyUserIds "12,15"`
@@ -248,3 +248,4 @@ Siehe `backend/.env.example`:
 - Reverse Proxy nur ueber HTTPS
 - Optional IP-Restriktion fuer Admin-Portal
 - Debug-Profile in Produktivbetrieb nur bei Bedarf aktivieren
+

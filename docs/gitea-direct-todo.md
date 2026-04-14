@@ -24,8 +24,8 @@ This checklist is for cluster-side work directly in Forge/Gitea after the Daily 
 ## 4) Mirror Target Finalization
 
 - Confirm final mirror URL points to org repo:
-  - `http://10.20.10.55:3000/praxis-cluster/app-daily.git`
-- If any host still points to `codex-agent/app-daily`, migrate configuration.
+  - `http://gitea.internal.local/org-or-user/app-daily.git`
+- If any host still points to `org-or-user/app-daily`, migrate configuration.
 
 ## 5) Operational Monitoring
 
@@ -53,3 +53,4 @@ This checklist is for cluster-side work directly in Forge/Gitea after the Daily 
 - Simulate one mirror failure (expired token or temporary connectivity issue).
 - Validate recovery path and documentation quality.
 - Record findings and improvement actions.
+

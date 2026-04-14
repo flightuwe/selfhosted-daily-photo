@@ -1,4 +1,4 @@
-plugins {
+﻿plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.gms.google-services")
@@ -16,7 +16,7 @@ android {
         versionName = "0.4.27"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "API_BASE_URL", "\"https://daily.teacloud.synology.me/api/\"")
+        buildConfigField("String", "API_BASE_URL", "\"https://daily.example.tld/api/\"")
     }
 
     val keystorePathEnv = System.getenv("ANDROID_KEYSTORE_PATH")
@@ -87,3 +87,4 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.1")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.6.1")
 }
+

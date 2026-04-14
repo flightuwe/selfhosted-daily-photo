@@ -1,5 +1,5 @@
-param(
-  [string]$BaseUrl = "https://daily.teacloud.synology.me",
+﻿param(
+  [string]$BaseUrl = "https://daily.example.tld",
   [string]$AdminToken = "",
   [string]$ExpectedServerVersion = ""
 )
@@ -52,3 +52,4 @@ Assert-True ($null -ne $export.overview.summary) "export.overview.summary fehlt"
 Write-Host "Export check ok"
 
 Write-Host "Smoke erfolgreich."
+

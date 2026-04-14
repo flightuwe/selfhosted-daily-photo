@@ -1,4 +1,4 @@
-# Release E2E Checklist (Backend + Admin + Android)
+﻿# Release E2E Checklist (Backend + Admin + Android)
 
 Diese Checkliste ist verbindlich vor und nach einem App-Tag-Release.
 
@@ -58,7 +58,7 @@ Diese Checkliste ist verbindlich vor und nach einem App-Tag-Release.
 
 ## 5) 24h Monitoring nach Release
 
-Alle 2-4h prüfen:
+Alle 2-4h prÃ¼fen:
 
 1. Fehlerklassenmix (`dns/connect/timeout/http4xx/http5xx`)
 2. Anteil `429` vs. 5xx
@@ -73,6 +73,7 @@ Wenn 5xx oder Timeout auffaellig steigen:
 ## Hilfsskripte
 
 - Smoke:
-  - `pwsh scripts/test-e2e-smoke.ps1 -BaseUrl https://daily.teacloud.synology.me -AdminToken <token>`
+  - `pwsh scripts/test-e2e-smoke.ps1 -BaseUrl https://daily.example.tld -AdminToken <token>`
 - Feed Burst / Rate-Limit:
-  - `pwsh scripts/test-feed-rate-limit.ps1 -BaseUrl https://daily.teacloud.synology.me -UserToken <token> -Requests 80 -Concurrency 8`
+  - `pwsh scripts/test-feed-rate-limit.ps1 -BaseUrl https://daily.example.tld -UserToken <token> -Requests 80 -Concurrency 8`
+

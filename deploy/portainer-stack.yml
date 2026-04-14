@@ -1,4 +1,4 @@
-version: "3.9"
+﻿version: "3.9"
 
 # DEBUG SWITCH (visible)
 # 1) Set DEBUGGING to "on" or "off" below.
@@ -24,8 +24,8 @@ services:
       - TOKEN_TTL_HOURS=24
       - REFRESH_TOKEN_TTL_DAYS=3650
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://daily.example.tld}
-      - ADMIN_BASE_URL=${ADMIN_BASE_URL:-http://10.20.10.30:13379}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://10.20.10.30:13379,https://daily.example.tld}
+      - ADMIN_BASE_URL=${ADMIN_BASE_URL:-http://admin.daily.local:13379}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://admin.daily.local:13379,https://daily.example.tld}
       - APP_TIMEZONE=Europe/Berlin
       - SCHEDULER_ENABLED=true
       - SCHEDULER_LEASE_TIMEOUT_SEC=60
@@ -93,3 +93,4 @@ services:
 networks:
   shp-net:
     driver: bridge
+

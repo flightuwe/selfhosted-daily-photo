@@ -90,7 +90,7 @@ The internal mirror host needs these env vars:
 Optional env vars:
 
 - `DAILY_GH_REPO` (default: `https://github.com/flightuwe/selfhosted-daily-photo.git`)
-- `DAILY_GITEA_REPO` (default: `http://10.20.10.55:3000/codex-agent/app-daily.git`)
+- `DAILY_GITEA_REPO` (default: `http://gitea.internal.local/org-or-user/app-daily.git`)
 - `DAILY_WORKDIR` (default: `.cache/daily-mirror`)
 
 ## Operator Notes
@@ -98,3 +98,4 @@ Optional env vars:
 - Keep release notes pair under `.github/release-notes/` for user-facing release quality.
 - CI green plus publish success is the minimum precondition before production deploy.
 - Mirror failures are production-ops relevant and must be documented in `reports/daily-ops-changelog.md` after recovery.
+

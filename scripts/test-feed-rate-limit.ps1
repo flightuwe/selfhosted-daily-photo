@@ -1,5 +1,5 @@
-param(
-  [string]$BaseUrl = "https://daily.teacloud.synology.me",
+﻿param(
+  [string]$BaseUrl = "https://daily.example.tld",
   [string]$UserToken = "",
   [int]$Requests = 80,
   [int]$Concurrency = 8,
@@ -94,3 +94,4 @@ if ($summary.rate429 -eq 0) {
 } else {
   Write-Host "429 erkannt wie erwartet (Soft-Rate-Limit aktiv)."
 }
+

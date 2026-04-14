@@ -1,5 +1,5 @@
-param(
-  [string]$BaseUrl = "https://daily.teacloud.synology.me",
+﻿param(
+  [string]$BaseUrl = "https://daily.example.tld",
   [Parameter(Mandatory = $true)][string]$AdminToken,
   [switch]$Silent,
   [string]$NotifyUserIds = ""
@@ -31,3 +31,4 @@ if ($ids.Count -gt 0) {
 
 $response = Invoke-RestMethod -Method POST -Uri $url -Headers $headers -Body ($payload | ConvertTo-Json -Depth 5)
 $response | ConvertTo-Json -Depth 8
+
