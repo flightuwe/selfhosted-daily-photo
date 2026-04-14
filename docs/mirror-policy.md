@@ -46,3 +46,9 @@ Fields:
 - Base URL default: `http://10.20.10.55:3000`
 - Current writable target: `codex-agent/app-daily`
 - Planned final target: `praxis-cluster/app-daily` after org transfer acceptance
+
+## Cluster Follow-up Tasks
+
+For pending direct Gitea/cluster actions (scheduler ownership, token rotation, monitoring, validation), use:
+
+- `docs/gitea-direct-todo.md`

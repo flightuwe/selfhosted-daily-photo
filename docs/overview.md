@@ -37,6 +37,7 @@ Runtime deployment uses:
 - App/server release lifecycle: `docs/release-process.md`
 - Secret contract and ownership boundaries: `docs/secrets-contract.md`
 - Mirror governance and drift policy: `docs/mirror-policy.md`
+- Cluster follow-up checklist for direct Forge work: `docs/gitea-direct-todo.md`
 - Ongoing ops history in Forge: `reports/daily-ops-changelog.md`
 
 ## Operator Default
