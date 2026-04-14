@@ -1,116 +1,14 @@
-﻿name: Sync Gitea Mirror
+﻿name: Sync Gitea Mirror (Legacy Push Path)
 
 on:
-  push:
-    branches: ["main"]
   workflow_dispatch:
 
 jobs:
-  sync:
+  notice:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      GITEA_BASE_URL: ${{ vars.GITEA_BASE_URL }}
-      GITEA_OWNER: ${{ vars.GITEA_OWNER }}
-      GITEA_REPO: ${{ vars.GITEA_REPO }}
-      GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Validate configuration
-        shell: bash
+      - name: Explain current mirror mode
         run: |
-          set -euo pipefail
-          [ -n "${GITEA_TOKEN:-}" ] || (echo "::error::Missing secret GITEA_TOKEN" && exit 1)
-          echo "GITEA_BASE_URL=${GITEA_BASE_URL:-http://10.20.10.55:3000}" >> "$GITHUB_ENV"
-          echo "GITEA_OWNER=${GITEA_OWNER:-codex-agent}" >> "$GITHUB_ENV"
-          echo "GITEA_REPO=${GITEA_REPO:-app-daily}" >> "$GITHUB_ENV"
-
-      - name: Push main branch to Gitea
-        shell: bash
-        run: |
-          set -euo pipefail
-          base="${GITEA_BASE_URL%/}"
-          host_no_proto="${base#http://}"
-          host_no_proto="${host_no_proto#https://}"
-          remote_url="http://oauth2:${GITEA_TOKEN}@${host_no_proto}/${GITEA_OWNER}/${GITEA_REPO}.git"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote remove gitea 2>/dev/null || true
-          git remote add gitea "$remote_url"
-          git push gitea HEAD:main --force
-
-      - name: Update Gitea mirror stamp and changelog
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          base="${GITEA_BASE_URL%/}"
-          owner="${GITEA_OWNER}"
-          repo="${GITEA_REPO}"
-          api="$base/api/v1/repos/$owner/$repo/contents"
-
-          ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          short_sha="${GITHUB_SHA::7}"
-          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-
-          append_line="- ${ts} mirror sync ok: github=${GITHUB_SHA} run=${run_url} target=${owner}/${repo}"
-
-          update_file() {
-            path="$1"
-            mode="$2"
-            tmp="$(mktemp)"
-
-            get_url="$api/$path?ref=main"
-            if curl -fsS -H "Authorization: token ${GITEA_TOKEN}" "$get_url" -o "$tmp.json"; then
-              sha="$(jq -r '.sha' "$tmp.json")"
-              content="$(jq -r '.content' "$tmp.json" | tr -d '\n' | base64 -d)"
-            else
-              sha=""
-              content=""
-            fi
-
-            if [ "$mode" = "append" ]; then
-              if [ -n "$content" ]; then
-                printf "%s\n%s\n" "$content" "$append_line" > "$tmp"
-              else
-                printf "# Daily Ops Changelog\n\n%s\n" "$append_line" > "$tmp"
-              fi
-            else
-              cat > "$tmp" <<EOF
-# Daily Mirror Policy
-
-Last successful sync:
-
-- timestamp: ${ts}
-- github_sha: ${GITHUB_SHA}
-- github_sha_short: ${short_sha}
-- github_run_url: ${run_url}
-- gitea_target: ${owner}/${repo}
-
-Source-of-truth:
-
-- code_write_source: GitHub
-- internal_ops_knowledge_hub: Gitea
-EOF
-            fi
-
-            b64="$(base64 -w 0 "$tmp")"
-            payload="$(jq -n --arg content "$b64" --arg message "mirror: update $path from github run ${GITHUB_RUN_ID}" --arg branch "main" --arg sha "$sha" '
-              if $sha == "" then {content:$content,message:$message,branch:$branch}
-              else {content:$content,message:$message,branch:$branch,sha:$sha}
-              end')"
-
-            curl -fsS -X PUT \
-              -H "Authorization: token ${GITEA_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "$payload" \
-              "$api/$path" > /dev/null
-          }
-
-          update_file "reports/daily-ops-changelog.md" "append"
-          update_file "docs/mirror-policy.md" "replace"
+          echo "Daily mirror now runs as an internal pull job from the cluster side."
+          echo "Use ops-runbooks/scripts/daily-github-to-gitea-sync.ps1 on internal infrastructure."
+          echo "This GitHub-hosted push path is intentionally disabled for private Forge access."

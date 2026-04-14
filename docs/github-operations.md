@@ -61,29 +61,37 @@ Release outputs:
 
 ## Mirror Automation to Gitea
 
-Workflow:
+Canonical mirror mode is now internal pull sync from cluster infrastructure.
 
-- `.github/workflows/sync-gitea-mirror.yml`
+Mechanism:
 
-Default behavior:
+- Script: `ops-runbooks/scripts/daily-github-to-gitea-sync.ps1`
+- Runbook: `ops-runbooks/runbooks/daily-github-gitea-mirror.md`
+- Execution location: internal host with reachability to both GitHub and Gitea
 
-- Runs on every push to `main` and can be started manually
-- Pushes `main` to Gitea mirror repo branch `main`
-- Updates mirror status files in Gitea:
-  - `docs/mirror-policy.md`
-  - `reports/daily-ops-changelog.md`
+Behavior:
 
-## Required GitHub-side Configuration
+- Fetches latest `main` from GitHub
+- Pushes fast-forward mirror to Gitea target repo `main`
+- Writes status metadata to `ops-runbooks/artifacts/daily/mirror-status.json`
 
-Set repository secret:
+GitHub workflow note:
 
-- `GITEA_TOKEN`: token with push rights to target Gitea repo
+- `.github/workflows/sync-gitea-mirror.yml` is retained as a legacy/manual placeholder.
+- GitHub-hosted push-to-private-Gitea mode is intentionally disabled.
 
-Optional repository variables:
+## Required Internal Configuration
 
-- `GITEA_BASE_URL` (default: `http://10.20.10.55:3000`)
-- `GITEA_OWNER` (default: `codex-agent` until org transfer is accepted)
-- `GITEA_REPO` (default: `app-daily`)
+The internal mirror host needs these env vars:
+
+- `DAILY_GH_TOKEN`: GitHub PAT with repo read permissions
+- `DAILY_GITEA_TOKEN`: Gitea token with repo write permissions
+
+Optional env vars:
+
+- `DAILY_GH_REPO` (default: `https://github.com/flightuwe/selfhosted-daily-photo.git`)
+- `DAILY_GITEA_REPO` (default: `http://10.20.10.55:3000/codex-agent/app-daily.git`)
+- `DAILY_WORKDIR` (default: `.cache/daily-mirror`)
 
 ## Operator Notes
 

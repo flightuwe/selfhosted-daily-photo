@@ -11,31 +11,34 @@ Keep internal operators fully effective from Forge while preserving GitHub as th
 
 ## Mirror Mechanism
 
-- Workflow: `.github/workflows/sync-gitea-mirror.yml`
-- Trigger: every push to `main` (plus manual dispatch)
+- Canonical path: internal pull job from cluster side
+- Script: `ops-runbooks/scripts/daily-github-to-gitea-sync.ps1`
+- Runbook: `ops-runbooks/runbooks/daily-github-gitea-mirror.md`
+- Trigger recommendation: scheduled task every 5 to 15 minutes on an internal host
 - Action:
+  - fetch `main` from GitHub
   - push `main` to Gitea mirror target
-  - update operational stamp/journal files in Gitea
+  - write status to `ops-runbooks/artifacts/daily/mirror-status.json`
 
 ## Drift Rule
 
 If mismatch occurs between GitHub and Gitea code trees:
 
 1. Treat GitHub commit history as canonical code truth.
-2. Re-run mirror sync and verify target branch head.
-3. Document incident and recovery in `reports/daily-ops-changelog.md`.
+2. Run internal mirror sync and verify target branch head.
+3. Document incident and recovery in `reports/daily-ops-changelog.md` and mirror status JSON.
 
 ## Operational Stamp
 
-Last successful mirror metadata is appended by automation into:
+Last successful mirror metadata is written by automation into:
 
-- `reports/daily-ops-changelog.md`
+- `ops-runbooks/artifacts/daily/mirror-status.json`
 
 Fields:
 
 - UTC timestamp
 - GitHub commit SHA
-- GitHub workflow run URL
+- Internal mirror run timestamp
 - Target Gitea repo
 
 ## Current Target
