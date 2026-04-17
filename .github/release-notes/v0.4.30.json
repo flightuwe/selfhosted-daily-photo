@@ -1,0 +1,32 @@
+{
+  "version": "0.4.30",
+  "releasedAt": "2026-04-17T00:00:00Z",
+  "highlights": [
+    "FotoMoji-Tap und Long-Press in der Viewer-Ansicht funktionieren wieder stabil.",
+    "Neuer Profilbereich fuer FotoMoji-Vorlagen mit Setzen, Ersetzen und Loeschen.",
+    "Vorlagen lassen sich direkt in der App pflegen, ohne neuen Post."
+  ],
+  "details": [
+    {
+      "title": "FotoMoji interaction fix",
+      "items": [
+        "FotoMoji-Buttons im Viewer sind jetzt korrekt an Tap und Long-Press gekoppelt.",
+        "Long-Press und normaler Tap verwenden getrennte, stabile Event-Pfade."
+      ]
+    },
+    {
+      "title": "Profile template management",
+      "items": [
+        "Profil hat einen eigenen Abschnitt fuer FotoMoji-Templates.",
+        "Templates koennen aktualisiert und geloescht werden; die Liste wird direkt aktualisiert."
+      ]
+    },
+    {
+      "title": "Android release",
+      "items": [
+        "versionName auf 0.4.30 gesetzt.",
+        "versionCode auf 81 erhoeht."
+      ]
+    }
+  ]
+}

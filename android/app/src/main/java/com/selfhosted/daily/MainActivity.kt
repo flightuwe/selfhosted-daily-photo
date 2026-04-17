@@ -1771,6 +1771,26 @@ class AppRepo(
     suspend fun listFotomojiTemplates(): List<FotomojiTemplateItem> =
         authorizedCall("/api/me/fotomojis/templates") { token -> api.listFotomojiTemplates(token).items }
 
+    suspend fun upsertFotomojiTemplate(emoji: String, uri: Uri): List<FotomojiTemplateItem> {
+        val file = copyUriToTemp(uri)
+        val part = MultipartBody.Part.createFormData(
+            "photo",
+            file.name,
+            file.asRequestBody("image/*".toMediaTypeOrNull())
+        )
+        val emojiBody = emoji.toRequestBody("text/plain".toMediaTypeOrNull())
+        return authorizedCall("/api/me/fotomojis/templates") { token ->
+            api.upsertFotomojiTemplate(token, part, emojiBody).items
+        }
+    }
+
+    suspend fun deleteFotomojiTemplate(emoji: String) {
+        val encoded = Uri.encode(emoji)
+        authorizedCall("/api/me/fotomojis/templates/:emoji") { token ->
+            api.deleteFotomojiTemplate(token, encoded)
+        }
+    }
+
     suspend fun commentPhoto(photoId: Long, body: String): PhotoInteractionsResponse =
         authorizedCall("/api/photos/:id/comments") { token -> api.commentPhoto(token, photoId, 0, PhotoCommentRequest(body)) }
 
@@ -2161,6 +2181,8 @@ data class UiState(
     val showDiagnosticsConsentDialog: Boolean = false,
     val diagnosticsConsentPrompt: UserPromptRule? = null,
     val debugLogs: List<DebugLogEntry> = emptyList(),
+    val fotomojiTemplates: List<FotomojiTemplateItem> = emptyList(),
+    val fotomojiTemplatesLoading: Boolean = false,
     val profileSectionExpanded: Map<String, Boolean> = emptyMap()
 )
 
@@ -2215,6 +2237,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val profileSectionIds = listOf(
         "display",
         "notifications",
+        "fotomojis",
         "invite",
         "profile_account",
         "profile_privacy",
@@ -3784,6 +3807,69 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
+    suspend fun refreshFotomojiTemplates() {
+        if (state.token.isBlank()) return
+        state = state.copy(fotomojiTemplatesLoading = true)
+        runCatching { repo.listFotomojiTemplates() }
+            .onSuccess { items ->
+                state = state.copy(
+                    fotomojiTemplatesLoading = false,
+                    fotomojiTemplates = items.sortedBy { it.emoji }
+                )
+            }
+            .onFailure {
+                state = state.copy(
+                    fotomojiTemplatesLoading = false,
+                    message = apiError(it, "FotoMoji-Templates laden fehlgeschlagen")
+                )
+            }
+    }
+
+    suspend fun upsertFotomojiTemplate(emoji: String, uri: Uri): Boolean {
+        if (emoji.isBlank()) return false
+        state = state.copy(fotomojiTemplatesLoading = true)
+        return runCatching { repo.upsertFotomojiTemplate(emoji, uri) }
+            .map { items ->
+                state = state.copy(
+                    fotomojiTemplatesLoading = false,
+                    fotomojiTemplates = items.sortedBy { it.emoji },
+                    message = "FotoMoji-Template fuer $emoji gespeichert"
+                )
+                true
+            }
+            .getOrElse {
+                state = state.copy(
+                    fotomojiTemplatesLoading = false,
+                    message = apiError(it, "FotoMoji-Template speichern fehlgeschlagen")
+                )
+                false
+            }
+    }
+
+    suspend fun deleteFotomojiTemplate(emoji: String): Boolean {
+        if (emoji.isBlank()) return false
+        state = state.copy(fotomojiTemplatesLoading = true)
+        return runCatching {
+            repo.deleteFotomojiTemplate(emoji)
+            repo.listFotomojiTemplates()
+        }
+            .map { items ->
+                state = state.copy(
+                    fotomojiTemplatesLoading = false,
+                    fotomojiTemplates = items.sortedBy { it.emoji },
+                    message = "FotoMoji-Template fuer $emoji geloescht"
+                )
+                true
+            }
+            .getOrElse {
+                state = state.copy(
+                    fotomojiTemplatesLoading = false,
+                    message = apiError(it, "FotoMoji-Template loeschen fehlgeschlagen")
+                )
+                false
+            }
+    }
+
     suspend fun commentPhoto(photoId: Long, body: String) {
         val trimmed = body.trim()
         if (photoId <= 0 || trimmed.isBlank()) return
@@ -4952,6 +5038,12 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         }
     }
 
+    LaunchedEffect(state.token, state.startupDone, state.activeTab) {
+        if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
+        if (state.activeTab != AppTab.PROFILE) return@LaunchedEffect
+        vm.refreshFotomojiTemplates()
+    }
+
     LaunchedEffect(state.token, state.startupDone, state.diagnosticsUploadEnabled) {
         if (state.token.isBlank() || !state.startupDone || !state.diagnosticsUploadEnabled) return@LaunchedEffect
         vm.autoUploadDebugLogsIfEnabled()
@@ -5792,6 +5884,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     diagnosticsUploadEnabled = state.diagnosticsUploadEnabled,
                     diagnosticsConsentGranted = state.diagnosticsConsentGranted,
                     debugLogs = state.debugLogs,
+                    fotomojiTemplates = state.fotomojiTemplates,
+                    fotomojiTemplatesLoading = state.fotomojiTemplatesLoading,
                     profileSetupJumpTarget = state.profileSetupJumpTarget,
                     profileSectionsExpanded = state.profileSectionExpanded,
                     avatarUrl = state.user?.avatarUrl.orEmpty(),
@@ -5849,6 +5943,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                             }
                             context.startActivity(Intent.createChooser(share, "Diagnose teilen"))
                         }
+                    },
+                    onRefreshFotomojiTemplates = { scope.launch { vm.refreshFotomojiTemplates() } },
+                    onUpsertFotomojiTemplate = { emoji, uri ->
+                        scope.launch { vm.upsertFotomojiTemplate(emoji, uri) }
+                    },
+                    onDeleteFotomojiTemplate = { emoji ->
+                        scope.launch { vm.deleteFotomojiTemplate(emoji) }
                     },
                     onProfileSectionExpandedChange = { sectionId, expanded -> vm.setProfileSectionExpanded(sectionId, expanded) },
                     onUploadAvatar = { uri -> scope.launch { vm.uploadAvatar(uri) } },
@@ -7381,6 +7482,8 @@ fun ProfileTab(
     diagnosticsUploadEnabled: Boolean,
     diagnosticsConsentGranted: Boolean,
     debugLogs: List<DebugLogEntry>,
+    fotomojiTemplates: List<FotomojiTemplateItem>,
+    fotomojiTemplatesLoading: Boolean,
     profileSetupJumpTarget: String,
     profileSectionsExpanded: Map<String, Boolean>,
     avatarUrl: String,
@@ -7417,6 +7520,9 @@ fun ProfileTab(
     onDiagnosticsConsentChange: (Boolean) -> Unit,
     onRefreshDebugLogs: () -> Unit,
     onShareDebugLogs: () -> Unit,
+    onRefreshFotomojiTemplates: () -> Unit,
+    onUpsertFotomojiTemplate: (String, Uri) -> Unit,
+    onDeleteFotomojiTemplate: (String) -> Unit,
     onProfileSectionExpandedChange: (String, Boolean) -> Unit,
     onUploadAvatar: (Uri) -> Unit,
     onEditableUsernameChange: (String) -> Unit,
@@ -7493,8 +7599,16 @@ fun ProfileTab(
     val scope = rememberCoroutineScope()
     val accountBringRequester = remember { BringIntoViewRequester() }
     val privacyBringRequester = remember { BringIntoViewRequester() }
+    var pendingTemplateEmoji by remember { mutableStateOf<String?>(null) }
     val avatarPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) onUploadAvatar(uri)
+    }
+    val fotomojiTemplatePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val emoji = pendingTemplateEmoji
+        pendingTemplateEmoji = null
+        if (uri != null && !emoji.isNullOrBlank()) {
+            onUpsertFotomojiTemplate(emoji, uri)
+        }
     }
 
     fun triggerProfileAutosave(debounced: Boolean) {
@@ -7921,6 +8035,97 @@ fun ProfileTab(
                                         }
                                 )
                             }
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "FotoMojis",
+                subtitle = "Vorlagen fuer deine Reaktionsfotos verwalten",
+                expanded = sectionExpanded("fotomojis"),
+                onExpandedChange = { onProfileSectionExpandedChange("fotomojis", it) }
+            ) {
+                Text("Setze oder ersetze hier deine FotoMoji-Vorlagen. Tippen im Viewer nutzt dann direkt die passende Vorlage.")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = onRefreshFotomojiTemplates,
+                        enabled = !fotomojiTemplatesLoading,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(if (fotomojiTemplatesLoading) "Lade..." else "Vorlagen aktualisieren")
+                    }
+                    Text("${fotomojiTemplates.size} aktiv")
+                }
+
+                val templateByEmoji = fotomojiTemplates.associateBy { it.emoji }
+                val editableFotomojis = viewerFotomojiEmojis.filter { it != viewerFotomojiLiveEmoji }
+                editableFotomojis.chunked(4).forEach { rowEmojis ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        rowEmojis.forEach { emoji ->
+                            val template = templateByEmoji[emoji]
+                            Card(
+                                modifier = Modifier.weight(1f),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(emoji, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                                    if (template != null) {
+                                        AsyncImage(
+                                            model = template.url,
+                                            contentDescription = "FotoMoji Vorlage",
+                                            modifier = Modifier
+                                                .size(64.dp)
+                                                .background(Color.LightGray, CircleShape),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(64.dp)
+                                                .background(MaterialTheme.colorScheme.surface, CircleShape),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text("--")
+                                        }
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            pendingTemplateEmoji = emoji
+                                            fotomojiTemplatePickerLauncher.launch("image/*")
+                                        },
+                                        enabled = !fotomojiTemplatesLoading,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(if (template == null) "Setzen" else "Ersetzen")
+                                    }
+                                    TextButton(
+                                        onClick = { onDeleteFotomojiTemplate(emoji) },
+                                        enabled = !fotomojiTemplatesLoading && template != null,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text("Loeschen")
+                                    }
+                                }
+                            }
+                        }
+                        repeat(4 - rowEmojis.size) {
+                            Spacer(modifier = Modifier.weight(1f))
                         }
                     }
                 }
