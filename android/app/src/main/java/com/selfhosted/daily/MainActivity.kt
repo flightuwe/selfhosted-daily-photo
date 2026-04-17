@@ -1349,6 +1349,12 @@ class AppRepo(
         prefs.edit().putBoolean("feed_post_push_enabled", enabled).apply()
     }
 
+    fun useFotomojiReactions(): Boolean = prefs.getBoolean("use_fotomoji_reactions", false)
+
+    fun setUseFotomojiReactions(enabled: Boolean) {
+        prefs.edit().putBoolean("use_fotomoji_reactions", enabled).apply()
+    }
+
     fun chatPushLocalEnabled(): Boolean = prefs.getBoolean("chat_push_enabled_local", false)
 
     fun setChatPushLocalEnabled(enabled: Boolean) {
@@ -2167,6 +2173,7 @@ data class UiState(
     val uploadQuality: Int = 80,
     val autoUpdateEnabled: Boolean = false,
     val notificationMasterEnabled: Boolean = true,
+    val useFotomojiReactions: Boolean = false,
     val feedPostPushEnabled: Boolean = false,
     val pollPushEnabled: Boolean = false,
     val specialMomentPushEnabled: Boolean = false,
@@ -2263,6 +2270,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             uploadQuality = repo.uploadQuality(),
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
+            useFotomojiReactions = repo.useFotomojiReactions(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
             specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
@@ -2490,6 +2498,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             uploadQueue = repo.uploadQueue(),
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
+            useFotomojiReactions = repo.useFotomojiReactions(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
             specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
@@ -2606,6 +2615,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             uploadQuality = state.uploadQuality,
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
+            useFotomojiReactions = repo.useFotomojiReactions(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
             specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
@@ -4041,6 +4051,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             uploadQuality = state.uploadQuality,
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
+            useFotomojiReactions = repo.useFotomojiReactions(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
             specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
@@ -4113,6 +4124,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             uploadQuality = state.uploadQuality,
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
+            useFotomojiReactions = repo.useFotomojiReactions(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
             specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
@@ -4319,6 +4331,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedPostPushEnabled = feed,
             notificationMasterEnabled = master
         )
+    }
+
+    fun setUseFotomojiReactions(enabled: Boolean) {
+        repo.setUseFotomojiReactions(enabled)
+        state = state.copy(useFotomojiReactions = repo.useFotomojiReactions())
     }
 
     suspend fun setPollPushEnabled(enabled: Boolean) {
@@ -4859,6 +4876,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     var captureUri by remember { mutableStateOf<Uri?>(null) }
     var captureTarget by remember { mutableStateOf<String?>(null) }
     var pendingFotomojiCapture by remember { mutableStateOf<PendingFotomojiCapture?>(null) }
+    var pendingProfileFotomojiTemplateEmoji by remember { mutableStateOf<String?>(null) }
     var captureAsPrompt by remember { mutableStateOf(true) }
     var captureCapsule by remember { mutableStateOf(CapsuleUploadOptions()) }
     var backPreviewUri by remember { mutableStateOf<Uri?>(null) }
@@ -4939,6 +4957,15 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                             }
                         }
                     }
+                }
+                "fotomoji_template" -> {
+                    val emoji = pendingProfileFotomojiTemplateEmoji
+                    if (!emoji.isNullOrBlank() && shotUri != null) {
+                        scope.launch {
+                            vm.upsertFotomojiTemplate(emoji, shotUri)
+                        }
+                    }
+                    pendingProfileFotomojiTemplateEmoji = null
                 }
             }
         }
@@ -5419,6 +5446,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             interactions = state.photoInteractions,
             interactionsLoading = state.interactionsLoading,
             ownDownloadFallback = viewerOwnDownloadFallback,
+            useFotomojiReactions = state.useFotomojiReactions,
             onCommentChange = { viewerComment = it },
             onCommentSend = {
                 val body = viewerComment
@@ -5436,28 +5464,32 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             onFotoMojiTap = { emoji ->
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
                 scope.launch {
-                    if (emoji == viewerFotomojiLiveEmoji) {
-                        pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = false)
-                        openCameraFor("fotomoji")
-                        return@launch
-                    }
                     val usedTemplate = vm.tryPhotoFotomojiFromTemplate(pid, emoji)
                     if (!usedTemplate) {
-                        pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = false)
+                        pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = true)
                         openCameraFor("fotomoji")
                     }
                 }
             },
             onFotoMojiLongPress = { emoji ->
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
-                val saveTemplate = emoji != viewerFotomojiLiveEmoji
-                pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = saveTemplate)
+                pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = true)
                 openCameraFor("fotomoji")
             },
             onDoubleTapReact = {
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
                 val emoji = viewerReactionEmojis[Random.nextInt(viewerReactionEmojis.size)]
-                scope.launch { vm.reactPhoto(pid, emoji) }
+                scope.launch {
+                    if (state.useFotomojiReactions) {
+                        val usedTemplate = vm.tryPhotoFotomojiFromTemplate(pid, emoji)
+                        if (!usedTemplate) {
+                            pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = true)
+                            openCameraFor("fotomoji")
+                        }
+                    } else {
+                        vm.reactPhoto(pid, emoji)
+                    }
+                }
             },
             onDownloadCurrent = { photoUrl ->
                 vm.downloadPhotoFromViewer(photoUrl)
@@ -5871,6 +5903,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     uploadQuality = state.uploadQuality,
                     autoUpdateEnabled = state.autoUpdateEnabled,
                     notificationMasterEnabled = state.notificationMasterEnabled,
+                    useFotomojiReactions = state.useFotomojiReactions,
                     chatPushEnabled = state.user?.chatPushEnabled ?: false,
                     pollPushEnabled = state.user?.pollPushEnabled ?: state.pollPushEnabled,
                     specialMomentPushEnabled = state.user?.specialMomentPushEnabled ?: state.specialMomentPushEnabled,
@@ -5945,12 +5978,14 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         }
                     },
                     onRefreshFotomojiTemplates = { scope.launch { vm.refreshFotomojiTemplates() } },
-                    onUpsertFotomojiTemplate = { emoji, uri ->
-                        scope.launch { vm.upsertFotomojiTemplate(emoji, uri) }
+                    onCaptureFotomojiTemplate = { emoji ->
+                        pendingProfileFotomojiTemplateEmoji = emoji
+                        openCameraFor("fotomoji_template")
                     },
                     onDeleteFotomojiTemplate = { emoji ->
                         scope.launch { vm.deleteFotomojiTemplate(emoji) }
                     },
+                    onUseFotomojiReactionsChange = { vm.setUseFotomojiReactions(it) },
                     onProfileSectionExpandedChange = { sectionId, expanded -> vm.setProfileSectionExpanded(sectionId, expanded) },
                     onUploadAvatar = { uri -> scope.launch { vm.uploadAvatar(uri) } },
                     onEditableUsernameChange = { profileUsername = it },
@@ -7469,6 +7504,7 @@ fun ProfileTab(
     uploadQuality: Int,
     autoUpdateEnabled: Boolean,
     notificationMasterEnabled: Boolean,
+    useFotomojiReactions: Boolean,
     chatPushEnabled: Boolean,
     pollPushEnabled: Boolean,
     specialMomentPushEnabled: Boolean,
@@ -7521,8 +7557,9 @@ fun ProfileTab(
     onRefreshDebugLogs: () -> Unit,
     onShareDebugLogs: () -> Unit,
     onRefreshFotomojiTemplates: () -> Unit,
-    onUpsertFotomojiTemplate: (String, Uri) -> Unit,
+    onCaptureFotomojiTemplate: (String) -> Unit,
     onDeleteFotomojiTemplate: (String) -> Unit,
+    onUseFotomojiReactionsChange: (Boolean) -> Unit,
     onProfileSectionExpandedChange: (String, Boolean) -> Unit,
     onUploadAvatar: (Uri) -> Unit,
     onEditableUsernameChange: (String) -> Unit,
@@ -7599,16 +7636,8 @@ fun ProfileTab(
     val scope = rememberCoroutineScope()
     val accountBringRequester = remember { BringIntoViewRequester() }
     val privacyBringRequester = remember { BringIntoViewRequester() }
-    var pendingTemplateEmoji by remember { mutableStateOf<String?>(null) }
     val avatarPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) onUploadAvatar(uri)
-    }
-    val fotomojiTemplatePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        val emoji = pendingTemplateEmoji
-        pendingTemplateEmoji = null
-        if (uri != null && !emoji.isNullOrBlank()) {
-            onUpsertFotomojiTemplate(emoji, uri)
-        }
     }
 
     fun triggerProfileAutosave(debounced: Boolean) {
@@ -8048,6 +8077,12 @@ fun ProfileTab(
                 onExpandedChange = { onProfileSectionExpandedChange("fotomojis", it) }
             ) {
                 Text("Setze oder ersetze hier deine FotoMoji-Vorlagen. Tippen im Viewer nutzt dann direkt die passende Vorlage.")
+                SettingsToggleRow(
+                    label = "FotoMoji statt Emoji-Reaktion verwenden",
+                    checked = useFotomojiReactions,
+                    onCheckedChange = onUseFotomojiReactionsChange,
+                    supportingText = "Aktiv: die Emoji-Leiste erstellt FotoMojis. Inaktiv: normale Emoji-Reaktionen."
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -8064,7 +8099,7 @@ fun ProfileTab(
                 }
 
                 val templateByEmoji = fotomojiTemplates.associateBy { it.emoji }
-                val editableFotomojis = viewerFotomojiEmojis.filter { it != viewerFotomojiLiveEmoji }
+                val editableFotomojis = viewerReactionEmojis
                 editableFotomojis.chunked(4).forEach { rowEmojis ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -8106,13 +8141,12 @@ fun ProfileTab(
                                     }
                                     OutlinedButton(
                                         onClick = {
-                                            pendingTemplateEmoji = emoji
-                                            fotomojiTemplatePickerLauncher.launch("image/*")
+                                            onCaptureFotomojiTemplate(emoji)
                                         },
                                         enabled = !fotomojiTemplatesLoading,
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
-                                        Text(if (template == null) "Setzen" else "Ersetzen")
+                                        Text(if (template == null) "Aufnehmen" else "Neu aufnehmen")
                                     }
                                     TextButton(
                                         onClick = { onDeleteFotomojiTemplate(emoji) },
@@ -9335,15 +9369,7 @@ private fun helpLines(): List<String> = listOf(
 )
 
 private val viewerReactionEmojis = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDE02", "\uD83D\uDD25", "\uD83D\uDE2E")
-private const val viewerFotomojiLiveEmoji = "\u26A1"
-private val viewerFotomojiEmojis = listOf(
-    "\u2764\uFE0F",
-    "\uD83D\uDC4D",
-    "\uD83D\uDE02",
-    "\uD83D\uDD25",
-    "\uD83D\uDE2E",
-    viewerFotomojiLiveEmoji
-)
+private val viewerFotomojiEmojis = viewerReactionEmojis
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -9355,6 +9381,7 @@ private fun FullscreenPhotoViewer(
     interactions: PhotoInteractionsResponse?,
     interactionsLoading: Boolean,
     ownDownloadFallback: Boolean,
+    useFotomojiReactions: Boolean,
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
     onReact: (String) -> Unit,
@@ -9407,6 +9434,7 @@ private fun FullscreenPhotoViewer(
                     interactions = interactions,
                     interactionsLoading = interactionsLoading,
                     ownDownloadFallback = ownDownloadFallback,
+                    useFotomojiReactions = useFotomojiReactions,
                     onCommentChange = onCommentChange,
                     onCommentSend = onCommentSend,
                     onReact = onReact,
@@ -9485,6 +9513,7 @@ private fun ViewerInteractionSheet(
     interactions: PhotoInteractionsResponse?,
     interactionsLoading: Boolean,
     ownDownloadFallback: Boolean,
+    useFotomojiReactions: Boolean,
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
     onReact: (String) -> Unit,
@@ -9503,37 +9532,41 @@ private fun ViewerInteractionSheet(
     ) {
         Text("Unter diesem Bild kannst du reagieren oder kommentieren.")
         if (photoId == null) return@Column
-        val countByEmoji = interactions?.reactions.orEmpty().associate { it.emoji to it.count }
+        val reactionCountByEmoji = interactions?.reactions.orEmpty().associate { it.emoji to it.count }
+        val photoMojiCountByEmoji = interactions?.photoMojis.orEmpty()
+            .groupingBy { it.emoji }
+            .eachCount()
+            .mapValues { it.value.toLong() }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
             viewerReactionEmojis.forEach { emoji ->
-                val selected = interactions?.myReaction == emoji
+                val selected = if (useFotomojiReactions) {
+                    interactions?.myPhotoMoji?.emoji == emoji
+                } else {
+                    interactions?.myReaction == emoji
+                }
                 Button(
-                    onClick = { onReact(emoji) },
-                    modifier = Modifier.weight(1f)
+                    onClick = {
+                        if (useFotomojiReactions) onFotoMojiTap(emoji) else onReact(emoji)
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .pointerInput(useFotomojiReactions, emoji) {
+                            if (useFotomojiReactions) {
+                                detectTapGestures(onLongPress = { onFotoMojiLongPress(emoji) })
+                            }
+                        }
                 ) {
-                    val count = countByEmoji[emoji] ?: 0L
+                    val count = if (useFotomojiReactions) {
+                        photoMojiCountByEmoji[emoji] ?: 0L
+                    } else {
+                        reactionCountByEmoji[emoji] ?: 0L
+                    }
                     Text("${if (selected) "+ " else ""}$emoji $count")
                 }
             }
         }
-        Text("FotoMojis: Tippen nutzt Template (wenn vorhanden), lang druecken speichert ein neues Template. ⚡ ist immer Live.")
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-            viewerFotomojiEmojis.forEach { emoji ->
-                val selected = interactions?.myPhotoMoji?.emoji == emoji
-                OutlinedButton(
-                    onClick = { onFotoMojiTap(emoji) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .pointerInput(emoji) {
-                            detectTapGestures(
-                                onLongPress = { onFotoMojiLongPress(emoji) }
-                            )
-                        }
-                ) {
-                    val marker = if (selected) "•" else ""
-                    Text("$emoji$marker")
-                }
-            }
+        if (useFotomojiReactions) {
+            Text("FotoMoji-Modus aktiv: Tippen nutzt Template, lang druecken ersetzt das Template mit neuer Kameraaufnahme.")
         }
         val photoMojis = interactions?.photoMojis.orEmpty().sortedWith(
             compareBy<PhotoMojiItem>(

@@ -1,0 +1,32 @@
+{
+  "version": "0.4.31",
+  "releasedAt": "2026-04-17T00:00:00Z",
+  "highlights": [
+    "Profil-FotoMoji setzt Vorlagen jetzt direkt ueber die Kamera statt Galerie.",
+    "Neuer Schalter: FotoMoji statt Emoji-Reaktion verwenden.",
+    "Reaktionsleiste im Viewer zusammengefuehrt und vereinfacht."
+  ],
+  "details": [
+    {
+      "title": "Profile FotoMoji capture",
+      "items": [
+        "Template-Setzen oeffnet jetzt die Kamera (Aufnehmen/Neu aufnehmen).",
+        "Delete/Refresh fuer Templates bleiben im Profil verfuegbar."
+      ]
+    },
+    {
+      "title": "Reaction mode switch",
+      "items": [
+        "Neuer lokaler Profil-Schalter fuer FotoMoji-Reaktionsmodus.",
+        "Bei aktivem Modus nutzt die Emoji-Leiste Template oder Kamera statt klassischer Emoji-Reaktion."
+      ]
+    },
+    {
+      "title": "Auto template save",
+      "items": [
+        "Wenn eine FotoMoji-Reaktion per Kamera erstellt wird, wird das Template fuer das Emoji automatisch gespeichert.",
+        "versionName auf 0.4.31 gesetzt und versionCode auf 82 erhoeht."
+      ]
+    }
+  ]
+}
