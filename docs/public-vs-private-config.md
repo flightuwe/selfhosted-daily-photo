@@ -38,6 +38,7 @@ Use this checklist before every real deploy or release.
 
 7. `APP_VERSION`
 - Set to deploy/build version so clients can validate running server version.
+- Legacy placeholders like `migration-prep` are only for short-lived migration phases and should not remain as the steady-state runtime value.
 
 8. Scheduler controls
 - `SCHEDULER_ENABLED`

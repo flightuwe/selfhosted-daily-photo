@@ -1,0 +1,25 @@
+{
+  "version": "0.4.28",
+  "releasedAt": "2026-04-17T00:00:00Z",
+  "highlights": [
+    "Versionssprung fuer den naechsten GitHub-App-Release auf 0.4.28.",
+    "Backend ersetzt Platzhalter wie migration-prep automatisch durch die echte Build-Version aus dem Image.",
+    "Health-Endpoints und Admin zeigen damit nach dem Rollout wieder die reale Backend-Version."
+  ],
+  "details": [
+    {
+      "title": "Android release test",
+      "items": [
+        "versionName auf 0.4.28 gesetzt.",
+        "versionCode auf 79 erhoeht."
+      ]
+    },
+    {
+      "title": "Backend version visibility",
+      "items": [
+        "Platzhalterwerte wie migration-prep werden nicht mehr gegenueber der Build-Version bevorzugt.",
+        "Versionsanzeige ueber Health-Endpunkte und Admin bleibt der kanonische Laufzeitindikator."
+      ]
+    }
+  ]
+}

@@ -12,26 +12,25 @@ import (
 	"syscall"
 	"time"
 
-    "github.com/yosho/selfhosted-bereal/backend/internal/api"
-    "github.com/yosho/selfhosted-bereal/backend/internal/auth"
-    "github.com/yosho/selfhosted-bereal/backend/internal/config"
-    "github.com/yosho/selfhosted-bereal/backend/internal/db"
-    "github.com/yosho/selfhosted-bereal/backend/internal/models"
-    "github.com/yosho/selfhosted-bereal/backend/internal/notify"
-    "github.com/yosho/selfhosted-bereal/backend/internal/scheduler"
-    "github.com/yosho/selfhosted-bereal/backend/internal/storage"
-    "gorm.io/gorm"
+	"github.com/yosho/selfhosted-bereal/backend/internal/api"
+	"github.com/yosho/selfhosted-bereal/backend/internal/auth"
+	"github.com/yosho/selfhosted-bereal/backend/internal/config"
+	"github.com/yosho/selfhosted-bereal/backend/internal/db"
+	"github.com/yosho/selfhosted-bereal/backend/internal/models"
+	"github.com/yosho/selfhosted-bereal/backend/internal/notify"
+	"github.com/yosho/selfhosted-bereal/backend/internal/scheduler"
+	"github.com/yosho/selfhosted-bereal/backend/internal/storage"
+	"gorm.io/gorm"
 )
 
 var buildVersion = "dev"
 
 func main() {
 	cfg := config.Load()
-	if (cfg.AppVersion == "" || strings.EqualFold(cfg.AppVersion, "dev")) && buildVersion != "" && !strings.EqualFold(buildVersion, "dev") {
-		cfg.AppVersion = buildVersion
-	}
+	cfg.AppVersion = config.ResolveAppVersion(cfg.AppVersion, buildVersion)
 	closeLogFile := configureBackendLogging(cfg.ForensicBackendLogPath)
 	defer closeLogFile()
+	log.Printf("startup: version=%s public_base_url=%s scheduler_enabled=%t", cfg.AppVersion, cfg.PublicBaseURL, cfg.SchedulerEnabled)
 
 	location, err := time.LoadLocation(cfg.Timezone)
 	if err != nil {
@@ -71,14 +70,14 @@ func main() {
 	}
 	monitor := api.NewMonitor(database, location)
 	server := &api.Server{
-		DB:       database,
-		Config:   cfg,
-		Auth:     auth.NewManager(cfg.JWTSecret, cfg.TokenTTL),
-		Store:    store,
-		Notifier: notifier,
-		Prompt:   promptService,
-		Location: location,
-		Monitor:  monitor,
+		DB:          database,
+		Config:      cfg,
+		Auth:        auth.NewManager(cfg.JWTSecret, cfg.TokenTTL),
+		Store:       store,
+		Notifier:    notifier,
+		Prompt:      promptService,
+		Location:    location,
+		Monitor:     monitor,
 		FeedCache:   api.NewFeedDayCache(12 * time.Second),
 		FeedLimiter: api.NewFeedPollLimiter(28, 30*time.Second),
 	}
@@ -103,30 +102,30 @@ func main() {
 		if err := database.Find(&rows).Error; err != nil {
 			log.Printf("device token query failed: %v", err)
 			promptService.MarkDispatchResult(prompt.Day, promptService.DispatchKindDailyPromptPush(), "failed", 0, 0, err.Error())
-            return
-        }
-        tokens := make([]string, 0, len(rows))
-        for _, t := range rows {
-            tokens = append(tokens, t.Token)
-        }
-        result, err := notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
+			return
+		}
+		tokens := make([]string, 0, len(rows))
+		for _, t := range rows {
+			tokens = append(tokens, t.Token)
+		}
+		result, err := notifier.SendDailyPrompt(tokens, settings.PromptNotificationText)
 		dispatchStatus := "sent"
 		if err != nil {
 			dispatchStatus = "failed"
 		}
 		promptService.MarkDispatchResult(prompt.Day, promptService.DispatchKindDailyPromptPush(), dispatchStatus, int64(result.Sent), int64(result.Failed), errorString(err))
-        monitor.RecordPush(result.Sent, result.Failed, len(result.InvalidTokens), err != nil)
-        if len(result.InvalidTokens) > 0 {
-            if dbErr := database.Where("token IN ?", result.InvalidTokens).Delete(&models.DeviceToken{}).Error; dbErr != nil {
-                log.Printf("failed to remove invalid tokens: %v", dbErr)
-            }
-        }
-        if err != nil {
-            log.Printf("notify failed: %v", err)
-        }
-        if result.Failed > 0 || len(result.InvalidTokens) > 0 {
-            log.Printf("notify summary: requested=%d sent=%d failed=%d invalid_removed=%d", result.Requested, result.Sent, result.Failed, len(result.InvalidTokens))
-        }
+		monitor.RecordPush(result.Sent, result.Failed, len(result.InvalidTokens), err != nil)
+		if len(result.InvalidTokens) > 0 {
+			if dbErr := database.Where("token IN ?", result.InvalidTokens).Delete(&models.DeviceToken{}).Error; dbErr != nil {
+				log.Printf("failed to remove invalid tokens: %v", dbErr)
+			}
+		}
+		if err != nil {
+			log.Printf("notify failed: %v", err)
+		}
+		if result.Failed > 0 || len(result.InvalidTokens) > 0 {
+			log.Printf("notify summary: requested=%d sent=%d failed=%d invalid_removed=%d", result.Requested, result.Sent, result.Failed, len(result.InvalidTokens))
+		}
 	})
 
 	r := server.Router()
@@ -178,27 +177,27 @@ func errorString(err error) string {
 }
 
 func ensureBootstrapAdmin(database *gorm.DB) {
-    username := strings.ToLower(os.Getenv("BOOTSTRAP_ADMIN_USER"))
-    password := os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")
-    if username == "" || password == "" {
-        return
-    }
+	username := strings.ToLower(os.Getenv("BOOTSTRAP_ADMIN_USER"))
+	password := os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")
+	if username == "" || password == "" {
+		return
+	}
 
-    var existing models.User
-    if err := database.Where("username = ?", username).First(&existing).Error; err == nil {
-        return
-    }
+	var existing models.User
+	if err := database.Where("username = ?", username).First(&existing).Error; err == nil {
+		return
+	}
 
-    hash, err := auth.HashPassword(password)
-    if err != nil {
-        log.Printf("bootstrap admin hash failed: %v", err)
-        return
-    }
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		log.Printf("bootstrap admin hash failed: %v", err)
+		return
+	}
 
-    admin := models.User{Username: username, PasswordHash: hash, IsAdmin: true}
-    if err := database.Create(&admin).Error; err != nil {
-        log.Printf("bootstrap admin create failed: %v", err)
-    }
+	admin := models.User{Username: username, PasswordHash: hash, IsAdmin: true}
+	if err := database.Create(&admin).Error; err != nil {
+		log.Printf("bootstrap admin create failed: %v", err)
+	}
 }
 
 func configureBackendLogging(path string) func() {

@@ -20,6 +20,10 @@ backend/secrets/
 # Deploy runtime
 deploy/data/
 deploy/certs/
+deploy/logs/
+
+# Local workspace artifacts
+artifacts/
 
 # OS
 .DS_Store

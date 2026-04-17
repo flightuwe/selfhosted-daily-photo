@@ -2,6 +2,12 @@
 
 This file is append-only operational history for Forge-side Daily continuity.
 
+## 2026-04-17
+
+- Prepared GitHub release `v0.4.28` with Android `versionName=0.4.28` and `versionCode=79`.
+- Hardened backend runtime version resolution so legacy placeholder values like `migration-prep` no longer hide the embedded build version from GHCR images.
+- Recorded release notes pair for `v0.4.28` and refreshed deploy guidance for `APP_VERSION` placeholder handling.
+
 ## 2026-04-14
 
 - Established Daily Forge Knowledge Hub docs (`docs/overview.md` and linked runbooks).

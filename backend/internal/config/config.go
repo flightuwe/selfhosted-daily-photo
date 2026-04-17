@@ -67,6 +67,30 @@ func Load() Config {
 	}
 }
 
+func ResolveAppVersion(configured string, build string) string {
+	configured = strings.TrimSpace(configured)
+	build = strings.TrimSpace(build)
+	if build == "" || strings.EqualFold(build, "dev") {
+		if configured == "" {
+			return "dev"
+		}
+		return configured
+	}
+	if isPlaceholderAppVersion(configured) {
+		return build
+	}
+	return configured
+}
+
+func isPlaceholderAppVersion(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "dev", "unknown", "latest", "migration-prep":
+		return true
+	default:
+		return false
+	}
+}
+
 func getEnv(key, fallback string) string {
 	v := os.Getenv(key)
 	if v == "" {
