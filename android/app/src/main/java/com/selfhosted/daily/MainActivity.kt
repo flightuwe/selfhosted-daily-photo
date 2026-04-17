@@ -32,6 +32,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -5464,6 +5465,11 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             onFotoMojiTap = { emoji ->
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
                 scope.launch {
+                    if (emoji == viewerFotomojiLiveEmoji) {
+                        pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = false)
+                        openCameraFor("fotomoji")
+                        return@launch
+                    }
                     val usedTemplate = vm.tryPhotoFotomojiFromTemplate(pid, emoji)
                     if (!usedTemplate) {
                         pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = true)
@@ -5473,7 +5479,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             },
             onFotoMojiLongPress = { emoji ->
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
-                pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = true)
+                val saveTemplate = emoji != viewerFotomojiLiveEmoji
+                pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = saveTemplate)
                 openCameraFor("fotomoji")
             },
             onDoubleTapReact = {
@@ -9369,7 +9376,8 @@ private fun helpLines(): List<String> = listOf(
 )
 
 private val viewerReactionEmojis = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDE02", "\uD83D\uDD25", "\uD83D\uDE2E")
-private val viewerFotomojiEmojis = viewerReactionEmojis
+private const val viewerFotomojiLiveEmoji = "\u26A1"
+private val viewerFotomojiEmojis = viewerReactionEmojis + viewerFotomojiLiveEmoji
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -9537,36 +9545,48 @@ private fun ViewerInteractionSheet(
             .groupingBy { it.emoji }
             .eachCount()
             .mapValues { it.value.toLong() }
+        val reactionEmojis = if (useFotomojiReactions) viewerFotomojiEmojis else viewerReactionEmojis
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-            viewerReactionEmojis.forEach { emoji ->
+            reactionEmojis.forEach { emoji ->
                 val selected = if (useFotomojiReactions) {
                     interactions?.myPhotoMoji?.emoji == emoji
                 } else {
                     interactions?.myReaction == emoji
                 }
-                Button(
-                    onClick = {
-                        if (useFotomojiReactions) onFotoMojiTap(emoji) else onReact(emoji)
-                    },
+                Box(
                     modifier = Modifier
                         .weight(1f)
-                        .pointerInput(useFotomojiReactions, emoji) {
-                            if (useFotomojiReactions) {
-                                detectTapGestures(onLongPress = { onFotoMojiLongPress(emoji) })
+                        .background(
+                            if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            MaterialTheme.shapes.small
+                        )
+                        .combinedClickable(
+                            onClick = {
+                                if (useFotomojiReactions) onFotoMojiTap(emoji) else onReact(emoji)
+                            },
+                            onLongClick = {
+                                if (useFotomojiReactions) {
+                                    onFotoMojiLongPress(emoji)
+                                }
                             }
-                        }
+                        )
+                        .padding(horizontal = 6.dp, vertical = 10.dp),
+                    contentAlignment = Alignment.Center
                 ) {
                     val count = if (useFotomojiReactions) {
                         photoMojiCountByEmoji[emoji] ?: 0L
                     } else {
                         reactionCountByEmoji[emoji] ?: 0L
                     }
-                    Text("${if (selected) "+ " else ""}$emoji $count")
+                    Text(
+                        "${if (selected) "+ " else ""}$emoji $count",
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                    )
                 }
             }
         }
         if (useFotomojiReactions) {
-            Text("FotoMoji-Modus aktiv: Tippen nutzt Template, lang druecken ersetzt das Template mit neuer Kameraaufnahme.")
+            Text("FotoMoji-Modus aktiv: Tippen nutzt Template, lang druecken ersetzt das Template. ⚡ bleibt immer live.")
         }
         val photoMojis = interactions?.photoMojis.orEmpty().sortedWith(
             compareBy<PhotoMojiItem>(

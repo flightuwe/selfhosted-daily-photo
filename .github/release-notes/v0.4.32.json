@@ -1,0 +1,32 @@
+{
+  "version": "0.4.32",
+  "releasedAt": "2026-04-18T00:00:00Z",
+  "highlights": [
+    "⚡ ist im FotoMoji-Modus wieder als immer-live Reaktion verfuegbar.",
+    "Long-Press auf FotoMoji-Emoji ersetzt Templates wieder zuverlaessig.",
+    "Viewer-Reaktionschips wurden fuer Tap/Long-Press robuster umgesetzt."
+  ],
+  "details": [
+    {
+      "title": "Live emoji and template replace",
+      "items": [
+        "⚡ startet immer direkt die Kamera und speichert kein festes Template.",
+        "Langdruck auf Emoji wie 👍 oeffnet Kamera wieder korrekt fuer Template-Ersetzung."
+      ]
+    },
+    {
+      "title": "Interaction reliability",
+      "items": [
+        "Reaktions-UI nutzt jetzt combinedClickable statt instabiler Button+Pointer-Kombination.",
+        "Verhalten bleibt fuer normalen Emoji-Modus unveraendert."
+      ]
+    },
+    {
+      "title": "Android release",
+      "items": [
+        "versionName auf 0.4.32 gesetzt.",
+        "versionCode auf 83 erhoeht."
+      ]
+    }
+  ]
+}
