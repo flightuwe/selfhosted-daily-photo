@@ -2057,6 +2057,7 @@ data class UiState(
     val notificationMasterEnabled: Boolean = true,
     val feedPostPushEnabled: Boolean = false,
     val pollPushEnabled: Boolean = false,
+    val specialMomentPushEnabled: Boolean = false,
     val inviteRegistrationPushEnabled: Boolean = false,
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
@@ -2149,6 +2150,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
+            specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
             inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
@@ -2375,6 +2377,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
+            specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
@@ -2490,6 +2493,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
+            specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -3029,6 +3033,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
             val pollPushEnabled = repo.pollPushLocalEnabled()
+            val specialMomentPushEnabled = repo.specialMomentPushLocalEnabled()
             val inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled()
             val photoReactionPushEnabled = repo.photoReactionPushLocalEnabled()
             val photoCommentPushEnabled = repo.photoCommentPushLocalEnabled()
@@ -3057,6 +3062,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 autoUpdateEnabled = autoUpdateEnabled,
                 feedPostPushEnabled = feedPostPushEnabled,
                 pollPushEnabled = pollPushEnabled,
+                specialMomentPushEnabled = specialMomentPushEnabled,
                 inviteRegistrationPushEnabled = inviteRegistrationPushEnabled,
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
@@ -3822,6 +3828,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
+            specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
             inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
@@ -3893,6 +3900,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
+            specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
             inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
@@ -4152,6 +4160,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.setSpecialMomentPushLocalEnabled(user.specialMomentPushEnabled)
                 state = state.copy(
                     user = user,
+                    specialMomentPushEnabled = user.specialMomentPushEnabled,
                     loading = false,
                     message = if (enabled) {
                         "Push bei Sondermomenten aktiviert"
@@ -5605,7 +5614,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     notificationMasterEnabled = state.notificationMasterEnabled,
                     chatPushEnabled = state.user?.chatPushEnabled ?: false,
                     pollPushEnabled = state.user?.pollPushEnabled ?: state.pollPushEnabled,
-                    specialMomentPushEnabled = state.user?.specialMomentPushEnabled ?: repo.specialMomentPushLocalEnabled(),
+                    specialMomentPushEnabled = state.user?.specialMomentPushEnabled ?: state.specialMomentPushEnabled,
                     inviteRegistrationPushEnabled = state.user?.inviteRegistrationPushEnabled ?: state.inviteRegistrationPushEnabled,
                     photoReactionPushEnabled = state.user?.photoReactionPushEnabled ?: state.photoReactionPushEnabled,
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
