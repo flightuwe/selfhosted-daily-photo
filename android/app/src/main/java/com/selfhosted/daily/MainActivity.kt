@@ -32,7 +32,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -9317,13 +9316,14 @@ private fun ViewerInteractionSheet(
             viewerFotomojiEmojis.forEach { emoji ->
                 val selected = interactions?.myPhotoMoji?.emoji == emoji
                 OutlinedButton(
-                    onClick = {},
+                    onClick = { onFotoMojiTap(emoji) },
                     modifier = Modifier
                         .weight(1f)
-                        .combinedClickable(
-                            onClick = { onFotoMojiTap(emoji) },
-                            onLongClick = { onFotoMojiLongPress(emoji) }
-                        )
+                        .pointerInput(emoji) {
+                            detectTapGestures(
+                                onLongPress = { onFotoMojiLongPress(emoji) }
+                            )
+                        }
                 ) {
                     val marker = if (selected) "•" else ""
                     Text("$emoji$marker")
