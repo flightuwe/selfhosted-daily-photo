@@ -13,6 +13,7 @@ type User struct {
 	SpecialMomentPushEnabled      bool       `gorm:"default:false" json:"specialMomentPushEnabled"`
 	InviteRegistrationPushEnabled bool       `gorm:"default:false" json:"inviteRegistrationPushEnabled"`
 	PhotoReactionPushEnabled      bool       `gorm:"default:false" json:"photoReactionPushEnabled"`
+	PhotoFotomojiPushEnabled      bool       `gorm:"default:false" json:"photoFotomojiPushEnabled"`
 	PhotoCommentPushEnabled       bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
 	AllowPhotoDownload            bool       `gorm:"default:false" json:"allowPhotoDownload"`
 	AvatarPath                    string     `gorm:"size:255" json:"avatarUrl"`
@@ -292,6 +293,26 @@ type PhotoReaction struct {
 	PhotoID   uint      `gorm:"index:idx_photo_user_reaction,unique;not null" json:"photoId"`
 	UserID    uint      `gorm:"index:idx_photo_user_reaction,unique;not null" json:"userId"`
 	Emoji     string    `gorm:"size:16;not null" json:"emoji"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type PhotoFotomoji struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	PhotoID   uint      `gorm:"index:idx_photo_user_fotomoji,unique;not null" json:"photoId"`
+	UserID    uint      `gorm:"index:idx_photo_user_fotomoji,unique;not null" json:"userId"`
+	User      User      `json:"user"`
+	Emoji     string    `gorm:"size:16;not null" json:"emoji"`
+	FilePath  string    `gorm:"size:255;not null" json:"filePath"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type UserFotomojiTemplate struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	UserID    uint      `gorm:"index:idx_user_fotomoji_template,unique;not null" json:"userId"`
+	Emoji     string    `gorm:"size:16;index:idx_user_fotomoji_template,unique;not null" json:"emoji"`
+	FilePath  string    `gorm:"size:255;not null" json:"filePath"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

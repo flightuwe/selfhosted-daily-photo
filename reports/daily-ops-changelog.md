@@ -7,6 +7,8 @@ This file is append-only operational history for Forge-side Daily continuity.
 - Prepared GitHub release `v0.4.28` with Android `versionName=0.4.28` and `versionCode=79`.
 - Hardened backend runtime version resolution so legacy placeholder values like `migration-prep` no longer hide the embedded build version from GHCR images.
 - Recorded release notes pair for `v0.4.28` and refreshed deploy guidance for `APP_VERSION` placeholder handling.
+- Revalidated the active production path on Broutschek (`daily.broutschek.de`, CT `9204`) including manual backend rollout from Proxmox host via `pct exec ... docker compose ...`.
+- Verified post-rollout live backend version on production as `srv-249.1`.
 
 ## 2026-04-14
 

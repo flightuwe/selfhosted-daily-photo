@@ -25,6 +25,7 @@ import {
   createUser,
   deleteReport,
   deleteReports,
+  deleteAdminFotomoji,
   deleteDebugLogs,
   deleteChatCommand,
   deleteUser,
@@ -32,6 +33,7 @@ import {
   getAdminSearch,
   getAdminHistory,
   getAdminTimeCapsules,
+  getAdminFotomojis,
   getAdminPolls,
   getCalendar,
   getChat,
@@ -106,6 +108,7 @@ import {
   type ChatItem,
   type CalendarItem,
   type AdminTimeCapsuleItem,
+  type AdminFotomojiItem,
   type FeedItem,
   type DebugLogItem,
   type DebugLogsResponse,
@@ -115,9 +118,9 @@ import {
   type UserPromptRule,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "reports" | "debug" | "settings" | "migration";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "fotomojis" | "reports" | "debug" | "settings" | "migration";
 type AdminArea = "operations" | "analytics" | "config";
-type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "polls" | "time_capsules" | "reports";
+type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "polls" | "time_capsules" | "fotomojis" | "reports";
 type AnalyticsSubtab = "history" | "performance" | "incident_export" | "trigger_audit" | "debug" | "system";
 type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
@@ -196,6 +199,7 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
     chat: "chat",
     polls: "polls",
     time_capsules: "time_capsule",
+    fotomojis: "fotomojis",
     reports: "reports",
   },
   analytics: {
@@ -223,6 +227,7 @@ const areaSubtabs: Record<AdminArea, Array<{ key: AdminSubtab; label: string }>>
     { key: "chat", label: "Chat" },
     { key: "polls", label: "Umfragen" },
     { key: "time_capsules", label: "Time-Capsules" },
+    { key: "fotomojis", label: "FotoMojis" },
     { key: "reports", label: "Reports" },
   ],
   analytics: [
@@ -328,6 +333,8 @@ function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
       return { area: "operations", subtab: "polls" };
     case "time_capsule":
       return { area: "operations", subtab: "time_capsules" };
+    case "fotomojis":
+      return { area: "operations", subtab: "fotomojis" };
     case "reports":
       return { area: "operations", subtab: "reports" };
     case "history":
@@ -498,6 +505,9 @@ export function App() {
   const [migrationLinkExport, setMigrationLinkExport] = useState<AdminMigrationLinkExportResponse | null>(null);
   const [migrationLinkImportToken, setMigrationLinkImportToken] = useState("");
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
+  const [fotomojiItems, setFotomojiItems] = useState<AdminFotomojiItem[]>([]);
+  const [fotomojiDayFilter, setFotomojiDayFilter] = useState("");
+  const [fotomojiUserFilter, setFotomojiUserFilter] = useState<number>(0);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
   const [reportTypeFilter, setReportTypeFilter] = useState<"" | "bug" | "idea">("");
@@ -746,6 +756,9 @@ export function App() {
     if (activeTab === "time_capsule") {
       void loadTimeCapsules(token);
     }
+    if (activeTab === "fotomojis") {
+      void loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter);
+    }
     if (activeTab === "reports") {
       void loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
     }
@@ -758,7 +771,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
+  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -1429,6 +1442,30 @@ export function App() {
     }
   }
 
+  async function loadFotomojis(authToken: string, day = "", userId = 0) {
+    try {
+      const items = await getAdminFotomojis(authToken, {
+        day: day.trim() || undefined,
+        userId: userId > 0 ? userId : undefined,
+        limit: 400,
+      });
+      setFotomojiItems(items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDeleteFotomoji(id: number) {
+    if (!window.confirm("Diesen FotoMoji wirklich loeschen?")) return;
+    try {
+      await deleteAdminFotomoji(token, id);
+      setFotomojiItems((prev) => prev.filter((item) => item.id !== id));
+      setMessage("FotoMoji geloescht.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function refreshAll() {
     if (!token) return;
     await loadAdminData(token);
@@ -1444,6 +1481,7 @@ export function App() {
     }
     if (activeTab === "trigger_audit") await loadTriggerAudit(token);
     if (activeTab === "time_capsule") await loadTimeCapsules(token);
+    if (activeTab === "fotomojis") await loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter);
     if (activeTab === "debug") await loadDebugLogs(token, debugUserFilter, debugSinceHours);
     if (activeTab === "reports") await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
     if (activeTab === "commands") await loadCommands(token);
@@ -2030,6 +2068,7 @@ export function App() {
             <button className={activeTab === "incident_export" ? "tab active" : "tab"} onClick={() => navigateTab("incident_export")}>Incident Export</button>
             <button className={activeTab === "trigger_audit" ? "tab active" : "tab"} onClick={() => navigateTab("trigger_audit")}>Trigger Audit</button>
             <button className={activeTab === "time_capsule" ? "tab active" : "tab"} onClick={() => navigateTab("time_capsule")}>Time-Capsule</button>
+            <button className={activeTab === "fotomojis" ? "tab active" : "tab"} onClick={() => navigateTab("fotomojis")}>FotoMojis</button>
             <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => navigateTab("reports")}>Reports</button>
             <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => navigateTab("debug")}>Debug</button>
             <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => navigateTab("settings")}>Einstellungen</button>
@@ -3769,6 +3808,76 @@ export function App() {
                   </article>
                 ))}
               </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "fotomojis" && (
+          <div className="stack">
+            <div className="row">
+              <h2>FotoMojis Moderation</h2>
+              <div className="row">
+                <input
+                  type="date"
+                  value={fotomojiDayFilter}
+                  onChange={(e) => setFotomojiDayFilter(e.target.value)}
+                />
+                <select value={fotomojiUserFilter} onChange={(e) => setFotomojiUserFilter(Number(e.target.value) || 0)}>
+                  <option value={0}>Alle Reagierenden</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>@{u.username}</option>
+                  ))}
+                </select>
+                <button onClick={() => loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter)}>Aktualisieren</button>
+              </div>
+            </div>
+            <div className="grid4">
+              <CardStat title="Treffer" value={fotomojiItems.length} />
+              <CardStat title="Tag-Filter" value={fotomojiDayFilter || "-"} />
+              <CardStat
+                title="Nutzer-Filter"
+                value={
+                  fotomojiUserFilter > 0
+                    ? `@${users.find((u) => u.id === fotomojiUserFilter)?.username || fotomojiUserFilter}`
+                    : "alle"
+                }
+              />
+            </div>
+            {fotomojiItems.length === 0 && <p>Keine FotoMojis im aktuellen Filter.</p>}
+            {fotomojiItems.length > 0 && (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Zeit</th>
+                    <th>Reaktion</th>
+                    <th>Reagierender</th>
+                    <th>Post</th>
+                    <th>Preview</th>
+                    <th>Aktion</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fotomojiItems.map((row) => (
+                    <tr key={row.id}>
+                      <td>{formatDateTime(row.createdAt)}</td>
+                      <td>{row.emoji}</td>
+                      <td style={{ color: row.user.favoriteColor || undefined }}>@{row.user.username}</td>
+                      <td>
+                        #{row.photo.id} {row.photo.day ? `(${formatDateShort(row.photo.day)})` : ""}
+                        {row.photo.user?.username ? ` · @${row.photo.user.username}` : ""}
+                      </td>
+                      <td>
+                        <a href={row.url} target="_blank" rel="noreferrer">
+                          <img src={row.url} alt="FotoMoji" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 12 }} />
+                        </a>
+                      </td>
+                      <td>
+                        <button className="danger" onClick={() => void onDeleteFotomoji(row.id)}>Loeschen</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </div>
         )}

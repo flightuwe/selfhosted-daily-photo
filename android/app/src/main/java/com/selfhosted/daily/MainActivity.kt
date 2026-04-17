@@ -32,6 +32,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -59,6 +60,7 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
@@ -203,6 +205,12 @@ data class PendingLaunch(
     val type: String = "",
     val targetDay: String = "",
     val targetPhotoId: Long? = null
+)
+
+data class PendingFotomojiCapture(
+    val photoId: Long,
+    val emoji: String,
+    val saveTemplate: Boolean
 )
 
 data class User(
@@ -391,12 +399,35 @@ data class FeedItem(
     val photo: PromptPhoto,
     val user: User,
     val reactions: List<ReactionCount>? = null,
+    val photoMojis: List<PhotoMojiItem>? = null,
     val comments: List<PhotoCommentItem>? = null,
     val triggerSource: String? = null,
     val requestedByUser: String? = null,
     val momentKind: String? = null,
     val specialRequestedByUserColor: String? = null
 )
+data class PhotoMojiItem(
+    val id: Long,
+    val emoji: String,
+    val url: String,
+    val createdAt: String,
+    val user: User
+)
+data class MyPhotoMoji(
+    val id: Long,
+    val emoji: String,
+    val url: String,
+    val createdAt: String,
+    val user: User? = null
+)
+data class FotomojiTemplateItem(
+    val id: Long? = null,
+    val emoji: String,
+    val url: String,
+    val createdAt: String? = null,
+    val updatedAt: String? = null
+)
+data class FotomojiTemplatesResponse(val items: List<FotomojiTemplateItem> = emptyList())
 
 data class CapsuleUploadOptions(
     val mode: String = "",
@@ -497,10 +528,13 @@ data class PhotoInteractionsResponse(
     val photoId: Long,
     val reactions: List<ReactionCount> = emptyList(),
     val myReaction: String = "",
+    val photoMojis: List<PhotoMojiItem> = emptyList(),
+    val myPhotoMoji: MyPhotoMoji? = null,
     val comments: List<PhotoCommentItem> = emptyList(),
     val canDownload: Boolean = false
 )
 data class PhotoReactionRequest(val emoji: String)
+data class PhotoFotomojiRequest(val emoji: String)
 data class PhotoCommentRequest(val body: String)
 data class SpecialMomentStatus(
     val canRequest: Boolean,
@@ -787,6 +821,40 @@ interface Api {
         @Path("id") id: Long,
         @Body body: PhotoReactionRequest
     ): PhotoInteractionsResponse
+
+    @POST("photos/{id}/fotomojis")
+    suspend fun fotomojiPhotoFromTemplate(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long,
+        @Body body: PhotoFotomojiRequest
+    ): PhotoInteractionsResponse
+
+    @Multipart
+    @POST("photos/{id}/fotomojis/upload")
+    suspend fun uploadPhotoFotomoji(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long,
+        @Part photo: MultipartBody.Part,
+        @Part("emoji") emoji: RequestBody,
+        @Part("saveTemplate") saveTemplate: RequestBody? = null
+    ): PhotoInteractionsResponse
+
+    @GET("me/fotomojis/templates")
+    suspend fun listFotomojiTemplates(@Header("Authorization") token: String): FotomojiTemplatesResponse
+
+    @Multipart
+    @POST("me/fotomojis/templates")
+    suspend fun upsertFotomojiTemplate(
+        @Header("Authorization") token: String,
+        @Part photo: MultipartBody.Part,
+        @Part("emoji") emoji: RequestBody
+    ): FotomojiTemplatesResponse
+
+    @DELETE("me/fotomojis/templates/{emoji}")
+    suspend fun deleteFotomojiTemplate(
+        @Header("Authorization") token: String,
+        @Path(value = "emoji", encoded = true) emoji: String
+    )
 
     @POST("photos/{id}/comments")
     suspend fun commentPhoto(
@@ -1678,6 +1746,31 @@ class AppRepo(
 
     suspend fun reactPhoto(photoId: Long, emoji: String): PhotoInteractionsResponse =
         authorizedCall("/api/photos/:id/reaction") { token -> api.reactPhoto(token, photoId, PhotoReactionRequest(emoji)) }
+
+    suspend fun reactPhotoFotomojiFromTemplate(photoId: Long, emoji: String): PhotoInteractionsResponse =
+        authorizedCall("/api/photos/:id/fotomojis") { token -> api.fotomojiPhotoFromTemplate(token, photoId, PhotoFotomojiRequest(emoji)) }
+
+    suspend fun uploadPhotoFotomoji(
+        photoId: Long,
+        emoji: String,
+        uri: Uri,
+        saveTemplate: Boolean
+    ): PhotoInteractionsResponse {
+        val file = copyUriToTemp(uri)
+        val part = MultipartBody.Part.createFormData(
+            "photo",
+            file.name,
+            file.asRequestBody("image/*".toMediaTypeOrNull())
+        )
+        val emojiBody = emoji.toRequestBody("text/plain".toMediaTypeOrNull())
+        val saveTemplateBody = saveTemplate.toString().toRequestBody("text/plain".toMediaTypeOrNull())
+        return authorizedCall("/api/photos/:id/fotomojis/upload") { token ->
+            api.uploadPhotoFotomoji(token, photoId, part, emojiBody, saveTemplateBody)
+        }
+    }
+
+    suspend fun listFotomojiTemplates(): List<FotomojiTemplateItem> =
+        authorizedCall("/api/me/fotomojis/templates") { token -> api.listFotomojiTemplates(token).items }
 
     suspend fun commentPhoto(photoId: Long, body: String): PhotoInteractionsResponse =
         authorizedCall("/api/photos/:id/comments") { token -> api.commentPhoto(token, photoId, 0, PhotoCommentRequest(body)) }
@@ -3655,6 +3748,43 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure { state = state.copy(interactionsLoading = false, message = apiError(it, "Reaktion fehlgeschlagen")) }
     }
 
+    suspend fun tryPhotoFotomojiFromTemplate(photoId: Long, emoji: String): Boolean {
+        if (photoId <= 0 || emoji.isBlank()) return false
+        state = state.copy(interactionsLoading = true)
+        return try {
+            val response = repo.reactPhotoFotomojiFromTemplate(photoId, emoji)
+            state = state.copy(interactionsLoading = false, photoInteractions = response)
+            true
+        } catch (t: Throwable) {
+            val code = (t as? HttpException)?.code()
+            if (code == 404) {
+                state = state.copy(interactionsLoading = false)
+                false
+            } else {
+                state = state.copy(interactionsLoading = false, message = apiError(t, "FotoMoji fehlgeschlagen"))
+                true
+            }
+        }
+    }
+
+    suspend fun uploadPhotoFotomoji(photoId: Long, emoji: String, uri: Uri, saveTemplate: Boolean): Boolean {
+        if (photoId <= 0 || emoji.isBlank()) return false
+        state = state.copy(interactionsLoading = true)
+        return runCatching { repo.uploadPhotoFotomoji(photoId, emoji, uri, saveTemplate) }
+            .map {
+                state = state.copy(
+                    interactionsLoading = false,
+                    photoInteractions = it,
+                    message = if (saveTemplate) "FotoMoji + Template gespeichert" else "FotoMoji gesendet"
+                )
+                true
+            }
+            .getOrElse {
+                state = state.copy(interactionsLoading = false, message = apiError(it, "FotoMoji Upload fehlgeschlagen"))
+                false
+            }
+    }
+
     suspend fun commentPhoto(photoId: Long, body: String) {
         val trimmed = body.trim()
         if (photoId <= 0 || trimmed.isBlank()) return
@@ -4541,7 +4671,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 setTab(AppTab.CHAT)
             }
 
-            action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" || type == "photo_reaction" || type == "photo_comment" || targetDay.isNotBlank() || targetPhotoId != null -> {
+            action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" || type == "photo_reaction" || type == "photo_fotomoji" || type == "photo_comment" || targetDay.isNotBlank() || targetPhotoId != null -> {
                 val targetIsTodayHidden = targetDay == prompt.day && !prompt.hasVisiblePostToday && !availableDays.contains(targetDay)
                 if (targetIsTodayHidden) {
                     openCamera("Der heutige Feed wird sichtbar, sobald du einen sichtbaren Beitrag gepostet hast.")
@@ -4643,6 +4773,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
 
     var captureUri by remember { mutableStateOf<Uri?>(null) }
     var captureTarget by remember { mutableStateOf<String?>(null) }
+    var pendingFotomojiCapture by remember { mutableStateOf<PendingFotomojiCapture?>(null) }
     var captureAsPrompt by remember { mutableStateOf(true) }
     var captureCapsule by remember { mutableStateOf(CapsuleUploadOptions()) }
     var backPreviewUri by remember { mutableStateOf<Uri?>(null) }
@@ -4704,6 +4835,22 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                             } else {
                                 cameraUploadDone = false
                                 cameraUploadError = vm.state.message.ifBlank { "Upload fehlgeschlagen" }
+                            }
+                        }
+                    }
+                }
+                "fotomoji" -> {
+                    val pending = pendingFotomojiCapture
+                    if (pending != null && shotUri != null) {
+                        scope.launch {
+                            val ok = vm.uploadPhotoFotomoji(
+                                photoId = pending.photoId,
+                                emoji = pending.emoji,
+                                uri = shotUri,
+                                saveTemplate = pending.saveTemplate
+                            )
+                            if (ok) {
+                                pendingFotomojiCapture = null
                             }
                         }
                     }
@@ -5194,6 +5341,27 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             onReact = { emoji ->
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
                 scope.launch { vm.reactPhoto(pid, emoji) }
+            },
+            onFotoMojiTap = { emoji ->
+                val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
+                scope.launch {
+                    if (emoji == viewerFotomojiLiveEmoji) {
+                        pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = false)
+                        openCameraFor("fotomoji")
+                        return@launch
+                    }
+                    val usedTemplate = vm.tryPhotoFotomojiFromTemplate(pid, emoji)
+                    if (!usedTemplate) {
+                        pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = false)
+                        openCameraFor("fotomoji")
+                    }
+                }
+            },
+            onFotoMojiLongPress = { emoji ->
+                val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
+                val saveTemplate = emoji != viewerFotomojiLiveEmoji
+                pendingFotomojiCapture = PendingFotomojiCapture(photoId = pid, emoji = emoji, saveTemplate = saveTemplate)
+                openCameraFor("fotomoji")
             },
             onDoubleTapReact = {
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
@@ -6612,6 +6780,12 @@ fun FeedTab(
                                 }
                             }
                             val reactions = item.reactions.orEmpty()
+                            val photoMojis = item.photoMojis.orEmpty().sortedWith(
+                                compareBy<PhotoMojiItem>(
+                                    { parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN },
+                                    { it.id }
+                                )
+                            )
                             val comments = item.comments.orEmpty().sortedWith(
                                 compareBy<PhotoCommentItem>(
                                     { parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN },
@@ -6623,6 +6797,34 @@ fun FeedTab(
                                     reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
                                     color = primaryTextColor
                                 )
+                            }
+                            if (photoMojis.isNotEmpty()) {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    items(photoMojis) { foto ->
+                                        Row(
+                                            modifier = Modifier
+                                                .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.large)
+                                                .clickable { onOpenViewer(listOf(foto.url), null) }
+                                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            AsyncImage(
+                                                model = foto.url,
+                                                contentDescription = "FotoMoji",
+                                                modifier = Modifier
+                                                    .size(34.dp)
+                                                    .background(Color.LightGray, CircleShape),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                            Text(
+                                                foto.emoji,
+                                                fontWeight = FontWeight.Bold,
+                                                color = parseUserColor(foto.user.favoriteColor)
+                                            )
+                                        }
+                                    }
+                                }
                             }
                             if (comments.isNotEmpty()) {
                                 comments.forEach { comment ->
@@ -8928,7 +9130,16 @@ private fun helpLines(): List<String> = listOf(
     "- Einige Funktionen (z. B. Push-Zustellung) haengen von korrekter Server/FCM-Konfiguration ab."
 )
 
-private val viewerReactionEmojis = listOf("❤️", "👍", "😂", "🔥", "😮")
+private val viewerReactionEmojis = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDE02", "\uD83D\uDD25", "\uD83D\uDE2E")
+private const val viewerFotomojiLiveEmoji = "\u26A1"
+private val viewerFotomojiEmojis = listOf(
+    "\u2764\uFE0F",
+    "\uD83D\uDC4D",
+    "\uD83D\uDE02",
+    "\uD83D\uDD25",
+    "\uD83D\uDE2E",
+    viewerFotomojiLiveEmoji
+)
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -8943,6 +9154,8 @@ private fun FullscreenPhotoViewer(
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
     onReact: (String) -> Unit,
+    onFotoMojiTap: (String) -> Unit,
+    onFotoMojiLongPress: (String) -> Unit,
     onDoubleTapReact: () -> Unit,
     onDownloadCurrent: (String) -> Unit,
     onIndexChange: (Int) -> Unit,
@@ -8993,6 +9206,8 @@ private fun FullscreenPhotoViewer(
                     onCommentChange = onCommentChange,
                     onCommentSend = onCommentSend,
                     onReact = onReact,
+                    onFotoMojiTap = onFotoMojiTap,
+                    onFotoMojiLongPress = onFotoMojiLongPress,
                     onDownloadCurrent = onDownloadCurrent
                 )
             },
@@ -9057,6 +9272,7 @@ private fun FullscreenPhotoViewer(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ViewerInteractionSheet(
     photoId: Long?,
@@ -9068,8 +9284,11 @@ private fun ViewerInteractionSheet(
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
     onReact: (String) -> Unit,
+    onFotoMojiTap: (String) -> Unit,
+    onFotoMojiLongPress: (String) -> Unit,
     onDownloadCurrent: (String) -> Unit
 ) {
+    var selectedFotoMoji by remember { mutableStateOf<PhotoMojiItem?>(null) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -9090,6 +9309,58 @@ private fun ViewerInteractionSheet(
                 ) {
                     val count = countByEmoji[emoji] ?: 0L
                     Text("${if (selected) "+ " else ""}$emoji $count")
+                }
+            }
+        }
+        Text("FotoMojis: Tippen nutzt Template (wenn vorhanden), lang druecken speichert ein neues Template. ⚡ ist immer Live.")
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+            viewerFotomojiEmojis.forEach { emoji ->
+                val selected = interactions?.myPhotoMoji?.emoji == emoji
+                OutlinedButton(
+                    onClick = {},
+                    modifier = Modifier
+                        .weight(1f)
+                        .combinedClickable(
+                            onClick = { onFotoMojiTap(emoji) },
+                            onLongClick = { onFotoMojiLongPress(emoji) }
+                        )
+                ) {
+                    val marker = if (selected) "•" else ""
+                    Text("$emoji$marker")
+                }
+            }
+        }
+        val photoMojis = interactions?.photoMojis.orEmpty().sortedWith(
+            compareBy<PhotoMojiItem>(
+                { parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN },
+                { it.id }
+            )
+        )
+        if (photoMojis.isNotEmpty()) {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                items(photoMojis) { item ->
+                    Row(
+                        modifier = Modifier
+                            .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.large)
+                            .clickable { selectedFotoMoji = item }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        AsyncImage(
+                            model = item.url,
+                            contentDescription = "FotoMoji",
+                            modifier = Modifier
+                                .size(40.dp)
+                                .background(Color.LightGray, CircleShape),
+                            contentScale = ContentScale.Crop
+                        )
+                        Text(
+                            item.emoji,
+                            fontWeight = FontWeight.Bold,
+                            color = parseUserColor(item.user.favoriteColor)
+                        )
+                    }
                 }
             }
         }
@@ -9122,6 +9393,34 @@ private fun ViewerInteractionSheet(
                         color = parseUserColor(item.user.favoriteColor)
                     )
                     Text(item.body)
+                }
+            }
+        }
+    }
+    selectedFotoMoji?.let { item ->
+        Dialog(
+            onDismissRequest = { selectedFotoMoji = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.9f))
+                    .clickable { selectedFotoMoji = null },
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    AsyncImage(
+                        model = item.url,
+                        contentDescription = "FotoMoji Vollansicht",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(420.dp)
+                            .padding(horizontal = 20.dp),
+                        contentScale = ContentScale.Fit
+                    )
+                    Text("@${item.user.username} ${item.emoji}", color = Color.White, fontWeight = FontWeight.SemiBold)
+                    TextButton(onClick = { selectedFotoMoji = null }) { Text("Schliessen") }
                 }
             }
         }

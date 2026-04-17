@@ -601,6 +601,20 @@ export type AdminTimeCapsuleItem = {
   user: { id: number; username: string; favoriteColor?: string };
 };
 
+export type AdminFotomojiItem = {
+  id: number;
+  emoji: string;
+  url: string;
+  createdAt: string;
+  updatedAt?: string;
+  user: { id: number; username: string; favoriteColor?: string };
+  photo: {
+    id: number;
+    day?: string;
+    user?: { id: number; username: string; favoriteColor?: string };
+  };
+};
+
 export type ChatCommand = {
   id: number;
   name: string;
@@ -1284,6 +1298,33 @@ export async function getAdminTimeCapsules(token: string): Promise<AdminTimeCaps
   });
   const data = await parse<{ items: AdminTimeCapsuleItem[] }>(res);
   return data.items || [];
+}
+
+export async function getAdminFotomojis(
+  token: string,
+  opts?: { day?: string; userId?: number; limit?: number }
+): Promise<AdminFotomojiItem[]> {
+  const qs = new URLSearchParams();
+  if (opts?.day) qs.set("day", opts.day);
+  if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
+  qs.set("limit", String(opts?.limit ?? 300));
+  const url = `${apiBase}/admin/fotomojis?${qs.toString()}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: AdminFotomojiItem[] }>(res);
+  return data.items || [];
+}
+
+export async function deleteAdminFotomoji(
+  token: string,
+  id: number
+): Promise<{ ok: boolean; deletedId: number }> {
+  const res = await fetch(`${apiBase}/admin/fotomojis/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<{ ok: boolean; deletedId: number }>(res);
 }
 
 export async function updateCalendarDay(token: string, day: string, plannedAt: string): Promise<CalendarItem> {

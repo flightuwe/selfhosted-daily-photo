@@ -108,6 +108,9 @@ func (s *Server) Router() *gin.Engine {
 			protected.PUT("/me/password", s.handleChangePassword)
 			protected.GET("/me/photos", s.handleMyPhotos)
 			protected.DELETE("/me/photos/:id", s.handleDeleteMyPhoto)
+			protected.GET("/me/fotomojis/templates", s.handleListMyFotomojiTemplates)
+			protected.POST("/me/fotomojis/templates", s.handleUpsertMyFotomojiTemplate)
+			protected.DELETE("/me/fotomojis/templates/:emoji", s.handleDeleteMyFotomojiTemplate)
 			protected.POST("/devices", s.handleDevice)
 			protected.POST("/migration/handoff", s.handleMigrationHandoff)
 			protected.GET("/prompt/current", s.handleCurrentPrompt)
@@ -129,6 +132,8 @@ func (s *Server) Router() *gin.Engine {
 			protected.DELETE("/chat/:id", s.handleDeleteChatMessage)
 			protected.GET("/photos/:id/interactions", s.handlePhotoInteractions)
 			protected.POST("/photos/:id/reaction", s.handlePhotoReaction)
+			protected.POST("/photos/:id/fotomojis", s.handlePhotoFotomojiFromTemplate)
+			protected.POST("/photos/:id/fotomojis/upload", s.handlePhotoFotomojiUpload)
 			protected.POST("/photos/:id/comments", s.handlePhotoComment)
 		}
 
@@ -159,6 +164,8 @@ func (s *Server) Router() *gin.Engine {
 			admin.PUT("/reports/:id", s.handleAdminUpdateReport)
 			admin.DELETE("/reports/:id", s.handleAdminDeleteReport)
 			admin.DELETE("/reports", s.handleAdminDeleteReports)
+			admin.GET("/fotomojis", s.handleAdminListFotomojis)
+			admin.DELETE("/fotomojis/:id", s.handleAdminDeleteFotomoji)
 			admin.GET("/debug/logs", s.handleAdminDebugLogs)
 			admin.DELETE("/debug/logs", s.handleAdminDeleteDebugLogs)
 			admin.GET("/debug/logs/export", s.handleAdminDebugLogsExport)
@@ -633,6 +640,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		SpecialMomentPushEnabled      *bool  `json:"specialMomentPushEnabled"`
 		InviteRegistrationPushEnabled *bool  `json:"inviteRegistrationPushEnabled"`
 		PhotoReactionPushEnabled      *bool  `json:"photoReactionPushEnabled"`
+		PhotoFotomojiPushEnabled      *bool  `json:"photoFotomojiPushEnabled"`
 		PhotoCommentPushEnabled       *bool  `json:"photoCommentPushEnabled"`
 		AllowPhotoDownload            *bool  `json:"allowPhotoDownload"`
 		DiagnosticsConsentGranted     *bool  `json:"diagnosticsConsentGranted"`
@@ -657,6 +665,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.PhotoReactionPushEnabled != nil {
 		updates["photo_reaction_push_enabled"] = *req.PhotoReactionPushEnabled
+	}
+	if req.PhotoFotomojiPushEnabled != nil {
+		updates["photo_fotomoji_push_enabled"] = *req.PhotoFotomojiPushEnabled
 	}
 	if req.PhotoCommentPushEnabled != nil {
 		updates["photo_comment_push_enabled"] = *req.PhotoCommentPushEnabled
@@ -1608,7 +1619,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 		photoIDs = append(photoIDs, p.ID)
 	}
 	interactionStart := time.Now()
-	reactionByPhoto, commentByPhoto, err := s.feedInteractionPreview(photoIDs)
+	reactionByPhoto, commentByPhoto, photoMojiByPhoto, err := s.feedInteractionPreview(photoIDs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "interaction query failed"})
 		return
@@ -1638,6 +1649,10 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 		if comments == nil {
 			comments = []gin.H{}
 		}
+		photoMojis := photoMojiByPhoto[p.ID]
+		if photoMojis == nil {
+			photoMojis = []gin.H{}
+		}
 		out = append(out, gin.H{
 			"isEarly":                     isEarly,
 			"isLate":                      isLate,
@@ -1647,6 +1662,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 			"user":                        s.userPublicJSON(adminUser.ID, p.User),
 			"reactions":                   reactions,
 			"comments":                    comments,
+			"photoMojis":                  photoMojis,
 			"triggerSource":               prompt.TriggerSource,
 			"requestedByUser":             requestedByUser,
 			"momentKind":                  momentKind,
@@ -1733,7 +1749,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 	for _, p := range photos {
 		photoIDs = append(photoIDs, p.ID)
 	}
-	reactionByPhoto, commentByPhoto, err := s.feedInteractionPreview(photoIDs)
+	reactionByPhoto, commentByPhoto, photoMojiByPhoto, err := s.feedInteractionPreview(photoIDs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "interaction query failed"})
 		return
@@ -1762,6 +1778,10 @@ func (s *Server) handleFeed(c *gin.Context) {
 		if comments == nil {
 			comments = []gin.H{}
 		}
+		photoMojis := photoMojiByPhoto[p.ID]
+		if photoMojis == nil {
+			photoMojis = []gin.H{}
+		}
 		out = append(out, gin.H{
 			"isEarly":                     isEarly,
 			"isLate":                      isLate,
@@ -1771,6 +1791,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 			"user":                        s.userPublicJSON(user.ID, p.User),
 			"reactions":                   reactions,
 			"comments":                    comments,
+			"photoMojis":                  photoMojis,
 			"triggerSource":               prompt.TriggerSource,
 			"requestedByUser":             requestedByUser,
 			"momentKind":                  momentKind,
@@ -4364,6 +4385,18 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
 		for _, row := range reactionRows {
 			reactionCounts[row.PhotoID] = row.Count
 		}
+		var fotomojiRows []interactionRow
+		if err := s.DB.Model(&models.PhotoFotomoji{}).
+			Select("photo_id, COUNT(*) as count").
+			Where("photo_id IN ?", photoIDs).
+			Group("photo_id").
+			Scan(&fotomojiRows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+		for _, row := range fotomojiRows {
+			reactionCounts[row.PhotoID] += row.Count
+		}
 
 		var commentRows []interactionRow
 		if err := s.DB.Model(&models.PhotoComment{}).
@@ -5688,6 +5721,18 @@ func (s *Server) handleDeleteMyPhoto(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete reactions failed"})
 		return
 	}
+	var photoMojis []models.PhotoFotomoji
+	if err := s.DB.Where("photo_id = ?", photo.ID).Find(&photoMojis).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete fotomojis failed"})
+		return
+	}
+	if err := s.DB.Where("photo_id = ?", photo.ID).Delete(&models.PhotoFotomoji{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete fotomojis failed"})
+		return
+	}
+	for _, item := range photoMojis {
+		_ = s.removeFotomojiFileIfUnreferenced(item.FilePath, item.ID)
+	}
 	if err := s.DB.Where("photo_id = ?", photo.ID).Delete(&models.PhotoComment{}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete comments failed"})
 		return
@@ -5815,6 +5860,315 @@ func (s *Server) handlePhotoReaction(c *gin.Context) {
 	}
 	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, out)
+}
+
+func (s *Server) handlePhotoFotomojiFromTemplate(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photoID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+	var req struct {
+		Emoji string `json:"emoji" binding:"required,max=16"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	emoji := normalizeFotomojiEmoji(req.Emoji)
+	if emoji == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "emoji required"})
+		return
+	}
+
+	photo, err := s.loadPhotoForInteraction(photoID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+		return
+	}
+	if ok, lockErr := s.ensurePhotoVisibleToUser(user.ID, photo); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": lockErr})
+		return
+	}
+
+	var tpl models.UserFotomojiTemplate
+	if err := s.DB.Where("user_id = ? AND emoji = ?", user.ID, emoji).First(&tpl).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "template query failed"})
+		return
+	}
+
+	shouldNotify, err := s.upsertPhotoFotomojiRecord(photo, user, emoji, tpl.FilePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "fotomoji save failed"})
+		return
+	}
+	out, err := s.photoInteractionsPayload(photo, user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if shouldNotify {
+		s.notifyPhotoFotomoji(user, photo)
+	}
+	s.invalidateFeedDayCache(photo.Day)
+	c.JSON(http.StatusOK, out)
+}
+
+func (s *Server) handlePhotoFotomojiUpload(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photoID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err == nil && settings.MaxUploadBytes > 0 {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, settings.MaxUploadBytes)
+	}
+
+	fileHeader, err := c.FormFile("photo")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "photo file required"})
+		return
+	}
+	emoji := normalizeFotomojiEmoji(c.PostForm("emoji"))
+	if emoji == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "emoji required"})
+		return
+	}
+	saveTemplate := parseFormBool(c.PostForm("saveTemplate"))
+
+	photo, err := s.loadPhotoForInteraction(photoID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+		return
+	}
+	if ok, lockErr := s.ensurePhotoVisibleToUser(user.ID, photo); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": lockErr})
+		return
+	}
+
+	uploadDay := filepath.ToSlash(filepath.Join(photo.Day, "fotomojis"))
+	savedPath, err := s.saveUploadedFile(uploadDay, user.ID, fileHeader)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save file failed"})
+		return
+	}
+
+	if saveTemplate {
+		if err := s.upsertUserFotomojiTemplate(user.ID, emoji, savedPath); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "save template failed"})
+			return
+		}
+	}
+
+	shouldNotify, err := s.upsertPhotoFotomojiRecord(photo, user, emoji, savedPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "fotomoji save failed"})
+		return
+	}
+	out, err := s.photoInteractionsPayload(photo, user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if shouldNotify {
+		s.notifyPhotoFotomoji(user, photo)
+	}
+	s.invalidateFeedDayCache(photo.Day)
+	c.JSON(http.StatusCreated, out)
+}
+
+func (s *Server) handleListMyFotomojiTemplates(c *gin.Context) {
+	user, _ := userFromContext(c)
+	var rows []models.UserFotomojiTemplate
+	if err := s.DB.Where("user_id = ?", user.ID).Order("emoji asc, updated_at desc").Find(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	items := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, s.fotomojiTemplateJSON(row))
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) handleUpsertMyFotomojiTemplate(c *gin.Context) {
+	user, _ := userFromContext(c)
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err == nil && settings.MaxUploadBytes > 0 {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, settings.MaxUploadBytes)
+	}
+	fileHeader, err := c.FormFile("photo")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "photo file required"})
+		return
+	}
+	emoji := normalizeFotomojiEmoji(c.PostForm("emoji"))
+	if emoji == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "emoji required"})
+		return
+	}
+	uploadDay := filepath.ToSlash(filepath.Join("fotomoji-templates", strconv.FormatUint(uint64(user.ID), 10)))
+	savedPath, err := s.saveUploadedFile(uploadDay, user.ID, fileHeader)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save file failed"})
+		return
+	}
+	if err := s.upsertUserFotomojiTemplate(user.ID, emoji, savedPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save template failed"})
+		return
+	}
+	var out models.UserFotomojiTemplate
+	if err := s.DB.Where("user_id = ? AND emoji = ?", user.ID, emoji).First(&out).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"item": s.fotomojiTemplateJSON(out)})
+}
+
+func (s *Server) handleDeleteMyFotomojiTemplate(c *gin.Context) {
+	user, _ := userFromContext(c)
+	emoji := normalizeFotomojiEmoji(c.Param("emoji"))
+	if emoji == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "emoji required"})
+		return
+	}
+	var row models.UserFotomojiTemplate
+	if err := s.DB.Where("user_id = ? AND emoji = ?", user.ID, emoji).First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if err := s.DB.Delete(&row).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	_ = s.removeFotomojiFileIfUnreferenced(row.FilePath, 0)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "emoji": emoji})
+}
+
+func (s *Server) handleAdminListFotomojis(c *gin.Context) {
+	limit := 200
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			if n < 20 {
+				n = 20
+			}
+			if n > 1000 {
+				n = 1000
+			}
+			limit = n
+		}
+	}
+	day := strings.TrimSpace(c.Query("day"))
+	reactorUserID := uint(0)
+	if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+		parsed, err := parseUintParam(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+			return
+		}
+		reactorUserID = parsed
+	}
+
+	q := s.DB.Model(&models.PhotoFotomoji{}).
+		Preload("User").
+		Order("photo_fotomojis.created_at desc, photo_fotomojis.id desc").
+		Limit(limit)
+	if reactorUserID != 0 {
+		q = q.Where("photo_fotomojis.user_id = ?", reactorUserID)
+	}
+	if day != "" {
+		q = q.Joins("JOIN photos ON photos.id = photo_fotomojis.photo_id").Where("photos.day = ?", day)
+	}
+
+	var rows []models.PhotoFotomoji
+	if err := q.Find(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	photoIDs := make([]uint, 0, len(rows))
+	for _, row := range rows {
+		photoIDs = append(photoIDs, row.PhotoID)
+	}
+	photoByID := make(map[uint]models.Photo, len(photoIDs))
+	if len(photoIDs) > 0 {
+		var photos []models.Photo
+		if err := s.DB.Preload("User").Where("id IN ?", photoIDs).Find(&photos).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+		for _, photo := range photos {
+			photoByID[photo.ID] = photo
+		}
+	}
+
+	items := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		photo := photoByID[row.PhotoID]
+		items = append(items, gin.H{
+			"id":        row.ID,
+			"emoji":     row.Emoji,
+			"url":       s.avatarURL(row.FilePath),
+			"createdAt": row.CreatedAt,
+			"updatedAt": row.UpdatedAt,
+			"user": gin.H{
+				"id":            row.User.ID,
+				"username":      row.User.Username,
+				"favoriteColor": defaultColor(row.User.FavoriteColor),
+			},
+			"photo": gin.H{
+				"id":  row.PhotoID,
+				"day": photo.Day,
+				"user": gin.H{
+					"id":            photo.User.ID,
+					"username":      photo.User.Username,
+					"favoriteColor": defaultColor(photo.User.FavoriteColor),
+				},
+			},
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"items": items, "count": len(items)})
+}
+
+func (s *Server) handleAdminDeleteFotomoji(c *gin.Context) {
+	id, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid fotomoji id"})
+		return
+	}
+	var row models.PhotoFotomoji
+	if err := s.DB.First(&row, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "fotomoji not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	var photo models.Photo
+	_ = s.DB.Select("id", "day").First(&photo, row.PhotoID).Error
+	if err := s.DB.Delete(&row).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	_ = s.removeFotomojiFileIfUnreferenced(row.FilePath, row.ID)
+	if strings.TrimSpace(photo.Day) != "" {
+		s.invalidateFeedDayCache(photo.Day)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "deletedId": row.ID})
 }
 
 func (s *Server) handlePhotoComment(c *gin.Context) {
@@ -6000,6 +6354,17 @@ func germanMonthLabel(t time.Time) string {
 	return fmt.Sprintf("%s %d", names[idx], t.Year())
 }
 
+func normalizeFotomojiEmoji(raw string) string {
+	emoji := strings.TrimSpace(raw)
+	if emoji == "" {
+		return ""
+	}
+	if len([]rune(emoji)) > 8 {
+		return ""
+	}
+	return emoji
+}
+
 func (s *Server) saveUploadedFile(day string, userID uint, header *multipart.FileHeader) (string, error) {
 	src, err := header.Open()
 	if err != nil {
@@ -6165,6 +6530,122 @@ func (s *Server) removePhotoFile(relPath string) error {
 	return nil
 }
 
+func (s *Server) removeFotomojiFileIfUnreferenced(relPath string, excludeFotomojiID uint) error {
+	path := strings.TrimSpace(relPath)
+	if path == "" {
+		return nil
+	}
+	var photoCount int64
+	q := s.DB.Model(&models.PhotoFotomoji{}).Where("file_path = ?", path)
+	if excludeFotomojiID > 0 {
+		q = q.Where("id <> ?", excludeFotomojiID)
+	}
+	if err := q.Count(&photoCount).Error; err != nil {
+		return err
+	}
+	if photoCount > 0 {
+		return nil
+	}
+	var templateCount int64
+	if err := s.DB.Model(&models.UserFotomojiTemplate{}).Where("file_path = ?", path).Count(&templateCount).Error; err != nil {
+		return err
+	}
+	if templateCount > 0 {
+		return nil
+	}
+	return s.removePhotoFile(path)
+}
+
+func (s *Server) upsertUserFotomojiTemplate(userID uint, emoji string, filePath string) error {
+	var existing models.UserFotomojiTemplate
+	err := s.DB.Where("user_id = ? AND emoji = ?", userID, emoji).First(&existing).Error
+	if err == nil {
+		oldPath := existing.FilePath
+		if err := s.DB.Model(&existing).Updates(map[string]any{
+			"file_path":  filePath,
+			"updated_at": time.Now().UTC(),
+		}).Error; err != nil {
+			return err
+		}
+		if oldPath != filePath {
+			_ = s.removeFotomojiFileIfUnreferenced(oldPath, 0)
+		}
+		return nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	row := models.UserFotomojiTemplate{
+		UserID:   userID,
+		Emoji:    emoji,
+		FilePath: filePath,
+	}
+	return s.DB.Create(&row).Error
+}
+
+func (s *Server) upsertPhotoFotomojiRecord(photo models.Photo, actor models.User, emoji string, filePath string) (bool, error) {
+	var existing models.PhotoFotomoji
+	err := s.DB.Where("photo_id = ? AND user_id = ?", photo.ID, actor.ID).First(&existing).Error
+	if err == nil {
+		oldPath := existing.FilePath
+		oldEmoji := existing.Emoji
+		if err := s.DB.Model(&existing).Updates(map[string]any{
+			"emoji":      emoji,
+			"file_path":  filePath,
+			"updated_at": time.Now().UTC(),
+		}).Error; err != nil {
+			return false, err
+		}
+		if oldPath != filePath {
+			_ = s.removeFotomojiFileIfUnreferenced(oldPath, existing.ID)
+		}
+		return oldPath != filePath || oldEmoji != emoji, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, err
+	}
+	row := models.PhotoFotomoji{
+		PhotoID:   photo.ID,
+		UserID:    actor.ID,
+		Emoji:     emoji,
+		FilePath:  filePath,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := s.DB.Create(&row).Error; err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Server) fotomojiTemplateJSON(tpl models.UserFotomojiTemplate) gin.H {
+	return gin.H{
+		"id":        tpl.ID,
+		"emoji":     tpl.Emoji,
+		"url":       s.avatarURL(tpl.FilePath),
+		"createdAt": tpl.CreatedAt,
+		"updatedAt": tpl.UpdatedAt,
+	}
+}
+
+func (s *Server) photoFotomojiJSON(item models.PhotoFotomoji, includeUser bool) gin.H {
+	out := gin.H{
+		"id":        item.ID,
+		"emoji":     item.Emoji,
+		"url":       s.avatarURL(item.FilePath),
+		"createdAt": item.CreatedAt,
+		"updatedAt": item.UpdatedAt,
+	}
+	if includeUser {
+		out["user"] = gin.H{
+			"id":            item.User.ID,
+			"username":      item.User.Username,
+			"favoriteColor": defaultColor(item.User.FavoriteColor),
+		}
+	}
+	return out
+}
+
 func (s *Server) photoJSON(p models.Photo) gin.H {
 	out := gin.H{
 		"id":                 p.ID,
@@ -6228,6 +6709,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"specialMomentPushEnabled":      u.SpecialMomentPushEnabled,
 		"inviteRegistrationPushEnabled": u.InviteRegistrationPushEnabled,
 		"photoReactionPushEnabled":      u.PhotoReactionPushEnabled,
+		"photoFotomojiPushEnabled":      u.PhotoFotomojiPushEnabled,
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"avatarUrl":                     avatarURL,
@@ -6261,6 +6743,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"specialMomentPushEnabled":      false,
 		"inviteRegistrationPushEnabled": false,
 		"photoReactionPushEnabled":      false,
+		"photoFotomojiPushEnabled":      false,
 		"photoCommentPushEnabled":       false,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"avatarUrl":                     "",
@@ -6458,6 +6941,17 @@ type photoReactionPreviewRow struct {
 	Count   int64
 }
 
+type photoFotomojiPreviewRow struct {
+	PhotoID       uint
+	ID            uint
+	Emoji         string
+	FilePath      string
+	CreatedAt     time.Time
+	UserID        uint
+	Username      string
+	FavoriteColor string
+}
+
 func (s *Server) loadPhotoForInteraction(photoID uint) (models.Photo, error) {
 	var photo models.Photo
 	if err := s.DB.First(&photo, photoID).Error; err != nil {
@@ -6466,11 +6960,12 @@ func (s *Server) loadPhotoForInteraction(photoID uint) (models.Photo, error) {
 	return photo, nil
 }
 
-func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[uint][]gin.H, error) {
+func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[uint][]gin.H, map[uint][]gin.H, error) {
 	reactionByPhoto := make(map[uint][]gin.H)
 	commentByPhoto := make(map[uint][]gin.H)
+	photoMojiByPhoto := make(map[uint][]gin.H)
 	if len(photoIDs) == 0 {
-		return reactionByPhoto, commentByPhoto, nil
+		return reactionByPhoto, commentByPhoto, photoMojiByPhoto, nil
 	}
 	commentLimit := 10
 	var settings models.AppSettings
@@ -6487,7 +6982,7 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 		Group("photo_id, emoji").
 		Order("count desc, emoji asc").
 		Scan(&reactionRows).Error; err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/feed", "feed_reaction_preview_query", time.Since(reactionQueryStart))
@@ -6529,7 +7024,7 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 		WHERE rn <= ?
 		ORDER BY created_at DESC, id DESC
 	`, photoIDs, commentLimit).Scan(&rows).Error; err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/feed", "feed_comment_preview_query", time.Since(commentQueryStart))
@@ -6553,7 +7048,49 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 		commentByPhoto[photoID] = list
 	}
 
-	return reactionByPhoto, commentByPhoto, nil
+	fotomojiLimit := 40
+	fotomojiRows := make([]photoFotomojiPreviewRow, 0, len(photoIDs)*8)
+	fotomojiQueryStart := time.Now()
+	if err := s.DB.Raw(`
+		SELECT photo_id, id, emoji, file_path, created_at, user_id, username, favorite_color
+		FROM (
+			SELECT
+				pf.photo_id AS photo_id,
+				pf.id AS id,
+				pf.emoji AS emoji,
+				pf.file_path AS file_path,
+				pf.created_at AS created_at,
+				u.id AS user_id,
+				u.username AS username,
+				u.favorite_color AS favorite_color,
+				ROW_NUMBER() OVER (PARTITION BY pf.photo_id ORDER BY pf.created_at DESC, pf.id DESC) AS rn
+			FROM photo_fotomojis pf
+			JOIN users u ON u.id = pf.user_id
+			WHERE pf.photo_id IN ?
+		)
+		WHERE rn <= ?
+		ORDER BY created_at ASC, id ASC
+	`, photoIDs, fotomojiLimit).Scan(&fotomojiRows).Error; err != nil {
+		return nil, nil, nil, err
+	}
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/feed", "feed_fotomoji_preview_query", time.Since(fotomojiQueryStart))
+	}
+	for _, item := range fotomojiRows {
+		photoMojiByPhoto[item.PhotoID] = append(photoMojiByPhoto[item.PhotoID], gin.H{
+			"id":        item.ID,
+			"emoji":     item.Emoji,
+			"url":       s.avatarURL(item.FilePath),
+			"createdAt": item.CreatedAt,
+			"user": gin.H{
+				"id":            item.UserID,
+				"username":      item.Username,
+				"favoriteColor": defaultColor(item.FavoriteColor),
+			},
+		})
+	}
+
+	return reactionByPhoto, commentByPhoto, photoMojiByPhoto, nil
 }
 
 func (s *Server) ensurePhotoVisibleToUser(userID uint, photo models.Photo) (bool, string) {
@@ -6858,12 +7395,27 @@ func (s *Server) photoInteractionsPayload(photo models.Photo, viewerID uint) (gi
 		myReaction = my.Emoji
 	}
 
+	var myPhotoMoji models.PhotoFotomoji
+	myPhotoMojiOut := any(nil)
+	if err := s.DB.Preload("User").Where("photo_id = ? AND user_id = ?", photoID, viewerID).First(&myPhotoMoji).Error; err == nil {
+		myPhotoMojiOut = s.photoFotomojiJSON(myPhotoMoji, true)
+	}
+
 	var comments []models.PhotoComment
 	if err := s.DB.Preload("User").
 		Where("photo_id = ?", photoID).
 		Order("created_at asc").
 		Limit(200).
 		Find(&comments).Error; err != nil {
+		return nil, err
+	}
+
+	var photoMojis []models.PhotoFotomoji
+	if err := s.DB.Preload("User").
+		Where("photo_id = ?", photoID).
+		Order("created_at asc").
+		Limit(200).
+		Find(&photoMojis).Error; err != nil {
 		return nil, err
 	}
 
@@ -6889,11 +7441,18 @@ func (s *Server) photoInteractionsPayload(photo models.Photo, viewerID uint) (gi
 		})
 	}
 
+	photoMojiItems := make([]gin.H, 0, len(photoMojis))
+	for _, item := range photoMojis {
+		photoMojiItems = append(photoMojiItems, s.photoFotomojiJSON(item, true))
+	}
+
 	return gin.H{
 		"photoId":     photoID,
 		"reactions":   reactions,
 		"myReaction":  myReaction,
 		"comments":    commentItems,
+		"photoMojis":  photoMojiItems,
+		"myPhotoMoji": myPhotoMojiOut,
 		"canDownload": canDownload,
 	}, nil
 }
@@ -6901,10 +7460,14 @@ func (s *Server) photoInteractionsPayload(photo models.Photo, viewerID uint) (gi
 func (s *Server) photoInteractionsLightPayload(photo models.Photo, commenter models.User) (gin.H, error) {
 	photoID := photo.ID
 	var (
-		reactionsTotal int64
-		commentsTotal  int64
+		reactionsTotal  int64
+		photoMojisTotal int64
+		commentsTotal   int64
 	)
 	if err := s.DB.Model(&models.PhotoReaction{}).Where("photo_id = ?", photoID).Count(&reactionsTotal).Error; err != nil {
+		return nil, err
+	}
+	if err := s.DB.Model(&models.PhotoFotomoji{}).Where("photo_id = ?", photoID).Count(&photoMojisTotal).Error; err != nil {
 		return nil, err
 	}
 	if err := s.DB.Model(&models.PhotoComment{}).Where("photo_id = ?", photoID).Count(&commentsTotal).Error; err != nil {
@@ -6925,12 +7488,15 @@ func (s *Server) photoInteractionsLightPayload(photo models.Photo, commenter mod
 	return gin.H{
 		"photoId":     photoID,
 		"reactions":   []gin.H{},
+		"photoMojis":  []gin.H{},
 		"comments":    []gin.H{},
 		"myReaction":  myReaction,
+		"myPhotoMoji": nil,
 		"canDownload": canDownload,
 		"counts": gin.H{
-			"reactions": reactionsTotal,
-			"comments":  commentsTotal,
+			"reactions":  reactionsTotal,
+			"photoMojis": photoMojisTotal,
+			"comments":   commentsTotal,
 		},
 		"commentCreated": gin.H{
 			"user": gin.H{
@@ -7089,6 +7655,20 @@ func (s *Server) reactionNotificationTokens(ownerID, actorID uint) []string {
 	return tokens
 }
 
+func (s *Server) fotomojiNotificationTokens(ownerID, actorID uint) []string {
+	var rows []models.DeviceToken
+	_ = s.DB.Table("device_tokens").
+		Select("device_tokens.token").
+		Joins("JOIN users ON users.id = device_tokens.user_id").
+		Where("users.id = ? AND users.id <> ? AND (users.photo_fotomoji_push_enabled = ? OR users.photo_reaction_push_enabled = ?)", ownerID, actorID, true, true).
+		Find(&rows).Error
+	tokens := make([]string, 0, len(rows))
+	for _, t := range rows {
+		tokens = append(tokens, t.Token)
+	}
+	return tokens
+}
+
 func (s *Server) commentNotificationTokens(ownerID, actorID uint) []string {
 	var rows []models.DeviceToken
 	_ = s.DB.Table("device_tokens").
@@ -7120,6 +7700,31 @@ func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
 		Title:   "Neue Reaktion",
 		Body:    body,
 		Type:    "photo_reaction",
+		Action:  "open_feed",
+		Day:     photo.Day,
+		PhotoID: int64(photo.ID),
+	})
+	s.recordPushResult(sendResult, sendErr)
+	s.removeInvalidTokens(sendResult.InvalidTokens)
+}
+
+func (s *Server) notifyPhotoFotomoji(actor models.User, photo models.Photo) {
+	if photo.UserID == 0 || photo.UserID == actor.ID {
+		return
+	}
+	now := time.Now().In(s.Location)
+	if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) {
+		return
+	}
+	tokens := s.fotomojiNotificationTokens(photo.UserID, actor.ID)
+	if len(tokens) == 0 {
+		return
+	}
+	body := fmt.Sprintf("%s hat mit einem Foto auf deinen Beitrag reagiert", actor.Username)
+	sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+		Title:   "Neue FotoMoji",
+		Body:    body,
+		Type:    "photo_fotomoji",
 		Action:  "open_feed",
 		Day:     photo.Day,
 		PhotoID: int64(photo.ID),

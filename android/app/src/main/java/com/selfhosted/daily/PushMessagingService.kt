@@ -42,7 +42,7 @@ class PushMessagingService : FirebaseMessagingService() {
         if ((type == "feed_post" || type == "post" || type == "extra_post") && !feedEnabled) return
         if ((type == "special_request" || type == "special_moment") && !specialEnabled) return
         if ((type == "invite_registered" || type == "invite_registration") && !inviteEnabled) return
-        if (type == "photo_reaction" && !reactionEnabled) return
+        if ((type == "photo_reaction" || type == "photo_fotomoji") && !reactionEnabled) return
         if (type == "photo_comment" && !commentEnabled) return
         if (isBlockedByQuietHours(type, prefs)) return
 
