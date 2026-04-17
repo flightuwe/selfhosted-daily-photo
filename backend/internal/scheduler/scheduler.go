@@ -30,17 +30,18 @@ type DailyPromptService struct {
 var ErrAlreadyTriggeredToday = errors.New("already_triggered_today")
 
 type TriggerAttemptMeta struct {
-	RequestID    string
-	AttemptType  string
+	RequestID      string
+	AttemptType    string
 	ServerInstance string
-	Meta         map[string]any
+	Meta           map[string]any
 }
 
 const (
-	schedulerLeaseName               = "daily_trigger_scheduler"
-	schedulerAutoPauseWindow         = 3 * time.Minute
-	schedulerAutoPauseAttemptLimit   = 4
-	dispatchKindDailyPromptPush      = "daily_prompt_push"
+	schedulerLeaseName             = "daily_trigger_scheduler"
+	schedulerAutoPauseWindow       = 3 * time.Minute
+	schedulerAutoPauseAttemptLimit = 4
+	dispatchKindDailyPromptPush    = "daily_prompt_push"
+	dispatchKindSpecialMomentPush  = "special_moment_push"
 )
 
 var specialTriggerSources = []string{"special_request", "chat_command"}
@@ -367,13 +368,13 @@ func (s *DailyPromptService) TriggerNowWithSourceAndMeta(source string, requeste
 	}
 
 	auditEvent := models.DailyTriggerAuditEvent{
-		Day:          day,
-		OccurredAt:   now,
-		RequestID:    strings.TrimSpace(meta.RequestID),
-		Source:       source,
-		AttemptType:  attemptType,
-		Result:       "failed",
-		Reason:       "unknown",
+		Day:            day,
+		OccurredAt:     now,
+		RequestID:      strings.TrimSpace(meta.RequestID),
+		Source:         source,
+		AttemptType:    attemptType,
+		Result:         "failed",
+		Reason:         "unknown",
 		ServerInstance: serverInstance,
 	}
 	if requestedBy != nil {
@@ -430,10 +431,10 @@ func (s *DailyPromptService) TriggerNowWithSourceAndMeta(source string, requeste
 		}
 
 		updates := map[string]any{
-			"triggered_at":    &now,
-			"upload_until":    &until,
-			"trigger_source":  source,
-			"updated_at":      now,
+			"triggered_at":   &now,
+			"upload_until":   &until,
+			"trigger_source": source,
+			"updated_at":     now,
 		}
 		if requestedBy != nil {
 			updates["requested_by_id"] = &requestedBy.ID
@@ -672,8 +673,8 @@ func (s *DailyPromptService) RuntimeState(now time.Time) map[string]any {
 		now = time.Now().In(s.Location)
 	}
 	state := map[string]any{
-		"serverInstance": s.resolvedServerInstance(),
-		"leaseName":      schedulerLeaseName,
+		"serverInstance":  s.resolvedServerInstance(),
+		"leaseName":       schedulerLeaseName,
 		"leaseTimeoutSec": int64(s.resolvedLeaseTimeout() / time.Second),
 	}
 	lastTickUnix := s.lastTickAt.Load()
@@ -766,6 +767,10 @@ func (s *DailyPromptService) MarkDispatchResult(day string, kind string, status 
 
 func (s *DailyPromptService) DispatchKindDailyPromptPush() string {
 	return dispatchKindDailyPromptPush
+}
+
+func (s *DailyPromptService) DispatchKindSpecialMomentPush() string {
+	return dispatchKindSpecialMomentPush
 }
 
 func (s *DailyPromptService) resolvedServerInstance() string {

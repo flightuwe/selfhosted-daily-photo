@@ -10,6 +10,7 @@ type User struct {
 	FavoriteColor                 string     `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
 	ChatPushEnabled               bool       `gorm:"default:false" json:"chatPushEnabled"`
 	PollPushEnabled               bool       `gorm:"default:false" json:"pollPushEnabled"`
+	SpecialMomentPushEnabled      bool       `gorm:"default:false" json:"specialMomentPushEnabled"`
 	InviteRegistrationPushEnabled bool       `gorm:"default:false" json:"inviteRegistrationPushEnabled"`
 	PhotoReactionPushEnabled      bool       `gorm:"default:false" json:"photoReactionPushEnabled"`
 	PhotoCommentPushEnabled       bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
@@ -80,9 +81,9 @@ type AppSettings struct {
 	ChatCommandValue                 string     `gorm:"size:64;default:'-moment'" json:"chatCommandValue"`
 	ChatCommandTrigger               bool       `gorm:"default:true" json:"chatCommandTrigger"`
 	ChatCommandSendPush              bool       `gorm:"default:true" json:"chatCommandSendPush"`
-	ChatCommandPushText              string     `gorm:"size:255;default:'{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.'" json:"chatCommandPushText"`
+	ChatCommandPushText              string     `gorm:"size:255;default:'Sondermoment von {user}! Jetzt 10 Minuten posten.'" json:"chatCommandPushText"`
 	ChatCommandEchoChat              bool       `gorm:"default:true" json:"chatCommandEchoChat"`
-	ChatCommandEchoText              string     `gorm:"size:255;default:'Moment wurde von {user} angefordert.'" json:"chatCommandEchoText"`
+	ChatCommandEchoText              string     `gorm:"size:255;default:'Sondermoment wurde von {user} angefordert.'" json:"chatCommandEchoText"`
 	PerformanceTrackingEnabled       bool       `gorm:"default:false" json:"performanceTrackingEnabled"`
 	PerformanceTrackingWindowMinutes int        `gorm:"default:30" json:"performanceTrackingWindowMinutes"`
 	PerformanceTrackingOneShot       bool       `gorm:"default:false" json:"performanceTrackingOneShot"`

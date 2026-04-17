@@ -150,9 +150,9 @@ const DEFAULT_SETTINGS: Settings = {
   chatCommandValue: "-moment",
   chatCommandTrigger: true,
   chatCommandSendPush: true,
-  chatCommandPushText: "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
+  chatCommandPushText: "Sondermoment von {user}! Jetzt 10 Minuten posten.",
   chatCommandEchoChat: true,
-  chatCommandEchoText: "Moment wurde von {user} angefordert.",
+  chatCommandEchoText: "Sondermoment wurde von {user} angefordert.",
   migrationEnabled: false,
   migrationStartedAt: null,
   migrationUntil: null,
@@ -273,8 +273,8 @@ const emptyCommandDraft: CommandDraft = {
   requireAdmin: false,
   sendPush: true,
   postChat: true,
-  pushText: "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten.",
-  responseText: "Moment wurde von {user} angefordert.",
+  pushText: "Sondermoment von {user}! Jetzt 10 Minuten posten.",
+  responseText: "Sondermoment wurde von {user} angefordert.",
   cooldownSecond: 0,
 };
 

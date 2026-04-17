@@ -630,6 +630,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	var req struct {
 		ChatPushEnabled               *bool  `json:"chatPushEnabled"`
 		PollPushEnabled               *bool  `json:"pollPushEnabled"`
+		SpecialMomentPushEnabled      *bool  `json:"specialMomentPushEnabled"`
 		InviteRegistrationPushEnabled *bool  `json:"inviteRegistrationPushEnabled"`
 		PhotoReactionPushEnabled      *bool  `json:"photoReactionPushEnabled"`
 		PhotoCommentPushEnabled       *bool  `json:"photoCommentPushEnabled"`
@@ -647,6 +648,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.PollPushEnabled != nil {
 		updates["poll_push_enabled"] = *req.PollPushEnabled
+	}
+	if req.SpecialMomentPushEnabled != nil {
+		updates["special_moment_push_enabled"] = *req.SpecialMomentPushEnabled
 	}
 	if req.InviteRegistrationPushEnabled != nil {
 		updates["invite_registration_push_enabled"] = *req.InviteRegistrationPushEnabled
@@ -1186,11 +1190,11 @@ func (s *Server) handleSpecialMomentRequest(c *gin.Context) {
 	}
 
 	pushBody := fmt.Sprintf("Sondermoment von %s angefordert! Du hast %d Minuten Zeit.", user.Username, settings.UploadWindowMinutes)
-	tokens := s.allDeviceTokens()
+	tokens := s.specialMomentNotificationTokens(user.ID)
 	sendResult := notify.SendResult{}
 	var sendErr error
 	removed := int64(0)
-	created, _, reserveErr := s.Prompt.ReserveDispatch(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), "special_request", requestIDFromContext(c))
+	created, _, reserveErr := s.Prompt.ReserveDispatch(prompt.Day, s.Prompt.DispatchKindSpecialMomentPush(), "special_request", requestIDFromContext(c))
 	if reserveErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "dispatch reserve failed"})
 		return
@@ -1210,7 +1214,7 @@ func (s *Server) handleSpecialMomentRequest(c *gin.Context) {
 			dispatchStatus = "failed"
 			dispatchErr = sendErr.Error()
 		}
-		s.Prompt.MarkDispatchResult(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), dispatchStatus, int64(sendResult.Sent), int64(sendResult.Failed), dispatchErr)
+		s.Prompt.MarkDispatchResult(prompt.Day, s.Prompt.DispatchKindSpecialMomentPush(), dispatchStatus, int64(sendResult.Sent), int64(sendResult.Failed), dispatchErr)
 	}
 
 	nextStatus, _ := s.specialMomentStatus(user.ID)
@@ -3957,7 +3961,12 @@ func (s *Server) handleBroadcastNotification(c *gin.Context) {
 	}
 
 	tokens := s.allDeviceTokens()
-	sendResult, err := s.Notifier.SendDailyPrompt(tokens, req.Body)
+	sendResult, err := s.Notifier.Send(tokens, notify.Message{
+		Title:  "Daily Nachricht",
+		Body:   strings.TrimSpace(req.Body),
+		Type:   "broadcast",
+		Action: "open_app",
+	})
 	s.recordPushResult(sendResult, err)
 	removed := s.removeInvalidTokens(sendResult.InvalidTokens)
 	if err != nil {
@@ -4002,7 +4011,12 @@ func (s *Server) handleUserNotification(c *gin.Context) {
 	}
 
 	tokens := s.userDeviceTokens(id)
-	sendResult, sendErr := s.Notifier.SendDailyPrompt(tokens, req.Body)
+	sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+		Title:  "Daily Nachricht",
+		Body:   strings.TrimSpace(req.Body),
+		Type:   "broadcast",
+		Action: "open_app",
+	})
 	s.recordPushResult(sendResult, sendErr)
 	removed := s.removeInvalidTokens(sendResult.InvalidTokens)
 	if sendErr != nil {
@@ -5198,14 +5212,19 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
 		}
 		if cmd.SendPush {
 			pushText := renderCommandText(cmd.PushText, user.Username)
-			tokens := s.allDeviceTokens()
-			created, _, reserveErr := s.Prompt.ReserveDispatch(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), "chat_command", requestIDFromContext(c))
+			tokens := s.specialMomentNotificationTokens(user.ID)
+			created, _, reserveErr := s.Prompt.ReserveDispatch(prompt.Day, s.Prompt.DispatchKindSpecialMomentPush(), "chat_command", requestIDFromContext(c))
 			if reserveErr != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "dispatch reserve failed"})
 				return true, reserveErr
 			}
 			if created {
-				sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
+				sendResult, sendErr = s.Notifier.Send(tokens, notify.Message{
+					Title:  "Sondermoment",
+					Body:   pushText,
+					Type:   "special_request",
+					Action: "open_camera",
+				})
 				s.recordPushResult(sendResult, sendErr)
 				invalidRemoved = s.removeInvalidTokens(sendResult.InvalidTokens)
 				dispatchStatus := "sent"
@@ -5214,7 +5233,7 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
 					dispatchStatus = "failed"
 					dispatchErr = sendErr.Error()
 				}
-				s.Prompt.MarkDispatchResult(prompt.Day, s.Prompt.DispatchKindDailyPromptPush(), dispatchStatus, int64(sendResult.Sent), int64(sendResult.Failed), dispatchErr)
+				s.Prompt.MarkDispatchResult(prompt.Day, s.Prompt.DispatchKindSpecialMomentPush(), dispatchStatus, int64(sendResult.Sent), int64(sendResult.Failed), dispatchErr)
 			}
 		}
 		if cmd.PostChat {
@@ -5250,7 +5269,12 @@ func (s *Server) tryHandleChatCommand(c *gin.Context, user models.User, body str
 		if cmd.SendPush {
 			pushText := renderCommandText(defaultIfBlank(cmd.PushText, "{user} hat eine Nachricht gesendet."), user.Username)
 			tokens := s.allDeviceTokens()
-			sendResult, sendErr = s.Notifier.SendDailyPrompt(tokens, pushText)
+			sendResult, sendErr = s.Notifier.Send(tokens, notify.Message{
+				Title:  "Daily Nachricht",
+				Body:   pushText,
+				Type:   "broadcast",
+				Action: "open_app",
+			})
 			s.recordPushResult(sendResult, sendErr)
 			invalidRemoved = s.removeInvalidTokens(sendResult.InvalidTokens)
 		}
@@ -6201,6 +6225,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"favoriteColor":                 defaultColor(u.FavoriteColor),
 		"chatPushEnabled":               u.ChatPushEnabled,
 		"pollPushEnabled":               u.PollPushEnabled,
+		"specialMomentPushEnabled":      u.SpecialMomentPushEnabled,
 		"inviteRegistrationPushEnabled": u.InviteRegistrationPushEnabled,
 		"photoReactionPushEnabled":      u.PhotoReactionPushEnabled,
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
@@ -6233,6 +6258,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"favoriteColor":                 defaultColor(u.FavoriteColor),
 		"chatPushEnabled":               false,
 		"pollPushEnabled":               false,
+		"specialMomentPushEnabled":      false,
 		"inviteRegistrationPushEnabled": false,
 		"photoReactionPushEnabled":      false,
 		"photoCommentPushEnabled":       false,
@@ -7010,6 +7036,23 @@ func (s *Server) inviteRegistrationNotificationTokens() []string {
 	return tokens
 }
 
+func (s *Server) specialMomentNotificationTokens(requesterID uint) []string {
+	var rows []models.DeviceToken
+	query := s.DB.Table("device_tokens").
+		Select("device_tokens.token").
+		Joins("JOIN users ON users.id = device_tokens.user_id").
+		Where("users.special_moment_push_enabled = ?", true)
+	if requesterID > 0 {
+		query = query.Where("users.id <> ?", requesterID)
+	}
+	_ = query.Find(&rows).Error
+	tokens := make([]string, 0, len(rows))
+	for _, t := range rows {
+		tokens = append(tokens, t.Token)
+	}
+	return tokens
+}
+
 func (s *Server) notifyPostCreated(author models.User, photo models.Photo) {
 	// Delayed capsules should not trigger immediate post notifications.
 	if photo.CapsuleVisibleAt != nil {
@@ -7437,10 +7480,10 @@ func normalizeSettings(settings models.AppSettings) models.AppSettings {
 		settings.ChatCommandValue = "-moment"
 	}
 	if strings.TrimSpace(settings.ChatCommandPushText) == "" {
-		settings.ChatCommandPushText = "{user} hat einen Moment angefordert. Jetzt 10 Minuten posten."
+		settings.ChatCommandPushText = "Sondermoment von {user}! Jetzt 10 Minuten posten."
 	}
 	if strings.TrimSpace(settings.ChatCommandEchoText) == "" {
-		settings.ChatCommandEchoText = "Moment wurde von {user} angefordert."
+		settings.ChatCommandEchoText = "Sondermoment wurde von {user} angefordert."
 	}
 	if settings.UploadWindowMinutes <= 0 {
 		settings.UploadWindowMinutes = 10

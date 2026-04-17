@@ -212,6 +212,7 @@ data class User(
     val favoriteColor: String = "#1F5FBF",
     val chatPushEnabled: Boolean = false,
     val pollPushEnabled: Boolean = false,
+    val specialMomentPushEnabled: Boolean = false,
     val inviteRegistrationPushEnabled: Boolean = false,
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
@@ -251,6 +252,7 @@ data class ProfileUpdateRequest(
 data class PreferencesUpdateRequest(
     val chatPushEnabled: Boolean,
     val pollPushEnabled: Boolean,
+    val specialMomentPushEnabled: Boolean? = null,
     val inviteRegistrationPushEnabled: Boolean,
     val photoReactionPushEnabled: Boolean,
     val photoCommentPushEnabled: Boolean,
@@ -1292,6 +1294,12 @@ class AppRepo(
         prefs.edit().putBoolean("poll_push_enabled_local", enabled).apply()
     }
 
+    fun specialMomentPushLocalEnabled(): Boolean = prefs.getBoolean("special_moment_push_enabled_local", false)
+
+    fun setSpecialMomentPushLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("special_moment_push_enabled_local", enabled).apply()
+    }
+
     fun ensurePollPushDefaultMigration() {
         val migratedKey = "poll_push_default_migrated_v1"
         val pendingKey = "poll_push_default_pending_sync_v1"
@@ -1584,6 +1592,7 @@ class AppRepo(
         photoReactionPushEnabled: Boolean,
         photoCommentPushEnabled: Boolean,
         allowPhotoDownload: Boolean,
+        specialMomentPushEnabled: Boolean? = null,
         diagnosticsConsentGranted: Boolean? = null,
         diagnosticsConsentSource: String? = null
     ): User =
@@ -1596,6 +1605,7 @@ class AppRepo(
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 allowPhotoDownload = allowPhotoDownload,
+                specialMomentPushEnabled = specialMomentPushEnabled,
                 diagnosticsConsentGranted = diagnosticsConsentGranted,
                 diagnosticsConsentSource = diagnosticsConsentSource
             )
@@ -3011,6 +3021,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             if (shouldPopup) repo.setSeenPromptMarker(marker)
             repo.setChatPushLocalEnabled(me.chatPushEnabled)
             repo.setPollPushLocalEnabled(me.pollPushEnabled)
+            repo.setSpecialMomentPushLocalEnabled(me.specialMomentPushEnabled)
             repo.setInviteRegistrationPushLocalEnabled(me.inviteRegistrationPushEnabled)
             repo.syncQuietHoursFromUser(me)
             repo.setPhotoReactionPushLocalEnabled(me.photoReactionPushEnabled)
@@ -4120,6 +4131,37 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             .onFailure {
                 state = state.copy(loading = false, message = apiError(it, "Push-Einstellung speichern fehlgeschlagen"))
+            }
+    }
+
+    suspend fun setSpecialMomentPushEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                current.pollPushEnabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload,
+                specialMomentPushEnabled = enabled
+            )
+        }
+            .onSuccess { user ->
+                repo.setSpecialMomentPushLocalEnabled(user.specialMomentPushEnabled)
+                state = state.copy(
+                    user = user,
+                    loading = false,
+                    message = if (enabled) {
+                        "Push bei Sondermomenten aktiviert"
+                    } else {
+                        "Push bei Sondermomenten deaktiviert"
+                    }
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Sondermoment-Push speichern fehlgeschlagen"))
             }
     }
 
@@ -5563,6 +5605,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     notificationMasterEnabled = state.notificationMasterEnabled,
                     chatPushEnabled = state.user?.chatPushEnabled ?: false,
                     pollPushEnabled = state.user?.pollPushEnabled ?: state.pollPushEnabled,
+                    specialMomentPushEnabled = state.user?.specialMomentPushEnabled ?: repo.specialMomentPushLocalEnabled(),
                     inviteRegistrationPushEnabled = state.user?.inviteRegistrationPushEnabled ?: state.inviteRegistrationPushEnabled,
                     photoReactionPushEnabled = state.user?.photoReactionPushEnabled ?: state.photoReactionPushEnabled,
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
@@ -5594,6 +5637,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onChatPushEnabledChange = { scope.launch { vm.setChatPushEnabled(it) } },
                     onPollPushEnabledChange = { scope.launch { vm.setPollPushEnabled(it) } },
+                    onSpecialMomentPushEnabledChange = { scope.launch { vm.setSpecialMomentPushEnabled(it) } },
                     onInviteRegistrationPushEnabledChange = { scope.launch { vm.setInviteRegistrationPushEnabled(it) } },
                     onPhotoReactionPushEnabledChange = { scope.launch { vm.setPhotoReactionPushEnabled(it) } },
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
@@ -7116,6 +7160,7 @@ fun ProfileTab(
     notificationMasterEnabled: Boolean,
     chatPushEnabled: Boolean,
     pollPushEnabled: Boolean,
+    specialMomentPushEnabled: Boolean,
     inviteRegistrationPushEnabled: Boolean,
     photoReactionPushEnabled: Boolean,
     photoCommentPushEnabled: Boolean,
@@ -7147,6 +7192,7 @@ fun ProfileTab(
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onChatPushEnabledChange: (Boolean) -> Unit,
     onPollPushEnabledChange: (Boolean) -> Unit,
+    onSpecialMomentPushEnabledChange: (Boolean) -> Unit,
     onInviteRegistrationPushEnabledChange: (Boolean) -> Unit,
     onPhotoReactionPushEnabledChange: (Boolean) -> Unit,
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
@@ -7691,7 +7737,7 @@ fun ProfileTab(
             )
             CollapsibleSection(
                 title = "Benachrichtigungen",
-                subtitle = "Master + Update, Chat, Feed, Interaktionen und neue Mitglieder",
+                subtitle = "Master + Update, Chat, Feed, Sondermomente, Interaktionen und neue Mitglieder",
                 expanded = sectionExpanded("notifications"),
                 onExpandedChange = { onProfileSectionExpandedChange("notifications", it) }
             ) {
@@ -7746,6 +7792,12 @@ fun ProfileTab(
                         label = "Push bei neuen Umfragen",
                         checked = pollPushEnabled,
                         onCheckedChange = onPollPushEnabledChange
+                    )
+                    SettingsToggleRow(
+                        label = "Push bei spontanen Sondermomenten",
+                        checked = specialMomentPushEnabled,
+                        onCheckedChange = onSpecialMomentPushEnabledChange,
+                        supportingText = "Optionaler Zusatzkanal fuer spontane Aufforderungen zum Posten ausserhalb des echten Daily-Moments."
                     )
                     SettingsToggleRow(
                         label = "Push bei Posts anderer Nutzer",
