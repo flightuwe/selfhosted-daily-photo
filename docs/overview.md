@@ -16,6 +16,12 @@ Daily is composed of three core parts:
 - `admin/`: React/Vite admin UI for moderation, trigger runtime, incident export and ops checks
 - `android/`: Kotlin/Compose mobile client with release artifacts from GitHub tags
 
+Current production runtime:
+
+- Public production endpoint: `https://daily.broutschek.de`
+- Internal target inside cluster/LXC: `http://10.20.10.30:13379`
+- Retired migration/source endpoints like `daily.teacloud.synology.me` and `192.168.178.80:13379` are not production anymore
+
 Runtime deployment uses:
 
 - `deploy/portainer-stack.yml` for Synology/Portainer operation
@@ -35,6 +41,7 @@ Runtime deployment uses:
 - Deploy and migration flow: `docs/deploy-runbook.md`
 - Trigger/scheduler incidents: `docs/incident-runbook.md`
 - App/server release lifecycle: `docs/release-process.md`
+- Local Android workstation setup and CI-parity checks: `docs/android-local-toolchain.md`
 - Secret contract and ownership boundaries: `docs/secrets-contract.md`
 - Mirror governance and drift policy: `docs/mirror-policy.md`
 - Cluster follow-up checklist for direct Forge work: `docs/gitea-direct-todo.md`
