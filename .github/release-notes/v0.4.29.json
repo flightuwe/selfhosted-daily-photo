@@ -1,0 +1,26 @@
+{
+  "version": "0.4.29",
+  "releasedAt": "2026-04-17T00:00:00Z",
+  "highlights": [
+    "FotoMoji-Reaktionen: Frontkamera-Fotos direkt als Reaktion auf Posts.",
+    "Horizontale FotoMoji-Bubbles unter Posts mit Emoji-Badge und Vollansicht.",
+    "Admin kann FotoMojis jetzt gezielt moderieren und loeschen."
+  ],
+  "details": [
+    {
+      "title": "Android app",
+      "items": [
+        "versionName auf 0.4.29 gesetzt.",
+        "versionCode auf 80 erhoeht.",
+        "FotoMoji-Capture, Template-Nutzung und Bubble-Rendering in Feed/Viewer integriert."
+      ]
+    },
+    {
+      "title": "Backend and admin",
+      "items": [
+        "Neue FotoMoji-API fuer Upload/Template-Reaktionen und Push-Typ photo_fotomoji.",
+        "Admin-Oberflaeche um FotoMoji-Moderation mit Loeschfunktion erweitert."
+      ]
+    }
+  ]
+}
