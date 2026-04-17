@@ -14,6 +14,10 @@
 
 ## Android Release Path
 
+Precondition for workstations with the local Android toolchain:
+
+- run the local debug build from `docs/android-local-toolchain.md` before tagging if the release includes Android changes
+
 1. Set `versionName` and increment `versionCode` in `android/app/build.gradle.kts`.
 2. Prepare release notes pair:
    - `.github/release-notes/vX.Y.Z.md`

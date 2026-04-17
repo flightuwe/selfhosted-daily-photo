@@ -99,3 +99,14 @@ Optional env vars:
 - CI green plus publish success is the minimum precondition before production deploy.
 - Mirror failures are production-ops relevant and must be documented in `reports/daily-ops-changelog.md` after recovery.
 
+## Local Android CI Parity
+
+For Windows-based local Android verification, use:
+
+- `docs/android-local-toolchain.md`
+
+Operational expectation:
+
+- if a change touches `android/`, run `gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain` locally before pushing when the workstation toolchain is available
+- this does not replace GitHub `CI`, but it catches Kotlin/Compose compile regressions earlier
+
