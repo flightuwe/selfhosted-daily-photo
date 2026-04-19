@@ -309,12 +309,21 @@ type PhotoFotomoji struct {
 }
 
 type UserFotomojiTemplate struct {
+	ID              uint      `gorm:"primaryKey" json:"id"`
+	UserID          uint      `gorm:"index:idx_user_fotomoji_template,unique;not null" json:"userId"`
+	Emoji           string    `gorm:"size:16;index:idx_user_fotomoji_template,unique;not null" json:"emoji"`
+	FilePath        string    `gorm:"size:255;not null" json:"filePath"`
+	ActiveVersionID uint      `gorm:"index;default:0" json:"activeVersionId"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+type UserFotomojiTemplateVersion struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
-	UserID    uint      `gorm:"index:idx_user_fotomoji_template,unique;not null" json:"userId"`
-	Emoji     string    `gorm:"size:16;index:idx_user_fotomoji_template,unique;not null" json:"emoji"`
+	UserID    uint      `gorm:"index:idx_user_fotomoji_template_versions_lookup,priority:1;not null" json:"userId"`
+	Emoji     string    `gorm:"size:16;index:idx_user_fotomoji_template_versions_lookup,priority:2;not null" json:"emoji"`
 	FilePath  string    `gorm:"size:255;not null" json:"filePath"`
 	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 type PhotoComment struct {

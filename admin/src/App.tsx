@@ -34,6 +34,7 @@ import {
   getAdminHistory,
   getAdminTimeCapsules,
   getAdminFotomojis,
+  getAdminFotomojiHistory,
   getAdminPolls,
   getCalendar,
   getChat,
@@ -109,6 +110,7 @@ import {
   type CalendarItem,
   type AdminTimeCapsuleItem,
   type AdminFotomojiItem,
+  type AdminFotomojiTemplateHistoryUser,
   type FeedItem,
   type DebugLogItem,
   type DebugLogsResponse,
@@ -506,8 +508,11 @@ export function App() {
   const [migrationLinkImportToken, setMigrationLinkImportToken] = useState("");
   const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
   const [fotomojiItems, setFotomojiItems] = useState<AdminFotomojiItem[]>([]);
+  const [fotomojiHistory, setFotomojiHistory] = useState<AdminFotomojiTemplateHistoryUser[]>([]);
+  const [fotomojiHistoryVersionCount, setFotomojiHistoryVersionCount] = useState<number>(0);
   const [fotomojiDayFilter, setFotomojiDayFilter] = useState("");
   const [fotomojiUserFilter, setFotomojiUserFilter] = useState<number>(0);
+  const [fotomojiEmojiFilter, setFotomojiEmojiFilter] = useState("");
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
   const [reportTypeFilter, setReportTypeFilter] = useState<"" | "bug" | "idea">("");
@@ -758,6 +763,7 @@ export function App() {
     }
     if (activeTab === "fotomojis") {
       void loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter);
+      void loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter);
     }
     if (activeTab === "reports") {
       void loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
@@ -771,7 +777,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
+  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -1455,6 +1461,20 @@ export function App() {
     }
   }
 
+  async function loadFotomojiHistory(authToken: string, userId = 0, emoji = "") {
+    try {
+      const response = await getAdminFotomojiHistory(authToken, {
+        userId: userId > 0 ? userId : undefined,
+        emoji: emoji.trim() || undefined,
+        limit: 1600,
+      });
+      setFotomojiHistory(response.items || []);
+      setFotomojiHistoryVersionCount(response.versionCount || 0);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function onDeleteFotomoji(id: number) {
     if (!window.confirm("Diesen FotoMoji wirklich loeschen?")) return;
     try {
@@ -1481,7 +1501,10 @@ export function App() {
     }
     if (activeTab === "trigger_audit") await loadTriggerAudit(token);
     if (activeTab === "time_capsule") await loadTimeCapsules(token);
-    if (activeTab === "fotomojis") await loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter);
+    if (activeTab === "fotomojis") {
+      await loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter);
+      await loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter);
+    }
     if (activeTab === "debug") await loadDebugLogs(token, debugUserFilter, debugSinceHours);
     if (activeTab === "reports") await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
     if (activeTab === "commands") await loadCommands(token);
@@ -3828,7 +3851,16 @@ export function App() {
                     <option key={u.id} value={u.id}>@{u.username}</option>
                   ))}
                 </select>
-                <button onClick={() => loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter)}>Aktualisieren</button>
+                <input
+                  type="text"
+                  value={fotomojiEmojiFilter}
+                  onChange={(e) => setFotomojiEmojiFilter(e.target.value)}
+                  placeholder="Emoji-Filter (z.B. ❤️)"
+                />
+                <button onClick={() => {
+                  void loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter);
+                  void loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter);
+                }}>Aktualisieren</button>
               </div>
             </div>
             <div className="grid4">
@@ -3842,7 +3874,63 @@ export function App() {
                     : "alle"
                 }
               />
+              <CardStat title="Historie-Versionen" value={fotomojiHistoryVersionCount} />
             </div>
+            <h3>Template-Historie pro User</h3>
+            {fotomojiHistory.length === 0 && <p>Keine Template-Historie im aktuellen Filter.</p>}
+            {fotomojiHistory.length > 0 && (
+              <div className="stack">
+                {fotomojiHistory.map((group) => (
+                  <article key={`hist_${group.user.id}`} className="card">
+                    <div className="row">
+                      <h4 style={{ margin: 0, color: group.user.favoriteColor || undefined }}>@{group.user.username}</h4>
+                      <span className="small">{group.emojis.length} Emoji-Gruppen</span>
+                    </div>
+                    {group.emojis.length === 0 && <p className="small">Keine Templates</p>}
+                    {group.emojis.map((entry) => (
+                      <div key={`hist_${group.user.id}_${entry.emoji}`} className="stack" style={{ gap: 8 }}>
+                        <div className="row">
+                          <strong>{entry.emoji}</strong>
+                          <span className="small">{entry.versions.length} Versionen</span>
+                        </div>
+                        {entry.activeVersion && (
+                          <p className="small" style={{ marginBottom: 0 }}>
+                            Aktiv: {formatDateTime(entry.activeVersion.createdAt)} ·
+                            genutzt in {entry.activeVersion.postUsageCount} Post-Reaktionen
+                          </p>
+                        )}
+                        <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
+                          {entry.versions.map((version) => (
+                            <a
+                              key={`hist_v_${version.id}`}
+                              href={version.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="card"
+                              style={{ textDecoration: "none", color: "inherit", minWidth: 140 }}
+                            >
+                              <img
+                                src={version.url}
+                                alt={`FotoMoji ${entry.emoji}`}
+                                style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 12 }}
+                              />
+                              <p className="small" style={{ marginBottom: 0 }}>
+                                {formatDateTime(version.createdAt)}
+                                {version.isActive ? " · aktiv" : ""}
+                              </p>
+                              <p className="small" style={{ marginBottom: 0 }}>
+                                Verwendet in {version.postUsageCount} Post-Reaktionen
+                              </p>
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </article>
+                ))}
+              </div>
+            )}
+            <h3>Post-Reaktionen (Moderation)</h3>
             {fotomojiItems.length === 0 && <p>Keine FotoMojis im aktuellen Filter.</p>}
             {fotomojiItems.length > 0 && (
               <table className="table">

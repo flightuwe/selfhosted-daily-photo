@@ -615,6 +615,33 @@ export type AdminFotomojiItem = {
   };
 };
 
+export type AdminFotomojiTemplateVersion = {
+  id: number;
+  url: string;
+  filePath: string;
+  createdAt: string;
+  isActive: boolean;
+  postUsageCount: number;
+};
+
+export type AdminFotomojiTemplateHistoryEmoji = {
+  emoji: string;
+  activeVersion?: AdminFotomojiTemplateVersion | null;
+  versions: AdminFotomojiTemplateVersion[];
+};
+
+export type AdminFotomojiTemplateHistoryUser = {
+  user: { id: number; username: string; favoriteColor?: string };
+  emojis: AdminFotomojiTemplateHistoryEmoji[];
+};
+
+export type AdminFotomojiHistoryResponse = {
+  items: AdminFotomojiTemplateHistoryUser[];
+  userCount: number;
+  versionCount: number;
+  filters?: { userId?: number; emoji?: string };
+};
+
 export type ChatCommand = {
   id: number;
   name: string;
@@ -1314,6 +1341,26 @@ export async function getAdminFotomojis(
   });
   const data = await parse<{ items: AdminFotomojiItem[] }>(res);
   return data.items || [];
+}
+
+export async function getAdminFotomojiHistory(
+  token: string,
+  opts?: { userId?: number; emoji?: string; limit?: number }
+): Promise<AdminFotomojiHistoryResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
+  if (opts?.emoji && opts.emoji.trim()) qs.set("emoji", opts.emoji.trim());
+  qs.set("limit", String(opts?.limit ?? 1200));
+  const res = await fetch(`${apiBase}/admin/fotomojis/history?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<AdminFotomojiHistoryResponse>(res);
+  return {
+    items: data.items || [],
+    userCount: data.userCount || 0,
+    versionCount: data.versionCount || 0,
+    filters: data.filters || { userId: opts?.userId || 0, emoji: opts?.emoji || "" },
+  };
 }
 
 export async function deleteAdminFotomoji(

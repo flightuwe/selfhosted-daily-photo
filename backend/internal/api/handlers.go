@@ -165,6 +165,7 @@ func (s *Server) Router() *gin.Engine {
 			admin.DELETE("/reports/:id", s.handleAdminDeleteReport)
 			admin.DELETE("/reports", s.handleAdminDeleteReports)
 			admin.GET("/fotomojis", s.handleAdminListFotomojis)
+			admin.GET("/fotomojis/history", s.handleAdminFotomojiHistory)
 			admin.DELETE("/fotomojis/:id", s.handleAdminDeleteFotomoji)
 			admin.GET("/debug/logs", s.handleAdminDebugLogs)
 			admin.DELETE("/debug/logs", s.handleAdminDeleteDebugLogs)
@@ -6049,12 +6050,61 @@ func (s *Server) handleDeleteMyFotomojiTemplate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
-	if err := s.DB.Delete(&row).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
+	oldPath := strings.TrimSpace(row.FilePath)
+	activeVersionID := row.ActiveVersionID
+	if activeVersionID == 0 {
+		var inferred models.UserFotomojiTemplateVersion
+		if err := s.DB.Where("user_id = ? AND emoji = ? AND file_path = ?", user.ID, emoji, oldPath).
+			Order("id desc").
+			First(&inferred).Error; err == nil {
+			activeVersionID = inferred.ID
+		}
 	}
-	_ = s.removeFotomojiFileIfUnreferenced(row.FilePath, 0)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "emoji": emoji})
+	if activeVersionID != 0 {
+		if err := s.DB.Where("id = ? AND user_id = ? AND emoji = ?", activeVersionID, user.ID, emoji).
+			Delete(&models.UserFotomojiTemplateVersion{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+			return
+		}
+	}
+	var fallback models.UserFotomojiTemplateVersion
+	err := s.DB.Where("user_id = ? AND emoji = ?", user.ID, emoji).
+		Order("id desc").
+		First(&fallback).Error
+	switch {
+	case err == nil:
+		if err := s.DB.Model(&row).Updates(map[string]any{
+			"file_path":         fallback.FilePath,
+			"active_version_id": fallback.ID,
+			"updated_at":        time.Now().UTC(),
+		}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
+			return
+		}
+		if oldPath != strings.TrimSpace(fallback.FilePath) {
+			_ = s.removeFotomojiFileIfUnreferenced(oldPath, 0)
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"ok":    true,
+			"emoji": emoji,
+			"fallback": s.fotomojiTemplateVersionJSON(
+				fallback.ID,
+				fallback.FilePath,
+				fallback.CreatedAt,
+				true,
+				0,
+			),
+		})
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		if err := s.DB.Delete(&row).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+			return
+		}
+		_ = s.removeFotomojiFileIfUnreferenced(oldPath, 0)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "emoji": emoji, "fallback": nil})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+	}
 }
 
 func (s *Server) handleAdminListFotomojis(c *gin.Context) {
@@ -6141,6 +6191,263 @@ func (s *Server) handleAdminListFotomojis(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"items": items, "count": len(items)})
+}
+
+func (s *Server) handleAdminFotomojiHistory(c *gin.Context) {
+	limit := 1200
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			if n < 50 {
+				n = 50
+			}
+			if n > 5000 {
+				n = 5000
+			}
+			limit = n
+		}
+	}
+	filterUserID := uint(0)
+	if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+		parsed, err := parseUintParam(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+			return
+		}
+		filterUserID = parsed
+	}
+	filterEmojiRaw := strings.TrimSpace(c.Query("emoji"))
+	filterEmoji := normalizeFotomojiEmoji(filterEmojiRaw)
+	if filterEmojiRaw != "" && filterEmoji == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid emoji"})
+		return
+	}
+
+	type templateRow struct {
+		UserID          uint      `gorm:"column:user_id"`
+		Emoji           string    `gorm:"column:emoji"`
+		FilePath        string    `gorm:"column:file_path"`
+		ActiveVersionID uint      `gorm:"column:active_version_id"`
+		UpdatedAt       time.Time `gorm:"column:updated_at"`
+		Username        string    `gorm:"column:username"`
+		FavoriteColor   string    `gorm:"column:favorite_color"`
+	}
+	type versionRow struct {
+		VersionID     uint      `gorm:"column:version_id"`
+		UserID        uint      `gorm:"column:user_id"`
+		Emoji         string    `gorm:"column:emoji"`
+		FilePath      string    `gorm:"column:file_path"`
+		CreatedAt     time.Time `gorm:"column:created_at"`
+		Username      string    `gorm:"column:username"`
+		FavoriteColor string    `gorm:"column:favorite_color"`
+	}
+	var activeRows []templateRow
+	activeQuery := s.DB.Table("user_fotomoji_templates t").
+		Select("t.user_id, t.emoji, t.file_path, t.active_version_id, t.updated_at, u.username, u.favorite_color").
+		Joins("JOIN users u ON u.id = t.user_id").
+		Order("u.username asc, t.emoji asc")
+	if filterUserID != 0 {
+		activeQuery = activeQuery.Where("t.user_id = ?", filterUserID)
+	}
+	if filterEmoji != "" {
+		activeQuery = activeQuery.Where("t.emoji = ?", filterEmoji)
+	}
+	if err := activeQuery.Find(&activeRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	var versionRows []versionRow
+	versionQuery := s.DB.Table("user_fotomoji_template_versions v").
+		Select("v.id as version_id, v.user_id, v.emoji, v.file_path, v.created_at, u.username, u.favorite_color").
+		Joins("JOIN users u ON u.id = v.user_id").
+		Order("v.created_at desc, v.id desc").
+		Limit(limit)
+	if filterUserID != 0 {
+		versionQuery = versionQuery.Where("v.user_id = ?", filterUserID)
+	}
+	if filterEmoji != "" {
+		versionQuery = versionQuery.Where("v.emoji = ?", filterEmoji)
+	}
+	if err := versionQuery.Find(&versionRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	filePathSet := make(map[string]struct{}, len(versionRows)+len(activeRows))
+	for _, row := range versionRows {
+		path := strings.TrimSpace(row.FilePath)
+		if path != "" {
+			filePathSet[path] = struct{}{}
+		}
+	}
+	for _, row := range activeRows {
+		path := strings.TrimSpace(row.FilePath)
+		if path != "" {
+			filePathSet[path] = struct{}{}
+		}
+	}
+	filePaths := make([]string, 0, len(filePathSet))
+	for path := range filePathSet {
+		filePaths = append(filePaths, path)
+	}
+	postUsageByPath := make(map[string]int64, len(filePaths))
+	if len(filePaths) > 0 {
+		type usageRow struct {
+			FilePath string `gorm:"column:file_path"`
+			Count    int64  `gorm:"column:count"`
+		}
+		var usageRows []usageRow
+		if err := s.DB.Model(&models.PhotoFotomoji{}).
+			Select("file_path, COUNT(*) as count").
+			Where("file_path IN ?", filePaths).
+			Group("file_path").
+			Scan(&usageRows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+		for _, row := range usageRows {
+			postUsageByPath[row.FilePath] = row.Count
+		}
+	}
+
+	type emojiHistory struct {
+		Emoji           string
+		ActiveVersionID uint
+		ActivePath      string
+		ActiveUpdatedAt time.Time
+		Versions        []versionRow
+	}
+	type userHistory struct {
+		UserID        uint
+		Username      string
+		FavoriteColor string
+		ByEmoji       map[string]*emojiHistory
+	}
+	userByID := map[uint]*userHistory{}
+	ensureUser := func(userID uint, username string, favoriteColor string) *userHistory {
+		if existing, ok := userByID[userID]; ok {
+			return existing
+		}
+		created := &userHistory{
+			UserID:        userID,
+			Username:      username,
+			FavoriteColor: favoriteColor,
+			ByEmoji:       map[string]*emojiHistory{},
+		}
+		userByID[userID] = created
+		return created
+	}
+	ensureEmoji := func(user *userHistory, emoji string) *emojiHistory {
+		if existing, ok := user.ByEmoji[emoji]; ok {
+			return existing
+		}
+		created := &emojiHistory{Emoji: emoji}
+		user.ByEmoji[emoji] = created
+		return created
+	}
+
+	for _, row := range activeRows {
+		u := ensureUser(row.UserID, row.Username, defaultColor(row.FavoriteColor))
+		e := ensureEmoji(u, row.Emoji)
+		e.ActiveVersionID = row.ActiveVersionID
+		e.ActivePath = row.FilePath
+		e.ActiveUpdatedAt = row.UpdatedAt
+	}
+	versionByID := map[uint]versionRow{}
+	for _, row := range versionRows {
+		u := ensureUser(row.UserID, row.Username, defaultColor(row.FavoriteColor))
+		e := ensureEmoji(u, row.Emoji)
+		e.Versions = append(e.Versions, row)
+		versionByID[row.VersionID] = row
+	}
+
+	userIDs := make([]uint, 0, len(userByID))
+	for userID := range userByID {
+		userIDs = append(userIDs, userID)
+	}
+	sort.Slice(userIDs, func(i, j int) bool {
+		left := userByID[userIDs[i]]
+		right := userByID[userIDs[j]]
+		if left.Username == right.Username {
+			return left.UserID < right.UserID
+		}
+		return strings.ToLower(left.Username) < strings.ToLower(right.Username)
+	})
+
+	items := make([]gin.H, 0, len(userIDs))
+	for _, userID := range userIDs {
+		userItem := userByID[userID]
+		emojis := make([]string, 0, len(userItem.ByEmoji))
+		for emoji := range userItem.ByEmoji {
+			emojis = append(emojis, emoji)
+		}
+		sort.Strings(emojis)
+		emojiItems := make([]gin.H, 0, len(emojis))
+		for _, emoji := range emojis {
+			history := userItem.ByEmoji[emoji]
+			sort.Slice(history.Versions, func(i, j int) bool {
+				if history.Versions[i].CreatedAt.Equal(history.Versions[j].CreatedAt) {
+					return history.Versions[i].VersionID > history.Versions[j].VersionID
+				}
+				return history.Versions[i].CreatedAt.After(history.Versions[j].CreatedAt)
+			})
+			versionItems := make([]gin.H, 0, len(history.Versions))
+			for _, version := range history.Versions {
+				versionItems = append(versionItems, s.fotomojiTemplateVersionJSON(
+					version.VersionID,
+					version.FilePath,
+					version.CreatedAt,
+					version.VersionID == history.ActiveVersionID,
+					postUsageByPath[version.FilePath],
+				))
+			}
+			activeOut := any(nil)
+			if history.ActiveVersionID != 0 {
+				if activeVersion, ok := versionByID[history.ActiveVersionID]; ok {
+					activeOut = s.fotomojiTemplateVersionJSON(
+						activeVersion.VersionID,
+						activeVersion.FilePath,
+						activeVersion.CreatedAt,
+						true,
+						postUsageByPath[activeVersion.FilePath],
+					)
+				}
+			}
+			if activeOut == nil && strings.TrimSpace(history.ActivePath) != "" {
+				activeOut = gin.H{
+					"id":             history.ActiveVersionID,
+					"url":            s.avatarURL(history.ActivePath),
+					"filePath":       history.ActivePath,
+					"createdAt":      history.ActiveUpdatedAt,
+					"isActive":       true,
+					"postUsageCount": postUsageByPath[history.ActivePath],
+				}
+			}
+			emojiItems = append(emojiItems, gin.H{
+				"emoji":         emoji,
+				"activeVersion": activeOut,
+				"versions":      versionItems,
+			})
+		}
+		items = append(items, gin.H{
+			"user": gin.H{
+				"id":            userItem.UserID,
+				"username":      userItem.Username,
+				"favoriteColor": defaultColor(userItem.FavoriteColor),
+			},
+			"emojis": emojiItems,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":        items,
+		"userCount":    len(items),
+		"versionCount": len(versionRows),
+		"filters": gin.H{
+			"userId": filterUserID,
+			"emoji":  filterEmoji,
+		},
+	})
 }
 
 func (s *Server) handleAdminDeleteFotomoji(c *gin.Context) {
@@ -6553,34 +6860,50 @@ func (s *Server) removeFotomojiFileIfUnreferenced(relPath string, excludeFotomoj
 	if templateCount > 0 {
 		return nil
 	}
+	var templateVersionCount int64
+	if err := s.DB.Model(&models.UserFotomojiTemplateVersion{}).Where("file_path = ?", path).Count(&templateVersionCount).Error; err != nil {
+		return err
+	}
+	if templateVersionCount > 0 {
+		return nil
+	}
 	return s.removePhotoFile(path)
 }
 
 func (s *Server) upsertUserFotomojiTemplate(userID uint, emoji string, filePath string) error {
-	var existing models.UserFotomojiTemplate
-	err := s.DB.Where("user_id = ? AND emoji = ?", userID, emoji).First(&existing).Error
-	if err == nil {
-		oldPath := existing.FilePath
-		if err := s.DB.Model(&existing).Updates(map[string]any{
-			"file_path":  filePath,
-			"updated_at": time.Now().UTC(),
-		}).Error; err != nil {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
+		version := models.UserFotomojiTemplateVersion{
+			UserID:    userID,
+			Emoji:     emoji,
+			FilePath:  filePath,
+			CreatedAt: now,
+		}
+		if err := tx.Create(&version).Error; err != nil {
 			return err
 		}
-		if oldPath != filePath {
-			_ = s.removeFotomojiFileIfUnreferenced(oldPath, 0)
+		var existing models.UserFotomojiTemplate
+		err := tx.Where("user_id = ? AND emoji = ?", userID, emoji).First(&existing).Error
+		if err == nil {
+			return tx.Model(&existing).Updates(map[string]any{
+				"file_path":         filePath,
+				"active_version_id": version.ID,
+				"updated_at":        now,
+			}).Error
 		}
-		return nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	row := models.UserFotomojiTemplate{
-		UserID:   userID,
-		Emoji:    emoji,
-		FilePath: filePath,
-	}
-	return s.DB.Create(&row).Error
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		row := models.UserFotomojiTemplate{
+			UserID:          userID,
+			Emoji:           emoji,
+			FilePath:        filePath,
+			ActiveVersionID: version.ID,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+		return tx.Create(&row).Error
+	})
 }
 
 func (s *Server) upsertPhotoFotomojiRecord(photo models.Photo, actor models.User, emoji string, filePath string) (bool, error) {
@@ -6620,11 +6943,23 @@ func (s *Server) upsertPhotoFotomojiRecord(photo models.Photo, actor models.User
 
 func (s *Server) fotomojiTemplateJSON(tpl models.UserFotomojiTemplate) gin.H {
 	return gin.H{
-		"id":        tpl.ID,
-		"emoji":     tpl.Emoji,
-		"url":       s.avatarURL(tpl.FilePath),
-		"createdAt": tpl.CreatedAt,
-		"updatedAt": tpl.UpdatedAt,
+		"id":              tpl.ID,
+		"emoji":           tpl.Emoji,
+		"url":             s.avatarURL(tpl.FilePath),
+		"createdAt":       tpl.CreatedAt,
+		"updatedAt":       tpl.UpdatedAt,
+		"activeVersionId": tpl.ActiveVersionID,
+	}
+}
+
+func (s *Server) fotomojiTemplateVersionJSON(versionID uint, filePath string, createdAt time.Time, isActive bool, postUsageCount int64) gin.H {
+	return gin.H{
+		"id":             versionID,
+		"url":            s.avatarURL(filePath),
+		"filePath":       filePath,
+		"createdAt":      createdAt,
+		"isActive":       isActive,
+		"postUsageCount": postUsageCount,
 	}
 }
 

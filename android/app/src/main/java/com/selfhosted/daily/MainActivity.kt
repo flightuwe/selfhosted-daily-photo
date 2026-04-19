@@ -1283,6 +1283,12 @@ class AppRepo(
         prefs.edit().putInt("upload_quality", value.coerceIn(20, 100)).apply()
     }
 
+    fun fotomojiUploadQuality(): Int = prefs.getInt("fotomoji_upload_quality", 30).coerceIn(20, 100)
+
+    fun setFotomojiUploadQuality(value: Int) {
+        prefs.edit().putInt("fotomoji_upload_quality", value.coerceIn(20, 100)).apply()
+    }
+
     private fun lastSyncedDeviceToken(): String = prefs.getString("last_synced_device_token", "") ?: ""
     private fun lastSyncedDeviceTokenAt(): Long = prefs.getLong("last_synced_device_token_at", 0L)
 
@@ -1762,7 +1768,7 @@ class AppRepo(
         uri: Uri,
         saveTemplate: Boolean
     ): PhotoInteractionsResponse {
-        val file = copyUriToTemp(uri)
+        val file = copyUriToTemp(uri, quality = fotomojiUploadQuality())
         val part = MultipartBody.Part.createFormData(
             "photo",
             file.name,
@@ -1779,7 +1785,7 @@ class AppRepo(
         authorizedCall("/api/me/fotomojis/templates") { token -> api.listFotomojiTemplates(token).items }
 
     suspend fun upsertFotomojiTemplate(emoji: String, uri: Uri): List<FotomojiTemplateItem> {
-        val file = copyUriToTemp(uri)
+        val file = copyUriToTemp(uri, quality = fotomojiUploadQuality())
         val part = MultipartBody.Part.createFormData(
             "photo",
             file.name,
@@ -1984,7 +1990,7 @@ class AppRepo(
         return dm.enqueue(request)
     }
 
-    private fun copyUriToTemp(uri: Uri): File {
+    private fun copyUriToTemp(uri: Uri, quality: Int = uploadQuality()): File {
         val resolver = context.contentResolver
         val originalName = resolver.query(uri, null, null, null, null)?.use { cursor ->
             val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
@@ -1992,6 +1998,7 @@ class AppRepo(
         } ?: "upload.jpg"
         val safeBase = originalName.substringBeforeLast(".").ifBlank { "upload" }
         val target = File(context.cacheDir, "${safeBase}_${UUID.randomUUID()}.jpg")
+        val clampedQuality = quality.coerceIn(20, 100)
         return runCatching {
             val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             resolver.openInputStream(uri).use { input ->
@@ -2009,7 +2016,7 @@ class AppRepo(
             val processed = if (rotation == 0) decoded else rotateBitmap(decoded, rotation)
             if (processed !== decoded) decoded.recycle()
             FileOutputStream(target).use { out ->
-                processed.compress(Bitmap.CompressFormat.JPEG, uploadQuality(), out)
+                processed.compress(Bitmap.CompressFormat.JPEG, clampedQuality, out)
             }
             processed.recycle()
             target
@@ -2172,6 +2179,7 @@ data class UiState(
     val darkMode: Boolean = false,
     val oledMode: Boolean = false,
     val uploadQuality: Int = 80,
+    val fotomojiUploadQuality: Int = 30,
     val autoUpdateEnabled: Boolean = false,
     val notificationMasterEnabled: Boolean = true,
     val useFotomojiReactions: Boolean = false,
@@ -2254,6 +2262,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         "community_stats",
         "moment_rules",
         "upload_quality",
+        "fotomoji_upload_quality",
         "past_posts"
     )
     private var profileSetupPromptShownInSession = false
@@ -2269,6 +2278,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             darkMode = repo.isDarkMode(),
             oledMode = repo.isOledMode(),
             uploadQuality = repo.uploadQuality(),
+            fotomojiUploadQuality = repo.fotomojiUploadQuality(),
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             useFotomojiReactions = repo.useFotomojiReactions(),
@@ -2497,6 +2507,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             showChangelogDialog = showChangelog,
             changelogLines = changelogLines,
             uploadQueue = repo.uploadQueue(),
+            fotomojiUploadQuality = repo.fotomojiUploadQuality(),
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             useFotomojiReactions = repo.useFotomojiReactions(),
@@ -2614,6 +2625,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             darkMode = state.darkMode,
             oledMode = state.oledMode,
             uploadQuality = state.uploadQuality,
+            fotomojiUploadQuality = state.fotomojiUploadQuality,
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             useFotomojiReactions = repo.useFotomojiReactions(),
@@ -4050,6 +4062,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             darkMode = state.darkMode,
             oledMode = state.oledMode,
             uploadQuality = state.uploadQuality,
+            fotomojiUploadQuality = state.fotomojiUploadQuality,
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             useFotomojiReactions = repo.useFotomojiReactions(),
@@ -4123,6 +4136,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             darkMode = state.darkMode,
             oledMode = state.oledMode,
             uploadQuality = state.uploadQuality,
+            fotomojiUploadQuality = state.fotomojiUploadQuality,
             autoUpdateEnabled = repo.autoUpdateEnabled(),
             notificationMasterEnabled = repo.notificationMasterEnabled(),
             useFotomojiReactions = repo.useFotomojiReactions(),
@@ -4298,6 +4312,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun setUploadQuality(value: Int) {
         repo.setUploadQuality(value)
         state = state.copy(uploadQuality = repo.uploadQuality())
+    }
+
+    fun setFotomojiUploadQuality(value: Int) {
+        repo.setFotomojiUploadQuality(value)
+        state = state.copy(fotomojiUploadQuality = repo.fotomojiUploadQuality())
     }
 
     fun setAutoUpdateEnabled(enabled: Boolean) {
@@ -5908,6 +5927,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     serverConnected = state.serverConnected,
                     lastPingMs = state.lastPingMs,
                     uploadQuality = state.uploadQuality,
+                    fotomojiUploadQuality = state.fotomojiUploadQuality,
                     autoUpdateEnabled = state.autoUpdateEnabled,
                     notificationMasterEnabled = state.notificationMasterEnabled,
                     useFotomojiReactions = state.useFotomojiReactions,
@@ -5944,6 +5964,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     communityStatsLoading = state.communityStatsLoading,
                     onThemeModeChange = { vm.setThemeMode(it) },
                     onUploadQualityChange = { vm.setUploadQuality(it) },
+                    onFotomojiUploadQualityChange = { vm.setFotomojiUploadQuality(it) },
                     onAutoUpdateEnabledChange = { vm.setAutoUpdateEnabled(it) },
                     onChatPushEnabledChange = { scope.launch { vm.setChatPushEnabled(it) } },
                     onPollPushEnabledChange = { scope.launch { vm.setPollPushEnabled(it) } },
@@ -7509,6 +7530,7 @@ fun ProfileTab(
     serverConnected: Boolean,
     lastPingMs: Long?,
     uploadQuality: Int,
+    fotomojiUploadQuality: Int,
     autoUpdateEnabled: Boolean,
     notificationMasterEnabled: Boolean,
     useFotomojiReactions: Boolean,
@@ -7545,6 +7567,7 @@ fun ProfileTab(
     communityStatsLoading: Boolean,
     onThemeModeChange: (Int) -> Unit,
     onUploadQualityChange: (Int) -> Unit,
+    onFotomojiUploadQualityChange: (Int) -> Unit,
     onAutoUpdateEnabledChange: (Boolean) -> Unit,
     onChatPushEnabledChange: (Boolean) -> Unit,
     onPollPushEnabledChange: (Boolean) -> Unit,
@@ -8466,6 +8489,26 @@ fun ProfileTab(
                                   valueRange = 20f..100f
                               )
                               Text("Weniger Qualitaet = kleiner und schnellerer Upload")
+                          }
+                      }
+                  }
+              }
+              item {
+                  CollapsibleSection(
+                      title = "FotoMoji-Komprimierung",
+                      subtitle = "Qualitaet fuer FotoMoji-Bilder",
+                      expanded = sectionExpanded("fotomoji_upload_quality"),
+                      onExpandedChange = { onProfileSectionExpandedChange("fotomoji_upload_quality", it) }
+                  ) {
+                      Card {
+                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                              Text("FotoMoji JPEG-Qualitaet: $fotomojiUploadQuality%")
+                              Slider(
+                                  value = fotomojiUploadQuality.toFloat(),
+                                  onValueChange = { onFotomojiUploadQualityChange(it.toInt()) },
+                                  valueRange = 20f..100f
+                              )
+                              Text("Gilt fuer FotoMoji-Uploads und FotoMoji-Template-Aufnahmen")
                           }
                       }
                   }

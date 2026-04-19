@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
@@ -45,6 +46,7 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.PhotoReaction{},
 		&models.PhotoFotomoji{},
 		&models.UserFotomojiTemplate{},
+		&models.UserFotomojiTemplateVersion{},
 		&models.PhotoComment{},
 		&models.ChatMessage{},
 		&models.ChatPollOption{},
@@ -73,6 +75,9 @@ func Connect(path string) (*gorm.DB, error) {
 		return nil, err
 	}
 	if err := ensureDailyDispatchRetention(database, 30); err != nil {
+		return nil, err
+	}
+	if err := ensureFotomojiTemplateVersionBackfill(database); err != nil {
 		return nil, err
 	}
 
@@ -241,4 +246,41 @@ func ensureDailyDispatchRetention(database *gorm.DB, days int) error {
 	}
 	cutoff := time.Now().AddDate(0, 0, -days)
 	return database.Where("created_at < ?", cutoff).Delete(&models.DailyDispatch{}).Error
+}
+
+func ensureFotomojiTemplateVersionBackfill(database *gorm.DB) error {
+	var templates []models.UserFotomojiTemplate
+	if err := database.
+		Where("active_version_id = ? OR active_version_id IS NULL", 0).
+		Find(&templates).Error; err != nil {
+		return err
+	}
+	for _, tpl := range templates {
+		path := strings.TrimSpace(tpl.FilePath)
+		if path == "" {
+			continue
+		}
+		createdAt := tpl.UpdatedAt
+		if createdAt.IsZero() {
+			createdAt = tpl.CreatedAt
+		}
+		if createdAt.IsZero() {
+			createdAt = time.Now().UTC()
+		}
+		version := models.UserFotomojiTemplateVersion{
+			UserID:    tpl.UserID,
+			Emoji:     tpl.Emoji,
+			FilePath:  path,
+			CreatedAt: createdAt,
+		}
+		if err := database.Create(&version).Error; err != nil {
+			return err
+		}
+		if err := database.Model(&models.UserFotomojiTemplate{}).
+			Where("id = ?", tpl.ID).
+			Update("active_version_id", version.ID).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

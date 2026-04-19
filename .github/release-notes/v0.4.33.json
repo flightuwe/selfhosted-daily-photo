@@ -1,0 +1,36 @@
+{
+  "version": "0.4.33",
+  "releasedAt": "2026-04-19T00:00:00Z",
+  "highlights": [
+    "FotoMoji-Templates haben jetzt eine Historie pro Nutzer und Emoji.",
+    "Loeschen eines aktiven Templates faellt auf die vorherige Version zurueck.",
+    "Admin zeigt FotoMoji-Historie je Nutzer und Emoji inklusive Aktiv-Markierung.",
+    "Profil hat einen separaten FotoMoji-Komprimierungsregler mit Standard 30 Prozent."
+  ],
+  "details": [
+    {
+      "title": "FotoMoji template history",
+      "items": [
+        "Neue Template-Version wird bei jeder FotoMoji-Template-Aufnahme gespeichert.",
+        "Aktives Template pro Emoji bleibt sofort nutzbar, alte Versionen bleiben historisch erhalten.",
+        "Bereits gesetzte Post-FotoMojis bleiben unveraendert."
+      ]
+    },
+    {
+      "title": "Delete fallback behavior",
+      "items": [
+        "Beim Loeschen wird zuerst die aktive Version entfernt.",
+        "Falls vorhanden wird automatisch die vorherige Version wieder aktiv.",
+        "Dateien werden nur geloescht, wenn sie nirgends mehr referenziert sind."
+      ]
+    },
+    {
+      "title": "Admin and Android",
+      "items": [
+        "Admin hat eine neue Historienansicht User -> Emoji -> Timeline.",
+        "Android nutzt fuer FotoMoji einen separaten Komprimierungsregler (Default 30).",
+        "versionName auf 0.4.33 gesetzt und versionCode auf 84 erhoeht."
+      ]
+    }
+  ]
+}
