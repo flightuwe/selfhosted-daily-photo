@@ -1,0 +1,36 @@
+{
+  "version": "0.4.34",
+  "releasedAt": "2026-04-19T00:00:00Z",
+  "highlights": [
+    "Admin FotoMoji-Moderation unterstuetzt jetzt Bulk-Loeschen mit Mehrfachauswahl.",
+    "FotoMoji-Moderation und Historie haben neue Filter fuer Emoji und Zeitraum (from/to).",
+    "Android Profil buendelt normale Upload- und FotoMoji-Komprimierung in einer ausklappbaren Sektion.",
+    "GitHub Workflows nutzen Node24 Action Forcing zur Node20-Warnungs-Mitigierung."
+  ],
+  "details": [
+    {
+      "title": "Admin FotoMoji Moderation",
+      "items": [
+        "Neuer Bulk-Delete Endpoint fuer FotoMojis im Backend.",
+        "Admin-Tabelle mit Mehrfachauswahl, Alle-auswaehlen und Sammel-Loeschen.",
+        "Moderationsliste filtert jetzt auf Emoji sowie optionalen Datumsbereich."
+      ]
+    },
+    {
+      "title": "FotoMoji Historie",
+      "items": [
+        "Historienabfrage unterstuetzt jetzt optionalen Datumsbereich (from/to).",
+        "Filter kombinierbar mit User- und Emoji-Filter.",
+        "Historie bleibt pro User und Emoji gruppiert."
+      ]
+    },
+    {
+      "title": "Android & CI",
+      "items": [
+        "Upload-Komprimierung und FotoMoji-Komprimierung in einer gemeinsamen ausklappbaren Profil-Sektion.",
+        "versionName auf 0.4.34 gesetzt und versionCode auf 85 erhoeht.",
+        "Workflows mit FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true aktualisiert."
+      ]
+    }
+  ]
+}

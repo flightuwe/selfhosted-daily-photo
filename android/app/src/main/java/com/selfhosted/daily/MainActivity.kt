@@ -2261,8 +2261,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         "debug_diagnose",
         "community_stats",
         "moment_rules",
-        "upload_quality",
-        "fotomoji_upload_quality",
+        "upload_compression",
         "past_posts"
     )
     private var profileSetupPromptShownInSession = false
@@ -8476,12 +8475,13 @@ fun ProfileTab(
               item {
                   CollapsibleSection(
                       title = "Upload-Komprimierung",
-                      subtitle = "Qualitaet vs. Geschwindigkeit",
-                      expanded = sectionExpanded("upload_quality"),
-                      onExpandedChange = { onProfileSectionExpandedChange("upload_quality", it) }
+                      subtitle = "Regler fuer Foto- und FotoMoji-Uploads",
+                      expanded = sectionExpanded("upload_compression"),
+                      onExpandedChange = { onProfileSectionExpandedChange("upload_compression", it) }
                   ) {
                       Card {
                           Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                              Text("Normaler Foto-Upload", fontWeight = FontWeight.SemiBold)
                               Text("JPEG-Qualitaet: $uploadQuality%")
                               Slider(
                                   value = uploadQuality.toFloat(),
@@ -8491,17 +8491,9 @@ fun ProfileTab(
                               Text("Weniger Qualitaet = kleiner und schnellerer Upload")
                           }
                       }
-                  }
-              }
-              item {
-                  CollapsibleSection(
-                      title = "FotoMoji-Komprimierung",
-                      subtitle = "Qualitaet fuer FotoMoji-Bilder",
-                      expanded = sectionExpanded("fotomoji_upload_quality"),
-                      onExpandedChange = { onProfileSectionExpandedChange("fotomoji_upload_quality", it) }
-                  ) {
                       Card {
                           Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                              Text("FotoMoji-Upload", fontWeight = FontWeight.SemiBold)
                               Text("FotoMoji JPEG-Qualitaet: $fotomojiUploadQuality%")
                               Slider(
                                   value = fotomojiUploadQuality.toFloat(),

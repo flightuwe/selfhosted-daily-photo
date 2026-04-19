@@ -166,6 +166,7 @@ func (s *Server) Router() *gin.Engine {
 			admin.DELETE("/reports", s.handleAdminDeleteReports)
 			admin.GET("/fotomojis", s.handleAdminListFotomojis)
 			admin.GET("/fotomojis/history", s.handleAdminFotomojiHistory)
+			admin.POST("/fotomojis/bulk-delete", s.handleAdminBulkDeleteFotomojis)
 			admin.DELETE("/fotomojis/:id", s.handleAdminDeleteFotomoji)
 			admin.GET("/debug/logs", s.handleAdminDebugLogs)
 			admin.DELETE("/debug/logs", s.handleAdminDeleteDebugLogs)
@@ -5097,6 +5098,31 @@ func parseAdminSinceHours(raw string) (int, error) {
 	return n, nil
 }
 
+func (s *Server) parseAdminDateRange(fromRaw string, toRaw string) (string, string, *time.Time, *time.Time, error) {
+	fromDay := strings.TrimSpace(fromRaw)
+	toDay := strings.TrimSpace(toRaw)
+	if (fromDay == "") != (toDay == "") {
+		return "", "", nil, nil, errors.New("from/to must be provided together")
+	}
+	if fromDay == "" {
+		return "", "", nil, nil, nil
+	}
+	fromParsed, err := time.ParseInLocation("2006-01-02", fromDay, s.Location)
+	if err != nil {
+		return "", "", nil, nil, errors.New("invalid from date")
+	}
+	toParsed, err := time.ParseInLocation("2006-01-02", toDay, s.Location)
+	if err != nil {
+		return "", "", nil, nil, errors.New("invalid to date")
+	}
+	if fromParsed.After(toParsed) {
+		return "", "", nil, nil, errors.New("from must be before or equal to to")
+	}
+	fromStart := fromParsed
+	toExclusive := toParsed.AddDate(0, 0, 1)
+	return fromDay, toDay, &fromStart, &toExclusive, nil
+}
+
 func adminSinceCutoff(now time.Time, sinceHours int) time.Time {
 	return now.UTC().Add(-time.Duration(sinceHours) * time.Hour)
 }
@@ -6121,6 +6147,17 @@ func (s *Server) handleAdminListFotomojis(c *gin.Context) {
 		}
 	}
 	day := strings.TrimSpace(c.Query("day"))
+	filterEmojiRaw := strings.TrimSpace(c.Query("emoji"))
+	filterEmoji := normalizeFotomojiEmoji(filterEmojiRaw)
+	if filterEmojiRaw != "" && filterEmoji == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid emoji"})
+		return
+	}
+	fromDay, toDay, fromTime, toTime, rangeErr := s.parseAdminDateRange(c.Query("from"), c.Query("to"))
+	if rangeErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": rangeErr.Error()})
+		return
+	}
 	reactorUserID := uint(0)
 	if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
 		parsed, err := parseUintParam(raw)
@@ -6138,8 +6175,14 @@ func (s *Server) handleAdminListFotomojis(c *gin.Context) {
 	if reactorUserID != 0 {
 		q = q.Where("photo_fotomojis.user_id = ?", reactorUserID)
 	}
+	if filterEmoji != "" {
+		q = q.Where("photo_fotomojis.emoji = ?", filterEmoji)
+	}
 	if day != "" {
 		q = q.Joins("JOIN photos ON photos.id = photo_fotomojis.photo_id").Where("photos.day = ?", day)
+	}
+	if fromTime != nil && toTime != nil {
+		q = q.Where("photo_fotomojis.created_at >= ? AND photo_fotomojis.created_at < ?", fromTime.UTC(), toTime.UTC())
 	}
 
 	var rows []models.PhotoFotomoji
@@ -6190,7 +6233,17 @@ func (s *Server) handleAdminListFotomojis(c *gin.Context) {
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"items": items, "count": len(items)})
+	c.JSON(http.StatusOK, gin.H{
+		"items": items,
+		"count": len(items),
+		"filters": gin.H{
+			"day":    day,
+			"userId": reactorUserID,
+			"emoji":  filterEmoji,
+			"from":   fromDay,
+			"to":     toDay,
+		},
+	})
 }
 
 func (s *Server) handleAdminFotomojiHistory(c *gin.Context) {
@@ -6219,6 +6272,11 @@ func (s *Server) handleAdminFotomojiHistory(c *gin.Context) {
 	filterEmoji := normalizeFotomojiEmoji(filterEmojiRaw)
 	if filterEmojiRaw != "" && filterEmoji == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid emoji"})
+		return
+	}
+	fromDay, toDay, fromTime, toTime, rangeErr := s.parseAdminDateRange(c.Query("from"), c.Query("to"))
+	if rangeErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": rangeErr.Error()})
 		return
 	}
 
@@ -6251,6 +6309,9 @@ func (s *Server) handleAdminFotomojiHistory(c *gin.Context) {
 	if filterEmoji != "" {
 		activeQuery = activeQuery.Where("t.emoji = ?", filterEmoji)
 	}
+	if fromTime != nil && toTime != nil {
+		activeQuery = activeQuery.Where("t.updated_at >= ? AND t.updated_at < ?", fromTime.UTC(), toTime.UTC())
+	}
 	if err := activeQuery.Find(&activeRows).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -6267,6 +6328,9 @@ func (s *Server) handleAdminFotomojiHistory(c *gin.Context) {
 	}
 	if filterEmoji != "" {
 		versionQuery = versionQuery.Where("v.emoji = ?", filterEmoji)
+	}
+	if fromTime != nil && toTime != nil {
+		versionQuery = versionQuery.Where("v.created_at >= ? AND v.created_at < ?", fromTime.UTC(), toTime.UTC())
 	}
 	if err := versionQuery.Find(&versionRows).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -6446,6 +6510,8 @@ func (s *Server) handleAdminFotomojiHistory(c *gin.Context) {
 		"filters": gin.H{
 			"userId": filterUserID,
 			"emoji":  filterEmoji,
+			"from":   fromDay,
+			"to":     toDay,
 		},
 	})
 }
@@ -6476,6 +6542,97 @@ func (s *Server) handleAdminDeleteFotomoji(c *gin.Context) {
 		s.invalidateFeedDayCache(photo.Day)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deletedId": row.ID})
+}
+
+func (s *Server) handleAdminBulkDeleteFotomojis(c *gin.Context) {
+	var req struct {
+		IDs []uint `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ids required"})
+		return
+	}
+	if len(req.IDs) > 1000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "too many ids"})
+		return
+	}
+	idSet := make(map[uint]struct{}, len(req.IDs))
+	ids := make([]uint, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		if id == 0 {
+			continue
+		}
+		if _, exists := idSet[id]; exists {
+			continue
+		}
+		idSet[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ids required"})
+		return
+	}
+
+	var rows []models.PhotoFotomoji
+	if err := s.DB.Where("id IN ?", ids).Find(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if len(rows) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "fotomojis not found"})
+		return
+	}
+
+	foundIDs := make([]uint, 0, len(rows))
+	photoIDSet := make(map[uint]struct{}, len(rows))
+	filePathSet := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		foundIDs = append(foundIDs, row.ID)
+		photoIDSet[row.PhotoID] = struct{}{}
+		path := strings.TrimSpace(row.FilePath)
+		if path != "" {
+			filePathSet[path] = struct{}{}
+		}
+	}
+
+	if err := s.DB.Where("id IN ?", foundIDs).Delete(&models.PhotoFotomoji{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+
+	photoIDs := make([]uint, 0, len(photoIDSet))
+	for photoID := range photoIDSet {
+		photoIDs = append(photoIDs, photoID)
+	}
+	daySet := make(map[string]struct{}, len(photoIDs))
+	if len(photoIDs) > 0 {
+		var photos []models.Photo
+		if err := s.DB.Select("id", "day").Where("id IN ?", photoIDs).Find(&photos).Error; err == nil {
+			for _, photo := range photos {
+				day := strings.TrimSpace(photo.Day)
+				if day != "" {
+					daySet[day] = struct{}{}
+				}
+			}
+		}
+	}
+
+	for path := range filePathSet {
+		_ = s.removeFotomojiFileIfUnreferenced(path, 0)
+	}
+	for day := range daySet {
+		s.invalidateFeedDayCache(day)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"ok":           true,
+		"deletedCount": len(foundIDs),
+		"deletedIds":   foundIDs,
+	})
 }
 
 func (s *Server) handlePhotoComment(c *gin.Context) {

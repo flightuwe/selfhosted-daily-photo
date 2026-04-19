@@ -639,7 +639,7 @@ export type AdminFotomojiHistoryResponse = {
   items: AdminFotomojiTemplateHistoryUser[];
   userCount: number;
   versionCount: number;
-  filters?: { userId?: number; emoji?: string };
+  filters?: { userId?: number; emoji?: string; from?: string; to?: string };
 };
 
 export type ChatCommand = {
@@ -1329,11 +1329,14 @@ export async function getAdminTimeCapsules(token: string): Promise<AdminTimeCaps
 
 export async function getAdminFotomojis(
   token: string,
-  opts?: { day?: string; userId?: number; limit?: number }
+  opts?: { day?: string; userId?: number; emoji?: string; from?: string; to?: string; limit?: number }
 ): Promise<AdminFotomojiItem[]> {
   const qs = new URLSearchParams();
   if (opts?.day) qs.set("day", opts.day);
   if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
+  if (opts?.emoji && opts.emoji.trim()) qs.set("emoji", opts.emoji.trim());
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
   qs.set("limit", String(opts?.limit ?? 300));
   const url = `${apiBase}/admin/fotomojis?${qs.toString()}`;
   const res = await fetch(url, {
@@ -1345,11 +1348,13 @@ export async function getAdminFotomojis(
 
 export async function getAdminFotomojiHistory(
   token: string,
-  opts?: { userId?: number; emoji?: string; limit?: number }
+  opts?: { userId?: number; emoji?: string; from?: string; to?: string; limit?: number }
 ): Promise<AdminFotomojiHistoryResponse> {
   const qs = new URLSearchParams();
   if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
   if (opts?.emoji && opts.emoji.trim()) qs.set("emoji", opts.emoji.trim());
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
   qs.set("limit", String(opts?.limit ?? 1200));
   const res = await fetch(`${apiBase}/admin/fotomojis/history?${qs.toString()}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -1359,7 +1364,12 @@ export async function getAdminFotomojiHistory(
     items: data.items || [],
     userCount: data.userCount || 0,
     versionCount: data.versionCount || 0,
-    filters: data.filters || { userId: opts?.userId || 0, emoji: opts?.emoji || "" },
+    filters: data.filters || {
+      userId: opts?.userId || 0,
+      emoji: opts?.emoji || "",
+      from: opts?.from || "",
+      to: opts?.to || "",
+    },
   };
 }
 
@@ -1372,6 +1382,22 @@ export async function deleteAdminFotomoji(
     headers: { Authorization: `Bearer ${token}` },
   });
   return parse<{ ok: boolean; deletedId: number }>(res);
+}
+
+export async function deleteAdminFotomojisBulk(
+  token: string,
+  ids: number[]
+): Promise<{ ok: boolean; deletedCount: number; deletedIds: number[] }> {
+  const cleanIds = Array.from(new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+  const res = await fetch(`${apiBase}/admin/fotomojis/bulk-delete`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ ids: cleanIds }),
+  });
+  return parse<{ ok: boolean; deletedCount: number; deletedIds: number[] }>(res);
 }
 
 export async function updateCalendarDay(token: string, day: string, plannedAt: string): Promise<CalendarItem> {

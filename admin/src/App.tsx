@@ -26,6 +26,7 @@ import {
   deleteReport,
   deleteReports,
   deleteAdminFotomoji,
+  deleteAdminFotomojisBulk,
   deleteDebugLogs,
   deleteChatCommand,
   deleteUser,
@@ -513,6 +514,9 @@ export function App() {
   const [fotomojiDayFilter, setFotomojiDayFilter] = useState("");
   const [fotomojiUserFilter, setFotomojiUserFilter] = useState<number>(0);
   const [fotomojiEmojiFilter, setFotomojiEmojiFilter] = useState("");
+  const [fotomojiFromFilter, setFotomojiFromFilter] = useState("");
+  const [fotomojiToFilter, setFotomojiToFilter] = useState("");
+  const [selectedFotomojiIds, setSelectedFotomojiIds] = useState<number[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
   const [reportTypeFilter, setReportTypeFilter] = useState<"" | "bug" | "idea">("");
@@ -562,6 +566,11 @@ export function App() {
     return users.filter((u) => u.username.toLowerCase().includes(q));
   }, [users, targetUserSearch]);
   const hasReportDeleteFilter = reportUserFilter > 0 || reportTypeFilter !== "" || reportStatusFilter !== "";
+  const selectedFotomojiSet = useMemo(() => new Set(selectedFotomojiIds), [selectedFotomojiIds]);
+  const allVisibleFotomojisSelected = useMemo(
+    () => fotomojiItems.length > 0 && fotomojiItems.every((item) => selectedFotomojiSet.has(item.id)),
+    [fotomojiItems, selectedFotomojiSet]
+  );
   const debugSummary = useMemo(() => {
     const uniqueUsers = new Set(debugLogs.map((row) => row.user?.id).filter(Boolean)).size;
     const typeCounts = debugLogs.reduce<Record<string, number>>((acc, row) => {
@@ -732,6 +741,10 @@ export function App() {
   }, [token]);
 
   useEffect(() => {
+    setSelectedFotomojiIds((prev) => prev.filter((id) => fotomojiItems.some((item) => item.id === id)));
+  }, [fotomojiItems]);
+
+  useEffect(() => {
     if (!token) return;
     if (activeTab === "feed") {
       void loadFeed(token, feedDay);
@@ -762,8 +775,8 @@ export function App() {
       void loadTimeCapsules(token);
     }
     if (activeTab === "fotomojis") {
-      void loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter);
-      void loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter);
+      void loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
+      void loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
     }
     if (activeTab === "reports") {
       void loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
@@ -777,7 +790,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
+  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -1448,24 +1461,32 @@ export function App() {
     }
   }
 
-  async function loadFotomojis(authToken: string, day = "", userId = 0) {
+  async function loadFotomojis(authToken: string, day = "", userId = 0, emoji = "", fromDay = "", toDay = "") {
     try {
+      const hasRange = fromDay.trim() !== "" && toDay.trim() !== "";
       const items = await getAdminFotomojis(authToken, {
         day: day.trim() || undefined,
         userId: userId > 0 ? userId : undefined,
+        emoji: emoji.trim() || undefined,
+        from: hasRange ? fromDay.trim() : undefined,
+        to: hasRange ? toDay.trim() : undefined,
         limit: 400,
       });
       setFotomojiItems(items);
+      setSelectedFotomojiIds((prev) => prev.filter((id) => items.some((item) => item.id === id)));
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
-  async function loadFotomojiHistory(authToken: string, userId = 0, emoji = "") {
+  async function loadFotomojiHistory(authToken: string, userId = 0, emoji = "", fromDay = "", toDay = "") {
     try {
+      const hasRange = fromDay.trim() !== "" && toDay.trim() !== "";
       const response = await getAdminFotomojiHistory(authToken, {
         userId: userId > 0 ? userId : undefined,
         emoji: emoji.trim() || undefined,
+        from: hasRange ? fromDay.trim() : undefined,
+        to: hasRange ? toDay.trim() : undefined,
         limit: 1600,
       });
       setFotomojiHistory(response.items || []);
@@ -1480,7 +1501,44 @@ export function App() {
     try {
       await deleteAdminFotomoji(token, id);
       setFotomojiItems((prev) => prev.filter((item) => item.id !== id));
+      setSelectedFotomojiIds((prev) => prev.filter((x) => x !== id));
       setMessage("FotoMoji geloescht.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  function onToggleFotomojiSelection(id: number, checked: boolean) {
+    setSelectedFotomojiIds((prev) => {
+      if (checked) {
+        if (prev.includes(id)) return prev;
+        return [...prev, id];
+      }
+      return prev.filter((x) => x !== id);
+    });
+  }
+
+  function onToggleAllVisibleFotomojis(checked: boolean) {
+    if (!checked) {
+      setSelectedFotomojiIds([]);
+      return;
+    }
+    setSelectedFotomojiIds(fotomojiItems.map((item) => item.id));
+  }
+
+  async function onDeleteSelectedFotomojis() {
+    if (selectedFotomojiIds.length === 0) return;
+    if (!window.confirm(`${selectedFotomojiIds.length} FotoMojis wirklich loeschen?`)) return;
+    try {
+      const result = await deleteAdminFotomojisBulk(token, selectedFotomojiIds);
+      const deletedSet = new Set((result.deletedIds || []).map((id) => Number(id)));
+      if (deletedSet.size > 0) {
+        setFotomojiItems((prev) => prev.filter((item) => !deletedSet.has(item.id)));
+      } else {
+        setFotomojiItems((prev) => prev.filter((item) => !selectedFotomojiSet.has(item.id)));
+      }
+      setSelectedFotomojiIds([]);
+      setMessage(`${result.deletedCount || deletedSet.size} FotoMoji(s) geloescht.`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1502,8 +1560,8 @@ export function App() {
     if (activeTab === "trigger_audit") await loadTriggerAudit(token);
     if (activeTab === "time_capsule") await loadTimeCapsules(token);
     if (activeTab === "fotomojis") {
-      await loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter);
-      await loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter);
+      await loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
+      await loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
     }
     if (activeTab === "debug") await loadDebugLogs(token, debugUserFilter, debugSinceHours);
     if (activeTab === "reports") await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
@@ -3857,9 +3915,21 @@ export function App() {
                   onChange={(e) => setFotomojiEmojiFilter(e.target.value)}
                   placeholder="Emoji-Filter (z.B. ❤️)"
                 />
+                <input
+                  type="date"
+                  value={fotomojiFromFilter}
+                  onChange={(e) => setFotomojiFromFilter(e.target.value)}
+                  placeholder="Von"
+                />
+                <input
+                  type="date"
+                  value={fotomojiToFilter}
+                  onChange={(e) => setFotomojiToFilter(e.target.value)}
+                  placeholder="Bis"
+                />
                 <button onClick={() => {
-                  void loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter);
-                  void loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter);
+                  void loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
+                  void loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
                 }}>Aktualisieren</button>
               </div>
             </div>
@@ -3933,39 +4003,67 @@ export function App() {
             <h3>Post-Reaktionen (Moderation)</h3>
             {fotomojiItems.length === 0 && <p>Keine FotoMojis im aktuellen Filter.</p>}
             {fotomojiItems.length > 0 && (
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Zeit</th>
-                    <th>Reaktion</th>
-                    <th>Reagierender</th>
-                    <th>Post</th>
-                    <th>Preview</th>
-                    <th>Aktion</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {fotomojiItems.map((row) => (
-                    <tr key={row.id}>
-                      <td>{formatDateTime(row.createdAt)}</td>
-                      <td>{row.emoji}</td>
-                      <td style={{ color: row.user.favoriteColor || undefined }}>@{row.user.username}</td>
-                      <td>
-                        #{row.photo.id} {row.photo.day ? `(${formatDateShort(row.photo.day)})` : ""}
-                        {row.photo.user?.username ? ` · @${row.photo.user.username}` : ""}
-                      </td>
-                      <td>
-                        <a href={row.url} target="_blank" rel="noreferrer">
-                          <img src={row.url} alt="FotoMoji" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 12 }} />
-                        </a>
-                      </td>
-                      <td>
-                        <button className="danger" onClick={() => void onDeleteFotomoji(row.id)}>Loeschen</button>
-                      </td>
+              <div className="stack">
+                <div className="row">
+                  <label className="checkbox" style={{ margin: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={allVisibleFotomojisSelected}
+                      onChange={(e) => onToggleAllVisibleFotomojis(e.target.checked)}
+                    />
+                    Alle sichtbaren auswaehlen
+                  </label>
+                  <span className="small">{selectedFotomojiIds.length} ausgewaehlt</span>
+                  <button
+                    className="danger"
+                    disabled={selectedFotomojiIds.length === 0}
+                    onClick={() => void onDeleteSelectedFotomojis()}
+                  >
+                    Ausgewaehlte loeschen
+                  </button>
+                </div>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th />
+                      <th>Zeit</th>
+                      <th>Reaktion</th>
+                      <th>Reagierender</th>
+                      <th>Post</th>
+                      <th>Preview</th>
+                      <th>Aktion</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {fotomojiItems.map((row) => (
+                      <tr key={row.id}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selectedFotomojiSet.has(row.id)}
+                            onChange={(e) => onToggleFotomojiSelection(row.id, e.target.checked)}
+                          />
+                        </td>
+                        <td>{formatDateTime(row.createdAt)}</td>
+                        <td>{row.emoji}</td>
+                        <td style={{ color: row.user.favoriteColor || undefined }}>@{row.user.username}</td>
+                        <td>
+                          #{row.photo.id} {row.photo.day ? `(${formatDateShort(row.photo.day)})` : ""}
+                          {row.photo.user?.username ? ` · @${row.photo.user.username}` : ""}
+                        </td>
+                        <td>
+                          <a href={row.url} target="_blank" rel="noreferrer">
+                            <img src={row.url} alt="FotoMoji" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 12 }} />
+                          </a>
+                        </td>
+                        <td>
+                          <button className="danger" onClick={() => void onDeleteFotomoji(row.id)}>Loeschen</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         )}
