@@ -10,6 +10,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
 import android.graphics.Matrix
+import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -225,6 +226,8 @@ data class User(
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
     val allowPhotoDownload: Boolean = false,
+    val locationFeatureEnabled: Boolean = false,
+    val locationShareDefaultEnabled: Boolean = false,
     val avatarUrl: String = "",
     val bio: String = "",
     val statusText: String = "",
@@ -265,6 +268,8 @@ data class PreferencesUpdateRequest(
     val photoReactionPushEnabled: Boolean,
     val photoCommentPushEnabled: Boolean,
     val allowPhotoDownload: Boolean,
+    val locationFeatureEnabled: Boolean? = null,
+    val locationShareDefaultEnabled: Boolean? = null,
     val diagnosticsConsentGranted: Boolean? = null,
     val diagnosticsConsentSource: String? = null
 )
@@ -361,7 +366,10 @@ data class PromptPhoto(
     val capsulePrivate: Boolean = false,
     val capsuleGroupRemind: Boolean = false,
     val capsulePreviewUrl: String? = null,
-    val capsuleLocked: Boolean = false
+    val capsuleLocked: Boolean = false,
+    val locationShared: Boolean = false,
+    val locationDisplay: String? = null,
+    val locationMapsUrl: String? = null
 )
 data class PromptResponse(
     val day: String,
@@ -405,6 +413,11 @@ data class FeedItem(
     val requestedByUser: String? = null,
     val momentKind: String? = null,
     val specialRequestedByUserColor: String? = null
+)
+
+data class PendingLocationPayload(
+    val latitude: Double,
+    val longitude: Double
 )
 data class PhotoMojiItem(
     val id: Long,
@@ -759,7 +772,10 @@ interface Api {
         @Part("kind") kind: RequestBody,
         @Part("capsule_mode") capsuleMode: RequestBody? = null,
         @Part("capsule_private") capsulePrivate: RequestBody? = null,
-        @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null
+        @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null,
+        @Part("location_shared") locationShared: RequestBody? = null,
+        @Part("location_latitude") locationLatitude: RequestBody? = null,
+        @Part("location_longitude") locationLongitude: RequestBody? = null
     )
 
     @Multipart
@@ -771,7 +787,10 @@ interface Api {
         @Part("kind") kind: RequestBody,
         @Part("capsule_mode") capsuleMode: RequestBody? = null,
         @Part("capsule_private") capsulePrivate: RequestBody? = null,
-        @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null
+        @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null,
+        @Part("location_shared") locationShared: RequestBody? = null,
+        @Part("location_latitude") locationLatitude: RequestBody? = null,
+        @Part("location_longitude") locationLongitude: RequestBody? = null
     )
 
     @Multipart
@@ -1673,6 +1692,8 @@ class AppRepo(
         photoCommentPushEnabled: Boolean,
         allowPhotoDownload: Boolean,
         specialMomentPushEnabled: Boolean? = null,
+        locationFeatureEnabled: Boolean? = null,
+        locationShareDefaultEnabled: Boolean? = null,
         diagnosticsConsentGranted: Boolean? = null,
         diagnosticsConsentSource: String? = null
     ): User =
@@ -1686,6 +1707,8 @@ class AppRepo(
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 allowPhotoDownload = allowPhotoDownload,
                 specialMomentPushEnabled = specialMomentPushEnabled,
+                locationFeatureEnabled = locationFeatureEnabled,
+                locationShareDefaultEnabled = locationShareDefaultEnabled,
                 diagnosticsConsentGranted = diagnosticsConsentGranted,
                 diagnosticsConsentSource = diagnosticsConsentSource
             )
@@ -1863,7 +1886,12 @@ class AppRepo(
         return if (version.isNotBlank()) "$name (Android $version)" else name
     }
 
-    suspend fun upload(uri: Uri, isPrompt: Boolean, capsule: CapsuleUploadOptions = CapsuleUploadOptions()) {
+    suspend fun upload(
+        uri: Uri,
+        isPrompt: Boolean,
+        shareLocation: Boolean = false,
+        capsule: CapsuleUploadOptions = CapsuleUploadOptions()
+    ) {
         val file = copyUriToTemp(uri)
         val part = MultipartBody.Part.createFormData(
             "photo",
@@ -1874,13 +1902,23 @@ class AppRepo(
         val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
-        authorizedCall("/api/uploads") { token -> api.upload(token, part, kind, capsuleMode, capsulePrivate, capsuleGroup) }
+        val locationPayload = if (shareLocation) lastAvailableLocationPayload() else null
+        if (shareLocation && locationPayload == null) {
+            logDebug("location_upload_skipped", "no device location available", "endpoint=/api/uploads")
+        }
+        val locationShared = locationPayload?.let { "true".toRequestBody("text/plain".toMediaTypeOrNull()) }
+        val latitude = locationPayload?.latitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val longitude = locationPayload?.longitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        authorizedCall("/api/uploads") { token ->
+            api.upload(token, part, kind, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
+        }
     }
 
     suspend fun uploadDual(
         backUri: Uri,
         frontUri: Uri,
         isPrompt: Boolean,
+        shareLocation: Boolean = false,
         capsule: CapsuleUploadOptions = CapsuleUploadOptions(),
         onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
     ) {
@@ -1917,9 +1955,16 @@ class AppRepo(
         val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
+        val locationPayload = if (shareLocation) lastAvailableLocationPayload() else null
+        if (shareLocation && locationPayload == null) {
+            logDebug("location_upload_skipped", "no device location available", "endpoint=/api/uploads/dual")
+        }
+        val locationShared = locationPayload?.let { "true".toRequestBody("text/plain".toMediaTypeOrNull()) }
+        val latitude = locationPayload?.latitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val longitude = locationPayload?.longitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
         emit()
         authorizedCall("/api/uploads/dual") { token ->
-            api.uploadDual(token, backPart, frontPart, kind, capsuleMode, capsulePrivate, capsuleGroup)
+            api.uploadDual(token, backPart, frontPart, kind, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
         }
         onProgress(totalBytes, totalBytes)
     }
@@ -1928,6 +1973,7 @@ class AppRepo(
         backUri: Uri,
         frontUri: Uri,
         isPrompt: Boolean,
+        shareLocation: Boolean = false,
         capsule: CapsuleUploadOptions = CapsuleUploadOptions()
     ): QueuedUploadItem {
         val backFile = copyUriToTemp(backUri)
@@ -1935,6 +1981,10 @@ class AppRepo(
         val queuedDir = File(context.filesDir, "upload-queue").apply { mkdirs() }
         val backQueued = moveToQueueFile(backFile, queuedDir, "back")
         val frontQueued = moveToQueueFile(frontFile, queuedDir, "front")
+        val locationPayload = if (shareLocation) lastAvailableLocationPayload() else null
+        if (shareLocation && locationPayload == null) {
+            logDebug("location_queue_skipped", "no device location available", "endpoint=/api/uploads/dual")
+        }
         return UploadQueueManager.enqueueFromFiles(
             context = context,
             backPath = backQueued.absolutePath,
@@ -1943,6 +1993,9 @@ class AppRepo(
             capsuleMode = capsule.mode,
             capsulePrivate = capsule.privateOnly,
             capsuleGroupRemind = capsule.groupRemind,
+            locationShared = locationPayload != null,
+            locationLatitude = locationPayload?.latitude,
+            locationLongitude = locationPayload?.longitude,
             authToken = token()
         )
     }
@@ -1988,6 +2041,27 @@ class AppRepo(
             .setAllowedOverRoaming(true)
         val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         return dm.enqueue(request)
+    }
+
+    private fun lastAvailableLocationPayload(): PendingLocationPayload? {
+        val hasFine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasFine && !hasCoarse) {
+            logDebug("location_permission_missing", "location permission not granted")
+            return null
+        }
+        val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+        val candidates = buildList {
+            runCatching { manager.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull()?.let(::add)
+            runCatching { manager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) }.getOrNull()?.let(::add)
+            runCatching { manager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER) }.getOrNull()?.let(::add)
+        }
+        val best = candidates.maxByOrNull { it.time }
+        if (best == null) {
+            logDebug("location_unavailable", "no last known location", "providers=${manager.allProviders.joinToString(",")}")
+            return null
+        }
+        return PendingLocationPayload(latitude = best.latitude, longitude = best.longitude)
     }
 
     private fun copyUriToTemp(uri: Uri, quality: Int = uploadQuality()): File {
@@ -2189,6 +2263,8 @@ data class UiState(
     val inviteRegistrationPushEnabled: Boolean = false,
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
+    val locationFeatureEnabled: Boolean = false,
+    val locationShareDefaultEnabled: Boolean = false,
     val customNotificationToneEnabled: Boolean = false,
     val customNotificationToneUri: String = "",
     val diagnosticsUploadEnabled: Boolean = false,
@@ -3567,6 +3643,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         back: Uri,
         front: Uri,
         asPrompt: Boolean,
+        shareLocation: Boolean,
         capsule: CapsuleUploadOptions = CapsuleUploadOptions(),
         onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
     ): Boolean {
@@ -3579,7 +3656,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             extra = "kind=${if (asPrompt) "prompt" else "extra"};capsule=${capsule.enabled}"
         )
         return try {
-            repo.uploadDual(back, front, asPrompt, capsule, onProgress)
+            repo.uploadDual(back, front, asPrompt, shareLocation, capsule, onProgress)
             state = state.copy(loading = false, message = "Fotos gepostet")
             refreshAll()
             logPerfEvent(
@@ -3605,11 +3682,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         back: Uri,
         front: Uri,
         asPrompt: Boolean,
+        shareLocation: Boolean,
         capsule: CapsuleUploadOptions = CapsuleUploadOptions()
     ): Boolean {
         state = state.copy(loading = true)
         return runCatching {
-            repo.enqueueDualUpload(back, front, asPrompt, capsule)
+            repo.enqueueDualUpload(back, front, asPrompt, shareLocation, capsule)
         }.onSuccess {
             repo.syncUploadQueueScheduler()
             state = state.copy(
@@ -4625,6 +4703,65 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
+    suspend fun setLocationFeatureEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        val nextDefault = if (enabled) current.locationShareDefaultEnabled else false
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                current.pollPushEnabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload,
+                locationFeatureEnabled = enabled,
+                locationShareDefaultEnabled = nextDefault
+            )
+        }
+            .onSuccess { user ->
+                state = state.copy(
+                    user = user,
+                    locationFeatureEnabled = user.locationFeatureEnabled,
+                    locationShareDefaultEnabled = user.locationShareDefaultEnabled,
+                    loading = false,
+                    message = if (enabled) "Standort-Feature aktiviert" else "Standort-Feature deaktiviert"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Standort-Feature speichern fehlgeschlagen"))
+            }
+    }
+
+    suspend fun setLocationShareDefaultEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                current.pollPushEnabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload,
+                locationFeatureEnabled = current.locationFeatureEnabled,
+                locationShareDefaultEnabled = enabled
+            )
+        }
+            .onSuccess { user ->
+                state = state.copy(
+                    user = user,
+                    locationFeatureEnabled = user.locationFeatureEnabled,
+                    locationShareDefaultEnabled = user.locationShareDefaultEnabled,
+                    loading = false,
+                    message = if (enabled) "Standort-Default aktiviert" else "Standort-Default deaktiviert"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Standort-Default speichern fehlgeschlagen"))
+            }
+    }
+
     suspend fun setInviteRegistrationPushEnabled(enabled: Boolean) {
         val current = state.user ?: return
         state = state.copy(loading = true)
@@ -4900,6 +5037,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     var captureCapsule by remember { mutableStateOf(CapsuleUploadOptions()) }
     var backPreviewUri by remember { mutableStateOf<Uri?>(null) }
     var frontPreviewUri by remember { mutableStateOf<Uri?>(null) }
+    var cameraLocationShareEnabled by remember { mutableStateOf(false) }
+    var cameraLocationToggleTouched by remember { mutableStateOf(false) }
 
     var pwCurrent by remember { mutableStateOf("") }
     var pwNext by remember { mutableStateOf("") }
@@ -4939,11 +5078,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         cameraUploadError = ""
                         cameraUploadDone = false
                         val asPrompt = captureAsPrompt
+                        val shareLocation = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true)
                         scope.launch {
                             val ok = vm.enqueueDualUpload(
                                 back,
                                 front,
                                 asPrompt,
+                                shareLocation,
                                 if (asPrompt) CapsuleUploadOptions() else captureCapsule
                             )
                             cameraUploading = false
@@ -5028,6 +5169,17 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         if (requestFrontCapture) {
             requestFrontCapture = false
             openCameraFor("front")
+        }
+    }
+
+    LaunchedEffect(state.user?.locationFeatureEnabled, state.user?.locationShareDefaultEnabled) {
+        val featureEnabled = state.user?.locationFeatureEnabled == true
+        val defaultEnabled = featureEnabled && state.user?.locationShareDefaultEnabled == true
+        if (!cameraLocationToggleTouched || !featureEnabled) {
+            cameraLocationShareEnabled = defaultEnabled
+        }
+        if (!featureEnabled) {
+            cameraLocationToggleTouched = false
         }
     }
 
@@ -5449,6 +5601,14 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     }
 
     if (viewerUrls.isNotEmpty()) {
+        val viewerLocationMapsUrl = viewerPhotoId?.let { photoId ->
+            state.feedByDay.values.asSequence()
+                .flatMap { it.asSequence() }
+                .map { it.photo }
+                .firstOrNull { it.id == photoId }
+                ?.locationMapsUrl
+                ?: state.photos.firstOrNull { it.id == photoId }?.locationMapsUrl
+        }
         val closeViewer = {
             viewerUrls = emptyList()
             viewerIndex = 0
@@ -5461,6 +5621,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             urls = viewerUrls,
             initialIndex = viewerIndex,
             photoId = viewerPhotoId,
+            locationMapsUrl = viewerLocationMapsUrl,
             comment = viewerComment,
             interactions = state.photoInteractions,
             interactionsLoading = state.interactionsLoading,
@@ -5518,6 +5679,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             },
             onDownloadCurrent = { photoUrl ->
                 vm.downloadPhotoFromViewer(photoUrl)
+            },
+            onOpenLocation = { url ->
+                openExternalUrl(context, url)
             },
             onIndexChange = { viewerIndex = it },
             onClose = closeViewer
@@ -5764,12 +5928,18 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     currentUsername = state.user?.username,
                     networkUnstable = vm.shouldPauseFeedAutoRefresh(),
                     promptRules = state.promptRules,
+                    locationFeatureEnabled = state.user?.locationFeatureEnabled == true,
+                    locationShareEnabled = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true),
                     updateAvailable = state.updateAvailable,
                     updateCheckInFlight = state.updateCheckInFlight,
                     specialMomentStatus = state.specialMomentStatus,
                     backPreviewUri = backPreviewUri,
                     frontPreviewUri = frontPreviewUri,
                     onDownloadUpdate = { vm.downloadLatestUpdateFromBadge() },
+                    onLocationShareEnabledChange = {
+                        cameraLocationToggleTouched = true
+                        cameraLocationShareEnabled = it
+                    },
                     onCapturePrompt = { startDualCapture(true) },
                     onCaptureExtra = { capsule -> startDualCapture(false, capsule) },
                     onRequestSpecialMoment = { showSpecialMomentConfirm = true },
@@ -5791,11 +5961,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                             cameraUploadError = ""
                             cameraUploadDone = false
                             val asPrompt = captureAsPrompt
+                            val shareLocation = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true)
                             scope.launch {
                                 val ok = vm.enqueueDualUpload(
                                     back,
                                     front,
                                     asPrompt,
+                                    shareLocation,
                                     if (asPrompt) CapsuleUploadOptions() else captureCapsule
                                 )
                                 cameraUploading = false
@@ -5937,6 +6109,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     photoReactionPushEnabled = state.user?.photoReactionPushEnabled ?: state.photoReactionPushEnabled,
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
+                    locationFeatureEnabled = state.user?.locationFeatureEnabled ?: false,
+                    locationShareDefaultEnabled = state.user?.locationShareDefaultEnabled ?: false,
                     feedPostPushEnabled = state.feedPostPushEnabled,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
@@ -5972,6 +6146,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onPhotoReactionPushEnabledChange = { scope.launch { vm.setPhotoReactionPushEnabled(it) } },
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
+                    onLocationFeatureEnabledChange = { scope.launch { vm.setLocationFeatureEnabled(it) } },
+                    onLocationShareDefaultEnabledChange = { scope.launch { vm.setLocationShareDefaultEnabled(it) } },
                     onNotificationMasterEnabledChange = { scope.launch { vm.setNotificationMasterEnabled(it) } },
                     onFeedPostPushEnabledChange = { vm.setFeedPostPushEnabled(it) },
                     onCustomNotificationToneEnabledChange = { vm.setCustomNotificationToneEnabled(it) },
@@ -6216,12 +6392,15 @@ fun CameraTab(
     currentUsername: String?,
     networkUnstable: Boolean,
     promptRules: PromptRulesResponse?,
+    locationFeatureEnabled: Boolean,
+    locationShareEnabled: Boolean,
     updateAvailable: Boolean,
     updateCheckInFlight: Boolean,
     specialMomentStatus: SpecialMomentStatus?,
     backPreviewUri: Uri?,
     frontPreviewUri: Uri?,
     onDownloadUpdate: () -> Unit,
+    onLocationShareEnabledChange: (Boolean) -> Unit,
     onCapturePrompt: () -> Unit,
     onCaptureExtra: (CapsuleUploadOptions) -> Unit,
     onRequestSpecialMoment: () -> Unit,
@@ -6343,6 +6522,40 @@ fun CameraTab(
         }
         if (promptRules != null) {
             Text("Zeitfenster heute: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
+        }
+        if (locationFeatureEnabled) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (locationShareEnabled) Color(0xFFFFD7D7) else Color(0xFFDFF5E3)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Standort fuer neuen Post", fontWeight = FontWeight.Bold)
+                        Text(
+                            if (locationShareEnabled) {
+                                "Rot: Standort wird mit neuem Post geteilt."
+                            } else {
+                                "Gruen: Kein Standort wird geteilt."
+                            }
+                        )
+                    }
+                    Switch(
+                        checked = locationShareEnabled,
+                        onCheckedChange = onLocationShareEnabledChange,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFFD32F2F),
+                            uncheckedTrackColor = Color(0xFF2E7D32)
+                        )
+                    )
+                }
+            }
         }
 
         if (hasVisiblePosted) {
@@ -6743,6 +6956,7 @@ fun FeedTab(
     onOpenUserProfile: (Long) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
+    val context = LocalContext.current
     val primaryTextColor = MaterialTheme.colorScheme.onSurface
     val secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant
     val pullRefreshState = rememberPullRefreshState(refreshing = refreshing, onRefresh = onRefresh)
@@ -6914,6 +7128,14 @@ fun FeedTab(
                                     color = secondaryTextColor,
                                     fontWeight = FontWeight.SemiBold
                                 )
+                                if (item.photo.locationShared && !item.photo.locationMapsUrl.isNullOrBlank()) {
+                                    Text(
+                                        "📍 Standort",
+                                        color = Color(0xFFD32F2F),
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.clickable { openExternalUrl(context, item.photo.locationMapsUrl) }
+                                    )
+                                }
                             } else {
                                 if (postMomentKind == "special") {
                                     SpecialMomentBadge(requestedByUser, requestedByUserColor)
@@ -7540,6 +7762,8 @@ fun ProfileTab(
     photoReactionPushEnabled: Boolean,
     photoCommentPushEnabled: Boolean,
     allowPhotoDownload: Boolean,
+    locationFeatureEnabled: Boolean,
+    locationShareDefaultEnabled: Boolean,
     feedPostPushEnabled: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
@@ -7575,6 +7799,8 @@ fun ProfileTab(
     onPhotoReactionPushEnabledChange: (Boolean) -> Unit,
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
+    onLocationFeatureEnabledChange: (Boolean) -> Unit,
+    onLocationShareDefaultEnabledChange: (Boolean) -> Unit,
     onNotificationMasterEnabledChange: (Boolean) -> Unit,
     onFeedPostPushEnabledChange: (Boolean) -> Unit,
     onCustomNotificationToneEnabledChange: (Boolean) -> Unit,
@@ -7636,6 +7862,8 @@ fun ProfileTab(
     var advancedSettingsVisible by remember(username) { mutableStateOf(appPrefs.getBoolean(advancedSettingsKey, false)) }
     var deleteCandidate by remember { mutableStateOf<PromptPhoto?>(null) }
     var showAllowDownloadWarning by remember { mutableStateOf(false) }
+    var showLocationEnableWarning by remember { mutableStateOf(false) }
+    var showLocationDisableWarning by remember { mutableStateOf(false) }
     var updatePulseTick by remember { mutableStateOf(0) }
     var updateChecked by remember { mutableStateOf(false) }
     var serverOverrideInput by remember(apiBaseUrlOverride) { mutableStateOf(apiBaseUrlOverride) }
@@ -7652,6 +7880,8 @@ fun ProfileTab(
     var avatarVisibleValue by remember(avatarVisible) { mutableStateOf(avatarVisible) }
     var bioVisibleValue by remember(bioVisible) { mutableStateOf(bioVisible) }
     var statusVisibleValue by remember(statusVisible) { mutableStateOf(statusVisible) }
+    var locationFeatureEnabledValue by remember(locationFeatureEnabled) { mutableStateOf(locationFeatureEnabled) }
+    var locationShareDefaultEnabledValue by remember(locationShareDefaultEnabled) { mutableStateOf(locationShareDefaultEnabled) }
     var quietHoursEnabledValue by remember(quietHoursEnabled) { mutableStateOf(quietHoursEnabled) }
     var quietHoursStartValue by remember(quietHoursStart) { mutableStateOf(quietHoursStart) }
     var quietHoursEndValue by remember(quietHoursEnd) { mutableStateOf(quietHoursEnd) }
@@ -8018,6 +8248,55 @@ fun ProfileTab(
                                 },
                                 supportingText = "Nur wenn du das aktiv einschaltest, erscheint im Bildbetrachter ein Download-Button."
                             )
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (locationFeatureEnabledValue) Color(0xFFFFE1E1) else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text("Standorteinstellungen", fontWeight = FontWeight.Bold)
+                                    Text(
+                                        if (locationFeatureEnabledValue) {
+                                            "Achtung: Neue Posts koennen ab jetzt deinen exakten Standort fuer andere Nutzer sichtbar machen. Im Kamera-Tab entscheidet der Schnellschalter pro Post."
+                                        } else {
+                                            "Komplett opt-in: Erst wenn du dieses Feature aktivierst und dein Telefon bereits Standortdaten hat, kann ein Post deinen Standort teilen."
+                                        },
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    SettingsToggleRow(
+                                        label = "Standort-Feature aktivieren",
+                                        checked = locationFeatureEnabledValue,
+                                        onCheckedChange = { checked ->
+                                            if (checked != locationFeatureEnabledValue) {
+                                                if (checked) {
+                                                    showLocationEnableWarning = true
+                                                } else {
+                                                    showLocationDisableWarning = true
+                                                }
+                                            }
+                                        },
+                                        supportingText = if (locationFeatureEnabledValue) {
+                                            "Aktiv: Im Kamera-Tab ist pro Post ein roter/gruener Standort-Schalter sichtbar."
+                                        } else {
+                                            "Inaktiv: Es wird nichts gefragt und beim Posten wird nie Standort mitgesendet."
+                                        }
+                                    )
+                                    SettingsToggleRow(
+                                        label = "Standort beim Posten standardmaessig mitsenden",
+                                        checked = locationShareDefaultEnabledValue,
+                                        onCheckedChange = {
+                                            locationShareDefaultEnabledValue = it
+                                            onLocationShareDefaultEnabledChange(it)
+                                        },
+                                        enabled = locationFeatureEnabledValue,
+                                        supportingText = "Der Kamera-Schalter startet bei jedem App-Start wieder mit diesem Standard."
+                                    )
+                                }
+                            }
                             SettingsToggleRow(
                                 label = "Profil aufrufbar",
                                 checked = profileVisibleValue,
@@ -8793,6 +9072,49 @@ fun ProfileTab(
             }
           )
       }
+      if (showLocationEnableWarning) {
+          AlertDialog(
+            onDismissRequest = { showLocationEnableWarning = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showLocationEnableWarning = false
+                        locationFeatureEnabledValue = true
+                        onLocationFeatureEnabledChange(true)
+                    }
+                ) { Text("Aktivieren") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLocationEnableWarning = false }) { Text("Abbrechen") }
+            },
+            title = { Text("Standort-Feature aktivieren?") },
+            text = {
+                Text("Achtung: Wenn du das aktivierst, koennen neue Posts deinen exakten Standort fuer andere Nutzer sichtbar machen. Nutze den Schalter im Kamera-Tab nur dann, wenn du das wirklich willst.")
+            }
+          )
+      }
+      if (showLocationDisableWarning) {
+          AlertDialog(
+            onDismissRequest = { showLocationDisableWarning = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showLocationDisableWarning = false
+                        locationFeatureEnabledValue = false
+                        locationShareDefaultEnabledValue = false
+                        onLocationFeatureEnabledChange(false)
+                    }
+                ) { Text("Deaktivieren") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLocationDisableWarning = false }) { Text("Abbrechen") }
+            },
+            title = { Text("Standort-Feature deaktivieren?") },
+            text = {
+                Text("Ab jetzt werden bei neuen Posts keine Standortdaten mehr mitgesendet. Bereits freigegebene alte Posts behalten ihren gespeicherten Standort, bis er entfernt wird.")
+            }
+          )
+      }
       if (showLogoutConfirm) {
           AlertDialog(
               onDismissRequest = { showLogoutConfirm = false },
@@ -9038,7 +9360,8 @@ private fun SettingsToggleRow(
     label: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
-    supportingText: String? = null
+    supportingText: String? = null,
+    enabled: Boolean = true
 ) {
     Row(
         modifier = Modifier
@@ -9048,7 +9371,7 @@ private fun SettingsToggleRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(label)
+            Text(label, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
             if (!supportingText.isNullOrBlank()) {
                 Text(supportingText, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -9057,8 +9380,16 @@ private fun SettingsToggleRow(
             modifier = Modifier.widthIn(min = 56.dp),
             contentAlignment = Alignment.CenterEnd
         ) {
-            Switch(checked = checked, onCheckedChange = onCheckedChange)
+            Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
         }
+    }
+}
+
+private fun openExternalUrl(context: Context, url: String?) {
+    val safeUrl = url?.trim().orEmpty()
+    if (safeUrl.isBlank()) return
+    runCatching {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(safeUrl)))
     }
 }
 
@@ -9420,6 +9751,7 @@ private fun FullscreenPhotoViewer(
     urls: List<String>,
     initialIndex: Int,
     photoId: Long?,
+    locationMapsUrl: String?,
     comment: String,
     interactions: PhotoInteractionsResponse?,
     interactionsLoading: Boolean,
@@ -9432,6 +9764,7 @@ private fun FullscreenPhotoViewer(
     onFotoMojiLongPress: (String) -> Unit,
     onDoubleTapReact: () -> Unit,
     onDownloadCurrent: (String) -> Unit,
+    onOpenLocation: (String) -> Unit,
     onIndexChange: (Int) -> Unit,
     onClose: () -> Unit
 ) {
@@ -9472,6 +9805,7 @@ private fun FullscreenPhotoViewer(
             sheetContent = {
                 ViewerInteractionSheet(
                     photoId = photoId,
+                    locationMapsUrl = locationMapsUrl,
                     currentImageUrl = urls.getOrNull(pagerState.currentPage).orEmpty(),
                     comment = comment,
                     interactions = interactions,
@@ -9483,7 +9817,8 @@ private fun FullscreenPhotoViewer(
                     onReact = onReact,
                     onFotoMojiTap = onFotoMojiTap,
                     onFotoMojiLongPress = onFotoMojiLongPress,
-                    onDownloadCurrent = onDownloadCurrent
+                    onDownloadCurrent = onDownloadCurrent,
+                    onOpenLocation = onOpenLocation
                 )
             },
             containerColor = viewerBg,
@@ -9551,6 +9886,7 @@ private fun FullscreenPhotoViewer(
 @Composable
 private fun ViewerInteractionSheet(
     photoId: Long?,
+    locationMapsUrl: String?,
     currentImageUrl: String,
     comment: String,
     interactions: PhotoInteractionsResponse?,
@@ -9562,7 +9898,8 @@ private fun ViewerInteractionSheet(
     onReact: (String) -> Unit,
     onFotoMojiTap: (String) -> Unit,
     onFotoMojiLongPress: (String) -> Unit,
-    onDownloadCurrent: (String) -> Unit
+    onDownloadCurrent: (String) -> Unit,
+    onOpenLocation: (String) -> Unit
 ) {
     var selectedFotoMoji by remember { mutableStateOf<PhotoMojiItem?>(null) }
     Column(
@@ -9662,6 +9999,13 @@ private fun ViewerInteractionSheet(
                 onClick = { onDownloadCurrent(currentImageUrl) },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Post herunterladen") }
+        }
+        if (!locationMapsUrl.isNullOrBlank()) {
+            Button(
+                onClick = { onOpenLocation(locationMapsUrl) },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
+            ) { Text("📍 Standort in Google Maps oeffnen") }
         }
         OutlinedTextField(
             value = comment,

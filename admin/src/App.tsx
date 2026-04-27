@@ -27,6 +27,7 @@ import {
   deleteReports,
   deleteAdminFotomoji,
   deleteAdminFotomojisBulk,
+  deleteAdminPhotoLocation,
   deleteDebugLogs,
   deleteChatCommand,
   deleteUser,
@@ -58,6 +59,7 @@ import {
   getAdminIncidentExportStatus,
   getAdminTriggerRuntime,
   getAdminMigration,
+  getAdminLocations,
   getAdminTriggerAudit,
   getAdminTriggerAuditSummary,
   getSystemHealth,
@@ -88,6 +90,7 @@ import {
   type AdminPerformanceSpikeWindow,
   type AdminPerformanceTrackingState,
   type AdminIncidentExportStatus,
+  type AdminLocationItem,
   type AdminTriggerRuntimeResponse,
   type AdminMigrationInfo,
   type AdminMigrationLinkExportResponse,
@@ -121,9 +124,9 @@ import {
   type UserPromptRule,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "fotomojis" | "reports" | "debug" | "settings" | "migration";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "fotomojis" | "reports" | "debug" | "settings" | "migration" | "locations";
 type AdminArea = "operations" | "analytics" | "config";
-type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "polls" | "time_capsules" | "fotomojis" | "reports";
+type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "polls" | "time_capsules" | "fotomojis" | "reports" | "locations";
 type AnalyticsSubtab = "history" | "performance" | "incident_export" | "trigger_audit" | "debug" | "system";
 type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
@@ -204,6 +207,7 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
     time_capsules: "time_capsule",
     fotomojis: "fotomojis",
     reports: "reports",
+    locations: "locations",
   },
   analytics: {
     history: "history",
@@ -232,6 +236,7 @@ const areaSubtabs: Record<AdminArea, Array<{ key: AdminSubtab; label: string }>>
     { key: "time_capsules", label: "Time-Capsules" },
     { key: "fotomojis", label: "FotoMojis" },
     { key: "reports", label: "Reports" },
+    { key: "locations", label: "Standorte" },
   ],
   analytics: [
     { key: "history", label: "Historie" },
@@ -340,6 +345,8 @@ function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
       return { area: "operations", subtab: "fotomojis" };
     case "reports":
       return { area: "operations", subtab: "reports" };
+    case "locations":
+      return { area: "operations", subtab: "locations" };
     case "history":
       return { area: "analytics", subtab: "history" };
     case "performance":
@@ -406,12 +413,16 @@ export function App() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [feedMonthRecap, setFeedMonthRecap] = useState<MonthlyRecap | null>(null);
+  const [locationItems, setLocationItems] = useState<AdminLocationItem[]>([]);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [chatDraft, setChatDraft] = useState("");
   const [pollItems, setPollItems] = useState<AdminPollItem[]>([]);
   const [pollCount, setPollCount] = useState(0);
   const [pollLimit, setPollLimit] = useState(100);
   const [pollDay, setPollDay] = useState("");
+  const [locationFromDay, setLocationFromDay] = useState("");
+  const [locationToDay, setLocationToDay] = useState("");
+  const [locationUserId, setLocationUserId] = useState<number>(0);
   const [pollOpenOnly, setPollOpenOnly] = useState(false);
   const [pollCreatorUserId, setPollCreatorUserId] = useState<number>(0);
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
@@ -781,6 +792,9 @@ export function App() {
     if (activeTab === "reports") {
       void loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
     }
+    if (activeTab === "locations") {
+      void loadLocations(token);
+    }
     if (activeTab === "commands") {
       void loadCommands(token);
     }
@@ -790,7 +804,7 @@ export function App() {
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
+  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, locationFromDay, locationToDay, locationUserId, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -978,6 +992,19 @@ export function App() {
       const data = await getAdminFeed(authToken, day);
       setFeedItems(data.items || []);
       setFeedMonthRecap(data.monthRecap || null);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function loadLocations(authToken: string) {
+    try {
+      const items = await getAdminLocations(authToken, {
+        userId: locationUserId > 0 ? locationUserId : undefined,
+        from: locationFromDay || undefined,
+        to: locationToDay || undefined,
+      });
+      setLocationItems(items);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1681,6 +1708,21 @@ export function App() {
       setSettings(next);
       setSavedSettings(next);
       setMessage("Settings gespeichert");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onDeleteLocation(photoId: number) {
+    if (!window.confirm("Standortdaten fuer diesen Post wirklich endgueltig loeschen?")) return;
+    setMessage("");
+    try {
+      await deleteAdminPhotoLocation(token, photoId);
+      setLocationItems((prev) => prev.filter((item) => item.photoId !== photoId));
+      if (activeTab === "feed") {
+        await loadFeed(token, feedDay);
+      }
+      setMessage("Standortdaten geloescht");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -2631,7 +2673,63 @@ export function App() {
                       </a>
                     )}
                   </div>
+                  {item.photo.locationShared && item.photo.locationMapsUrl && (
+                    <p className="small">
+                      <a href={item.photo.locationMapsUrl} target="_blank" rel="noreferrer">📍 Standort</a>
+                      {item.photo.locationDisplay ? ` (${item.photo.locationDisplay})` : ""}
+                    </p>
+                  )}
                   {item.photo.caption && <p className="small">{item.photo.caption}</p>}
+                </article>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "locations" && (
+          <div className="stack">
+            <div className="row">
+              <label>
+                Von
+                <input type="date" value={locationFromDay} onChange={(e) => setLocationFromDay(e.target.value)} />
+              </label>
+              <label>
+                Bis
+                <input type="date" value={locationToDay} onChange={(e) => setLocationToDay(e.target.value)} />
+              </label>
+              <label>
+                Nutzer
+                <select value={locationUserId} onChange={(e) => setLocationUserId(Number(e.target.value))}>
+                  <option value={0}>Alle</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>{u.username}</option>
+                  ))}
+                </select>
+              </label>
+              <button onClick={() => loadLocations(token)}>Standorte laden</button>
+            </div>
+            {locationItems.length === 0 && <p>Keine Posts mit Standort im aktuellen Filter.</p>}
+            <div className="feed-grid">
+              {locationItems.map((item) => (
+                <article key={item.photoId} className="feed-card">
+                  <div className="row">
+                    <strong>{item.user.username}</strong>
+                    <span className="small">{formatDateTime(item.createdAt)}</span>
+                  </div>
+                  <p className="small"><strong>Tag:</strong> {item.day}</p>
+                  <p className="small"><strong>Koordinaten:</strong> {item.locationDisplay}</p>
+                  <p className="small"><a href={item.locationMapsUrl} target="_blank" rel="noreferrer">Google Maps oeffnen</a></p>
+                  <div className="photo-grid">
+                    <a href={item.photo.url} target="_blank" rel="noreferrer">
+                      <img src={item.photo.url} alt={`${item.user.username} back`} />
+                    </a>
+                    {item.photo.secondUrl && (
+                      <a href={item.photo.secondUrl} target="_blank" rel="noreferrer">
+                        <img src={item.photo.secondUrl} alt={`${item.user.username} front`} />
+                      </a>
+                    )}
+                  </div>
+                  <button className="danger" onClick={() => void onDeleteLocation(item.photoId)}>Standortdaten loeschen</button>
                 </article>
               ))}
             </div>

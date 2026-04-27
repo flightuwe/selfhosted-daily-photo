@@ -152,6 +152,9 @@ export type FeedPhoto = {
   url: string;
   secondUrl?: string;
   createdAt: string;
+  locationShared?: boolean;
+  locationDisplay?: string;
+  locationMapsUrl?: string;
 };
 
 export type FeedItem = {
@@ -174,6 +177,18 @@ export type MonthlyRecap = {
 export type AdminFeedResponse = {
   items: FeedItem[];
   monthRecap?: MonthlyRecap | null;
+};
+
+export type AdminLocationItem = {
+  photoId: number;
+  day: string;
+  createdAt: string;
+  locationLatitude: number;
+  locationLongitude: number;
+  locationDisplay: string;
+  locationMapsUrl: string;
+  user: { id: number; username: string; favoriteColor?: string };
+  photo: FeedPhoto;
 };
 
 export type ChatItem = {
@@ -1157,6 +1172,30 @@ export async function getAdminFeed(token: string, day?: string): Promise<AdminFe
     headers: { Authorization: `Bearer ${token}` },
   });
   return parse<AdminFeedResponse>(res);
+}
+
+export async function getAdminLocations(
+  token: string,
+  filters?: { userId?: number; from?: string; to?: string }
+): Promise<AdminLocationItem[]> {
+  const qs = new URLSearchParams();
+  if (filters?.userId) qs.set("userId", String(filters.userId));
+  if (filters?.from) qs.set("from", filters.from);
+  if (filters?.to) qs.set("to", filters.to);
+  const url = qs.toString() ? `${apiBase}/admin/locations?${qs.toString()}` : `${apiBase}/admin/locations`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ items: AdminLocationItem[] }>(res);
+  return data.items || [];
+}
+
+export async function deleteAdminPhotoLocation(token: string, photoId: number): Promise<void> {
+  const res = await fetch(`${apiBase}/admin/photos/${photoId}/location`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  await parse(res);
 }
 
 export async function getChat(token: string): Promise<ChatItem[]> {

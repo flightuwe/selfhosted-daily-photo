@@ -1,0 +1,36 @@
+{
+  "version": "0.4.35",
+  "releasedAt": "2026-04-27T00:00:00Z",
+  "highlights": [
+    "Daily-Posts koennen jetzt optional exakte Standortdaten teilen.",
+    "Android Profil hat neue Standorteinstellungen mit Master-Switch, Default und Warntexten.",
+    "Der Kamera-Tab zeigt pro Post einen roten/gruenen Standort-Schnellschalter.",
+    "Admin hat einen neuen Standort-Reiter mit Filter, Karten-Link und Loeschfunktion."
+  ],
+  "details": [
+    {
+      "title": "Android Standort-Opt-in",
+      "items": [
+        "Neues Untermenue Standorteinstellungen im Profil.",
+        "Master-Switch aktiviert das Feature global, Default-Schalter bestimmt den Kamera-Startzustand pro App-Start.",
+        "Wenn kein Standort verfuegbar ist, wird der Post normal ohne Standort hochgeladen und nur als Debug-Ereignis vermerkt."
+      ]
+    },
+    {
+      "title": "Standort an Posts",
+      "items": [
+        "Posts koennen exakte Koordinaten speichern und als Google-Maps-Link ausliefern.",
+        "Feed und Bild-Viewer zeigen freigegebene Standorte direkt als klickbaren Standort-Link.",
+        "Alte Posts ohne Standort bleiben unveraendert."
+      ]
+    },
+    {
+      "title": "Admin & Backend",
+      "items": [
+        "Backend speichert Standort nur, wenn der Nutzer das Feature serverseitig wirklich aktiviert hat.",
+        "Admin bekommt einen eigenen Standort-Reiter mit Nutzer-, Datums- und Kartenansicht.",
+        "Standortdaten koennen pro Post im Admin irreversibel geloescht werden."
+      ]
+    }
+  ]
+}

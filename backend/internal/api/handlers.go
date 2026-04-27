@@ -144,6 +144,8 @@ func (s *Server) Router() *gin.Engine {
 			admin.PUT("/settings", s.handleUpdateSettings)
 			admin.GET("/stats", s.handleAdminStats)
 			admin.GET("/feed", s.handleAdminFeed)
+			admin.GET("/locations", s.handleAdminLocations)
+			admin.DELETE("/photos/:id/location", s.handleAdminDeletePhotoLocation)
 			admin.GET("/calendar", s.handleAdminCalendar)
 			admin.GET("/history", s.handleAdminHistory)
 			admin.GET("/search", s.handleAdminSearch)
@@ -645,6 +647,8 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		PhotoFotomojiPushEnabled      *bool  `json:"photoFotomojiPushEnabled"`
 		PhotoCommentPushEnabled       *bool  `json:"photoCommentPushEnabled"`
 		AllowPhotoDownload            *bool  `json:"allowPhotoDownload"`
+		LocationFeatureEnabled        *bool  `json:"locationFeatureEnabled"`
+		LocationShareDefaultEnabled   *bool  `json:"locationShareDefaultEnabled"`
 		DiagnosticsConsentGranted     *bool  `json:"diagnosticsConsentGranted"`
 		DiagnosticsConsentSource      string `json:"diagnosticsConsentSource"`
 	}
@@ -676,6 +680,22 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.AllowPhotoDownload != nil {
 		updates["allow_photo_download"] = *req.AllowPhotoDownload
+	}
+	if req.LocationFeatureEnabled != nil {
+		updates["location_feature_enabled"] = *req.LocationFeatureEnabled
+		if !*req.LocationFeatureEnabled {
+			updates["location_share_default_enabled"] = false
+		}
+	}
+	if req.LocationShareDefaultEnabled != nil {
+		shareDefault := *req.LocationShareDefaultEnabled
+		if req.LocationFeatureEnabled == nil {
+			var current models.User
+			if err := s.DB.Select("id", "location_feature_enabled").First(&current, user.ID).Error; err == nil && !current.LocationFeatureEnabled {
+				shareDefault = false
+			}
+		}
+		updates["location_share_default_enabled"] = shareDefault
 	}
 	if req.DiagnosticsConsentGranted != nil {
 		updates["diagnostics_consent_granted"] = *req.DiagnosticsConsentGranted
@@ -1311,6 +1331,16 @@ func (s *Server) handleUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": capsuleErr.Error()})
 		return
 	}
+	locationShared, latitude, longitude, locationErr := parseLocationForm(c)
+	if locationErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": locationErr.Error()})
+		return
+	}
+	if !user.LocationFeatureEnabled {
+		locationShared = false
+		latitude = nil
+		longitude = nil
+	}
 
 	src, err := fileHeader.Open()
 	if err != nil {
@@ -1346,6 +1376,9 @@ func (s *Server) handleUpload(c *gin.Context) {
 		CapsuleVisibleAt:   capsuleVisibleAt,
 		CapsulePrivate:     capsulePrivate,
 		CapsuleGroupRemind: capsuleGroupRemind,
+		LocationShared:     locationShared,
+		LocationLatitude:   latitude,
+		LocationLongitude:  longitude,
 	}
 	if err := s.DB.Create(&photo).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
@@ -1684,6 +1717,80 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 		"momentKind":      momentKind,
 		"monthRecap":      recap,
 	})
+}
+
+func (s *Server) handleAdminLocations(c *gin.Context) {
+	userFilter, _ := strconv.ParseUint(strings.TrimSpace(c.Query("userId")), 10, 64)
+	fromDay := strings.TrimSpace(c.Query("from"))
+	toDay := strings.TrimSpace(c.Query("to"))
+
+	query := s.DB.Preload("User").
+		Where("location_shared = ? AND location_latitude IS NOT NULL AND location_longitude IS NOT NULL", true)
+	if userFilter > 0 {
+		query = query.Where("user_id = ?", uint(userFilter))
+	}
+	if fromDay != "" {
+		query = query.Where("day >= ?", fromDay)
+	}
+	if toDay != "" {
+		query = query.Where("day <= ?", toDay)
+	}
+
+	var photos []models.Photo
+	if err := query.Order("created_at desc").Limit(500).Find(&photos).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	items := make([]gin.H, 0, len(photos))
+	for _, photo := range photos {
+		if !photo.LocationShared || photo.LocationLatitude == nil || photo.LocationLongitude == nil {
+			continue
+		}
+		items = append(items, gin.H{
+			"photoId":           photo.ID,
+			"day":               photo.Day,
+			"createdAt":         photo.CreatedAt,
+			"user":              s.userPublicJSON(0, photo.User),
+			"photo":             s.photoJSON(photo),
+			"locationLatitude":  *photo.LocationLatitude,
+			"locationLongitude": *photo.LocationLongitude,
+			"locationDisplay":   formatLocationDisplay(*photo.LocationLatitude, *photo.LocationLongitude),
+			"locationMapsUrl":   googleMapsLocationURL(*photo.LocationLatitude, *photo.LocationLongitude),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) handleAdminDeletePhotoLocation(c *gin.Context) {
+	photoID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || photoID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+
+	var photo models.Photo
+	if err := s.DB.First(&photo, uint(photoID)).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	updates := map[string]any{
+		"location_shared":    false,
+		"location_latitude":  nil,
+		"location_longitude": nil,
+	}
+	if err := s.DB.Model(&models.Photo{}).Where("id = ?", photo.ID).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+		return
+	}
+	s.invalidateFeedDayCache(photo.Day)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photoId": photo.ID})
 }
 
 func (s *Server) handleFeed(c *gin.Context) {
@@ -5542,6 +5649,16 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": capsuleErr.Error()})
 		return
 	}
+	locationShared, latitude, longitude, locationErr := parseLocationForm(c)
+	if locationErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": locationErr.Error()})
+		return
+	}
+	if !user.LocationFeatureEnabled {
+		locationShared = false
+		latitude = nil
+		longitude = nil
+	}
 
 	backPath, err := s.saveUploadedFile(day, user.ID, backHeader)
 	if err != nil {
@@ -5583,6 +5700,9 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		CapsuleVisibleAt:         capsuleVisibleAt,
 		CapsulePrivate:           capsulePrivate,
 		CapsuleGroupRemind:       capsuleGroupRemind,
+		LocationShared:           locationShared,
+		LocationLatitude:         latitude,
+		LocationLongitude:        longitude,
 	}
 	if err := s.DB.Create(&photo).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
@@ -7152,6 +7272,9 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 		"url":                fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
 		"capsuleLocked":      false,
 		"capsulePreviewUrl":  "",
+		"locationShared":     false,
+		"locationDisplay":    "",
+		"locationMapsUrl":    "",
 	}
 	if p.SecondPath != "" {
 		out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
@@ -7159,7 +7282,20 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 	if strings.TrimSpace(p.CapsulePreviewPath) != "" {
 		out["capsulePreviewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsulePreviewPath)
 	}
+	if p.LocationShared && p.LocationLatitude != nil && p.LocationLongitude != nil {
+		out["locationShared"] = true
+		out["locationDisplay"] = formatLocationDisplay(*p.LocationLatitude, *p.LocationLongitude)
+		out["locationMapsUrl"] = googleMapsLocationURL(*p.LocationLatitude, *p.LocationLongitude)
+	}
 	return out
+}
+
+func formatLocationDisplay(lat float64, lon float64) string {
+	return fmt.Sprintf("%.6f, %.6f", lat, lon)
+}
+
+func googleMapsLocationURL(lat float64, lon float64) string {
+	return fmt.Sprintf("https://www.google.com/maps/search/?api=1&query=%.6f,%.6f", lat, lon)
 }
 
 func (s *Server) avatarURL(path string) string {
@@ -7204,6 +7340,8 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"photoFotomojiPushEnabled":      u.PhotoFotomojiPushEnabled,
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
+		"locationFeatureEnabled":        u.LocationFeatureEnabled,
+		"locationShareDefaultEnabled":   u.LocationShareDefaultEnabled,
 		"avatarUrl":                     avatarURL,
 		"bio":                           strings.TrimSpace(u.Bio),
 		"statusText":                    strings.TrimSpace(u.StatusText),
@@ -7238,6 +7376,8 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"photoFotomojiPushEnabled":      false,
 		"photoCommentPushEnabled":       false,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
+		"locationFeatureEnabled":        false,
+		"locationShareDefaultEnabled":   false,
 		"avatarUrl":                     "",
 		"bio":                           "",
 		"statusText":                    "",
@@ -7849,6 +7989,33 @@ func parseFormBool(v string) bool {
 	default:
 		return false
 	}
+}
+
+func parseLocationForm(c *gin.Context) (bool, *float64, *float64, error) {
+	shared := parseFormBool(c.PostForm("location_shared"))
+	latRaw := strings.TrimSpace(c.PostForm("location_latitude"))
+	lonRaw := strings.TrimSpace(c.PostForm("location_longitude"))
+	if !shared {
+		return false, nil, nil, nil
+	}
+	if latRaw == "" || lonRaw == "" {
+		return false, nil, nil, nil
+	}
+	lat, err := strconv.ParseFloat(latRaw, 64)
+	if err != nil {
+		return false, nil, nil, errors.New("invalid location_latitude")
+	}
+	lon, err := strconv.ParseFloat(lonRaw, 64)
+	if err != nil {
+		return false, nil, nil, errors.New("invalid location_longitude")
+	}
+	if lat < -90 || lat > 90 {
+		return false, nil, nil, errors.New("location_latitude out of range")
+	}
+	if lon < -180 || lon > 180 {
+		return false, nil, nil, errors.New("location_longitude out of range")
+	}
+	return true, &lat, &lon, nil
 }
 
 func parseQueryBool(v string, fallback bool) bool {

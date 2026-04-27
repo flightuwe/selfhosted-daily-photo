@@ -40,6 +40,9 @@ data class QueuedUploadItem(
     val capsuleMode: String,
     val capsulePrivate: Boolean,
     val capsuleGroupRemind: Boolean,
+    val locationShared: Boolean,
+    val locationLatitude: Double?,
+    val locationLongitude: Double?,
     val authToken: String,
     val status: String,
     val attempts: Int,
@@ -89,6 +92,9 @@ object UploadQueueManager {
         capsuleMode: String = "",
         capsulePrivate: Boolean = false,
         capsuleGroupRemind: Boolean = false,
+        locationShared: Boolean = false,
+        locationLatitude: Double? = null,
+        locationLongitude: Double? = null,
         authToken: String
     ): QueuedUploadItem {
         val now = System.currentTimeMillis()
@@ -100,6 +106,9 @@ object UploadQueueManager {
             capsuleMode = capsuleMode.trim(),
             capsulePrivate = capsulePrivate,
             capsuleGroupRemind = capsuleGroupRemind,
+            locationShared = locationShared && locationLatitude != null && locationLongitude != null,
+            locationLatitude = locationLatitude,
+            locationLongitude = locationLongitude,
             authToken = authToken,
             status = UploadQueueStatus.WAITING,
             attempts = 0,
@@ -287,6 +296,9 @@ object UploadQueueManager {
                     capsuleMode = o.optString("capsuleMode"),
                     capsulePrivate = o.optBoolean("capsulePrivate", false),
                     capsuleGroupRemind = o.optBoolean("capsuleGroupRemind", false),
+                    locationShared = o.optBoolean("locationShared", false),
+                    locationLatitude = if (o.has("locationLatitude") && !o.isNull("locationLatitude")) o.optDouble("locationLatitude") else null,
+                    locationLongitude = if (o.has("locationLongitude") && !o.isNull("locationLongitude")) o.optDouble("locationLongitude") else null,
                     authToken = o.optString("authToken"),
                     status = o.optString("status", UploadQueueStatus.WAITING),
                     attempts = o.optInt("attempts", 0),
@@ -313,6 +325,9 @@ object UploadQueueManager {
                     put("capsuleMode", item.capsuleMode)
                     put("capsulePrivate", item.capsulePrivate)
                     put("capsuleGroupRemind", item.capsuleGroupRemind)
+                    put("locationShared", item.locationShared)
+                    put("locationLatitude", item.locationLatitude)
+                    put("locationLongitude", item.locationLongitude)
                     put("authToken", item.authToken)
                     put("status", item.status)
                     put("attempts", item.attempts)
@@ -430,6 +445,11 @@ class UploadQueueWorker(
         val capsuleGroupRemindPart = if (capsuleModePart != null) {
             item.capsuleGroupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull())
         } else null
+        val locationSharedPart = if (item.locationShared && item.locationLatitude != null && item.locationLongitude != null) {
+            "true".toRequestBody("text/plain".toMediaTypeOrNull())
+        } else null
+        val locationLatitudePart = item.locationLatitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val locationLongitudePart = item.locationLongitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
         UploadQueueManager.markProgress(applicationContext, item.id, 1)
         api.uploadDual(
             "Bearer ${item.authToken}",
@@ -438,7 +458,10 @@ class UploadQueueWorker(
             kind,
             capsuleModePart,
             capsulePrivatePart,
-            capsuleGroupRemindPart
+            capsuleGroupRemindPart,
+            locationSharedPart,
+            locationLatitudePart,
+            locationLongitudePart
         )
         UploadQueueManager.markProgress(applicationContext, item.id, 100)
     }
