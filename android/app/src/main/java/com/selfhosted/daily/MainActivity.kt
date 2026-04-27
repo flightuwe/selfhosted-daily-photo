@@ -16,9 +16,11 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Environment
 import android.media.RingtoneManager
 import android.provider.OpenableColumns
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -147,6 +149,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -192,6 +195,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.random.Random
+import kotlin.coroutines.resume
 
 const val EXTRA_LAUNCH_ACTION = "daily_launch_action"
 const val EXTRA_LAUNCH_TYPE = "daily_launch_type"
@@ -2043,10 +2047,8 @@ class AppRepo(
         return dm.enqueue(request)
     }
 
-    private fun lastAvailableLocationPayload(): PendingLocationPayload? {
-        val hasFine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val hasCoarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (!hasFine && !hasCoarse) {
+    private suspend fun lastAvailableLocationPayload(): PendingLocationPayload? {
+        if (!hasLocationPermission(context)) {
             logDebug("location_permission_missing", "location permission not granted")
             return null
         }
@@ -2056,12 +2058,35 @@ class AppRepo(
             runCatching { manager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) }.getOrNull()?.let(::add)
             runCatching { manager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER) }.getOrNull()?.let(::add)
         }
-        val best = candidates.maxByOrNull { it.time }
-        if (best == null) {
-            logDebug("location_unavailable", "no last known location", "providers=${manager.allProviders.joinToString(",")}")
+        candidates.maxByOrNull { it.time }?.let { best ->
+            return PendingLocationPayload(latitude = best.latitude, longitude = best.longitude)
+        }
+        val current = currentLocationFromManager(manager)
+        if (current == null) {
+            logDebug("location_unavailable", "no last known or current location", "providers=${manager.allProviders.joinToString(",")}")
             return null
         }
-        return PendingLocationPayload(latitude = best.latitude, longitude = best.longitude)
+        return PendingLocationPayload(latitude = current.latitude, longitude = current.longitude)
+    }
+
+    private suspend fun currentLocationFromManager(manager: LocationManager): android.location.Location? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val provider = listOf(
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.PASSIVE_PROVIDER
+        ).firstOrNull { runCatching { manager.isProviderEnabled(it) }.getOrDefault(false) } ?: return null
+        return suspendCancellableCoroutine { cont ->
+            val signal = CancellationSignal()
+            cont.invokeOnCancellation { signal.cancel() }
+            runCatching {
+                manager.getCurrentLocation(provider, signal, context.mainExecutor) { location ->
+                    if (cont.isActive) cont.resume(location)
+                }
+            }.onFailure {
+                if (cont.isActive) cont.resume(null)
+            }
+        }
     }
 
     private fun copyUriToTemp(uri: Uri, quality: Int = uploadQuality()): File {
@@ -5058,6 +5083,17 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     var cameraUploadError by remember { mutableStateOf("") }
     var cameraUploadDone by remember { mutableStateOf(false) }
     val feedListState = remember { LazyListState() }
+    var locationPermissionGranted by remember { mutableStateOf(hasLocationPermission(context)) }
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        locationPermissionGranted = hasLocationPermission(context)
+    }
+    val appPermissionSettingsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        locationPermissionGranted = hasLocationPermission(context)
+    }
 
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         val target = captureTarget
@@ -5078,7 +5114,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         cameraUploadError = ""
                         cameraUploadDone = false
                         val asPrompt = captureAsPrompt
-                        val shareLocation = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true)
+                        val shareLocation = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true) && locationPermissionGranted
                         scope.launch {
                             val ok = vm.enqueueDualUpload(
                                 back,
@@ -5154,6 +5190,19 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         captureTarget = target
         captureUri = uri
         cameraLauncher.launch(uri)
+    }
+
+    fun requestLocationPermission() {
+        locationPermissionLauncher.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            )
+        )
+    }
+
+    fun openLocationPermissionSettings() {
+        appPermissionSettingsLauncher.launch(appPermissionSettingsIntent(context))
     }
 
     fun startDualCapture(asPrompt: Boolean, capsule: CapsuleUploadOptions = CapsuleUploadOptions()) {
@@ -5929,7 +5978,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     networkUnstable = vm.shouldPauseFeedAutoRefresh(),
                     promptRules = state.promptRules,
                     locationFeatureEnabled = state.user?.locationFeatureEnabled == true,
-                    locationShareEnabled = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true),
+                    locationPermissionGranted = locationPermissionGranted,
+                    locationShareEnabled = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true) && locationPermissionGranted,
                     updateAvailable = state.updateAvailable,
                     updateCheckInFlight = state.updateCheckInFlight,
                     specialMomentStatus = state.specialMomentStatus,
@@ -5940,6 +5990,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         cameraLocationToggleTouched = true
                         cameraLocationShareEnabled = it
                     },
+                    onRequestLocationPermission = ::requestLocationPermission,
+                    onOpenLocationPermissionSettings = ::openLocationPermissionSettings,
                     onCapturePrompt = { startDualCapture(true) },
                     onCaptureExtra = { capsule -> startDualCapture(false, capsule) },
                     onRequestSpecialMoment = { showSpecialMomentConfirm = true },
@@ -5961,7 +6013,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                             cameraUploadError = ""
                             cameraUploadDone = false
                             val asPrompt = captureAsPrompt
-                            val shareLocation = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true)
+                            val shareLocation = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true) && locationPermissionGranted
                             scope.launch {
                                 val ok = vm.enqueueDualUpload(
                                     back,
@@ -6111,6 +6163,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     locationFeatureEnabled = state.user?.locationFeatureEnabled ?: false,
                     locationShareDefaultEnabled = state.user?.locationShareDefaultEnabled ?: false,
+                    locationPermissionGranted = locationPermissionGranted,
                     feedPostPushEnabled = state.feedPostPushEnabled,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
@@ -6148,6 +6201,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onLocationFeatureEnabledChange = { scope.launch { vm.setLocationFeatureEnabled(it) } },
                     onLocationShareDefaultEnabledChange = { scope.launch { vm.setLocationShareDefaultEnabled(it) } },
+                    onRequestLocationPermission = ::requestLocationPermission,
+                    onOpenLocationPermissionSettings = ::openLocationPermissionSettings,
                     onNotificationMasterEnabledChange = { scope.launch { vm.setNotificationMasterEnabled(it) } },
                     onFeedPostPushEnabledChange = { vm.setFeedPostPushEnabled(it) },
                     onCustomNotificationToneEnabledChange = { vm.setCustomNotificationToneEnabled(it) },
@@ -6393,6 +6448,7 @@ fun CameraTab(
     networkUnstable: Boolean,
     promptRules: PromptRulesResponse?,
     locationFeatureEnabled: Boolean,
+    locationPermissionGranted: Boolean,
     locationShareEnabled: Boolean,
     updateAvailable: Boolean,
     updateCheckInFlight: Boolean,
@@ -6401,6 +6457,8 @@ fun CameraTab(
     frontPreviewUri: Uri?,
     onDownloadUpdate: () -> Unit,
     onLocationShareEnabledChange: (Boolean) -> Unit,
+    onRequestLocationPermission: () -> Unit,
+    onOpenLocationPermissionSettings: () -> Unit,
     onCapturePrompt: () -> Unit,
     onCaptureExtra: (CapsuleUploadOptions) -> Unit,
     onRequestSpecialMoment: () -> Unit,
@@ -6527,33 +6585,47 @@ fun CameraTab(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (locationShareEnabled) Color(0xFFFFD7D7) else Color(0xFFDFF5E3)
+                    containerColor = if (!locationPermissionGranted) Color(0xFFFFE1E1) else if (locationShareEnabled) Color(0xFFFFD7D7) else Color(0xFFDFF5E3)
                 )
             ) {
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Standort fuer neuen Post", fontWeight = FontWeight.Bold)
-                        Text(
-                            if (locationShareEnabled) {
-                                "Rot: Standort wird mit neuem Post geteilt."
-                            } else {
-                                "Gruen: Kein Standort wird geteilt."
-                            }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Standort fuer neuen Post", fontWeight = FontWeight.Bold)
+                            Text(
+                                if (!locationPermissionGranted) {
+                                    "Die App hat noch keine Standortberechtigung. Dieser Post wird trotz Feature-Schalter ohne Standort gesendet."
+                                } else if (locationShareEnabled) {
+                                    "Rot: Standort wird mit neuem Post geteilt."
+                                } else {
+                                    "Gruen: Kein Standort wird geteilt."
+                                }
+                            )
+                        }
+                        Switch(
+                            checked = locationPermissionGranted && locationShareEnabled,
+                            onCheckedChange = onLocationShareEnabledChange,
+                            enabled = locationPermissionGranted,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFFD32F2F),
+                                uncheckedTrackColor = Color(0xFF2E7D32)
+                            )
                         )
                     }
-                    Switch(
-                        checked = locationShareEnabled,
-                        onCheckedChange = onLocationShareEnabledChange,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = Color(0xFFD32F2F),
-                            uncheckedTrackColor = Color(0xFF2E7D32)
-                        )
-                    )
+                    if (!locationPermissionGranted) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = onRequestLocationPermission) { Text("Berechtigung erlauben") }
+                            OutlinedButton(onClick = onOpenLocationPermissionSettings) { Text("App-Einstellungen") }
+                        }
+                    }
                 }
             }
         }
@@ -7141,6 +7213,14 @@ fun FeedTab(
                                     SpecialMomentBadge(requestedByUser, requestedByUserColor)
                                 } else {
                                     DailyMomentBadge()
+                                }
+                                if (item.photo.locationShared && !item.photo.locationMapsUrl.isNullOrBlank()) {
+                                    Text(
+                                        "📍 Standort",
+                                        color = Color(0xFFD32F2F),
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.clickable { openExternalUrl(context, item.photo.locationMapsUrl) }
+                                    )
                                 }
                             }
                             if (item.capsuleLocked) {
@@ -7764,6 +7844,7 @@ fun ProfileTab(
     allowPhotoDownload: Boolean,
     locationFeatureEnabled: Boolean,
     locationShareDefaultEnabled: Boolean,
+    locationPermissionGranted: Boolean,
     feedPostPushEnabled: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
@@ -7801,6 +7882,8 @@ fun ProfileTab(
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onLocationFeatureEnabledChange: (Boolean) -> Unit,
     onLocationShareDefaultEnabledChange: (Boolean) -> Unit,
+    onRequestLocationPermission: () -> Unit,
+    onOpenLocationPermissionSettings: () -> Unit,
     onNotificationMasterEnabledChange: (Boolean) -> Unit,
     onFeedPostPushEnabledChange: (Boolean) -> Unit,
     onCustomNotificationToneEnabledChange: (Boolean) -> Unit,
@@ -8295,6 +8378,27 @@ fun ProfileTab(
                                         enabled = locationFeatureEnabledValue,
                                         supportingText = "Der Kamera-Schalter startet bei jedem App-Start wieder mit diesem Standard."
                                     )
+                                    if (locationFeatureEnabledValue && !locationPermissionGranted) {
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF0F0))
+                                        ) {
+                                            Column(
+                                                modifier = Modifier.fillMaxWidth().padding(10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Text("App-Standortberechtigung fehlt", fontWeight = FontWeight.Bold, color = Color(0xFFD32F2F))
+                                                Text(
+                                                    "Im Moment bleibt der Kamera-Schalter zwar sichtbar, neue Posts werden aber ohne Standort hochgeladen, bis du der App die Standortberechtigung gibst.",
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                    Button(onClick = onRequestLocationPermission) { Text("Berechtigung erlauben") }
+                                                    OutlinedButton(onClick = onOpenLocationPermissionSettings) { Text("App-Einstellungen") }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             SettingsToggleRow(
@@ -9081,6 +9185,9 @@ fun ProfileTab(
                         showLocationEnableWarning = false
                         locationFeatureEnabledValue = true
                         onLocationFeatureEnabledChange(true)
+                        if (!locationPermissionGranted) {
+                            onRequestLocationPermission()
+                        }
                     }
                 ) { Text("Aktivieren") }
             },
@@ -9390,6 +9497,21 @@ private fun openExternalUrl(context: Context, url: String?) {
     if (safeUrl.isBlank()) return
     runCatching {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(safeUrl)))
+    }
+}
+
+private fun hasLocationPermission(context: Context): Boolean {
+    val hasFine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    val hasCoarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    return hasFine || hasCoarse
+}
+
+private fun appPermissionSettingsIntent(context: Context): Intent {
+    return Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", context.packageName, null)
+    ).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 }
 
