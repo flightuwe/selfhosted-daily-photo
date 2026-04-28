@@ -148,6 +148,10 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.google.android.gms.location.CurrentLocationRequest
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
@@ -893,6 +897,7 @@ class AppRepo(
     private val httpClient: OkHttpClient
 ) {
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
+    private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(context) }
     @Volatile
     private var api: Api = buildApiService(resolveApiBaseUrl(context), httpClient)
     private val maxUploadDimensionPx = 1600
@@ -2053,20 +2058,33 @@ class AppRepo(
             return null
         }
         val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
-        val candidates = buildList {
-            runCatching { manager.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull()?.let(::add)
-            runCatching { manager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) }.getOrNull()?.let(::add)
-            runCatching { manager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER) }.getOrNull()?.let(::add)
+        val candidates = buildList<Pair<String, android.location.Location>> {
+            currentHighAccuracyLocation()?.let { add("fused_current" to it) }
+            currentLocationFromManager(manager)?.let { add("manager_current" to it) }
+            runCatching { fusedLocationClient.lastLocation.await() }.getOrNull()?.let { add("fused_last" to it) }
+            runCatching { manager.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull()?.let { add("gps_last" to it) }
+            runCatching { manager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) }.getOrNull()?.let { add("network_last" to it) }
+            runCatching { manager.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER) }.getOrNull()?.let { add("passive_last" to it) }
         }
-        candidates.maxByOrNull { it.time }?.let { best ->
-            return PendingLocationPayload(latitude = best.latitude, longitude = best.longitude)
-        }
-        val current = currentLocationFromManager(manager)
-        if (current == null) {
-            logDebug("location_unavailable", "no last known or current location", "providers=${manager.allProviders.joinToString(",")}")
+        val best = chooseBestLocation(candidates)
+        if (best == null) {
+            logDebug("location_unavailable", "no usable location fix", "providers=${manager.allProviders.joinToString(",")}")
             return null
         }
-        return PendingLocationPayload(latitude = current.latitude, longitude = current.longitude)
+        logSelectedLocation(best.first, best.second)
+        return PendingLocationPayload(latitude = best.second.latitude, longitude = best.second.longitude)
+    }
+
+    private suspend fun currentHighAccuracyLocation(): android.location.Location? {
+        val request = CurrentLocationRequest.Builder()
+            .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+            .setMaxUpdateAgeMillis(0)
+            .setDurationMillis(8_000)
+            .build()
+        val cancellation = CancellationTokenSource()
+        return runCatching {
+            fusedLocationClient.getCurrentLocation(request, cancellation.token).await()
+        }.getOrNull()
     }
 
     private suspend fun currentLocationFromManager(manager: LocationManager): android.location.Location? {
@@ -2087,6 +2105,29 @@ class AppRepo(
                 if (cont.isActive) cont.resume(null)
             }
         }
+    }
+
+    private fun chooseBestLocation(candidates: List<Pair<String, android.location.Location>>): Pair<String, android.location.Location>? {
+        val now = System.currentTimeMillis()
+        return candidates
+            .filter { (_, location) -> location.latitude in -90.0..90.0 && location.longitude in -180.0..180.0 }
+            .minByOrNull { (_, location) ->
+                val accuracyPenalty = if (location.hasAccuracy()) location.accuracy else 5000f
+                val ageMs = (now - location.time).coerceAtLeast(0L)
+                val agePenalty = (ageMs / 1000f) * 1.5f
+                accuracyPenalty + agePenalty
+            }
+    }
+
+    private fun logSelectedLocation(source: String, location: android.location.Location) {
+        val ageMs = (System.currentTimeMillis() - location.time).coerceAtLeast(0L)
+        val accuracy = if (location.hasAccuracy()) "%.1f".format(Locale.US, location.accuracy) else "unknown"
+        val provider = location.provider ?: "unknown"
+        logDebug(
+            "location_fix_selected",
+            "location fix selected",
+            "source=$source;provider=$provider;accuracyMeters=$accuracy;ageMs=$ageMs;lat=${location.latitude};lon=${location.longitude}"
+        )
     }
 
     private fun copyUriToTemp(uri: Uri, quality: Int = uploadQuality()): File {

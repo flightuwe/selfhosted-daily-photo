@@ -1,0 +1,10 @@
+{
+  "version": "0.4.37",
+  "releasedAt": "2026-04-28T00:00:00Z",
+  "highlights": [
+    "Android Standort-Teilen nutzt jetzt aktiv eine frische High-Accuracy-Position statt bevorzugt alte oder grobe Naeherungswerte.",
+    "Wenn mehrere Standort-Fixes vorliegen, waehlt die App jetzt den besten Kandidaten aus Genauigkeit und Frische statt nur den juengsten.",
+    "Standort-Debugging wurde erweitert, damit provider, Genauigkeit und Alter des verwendeten Fixes spaeter nachvollziehbar sind."
+  ],
+  "details": []
+}
