@@ -278,8 +278,11 @@ type Photo struct {
 	User                     User       `json:"user"`
 	Day                      string     `gorm:"index;size:10;not null" json:"day"`
 	PromptOnly               bool       `gorm:"default:false" json:"promptOnly"`
+	UploadClientID           string     `gorm:"size:64;index:idx_photo_user_upload_client" json:"uploadClientId"`
 	FilePath                 string     `gorm:"size:255;not null" json:"filePath"`
 	SecondPath               string     `gorm:"size:255" json:"secondPath"`
+	PrimaryDigest            string     `gorm:"size:64;index" json:"primaryDigest"`
+	SecondaryDigest          string     `gorm:"size:64" json:"secondaryDigest"`
 	CapsulePreviewPath       string     `gorm:"size:255" json:"capsulePreviewPath"`
 	CapsuleSecondPreviewPath string     `gorm:"size:255" json:"capsuleSecondPreviewPath"`
 	Caption                  string     `gorm:"size:255" json:"caption"`
@@ -290,6 +293,7 @@ type Photo struct {
 	LocationShared           bool       `gorm:"default:false;index" json:"locationShared"`
 	LocationLatitude         *float64   `json:"locationLatitude"`
 	LocationLongitude        *float64   `json:"locationLongitude"`
+	CapturedAt               *time.Time `gorm:"index" json:"capturedAt"`
 	CreatedAt                time.Time  `json:"createdAt"`
 }
 

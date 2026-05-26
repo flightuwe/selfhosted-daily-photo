@@ -36,6 +36,7 @@ data class QueuedUploadItem(
     val id: String,
     val backPath: String,
     val frontPath: String,
+    val uploadClientId: String,
     val isPrompt: Boolean,
     val capsuleMode: String,
     val capsulePrivate: Boolean,
@@ -49,6 +50,7 @@ data class QueuedUploadItem(
     val lastError: String,
     val progressPercent: Int,
     val nextRetryAtMs: Long,
+    val capturedAtMs: Long,
     val createdAtMs: Long,
     val updatedAtMs: Long
 )
@@ -88,6 +90,7 @@ object UploadQueueManager {
         context: Context,
         backPath: String,
         frontPath: String,
+        uploadClientId: String,
         isPrompt: Boolean,
         capsuleMode: String = "",
         capsulePrivate: Boolean = false,
@@ -95,6 +98,7 @@ object UploadQueueManager {
         locationShared: Boolean = false,
         locationLatitude: Double? = null,
         locationLongitude: Double? = null,
+        capturedAtMs: Long = 0L,
         authToken: String
     ): QueuedUploadItem {
         val now = System.currentTimeMillis()
@@ -102,6 +106,7 @@ object UploadQueueManager {
             id = UUID.randomUUID().toString(),
             backPath = backPath,
             frontPath = frontPath,
+            uploadClientId = uploadClientId,
             isPrompt = isPrompt,
             capsuleMode = capsuleMode.trim(),
             capsulePrivate = capsulePrivate,
@@ -115,6 +120,7 @@ object UploadQueueManager {
             lastError = "",
             progressPercent = 0,
             nextRetryAtMs = 0L,
+            capturedAtMs = capturedAtMs,
             createdAtMs = now,
             updatedAtMs = now
         )
@@ -292,6 +298,7 @@ object UploadQueueManager {
                     id = o.optString("id"),
                     backPath = o.optString("backPath"),
                     frontPath = o.optString("frontPath"),
+                    uploadClientId = o.optString("uploadClientId"),
                     isPrompt = o.optBoolean("isPrompt", true),
                     capsuleMode = o.optString("capsuleMode"),
                     capsulePrivate = o.optBoolean("capsulePrivate", false),
@@ -305,6 +312,7 @@ object UploadQueueManager {
                     lastError = o.optString("lastError"),
                     progressPercent = o.optInt("progressPercent", 0),
                     nextRetryAtMs = o.optLong("nextRetryAtMs", 0L),
+                    capturedAtMs = o.optLong("capturedAtMs", 0L),
                     createdAtMs = o.optLong("createdAtMs", 0L),
                     updatedAtMs = o.optLong("updatedAtMs", 0L)
                 )
@@ -321,6 +329,7 @@ object UploadQueueManager {
                     put("id", item.id)
                     put("backPath", item.backPath)
                     put("frontPath", item.frontPath)
+                    put("uploadClientId", item.uploadClientId)
                     put("isPrompt", item.isPrompt)
                     put("capsuleMode", item.capsuleMode)
                     put("capsulePrivate", item.capsulePrivate)
@@ -334,6 +343,7 @@ object UploadQueueManager {
                     put("lastError", item.lastError)
                     put("progressPercent", item.progressPercent)
                     put("nextRetryAtMs", item.nextRetryAtMs)
+                    put("capturedAtMs", item.capturedAtMs)
                     put("createdAtMs", item.createdAtMs)
                     put("updatedAtMs", item.updatedAtMs)
                 }
@@ -437,6 +447,11 @@ class UploadQueueWorker(
             frontBody
         )
         val kind = (if (item.isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
+        val capturedAtPart = item.capturedAtMs.takeIf { it > 0L }
+            ?.let { OffsetDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault()).toString() }
+            ?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val uploadClientIdPart = item.uploadClientId.trim().takeIf { it.isNotBlank() }
+            ?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsuleModePart = item.capsuleMode.trim().takeIf { it.isNotBlank() }
             ?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivatePart = if (capsuleModePart != null) {
@@ -456,6 +471,8 @@ class UploadQueueWorker(
             backPart,
             frontPart,
             kind,
+            capturedAtPart,
+            uploadClientIdPart,
             capsuleModePart,
             capsulePrivatePart,
             capsuleGroupRemindPart,

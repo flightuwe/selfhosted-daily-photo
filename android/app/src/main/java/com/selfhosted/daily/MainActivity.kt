@@ -19,6 +19,7 @@ import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.Environment
 import android.media.RingtoneManager
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -194,7 +195,9 @@ import java.util.concurrent.TimeUnit
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.LocalDateTime
+import java.time.Instant
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
@@ -368,6 +371,10 @@ data class PromptPhoto(
     val url: String,
     val secondUrl: String? = null,
     val createdAt: String,
+    val capturedAt: String? = null,
+    val uploadedAt: String? = null,
+    val timeShifted: Boolean = false,
+    val deduplicated: Boolean = false,
     val dailyMoment: Boolean = false,
     val capsuleMode: String? = null,
     val capsuleVisibleAt: String? = null,
@@ -778,6 +785,8 @@ interface Api {
         @Header("Authorization") token: String,
         @Part photo: MultipartBody.Part,
         @Part("kind") kind: RequestBody,
+        @Part("captured_at") capturedAt: RequestBody? = null,
+        @Part("upload_client_id") uploadClientId: RequestBody? = null,
         @Part("capsule_mode") capsuleMode: RequestBody? = null,
         @Part("capsule_private") capsulePrivate: RequestBody? = null,
         @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null,
@@ -793,6 +802,8 @@ interface Api {
         @Part photoBack: MultipartBody.Part,
         @Part photoFront: MultipartBody.Part,
         @Part("kind") kind: RequestBody,
+        @Part("captured_at") capturedAt: RequestBody? = null,
+        @Part("upload_client_id") uploadClientId: RequestBody? = null,
         @Part("capsule_mode") capsuleMode: RequestBody? = null,
         @Part("capsule_private") capsulePrivate: RequestBody? = null,
         @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null,
@@ -1901,6 +1912,7 @@ class AppRepo(
         shareLocation: Boolean = false,
         capsule: CapsuleUploadOptions = CapsuleUploadOptions()
     ) {
+        val capturedAt = readCapturedAtFromUri(uri)
         val file = copyUriToTemp(uri)
         val part = MultipartBody.Part.createFormData(
             "photo",
@@ -1908,6 +1920,8 @@ class AppRepo(
             file.asRequestBody("image/*".toMediaTypeOrNull())
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
+        val capturedAtPart = capturedAt?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val uploadClientIdPart = UUID.randomUUID().toString().toRequestBody("text/plain".toMediaTypeOrNull())
         val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
@@ -1919,7 +1933,7 @@ class AppRepo(
         val latitude = locationPayload?.latitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
         val longitude = locationPayload?.longitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
         authorizedCall("/api/uploads") { token ->
-            api.upload(token, part, kind, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
+            api.upload(token, part, kind, capturedAtPart, uploadClientIdPart, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
         }
     }
 
@@ -1931,6 +1945,9 @@ class AppRepo(
         capsule: CapsuleUploadOptions = CapsuleUploadOptions(),
         onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
     ) {
+        val backCapturedAt = readCapturedAtFromUri(backUri)
+        val frontCapturedAt = readCapturedAtFromUri(frontUri)
+        val capturedAt = earliestCapturedAt(backCapturedAt, frontCapturedAt)
         val backFile = copyUriToTemp(backUri)
         val frontFile = copyUriToTemp(frontUri)
         val totalBytes = (backFile.length() + frontFile.length()).coerceAtLeast(1L)
@@ -1961,6 +1978,8 @@ class AppRepo(
             frontBody
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
+        val capturedAtPart = capturedAt?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val uploadClientIdPart = UUID.randomUUID().toString().toRequestBody("text/plain".toMediaTypeOrNull())
         val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
@@ -1973,7 +1992,7 @@ class AppRepo(
         val longitude = locationPayload?.longitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
         emit()
         authorizedCall("/api/uploads/dual") { token ->
-            api.uploadDual(token, backPart, frontPart, kind, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
+            api.uploadDual(token, backPart, frontPart, kind, capturedAtPart, uploadClientIdPart, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
         }
         onProgress(totalBytes, totalBytes)
     }
@@ -1985,11 +2004,15 @@ class AppRepo(
         shareLocation: Boolean = false,
         capsule: CapsuleUploadOptions = CapsuleUploadOptions()
     ): QueuedUploadItem {
+        val backCapturedAt = readCapturedAtFromUri(backUri)
+        val frontCapturedAt = readCapturedAtFromUri(frontUri)
+        val capturedAt = earliestCapturedAt(backCapturedAt, frontCapturedAt)
         val backFile = copyUriToTemp(backUri)
         val frontFile = copyUriToTemp(frontUri)
         val queuedDir = File(context.filesDir, "upload-queue").apply { mkdirs() }
         val backQueued = moveToQueueFile(backFile, queuedDir, "back")
         val frontQueued = moveToQueueFile(frontFile, queuedDir, "front")
+        val uploadClientId = UUID.randomUUID().toString()
         val locationPayload = if (shareLocation) lastAvailableLocationPayload() else null
         if (shareLocation && locationPayload == null) {
             logDebug("location_queue_skipped", "no device location available", "endpoint=/api/uploads/dual")
@@ -1998,6 +2021,7 @@ class AppRepo(
             context = context,
             backPath = backQueued.absolutePath,
             frontPath = frontQueued.absolutePath,
+            uploadClientId = uploadClientId,
             isPrompt = isPrompt,
             capsuleMode = capsule.mode,
             capsulePrivate = capsule.privateOnly,
@@ -2005,6 +2029,7 @@ class AppRepo(
             locationShared = locationPayload != null,
             locationLatitude = locationPayload?.latitude,
             locationLongitude = locationPayload?.longitude,
+            capturedAtMs = capturedAt?.toInstant()?.toEpochMilli() ?: 0L,
             authToken = token()
         )
     }
@@ -2168,6 +2193,77 @@ class AppRepo(
                 }
             }
             fallback
+        }
+    }
+
+    private fun readCapturedAtFromUri(uri: Uri): OffsetDateTime? {
+        val resolver = context.contentResolver
+        val exifValue = resolver.openInputStream(uri)?.use { input ->
+            val exif = ExifInterface(input)
+            exifDateTimeOriginal(exif)
+        }
+        if (exifValue != null) {
+            return exifValue
+        }
+
+        val projection = arrayOf(
+            MediaStore.Images.ImageColumns.DATE_TAKEN,
+            MediaStore.MediaColumns.DATE_MODIFIED
+        )
+        runCatching {
+            resolver.query(uri, projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val takenIdx = cursor.getColumnIndex(MediaStore.Images.ImageColumns.DATE_TAKEN)
+                    if (takenIdx >= 0) {
+                        val taken = cursor.getLong(takenIdx)
+                        if (taken > 0L) {
+                            return OffsetDateTime.ofInstant(Instant.ofEpochMilli(taken), ZoneId.systemDefault())
+                        }
+                    }
+                    val modifiedIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                    if (modifiedIdx >= 0) {
+                        val modified = cursor.getLong(modifiedIdx)
+                        if (modified > 0L) {
+                            return OffsetDateTime.ofInstant(Instant.ofEpochSecond(modified), ZoneId.systemDefault())
+                        }
+                    }
+                }
+            }
+        }
+
+        if (uri.scheme.equals("file", ignoreCase = true)) {
+            val path = uri.path
+            if (!path.isNullOrBlank()) {
+                val file = File(path)
+                if (file.exists() && file.lastModified() > 0L) {
+                    return OffsetDateTime.ofInstant(Instant.ofEpochMilli(file.lastModified()), ZoneId.systemDefault())
+                }
+            }
+        }
+        return null
+    }
+
+    private fun exifDateTimeOriginal(exif: ExifInterface): OffsetDateTime? {
+        val value = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)?.trim().orEmpty()
+        if (value.isBlank()) return null
+        val local = runCatching {
+            LocalDateTime.parse(value, DateTimeFormatter.ofPattern("yyyy:MM:dd HH:mm:ss", Locale.US))
+        }.getOrNull() ?: return null
+        val offsetText = exif.getAttribute(ExifInterface.TAG_OFFSET_TIME_ORIGINAL)?.trim().orEmpty()
+        val offset = runCatching { ZoneOffset.of(offsetText) }.getOrNull()
+        return if (offset != null) {
+            OffsetDateTime.of(local, offset)
+        } else {
+            local.atZone(ZoneId.systemDefault()).toOffsetDateTime()
+        }
+    }
+
+    private fun earliestCapturedAt(first: OffsetDateTime?, second: OffsetDateTime?): OffsetDateTime? {
+        return when {
+            first == null -> second
+            second == null -> first
+            first.isBefore(second) -> first
+            else -> second
         }
     }
 
@@ -7241,6 +7337,14 @@ fun FeedTab(
                                     color = secondaryTextColor,
                                     fontWeight = FontWeight.SemiBold
                                 )
+                                uploadTimeHint(item.photo)?.let { hint ->
+                                    Text(
+                                        hint,
+                                        color = secondaryTextColor,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                                 if (item.photo.locationShared && !item.photo.locationMapsUrl.isNullOrBlank()) {
                                     Text(
                                         "📍 Standort",
@@ -8831,6 +8935,9 @@ fun ProfileTab(
                                             Text("2 Bilder", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                         Text("Zeit ${formatMomentTime(photo.createdAt)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        uploadTimeHint(photo)?.let { hint ->
+                                            Text(hint, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
                                         Text(formatDayLabel(photo.day), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
                                 }
@@ -9384,6 +9491,12 @@ private fun formatMomentTime(raw: String?): String {
         }
     }
     return parsed
+}
+
+private fun uploadTimeHint(photo: PromptPhoto): String? {
+    if (!photo.timeShifted) return null
+    val uploadedAt = photo.uploadedAt ?: return null
+    return "Spaeter hochgeladen: ${formatMomentTime(uploadedAt)}"
 }
 
 @Composable

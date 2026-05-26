@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +63,9 @@ type Server struct {
 	activityTouchMu   sync.Mutex
 	activityTouchLast map[uint]time.Time
 }
+
+const photoTimeShiftThreshold = 5 * time.Minute
+const duplicateDigestWindow = time.Minute
 
 func (s *Server) Router() *gin.Engine {
 	r := gin.Default()
@@ -427,6 +432,7 @@ func (s *Server) computeUserMomentStats(userID uint) (int64, int64, error) {
 	if err := s.DB.Where("user_id = ?", userID).Order("created_at desc").Limit(500).Find(&photos).Error; err != nil {
 		return 0, 0, err
 	}
+	sortPhotosForFeed(photos)
 	days := make([]string, 0, len(photos))
 	daySeen := make(map[string]struct{}, len(photos))
 	postedDaySet := make(map[string]struct{}, len(photos))
@@ -460,7 +466,8 @@ func (s *Server) computeUserMomentStats(userID uint) (int64, int64, error) {
 		if !ok || prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
 			continue
 		}
-		if !p.CreatedAt.Before(*prompt.TriggeredAt) && !p.CreatedAt.After(*prompt.UploadUntil) {
+		effectiveAt := photoEffectiveTime(p)
+		if !effectiveAt.Before(*prompt.TriggeredAt) && !effectiveAt.After(*prompt.UploadUntil) {
 			dailyMomentCount++
 			countedDays[p.Day] = struct{}{}
 		}
@@ -1296,6 +1303,22 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	}
 
+	capturedAt, err := s.parseCapturedAtValue(c.PostForm("captured_at"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid captured_at"})
+		return
+	}
+	uploadClientID := normalizeUploadClientID(c.PostForm("upload_client_id"))
+	if uploadClientID != "" {
+		if existing, ok, err := s.findPhotoByUploadClientID(user.ID, uploadClientID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		} else if ok {
+			c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true})
+			return
+		}
+	}
+
 	day := time.Now().In(s.Location).Format("2006-01-02")
 	now := time.Now().In(s.Location)
 	todayWindowActive := s.isDailyWindowActive(day, now)
@@ -1314,10 +1337,6 @@ func (s *Server) handleUpload(c *gin.Context) {
 	if kind == "prompt" {
 		if !s.isPromptUploadAllowed(day, now) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
-			return
-		}
-		if hasPromptPosted {
-			c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
 			return
 		}
 	}
@@ -1369,7 +1388,9 @@ func (s *Server) handleUpload(c *gin.Context) {
 		UserID:             user.ID,
 		Day:                day,
 		PromptOnly:         kind == "prompt",
+		UploadClientID:     uploadClientID,
 		FilePath:           relPath,
+		PrimaryDigest:      "",
 		CapsulePreviewPath: capsulePreviewPath,
 		Caption:            c.PostForm("caption"),
 		CapsuleMode:        capsuleMode,
@@ -1379,8 +1400,30 @@ func (s *Server) handleUpload(c *gin.Context) {
 		LocationShared:     locationShared,
 		LocationLatitude:   latitude,
 		LocationLongitude:  longitude,
+		CapturedAt:         capturedAt,
+	}
+	photo.PrimaryDigest, err = s.fileDigest(relPath)
+	if err != nil {
+		s.removePhotoFiles(photo)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "digest failed"})
+		return
+	}
+	if existing, ok, err := s.findRecentDuplicatePhoto(user.ID, day, kind == "prompt", photo.PrimaryDigest, photo.SecondaryDigest, now); err != nil {
+		s.removePhotoFiles(photo)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	} else if ok {
+		s.removePhotoFiles(photo)
+		c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true})
+		return
+	}
+	if kind == "prompt" && hasPromptPosted {
+		s.removePhotoFiles(photo)
+		c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+		return
 	}
 	if err := s.DB.Create(&photo).Error; err != nil {
+		s.removePhotoFiles(photo)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
 		return
 	}
@@ -1645,6 +1688,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
+	sortPhotosForFeed(photos)
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/feed", "feed_photos_query", time.Since(photosQueryStart))
 	}
@@ -1670,10 +1714,11 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 		capsuleReleased := strings.TrimSpace(p.CapsuleMode) != "" && !capsuleLocked
 		isEarly := false
 		isLate := false
-		if prompt.TriggeredAt != nil && p.CreatedAt.Before(*prompt.TriggeredAt) {
+		effectiveAt := photoEffectiveTime(p)
+		if prompt.TriggeredAt != nil && effectiveAt.Before(*prompt.TriggeredAt) {
 			isEarly = true
 		}
-		if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
+		if prompt.UploadUntil != nil && effectiveAt.After(*prompt.UploadUntil) {
 			isLate = true
 		}
 		reactions := reactionByPhoto[p.ID]
@@ -1741,6 +1786,7 @@ func (s *Server) handleAdminLocations(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
+	sortPhotosForFeed(photos)
 
 	items := make([]gin.H, 0, len(photos))
 	for _, photo := range photos {
@@ -1853,6 +1899,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
+	sortPhotosForFeed(photos)
 
 	photoIDs := make([]uint, 0, len(photos))
 	for _, p := range photos {
@@ -1873,10 +1920,11 @@ func (s *Server) handleFeed(c *gin.Context) {
 		capsuleReleased := strings.TrimSpace(p.CapsuleMode) != "" && !capsuleLocked
 		isEarly := false
 		isLate := false
-		if prompt.TriggeredAt != nil && p.CreatedAt.Before(*prompt.TriggeredAt) {
+		effectiveAt := photoEffectiveTime(p)
+		if prompt.TriggeredAt != nil && effectiveAt.Before(*prompt.TriggeredAt) {
 			isEarly = true
 		}
-		if prompt.UploadUntil != nil && p.CreatedAt.After(*prompt.UploadUntil) {
+		if prompt.UploadUntil != nil && effectiveAt.After(*prompt.UploadUntil) {
 			isLate = true
 		}
 		reactions := reactionByPhoto[p.ID]
@@ -5614,6 +5662,22 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		return
 	}
 
+	capturedAt, err := s.parseCapturedAtValue(c.PostForm("captured_at"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid captured_at"})
+		return
+	}
+	uploadClientID := normalizeUploadClientID(c.PostForm("upload_client_id"))
+	if uploadClientID != "" {
+		if existing, ok, err := s.findPhotoByUploadClientID(user.ID, uploadClientID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		} else if ok {
+			c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true})
+			return
+		}
+	}
+
 	now := time.Now().In(s.Location)
 	day := now.Format("2006-01-02")
 	todayWindowActive := s.isDailyWindowActive(day, now)
@@ -5632,10 +5696,6 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	if kind == "prompt" {
 		if !s.isPromptUploadAllowed(day, now) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
-			return
-		}
-		if hasPromptPosted {
-			c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
 			return
 		}
 	}
@@ -5691,10 +5751,12 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		UserID:                   user.ID,
 		Day:                      day,
 		PromptOnly:               kind == "prompt",
+		UploadClientID:           uploadClientID,
 		FilePath:                 backPath,
 		SecondPath:               frontPath,
 		CapsulePreviewPath:       capsulePreviewPath,
 		CapsuleSecondPreviewPath: capsuleSecondPreviewPath,
+		CapturedAt:               capturedAt,
 		Caption:                  c.PostForm("caption"),
 		CapsuleMode:              capsuleMode,
 		CapsuleVisibleAt:         capsuleVisibleAt,
@@ -5704,7 +5766,34 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		LocationLatitude:         latitude,
 		LocationLongitude:        longitude,
 	}
+	photo.PrimaryDigest, err = s.fileDigest(backPath)
+	if err != nil {
+		s.removePhotoFiles(photo)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "digest failed"})
+		return
+	}
+	photo.SecondaryDigest, err = s.fileDigest(frontPath)
+	if err != nil {
+		s.removePhotoFiles(photo)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "digest failed"})
+		return
+	}
+	if existing, ok, err := s.findRecentDuplicatePhoto(user.ID, day, kind == "prompt", photo.PrimaryDigest, photo.SecondaryDigest, now); err != nil {
+		s.removePhotoFiles(photo)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	} else if ok {
+		s.removePhotoFiles(photo)
+		c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true})
+		return
+	}
+	if kind == "prompt" && hasPromptPosted {
+		s.removePhotoFiles(photo)
+		c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+		return
+	}
 	if err := s.DB.Create(&photo).Error; err != nil {
+		s.removePhotoFiles(photo)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
 		return
 	}
@@ -5742,6 +5831,7 @@ func (s *Server) myPhotosPayload(userID uint, now time.Time) ([]gin.H, error) {
 	if err := s.DB.Where("user_id = ?", userID).Order("created_at desc").Limit(120).Find(&photos).Error; err != nil {
 		return nil, err
 	}
+	sortPhotosForFeed(photos)
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/me/photos", "my_photos_query", time.Since(queryStart))
 	}
@@ -5779,7 +5869,8 @@ func (s *Server) myPhotosPayload(userID uint, now time.Time) ([]gin.H, error) {
 		row := s.photoJSON(p)
 		dailyMoment := false
 		if prompt, ok := promptByDay[p.Day]; ok && prompt.TriggeredAt != nil && prompt.UploadUntil != nil {
-			dailyMoment = !p.CreatedAt.Before(*prompt.TriggeredAt) && !p.CreatedAt.After(*prompt.UploadUntil)
+			effectiveAt := photoEffectiveTime(p)
+			dailyMoment = !effectiveAt.Before(*prompt.TriggeredAt) && !effectiveAt.After(*prompt.UploadUntil)
 		}
 		row["dailyMoment"] = dailyMoment
 		out = append(out, row)
@@ -6949,6 +7040,127 @@ func normalizeFotomojiEmoji(raw string) string {
 	return emoji
 }
 
+func normalizeUploadClientID(raw string) string {
+	value := strings.TrimSpace(raw)
+	if len(value) > 64 {
+		value = value[:64]
+	}
+	return value
+}
+
+func (s *Server) parseCapturedAtValue(raw string) (*time.Time, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, err
+	}
+	captured := parsed.In(s.Location)
+	return &captured, nil
+}
+
+func photoEffectiveTime(photo models.Photo) time.Time {
+	if photo.CapturedAt != nil && !photo.CapturedAt.IsZero() {
+		return *photo.CapturedAt
+	}
+	return photo.CreatedAt
+}
+
+func photoTimeShifted(photo models.Photo) bool {
+	if photo.CapturedAt == nil || photo.CapturedAt.IsZero() || photo.CreatedAt.IsZero() {
+		return false
+	}
+	diff := photo.CreatedAt.Sub(*photo.CapturedAt)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff > photoTimeShiftThreshold
+}
+
+func sortPhotosForFeed(photos []models.Photo) {
+	sort.SliceStable(photos, func(i, j int) bool {
+		left := photoEffectiveTime(photos[i])
+		right := photoEffectiveTime(photos[j])
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		if !photos[i].CreatedAt.Equal(photos[j].CreatedAt) {
+			return photos[i].CreatedAt.After(photos[j].CreatedAt)
+		}
+		return photos[i].ID > photos[j].ID
+	})
+}
+
+func (s *Server) findPhotoByUploadClientID(userID uint, uploadClientID string) (models.Photo, bool, error) {
+	if strings.TrimSpace(uploadClientID) == "" {
+		return models.Photo{}, false, nil
+	}
+	var photo models.Photo
+	err := s.DB.Where("user_id = ? AND upload_client_id = ?", userID, uploadClientID).Order("id desc").First(&photo).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.Photo{}, false, nil
+	}
+	if err != nil {
+		return models.Photo{}, false, err
+	}
+	return photo, true, nil
+}
+
+func (s *Server) findRecentDuplicatePhoto(userID uint, day string, promptOnly bool, primaryDigest string, secondaryDigest string, now time.Time) (models.Photo, bool, error) {
+	if strings.TrimSpace(primaryDigest) == "" {
+		return models.Photo{}, false, nil
+	}
+	var photos []models.Photo
+	cutoff := now.Add(-duplicateDigestWindow)
+	if err := s.DB.
+		Where("user_id = ? AND day = ? AND prompt_only = ? AND created_at >= ?", userID, day, promptOnly, cutoff).
+		Order("created_at desc, id desc").
+		Find(&photos).Error; err != nil {
+		return models.Photo{}, false, err
+	}
+	for _, photo := range photos {
+		if photo.PrimaryDigest == primaryDigest && photo.SecondaryDigest == secondaryDigest {
+			return photo, true, nil
+		}
+	}
+	return models.Photo{}, false, nil
+}
+
+func (s *Server) fileDigest(relPath string) (string, error) {
+	cleanRel := filepath.ToSlash(strings.TrimSpace(relPath))
+	if cleanRel == "" {
+		return "", errors.New("empty photo path")
+	}
+	fullPath := filepath.Join(s.Config.UploadDir, cleanRel)
+	file, err := os.Open(fullPath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum.Sum(nil)), nil
+}
+
+func (s *Server) removePhotoFiles(photo models.Photo) {
+	for _, rel := range []string{
+		photo.FilePath,
+		photo.SecondPath,
+		photo.CapsulePreviewPath,
+		photo.CapsuleSecondPreviewPath,
+	} {
+		cleanRel := filepath.ToSlash(strings.TrimSpace(rel))
+		if cleanRel == "" {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.Config.UploadDir, cleanRel))
+	}
+}
+
 func (s *Server) saveUploadedFile(day string, userID uint, header *multipart.FileHeader) (string, error) {
 	src, err := header.Open()
 	if err != nil {
@@ -7259,12 +7471,16 @@ func (s *Server) photoFotomojiJSON(item models.PhotoFotomoji, includeUser bool) 
 }
 
 func (s *Server) photoJSON(p models.Photo) gin.H {
+	effectiveAt := photoEffectiveTime(p)
 	out := gin.H{
 		"id":                 p.ID,
 		"day":                p.Day,
 		"promptOnly":         p.PromptOnly,
 		"caption":            p.Caption,
-		"createdAt":          p.CreatedAt,
+		"createdAt":          effectiveAt,
+		"capturedAt":         p.CapturedAt,
+		"uploadedAt":         p.CreatedAt,
+		"timeShifted":        photoTimeShifted(p),
 		"capsuleMode":        p.CapsuleMode,
 		"capsuleVisibleAt":   p.CapsuleVisibleAt,
 		"capsulePrivate":     false,
@@ -7275,6 +7491,7 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 		"locationShared":     false,
 		"locationDisplay":    "",
 		"locationMapsUrl":    "",
+		"deduplicated":       false,
 	}
 	if p.SecondPath != "" {
 		out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
@@ -7431,6 +7648,7 @@ func (s *Server) loadVisibleUserPhotos(viewerID uint, targetID uint) ([]gin.H, e
 	if err := s.DB.Where("user_id = ?", targetID).Order("created_at desc").Limit(120).Find(&photos).Error; err != nil {
 		return nil, err
 	}
+	sortPhotosForFeed(photos)
 	now := time.Now().In(s.Location)
 	out := make([]gin.H, 0, len(photos))
 	for _, p := range photos {

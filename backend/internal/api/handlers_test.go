@@ -89,6 +89,41 @@ func TestPhotoVisibleToViewer(t *testing.T) {
 	}
 }
 
+func TestPhotoEffectiveTimeUsesCapturedAt(t *testing.T) {
+	uploadedAt := time.Date(2026, 3, 12, 18, 0, 0, 0, time.UTC)
+	capturedAt := uploadedAt.Add(-12 * time.Minute)
+	photo := models.Photo{CreatedAt: uploadedAt, CapturedAt: &capturedAt}
+	if got := photoEffectiveTime(photo); !got.Equal(capturedAt) {
+		t.Fatalf("photoEffectiveTime() = %v, want %v", got, capturedAt)
+	}
+}
+
+func TestPhotoTimeShiftedThreshold(t *testing.T) {
+	uploadedAt := time.Date(2026, 3, 12, 18, 0, 0, 0, time.UTC)
+	within := uploadedAt.Add(-5 * time.Minute)
+	if photoTimeShifted(models.Photo{CreatedAt: uploadedAt, CapturedAt: &within}) {
+		t.Fatal("photoTimeShifted() = true, want false at exactly 5 minutes")
+	}
+	shifted := uploadedAt.Add(-6 * time.Minute)
+	if !photoTimeShifted(models.Photo{CreatedAt: uploadedAt, CapturedAt: &shifted}) {
+		t.Fatal("photoTimeShifted() = false, want true beyond threshold")
+	}
+}
+
+func TestSortPhotosForFeedUsesEffectiveTime(t *testing.T) {
+	uploadA := time.Date(2026, 3, 12, 18, 0, 0, 0, time.UTC)
+	capturedA := uploadA.Add(-10 * time.Minute)
+	uploadB := time.Date(2026, 3, 12, 17, 57, 0, 0, time.UTC)
+	photos := []models.Photo{
+		{ID: 1, CreatedAt: uploadA, CapturedAt: &capturedA},
+		{ID: 2, CreatedAt: uploadB},
+	}
+	sortPhotosForFeed(photos)
+	if photos[0].ID != 2 || photos[1].ID != 1 {
+		t.Fatalf("sortPhotosForFeed() order = [%d %d], want [2 1]", photos[0].ID, photos[1].ID)
+	}
+}
+
 func TestMomentKindFromTriggerSource(t *testing.T) {
 	tests := []struct {
 		name          string
