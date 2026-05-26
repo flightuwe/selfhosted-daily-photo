@@ -1,0 +1,10 @@
+{
+  "version": "0.5.2",
+  "releasedAt": "2026-05-26T00:00:00Z",
+  "highlights": [
+    "Feed-Posts koennen jetzt direkt ueber das Drei-Punkte-Menue gemeldet werden.",
+    "Der Kalender-Suchmodus bleibt beim Oeffnen stabil nutzbar und klappt nicht mehr sofort wieder zu.",
+    "Im Gemerkt-Kalender werden mehrere gemerkte Posts vom selben Tag jetzt vollstaendig angezeigt."
+  ],
+  "details": []
+}
