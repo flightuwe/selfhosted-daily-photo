@@ -1,0 +1,10 @@
+{
+  "version": "0.4.39",
+  "releasedAt": "2026-05-26T00:00:00Z",
+  "highlights": [
+    "Retry-Uploads behalten jetzt ihre eigentliche Aufnahmezeit, damit der Feed auch bei spaeterem Hochladen chronologisch korrekt bleibt.",
+    "Die App zeigt bei deutlich spaeterem Upload zusaetzlich an, dass der Beitrag erst nachtraeglich hochgeladen wurde.",
+    "Doppelte Posts nach schlechtem Netz oder Timeout werden ueber Upload-Idempotenz und Bildvergleich abgefangen."
+  ],
+  "details": []
+}
