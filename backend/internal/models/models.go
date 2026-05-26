@@ -15,6 +15,7 @@ type User struct {
 	PhotoReactionPushEnabled      bool       `gorm:"default:false" json:"photoReactionPushEnabled"`
 	PhotoFotomojiPushEnabled      bool       `gorm:"default:false" json:"photoFotomojiPushEnabled"`
 	PhotoCommentPushEnabled       bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
+	BookmarkedPhotoPushEnabled    bool       `gorm:"default:false" json:"bookmarkedPhotoPushEnabled"`
 	AllowPhotoDownload            bool       `gorm:"default:false" json:"allowPhotoDownload"`
 	LocationFeatureEnabled        bool       `gorm:"default:false" json:"locationFeatureEnabled"`
 	LocationShareDefaultEnabled   bool       `gorm:"default:false" json:"locationShareDefaultEnabled"`
@@ -293,6 +294,7 @@ type Photo struct {
 	LocationShared           bool       `gorm:"default:false;index" json:"locationShared"`
 	LocationLatitude         *float64   `json:"locationLatitude"`
 	LocationLongitude        *float64   `json:"locationLongitude"`
+	PublicNumber             string     `gorm:"size:9;uniqueIndex" json:"publicNumber"`
 	CapturedAt               *time.Time `gorm:"index" json:"capturedAt"`
 	CreatedAt                time.Time  `json:"createdAt"`
 }

@@ -250,6 +250,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.POST("/chat/polls/:id/close", s.handleChatPollClose)
 			protected.DELETE("/chat/:id", s.handleDeleteChatMessage)
 			protected.GET("/photos/:id/interactions", s.handlePhotoInteractions)
+			protected.DELETE("/photos/bookmarks", s.handlePhotoBookmarksClear)
 			protected.POST("/photos/:id/bookmark", s.handlePhotoBookmarkCreate)
 			protected.DELETE("/photos/:id/bookmark", s.handlePhotoBookmarkDelete)
 			protected.POST("/photos/:id/reaction", s.handlePhotoReaction)
@@ -769,6 +770,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		PhotoReactionPushEnabled      *bool  `json:"photoReactionPushEnabled"`
 		PhotoFotomojiPushEnabled      *bool  `json:"photoFotomojiPushEnabled"`
 		PhotoCommentPushEnabled       *bool  `json:"photoCommentPushEnabled"`
+		BookmarkedPhotoPushEnabled    *bool  `json:"bookmarkedPhotoPushEnabled"`
 		AllowPhotoDownload            *bool  `json:"allowPhotoDownload"`
 		LocationFeatureEnabled        *bool  `json:"locationFeatureEnabled"`
 		LocationShareDefaultEnabled   *bool  `json:"locationShareDefaultEnabled"`
@@ -800,6 +802,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.PhotoCommentPushEnabled != nil {
 		updates["photo_comment_push_enabled"] = *req.PhotoCommentPushEnabled
+	}
+	if req.BookmarkedPhotoPushEnabled != nil {
+		updates["bookmarked_photo_push_enabled"] = *req.BookmarkedPhotoPushEnabled
 	}
 	if req.AllowPhotoDownload != nil {
 		updates["allow_photo_download"] = *req.AllowPhotoDownload
@@ -1541,6 +1546,12 @@ func (s *Server) handleUpload(c *gin.Context) {
 	if err := s.DB.Create(&photo).Error; err != nil {
 		s.removePhotoFiles(photo)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
+		return
+	}
+	if err := s.assignAndPersistPublicPhotoNumber(&photo); err != nil {
+		s.removePhotoFiles(photo)
+		_ = s.DB.Delete(&photo).Error
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "public number failed"})
 		return
 	}
 	if err := s.refreshPhotoSearchDocument(photo.ID); err != nil {
@@ -4902,6 +4913,16 @@ func (s *Server) handlePhotoBookmarkDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, map[uint]bool{})})
 }
 
+func (s *Server) handlePhotoBookmarksClear(c *gin.Context) {
+	user, _ := userFromContext(c)
+	result := s.DB.Where("user_id = ?", user.ID).Delete(&models.PhotoBookmark{})
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark clear failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "deletedCount": result.RowsAffected})
+}
+
 func (s *Server) loadVisiblePhotoForViewer(viewerID uint, rawPhotoID string) (models.Photo, error) {
 	photoID, err := parseUintParam(rawPhotoID)
 	if err != nil {
@@ -5089,6 +5110,7 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 				"commentCount":     commentCount,
 				"interactionCount": reactionCount + commentCount,
 				"bookmarkedByMe":   bookmarkMap[photo.ID],
+				"publicNumber":     strings.TrimSpace(photo.PublicNumber),
 			}
 			if strings.TrimSpace(photo.SecondPath) != "" {
 				featured["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, photo.SecondPath)
@@ -5502,6 +5524,7 @@ func (s *Server) calendarSearchPayload(viewerID uint, rawQuery string, now time.
 				"commentCount":     featuredComments,
 				"interactionCount": featuredReactions + featuredComments,
 				"bookmarkedByMe":   featured.BookmarkedByMe,
+				"publicNumber":     strings.TrimSpace(featured.Photo.PublicNumber),
 			}
 			if strings.TrimSpace(featured.Photo.SecondPath) != "" {
 				featuredRow["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, featured.Photo.SecondPath)
@@ -6677,6 +6700,12 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	if err := s.DB.Create(&photo).Error; err != nil {
 		s.removePhotoFiles(photo)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
+		return
+	}
+	if err := s.assignAndPersistPublicPhotoNumber(&photo); err != nil {
+		s.removePhotoFiles(photo)
+		_ = s.DB.Delete(&photo).Error
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "public number failed"})
 		return
 	}
 	if err := s.refreshPhotoSearchDocument(photo.ID); err != nil {
@@ -7953,6 +7982,70 @@ func normalizeUploadClientID(raw string) string {
 	return value
 }
 
+func formatPublicPhotoNumber(day string, seq int) string {
+	parsed, err := time.Parse("2006-01-02", strings.TrimSpace(day))
+	if err != nil {
+		return ""
+	}
+	if seq < 1 {
+		seq = 1
+	}
+	return fmt.Sprintf("%02d%02d%02d%03d", parsed.Year()%100, int(parsed.Month()), parsed.Day(), seq)
+}
+
+func publicPhotoNumberPrefix(day string) string {
+	number := formatPublicPhotoNumber(day, 1)
+	if len(number) < 6 {
+		return ""
+	}
+	return number[:6]
+}
+
+func parsePublicPhotoSequence(day string, publicNumber string) (int, bool) {
+	number := strings.TrimSpace(publicNumber)
+	prefix := publicPhotoNumberPrefix(day)
+	if prefix == "" || len(number) != 9 || !strings.HasPrefix(number, prefix) {
+		return 0, false
+	}
+	seq, err := strconv.Atoi(number[6:])
+	if err != nil || seq < 1 {
+		return 0, false
+	}
+	return seq, true
+}
+
+func (s *Server) assignAndPersistPublicPhotoNumber(photo *models.Photo) error {
+	if photo == nil {
+		return errors.New("nil photo")
+	}
+	if strings.TrimSpace(photo.PublicNumber) != "" {
+		return nil
+	}
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		var existing []string
+		if err := tx.Model(&models.Photo{}).
+			Where("day = ? AND public_number <> ''", photo.Day).
+			Pluck("public_number", &existing).Error; err != nil {
+			return err
+		}
+		nextSeq := 1
+		for _, number := range existing {
+			if seq, ok := parsePublicPhotoSequence(photo.Day, number); ok && seq >= nextSeq {
+				nextSeq = seq + 1
+			}
+		}
+		publicNumber := formatPublicPhotoNumber(photo.Day, nextSeq)
+		if publicNumber == "" {
+			return errors.New("invalid photo day")
+		}
+		if err := tx.Model(&models.Photo{}).Where("id = ?", photo.ID).Update("public_number", publicNumber).Error; err != nil {
+			return err
+		}
+		photo.PublicNumber = publicNumber
+		return nil
+	})
+}
+
 func (s *Server) parseCapturedAtValue(raw string) (*time.Time, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -8398,6 +8491,7 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 		"locationMapsUrl":    "",
 		"deduplicated":       false,
 		"bookmarkedByMe":     false,
+		"publicNumber":       strings.TrimSpace(p.PublicNumber),
 	}
 	if p.SecondPath != "" {
 		out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
@@ -8487,6 +8581,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"photoReactionPushEnabled":      u.PhotoReactionPushEnabled,
 		"photoFotomojiPushEnabled":      u.PhotoFotomojiPushEnabled,
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
+		"bookmarkedPhotoPushEnabled":    u.BookmarkedPhotoPushEnabled,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"locationFeatureEnabled":        u.LocationFeatureEnabled,
 		"locationShareDefaultEnabled":   u.LocationShareDefaultEnabled,
@@ -8523,6 +8618,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"photoReactionPushEnabled":      false,
 		"photoFotomojiPushEnabled":      false,
 		"photoCommentPushEnabled":       false,
+		"bookmarkedPhotoPushEnabled":    false,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"locationFeatureEnabled":        false,
 		"locationShareDefaultEnabled":   false,
@@ -9503,23 +9599,51 @@ func (s *Server) commentNotificationTokens(ownerID, actorID uint) []string {
 	return tokens
 }
 
-func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
-	if photo.UserID == 0 || photo.UserID == actor.ID {
-		return
+func (s *Server) bookmarkedPhotoNotificationTokens(photoID, ownerID, actorID uint) []string {
+	var rows []models.DeviceToken
+	_ = s.DB.Table("device_tokens").
+		Select("device_tokens.token").
+		Joins("JOIN users ON users.id = device_tokens.user_id").
+		Joins("JOIN photo_bookmarks ON photo_bookmarks.user_id = users.id").
+		Where("photo_bookmarks.photo_id = ? AND users.bookmarked_photo_push_enabled = ? AND users.id <> ? AND users.id <> ?", photoID, true, ownerID, actorID).
+		Find(&rows).Error
+	tokens := make([]string, 0, len(rows))
+	for _, t := range rows {
+		tokens = append(tokens, t.Token)
 	}
+	return tokens
+}
+
+func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
 	now := time.Now().In(s.Location)
 	if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) {
 		return
 	}
-	tokens := s.reactionNotificationTokens(photo.UserID, actor.ID)
-	if len(tokens) == 0 {
+	if photo.UserID != 0 && photo.UserID != actor.ID {
+		tokens := s.reactionNotificationTokens(photo.UserID, actor.ID)
+		if len(tokens) > 0 {
+			body := fmt.Sprintf("%s hat auf deinen Beitrag reagiert", actor.Username)
+			sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+				Title:   "Neue Reaktion",
+				Body:    body,
+				Type:    "photo_reaction",
+				Action:  "open_feed",
+				Day:     photo.Day,
+				PhotoID: int64(photo.ID),
+			})
+			s.recordPushResult(sendResult, sendErr)
+			s.removeInvalidTokens(sendResult.InvalidTokens)
+		}
+	}
+	bookmarkTokens := s.bookmarkedPhotoNotificationTokens(photo.ID, photo.UserID, actor.ID)
+	if len(bookmarkTokens) == 0 {
 		return
 	}
-	body := fmt.Sprintf("%s hat auf deinen Beitrag reagiert", actor.Username)
-	sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
-		Title:   "Neue Reaktion",
+	body := fmt.Sprintf("%s hat auf einen gemerkten Beitrag reagiert", actor.Username)
+	sendResult, sendErr := s.Notifier.Send(bookmarkTokens, notify.Message{
+		Title:   "Aktivitaet auf gemerktem Beitrag",
 		Body:    body,
-		Type:    "photo_reaction",
+		Type:    "bookmarked_photo_reaction",
 		Action:  "open_feed",
 		Day:     photo.Day,
 		PhotoID: int64(photo.ID),
@@ -9529,22 +9653,35 @@ func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
 }
 
 func (s *Server) notifyPhotoFotomoji(actor models.User, photo models.Photo) {
-	if photo.UserID == 0 || photo.UserID == actor.ID {
-		return
-	}
 	now := time.Now().In(s.Location)
 	if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) {
 		return
 	}
-	tokens := s.fotomojiNotificationTokens(photo.UserID, actor.ID)
-	if len(tokens) == 0 {
+	if photo.UserID != 0 && photo.UserID != actor.ID {
+		tokens := s.fotomojiNotificationTokens(photo.UserID, actor.ID)
+		if len(tokens) > 0 {
+			body := fmt.Sprintf("%s hat mit einem Foto auf deinen Beitrag reagiert", actor.Username)
+			sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+				Title:   "Neue FotoMoji",
+				Body:    body,
+				Type:    "photo_fotomoji",
+				Action:  "open_feed",
+				Day:     photo.Day,
+				PhotoID: int64(photo.ID),
+			})
+			s.recordPushResult(sendResult, sendErr)
+			s.removeInvalidTokens(sendResult.InvalidTokens)
+		}
+	}
+	bookmarkTokens := s.bookmarkedPhotoNotificationTokens(photo.ID, photo.UserID, actor.ID)
+	if len(bookmarkTokens) == 0 {
 		return
 	}
-	body := fmt.Sprintf("%s hat mit einem Foto auf deinen Beitrag reagiert", actor.Username)
-	sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
-		Title:   "Neue FotoMoji",
+	body := fmt.Sprintf("%s hat mit einem Foto auf einen gemerkten Beitrag reagiert", actor.Username)
+	sendResult, sendErr := s.Notifier.Send(bookmarkTokens, notify.Message{
+		Title:   "Aktivitaet auf gemerktem Beitrag",
 		Body:    body,
-		Type:    "photo_fotomoji",
+		Type:    "bookmarked_photo_fotomoji",
 		Action:  "open_feed",
 		Day:     photo.Day,
 		PhotoID: int64(photo.ID),
@@ -9554,22 +9691,35 @@ func (s *Server) notifyPhotoFotomoji(actor models.User, photo models.Photo) {
 }
 
 func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo) {
-	if photo.UserID == 0 || photo.UserID == actor.ID {
-		return
-	}
 	now := time.Now().In(s.Location)
 	if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) {
 		return
 	}
-	tokens := s.commentNotificationTokens(photo.UserID, actor.ID)
-	if len(tokens) == 0 {
+	if photo.UserID != 0 && photo.UserID != actor.ID {
+		tokens := s.commentNotificationTokens(photo.UserID, actor.ID)
+		if len(tokens) > 0 {
+			body := fmt.Sprintf("%s hat deinen Beitrag kommentiert", actor.Username)
+			sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+				Title:   "Neuer Kommentar",
+				Body:    body,
+				Type:    "photo_comment",
+				Action:  "open_feed",
+				Day:     photo.Day,
+				PhotoID: int64(photo.ID),
+			})
+			s.recordPushResult(sendResult, sendErr)
+			s.removeInvalidTokens(sendResult.InvalidTokens)
+		}
+	}
+	bookmarkTokens := s.bookmarkedPhotoNotificationTokens(photo.ID, photo.UserID, actor.ID)
+	if len(bookmarkTokens) == 0 {
 		return
 	}
-	body := fmt.Sprintf("%s hat deinen Beitrag kommentiert", actor.Username)
-	sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
-		Title:   "Neuer Kommentar",
+	body := fmt.Sprintf("%s hat einen gemerkten Beitrag kommentiert", actor.Username)
+	sendResult, sendErr := s.Notifier.Send(bookmarkTokens, notify.Message{
+		Title:   "Aktivitaet auf gemerktem Beitrag",
 		Body:    body,
-		Type:    "photo_comment",
+		Type:    "bookmarked_photo_comment",
 		Action:  "open_feed",
 		Day:     photo.Day,
 		PhotoID: int64(photo.ID),

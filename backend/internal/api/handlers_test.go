@@ -113,6 +113,33 @@ func TestPhotoTimeShiftedThreshold(t *testing.T) {
 	}
 }
 
+func TestPublicPhotoNumberHelpers(t *testing.T) {
+	if got := formatPublicPhotoNumber("2026-05-26", 1); got != "260526001" {
+		t.Fatalf("formatPublicPhotoNumber() = %q, want %q", got, "260526001")
+	}
+	if seq, ok := parsePublicPhotoSequence("2026-05-26", "260526017"); !ok || seq != 17 {
+		t.Fatalf("parsePublicPhotoSequence() = (%d, %v), want (17, true)", seq, ok)
+	}
+	if _, ok := parsePublicPhotoSequence("2026-05-26", "260527001"); ok {
+		t.Fatal("parsePublicPhotoSequence() = true for wrong day prefix")
+	}
+}
+
+func TestPhotoJSONIncludesPublicNumber(t *testing.T) {
+	server := &Server{Config: config.Config{PublicBaseURL: "https://daily.example"}}
+	photo := models.Photo{
+		ID:           7,
+		Day:          "2026-05-26",
+		FilePath:     "2026-05-26/test.jpg",
+		PublicNumber: "260526007",
+		CreatedAt:    time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC),
+	}
+	row := server.photoJSON(photo)
+	if got := row["publicNumber"]; got != "260526007" {
+		t.Fatalf("photoJSON publicNumber = %v, want %q", got, "260526007")
+	}
+}
+
 func TestSortPhotosForFeedUsesEffectiveTime(t *testing.T) {
 	uploadA := time.Date(2026, 3, 12, 18, 0, 0, 0, time.UTC)
 	capturedA := uploadA.Add(-10 * time.Minute)

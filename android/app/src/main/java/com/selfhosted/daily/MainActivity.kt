@@ -245,6 +245,7 @@ data class User(
     val inviteRegistrationPushEnabled: Boolean = false,
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
+    val bookmarkedPhotoPushEnabled: Boolean = false,
     val allowPhotoDownload: Boolean = false,
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
@@ -287,6 +288,7 @@ data class PreferencesUpdateRequest(
     val inviteRegistrationPushEnabled: Boolean,
     val photoReactionPushEnabled: Boolean,
     val photoCommentPushEnabled: Boolean,
+    val bookmarkedPhotoPushEnabled: Boolean? = null,
     val allowPhotoDownload: Boolean,
     val locationFeatureEnabled: Boolean? = null,
     val locationShareDefaultEnabled: Boolean? = null,
@@ -394,7 +396,8 @@ data class PromptPhoto(
     val locationShared: Boolean = false,
     val locationDisplay: String? = null,
     val locationMapsUrl: String? = null,
-    val bookmarkedByMe: Boolean = false
+    val bookmarkedByMe: Boolean = false,
+    val publicNumber: String? = null
 )
 data class PromptResponse(
     val day: String,
@@ -515,7 +518,8 @@ data class CalendarFeaturedPhoto(
     val reactionCount: Long = 0,
     val commentCount: Long = 0,
     val interactionCount: Long = 0,
-    val bookmarkedByMe: Boolean = false
+    val bookmarkedByMe: Boolean = false,
+    val publicNumber: String? = null
 )
 data class DayStatItem(
     val day: String,
@@ -549,6 +553,10 @@ data class CalendarSearchResponse(
     val days: List<String> = emptyList(),
     val dayStats: List<DayStatItem> = emptyList(),
     val matchedPhotosByDay: Map<String, List<CalendarSearchMatchItem>> = emptyMap()
+)
+data class BookmarkClearResponse(
+    val ok: Boolean = false,
+    val deletedCount: Int = 0
 )
 data class TopReactionStat(val emoji: String, val count: Long)
 data class LatestActiveUser(
@@ -915,6 +923,9 @@ interface Api {
         @Header("Authorization") token: String,
         @Path("id") id: Long
     ): Map<String, Any?>
+
+    @DELETE("photos/bookmarks")
+    suspend fun clearBookmarks(@Header("Authorization") token: String): BookmarkClearResponse
 
     @POST("photos/{id}/reaction")
     suspend fun reactPhoto(
@@ -1520,6 +1531,18 @@ class AppRepo(
         prefs.edit().putBoolean("photo_comment_push_enabled_local", enabled).apply()
     }
 
+    fun bookmarkedPhotoPushLocalEnabled(): Boolean = prefs.getBoolean("bookmarked_photo_push_enabled_local", false)
+
+    fun setBookmarkedPhotoPushLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("bookmarked_photo_push_enabled_local", enabled).apply()
+    }
+
+    fun showPublicPostNumbers(): Boolean = prefs.getBoolean("show_public_post_numbers", false)
+
+    fun setShowPublicPostNumbers(enabled: Boolean) {
+        prefs.edit().putBoolean("show_public_post_numbers", enabled).apply()
+    }
+
     fun customNotificationToneEnabled(): Boolean = prefs.getBoolean("custom_notification_tone_enabled", false)
 
     fun setCustomNotificationToneEnabled(enabled: Boolean) {
@@ -1774,6 +1797,7 @@ class AppRepo(
         photoReactionPushEnabled: Boolean,
         photoCommentPushEnabled: Boolean,
         allowPhotoDownload: Boolean,
+        bookmarkedPhotoPushEnabled: Boolean? = null,
         specialMomentPushEnabled: Boolean? = null,
         locationFeatureEnabled: Boolean? = null,
         locationShareDefaultEnabled: Boolean? = null,
@@ -1788,6 +1812,7 @@ class AppRepo(
                 inviteRegistrationPushEnabled = inviteRegistrationPushEnabled,
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
+                bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
                 allowPhotoDownload = allowPhotoDownload,
                 specialMomentPushEnabled = specialMomentPushEnabled,
                 locationFeatureEnabled = locationFeatureEnabled,
@@ -1875,6 +1900,9 @@ class AppRepo(
     suspend fun unbookmarkPhoto(photoId: Long) {
         authorizedCall("/api/photos/:id/bookmark") { token -> api.unbookmarkPhoto(token, photoId) }
     }
+
+    suspend fun clearBookmarks(): Int =
+        authorizedCall("/api/photos/bookmarks") { token -> api.clearBookmarks(token) }.deletedCount
 
     suspend fun reactPhoto(photoId: Long, emoji: String): PhotoInteractionsResponse =
         authorizedCall("/api/photos/:id/reaction") { token -> api.reactPhoto(token, photoId, PhotoReactionRequest(emoji)) }
@@ -2525,8 +2553,10 @@ data class UiState(
     val inviteRegistrationPushEnabled: Boolean = false,
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
+    val bookmarkedPhotoPushEnabled: Boolean = false,
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
+    val showPublicPostNumbers: Boolean = false,
     val customNotificationToneEnabled: Boolean = false,
     val customNotificationToneUri: String = "",
     val diagnosticsUploadEnabled: Boolean = false,
@@ -2600,6 +2630,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         "community_stats",
         "moment_rules",
         "upload_compression",
+        "calendar_functions",
         "past_posts"
     )
     private var profileSetupPromptShownInSession = false
@@ -2625,6 +2656,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
+            bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -2734,6 +2767,37 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (state.calendarMode == CalendarMode.BOOKMARKS) {
             applyCalendarDataset(updated)
         }
+    }
+
+    private fun clearAllBookmarksLocally() {
+        val newFeedByDay = state.feedByDay.mapValues { (_, items) ->
+            items.map { item -> item.copy(photo = item.photo.copy(bookmarkedByMe = false)) }
+        }
+        state = state.copy(
+            feedByDay = newFeedByDay,
+            feed = newFeedByDay[state.prompt?.day].orEmpty(),
+            photos = state.photos.map { it.copy(bookmarkedByMe = false) },
+            viewedProfile = state.viewedProfile?.let { profile ->
+                profile.copy(photos = profile.photos.map { it.copy(bookmarkedByMe = false) })
+            },
+            calendarPublicData = state.calendarPublicData.copy(
+                dayStats = state.calendarPublicData.dayStats.mapValues { (_, stat) ->
+                    stat.copy(featuredPhoto = stat.featuredPhoto?.copy(bookmarkedByMe = false))
+                }
+            ),
+            calendarBookmarksData = CalendarDataset(),
+            calendarSearchData = state.calendarSearchData.copy(
+                dataset = state.calendarSearchData.dataset.copy(
+                    dayStats = state.calendarSearchData.dataset.dayStats.mapValues { (_, stat) ->
+                        stat.copy(featuredPhoto = stat.featuredPhoto?.copy(bookmarkedByMe = false))
+                    }
+                ),
+                matchesByDay = state.calendarSearchData.matchesByDay.mapValues { (_, matches) ->
+                    matches.map { it.copy(photo = it.photo.copy(bookmarkedByMe = false)) }
+                }
+            )
+        )
+        applyCalendarModeDataset()
     }
 
     private fun cleanupPendingChatBodies(nowMs: Long) {
@@ -2943,6 +3007,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
+            bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -3459,6 +3525,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    suspend fun clearAllBookmarks() {
+        state = state.copy(loading = true)
+        runCatching { repo.clearBookmarks() }
+            .onSuccess { deletedCount ->
+                clearAllBookmarksLocally()
+                state = state.copy(
+                    loading = false,
+                    message = if (deletedCount == 1) "1 gemerkter Beitrag entfernt" else "$deletedCount gemerkte Beitraege entfernt"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Bookmarks aufraeumen fehlgeschlagen"))
+            }
+    }
+
     fun clearFeedPhotoFocus() {
         if (state.feedFocusPhotoId != null) {
             state = state.copy(feedFocusPhotoId = null)
@@ -3701,6 +3782,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.syncQuietHoursFromUser(me)
             repo.setPhotoReactionPushLocalEnabled(me.photoReactionPushEnabled)
             repo.setPhotoCommentPushLocalEnabled(me.photoCommentPushEnabled)
+            repo.setBookmarkedPhotoPushLocalEnabled(me.bookmarkedPhotoPushEnabled)
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
             val pollPushEnabled = repo.pollPushLocalEnabled()
@@ -3708,6 +3790,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled()
             val photoReactionPushEnabled = repo.photoReactionPushLocalEnabled()
             val photoCommentPushEnabled = repo.photoCommentPushLocalEnabled()
+            val bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled()
             val autoUpdateEnabled = repo.autoUpdateEnabled()
             val profileSectionExpanded = profileSectionIds.associateWith { sectionId ->
                 repo.getProfileSectionExpanded(me.id, sectionId)
@@ -3737,7 +3820,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 inviteRegistrationPushEnabled = inviteRegistrationPushEnabled,
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
-                notificationMasterEnabled = notificationMaster && autoUpdateEnabled && feedPostPushEnabled && me.chatPushEnabled && pollPushEnabled && inviteRegistrationPushEnabled && photoReactionPushEnabled && photoCommentPushEnabled,
+                bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
+                showPublicPostNumbers = repo.showPublicPostNumbers(),
+                notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled),
                 diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && me.diagnosticsConsentGranted,
                 diagnosticsConsentGranted = me.diagnosticsConsentGranted,
                 diagnosticsConsentUpdatedAt = me.diagnosticsConsentUpdatedAt,
@@ -4616,6 +4701,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
+            bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -4690,6 +4777,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             inviteRegistrationPushEnabled = repo.inviteRegistrationPushLocalEnabled(),
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
+            bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -4853,6 +4942,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(darkMode = repo.isDarkMode(), oledMode = repo.isOledMode())
     }
 
+    fun setShowPublicPostNumbers(enabled: Boolean) {
+        repo.setShowPublicPostNumbers(enabled)
+        state = state.copy(showPublicPostNumbers = repo.showPublicPostNumbers())
+    }
+
     fun setUploadQuality(value: Int) {
         repo.setUploadQuality(value)
         state = state.copy(uploadQuality = repo.uploadQuality())
@@ -4872,7 +4966,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val invite = state.user?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
         val reaction = state.user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val comment = state.user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
-        val master = auto && chat && feed && poll && invite && reaction && comment
+        val bookmarked = state.user?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled()
+        val master = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked)
         repo.setNotificationMasterEnabled(master)
         state = state.copy(
             autoUpdateEnabled = auto,
@@ -4889,7 +4984,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val invite = state.user?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
         val reaction = state.user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val comment = state.user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
-        val master = auto && chat && feed && poll && invite && reaction && comment
+        val bookmarked = state.user?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled()
+        val master = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked)
         repo.setNotificationMasterEnabled(master)
         state = state.copy(
             feedPostPushEnabled = feed,
@@ -4900,6 +4996,25 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun setUseFotomojiReactions(enabled: Boolean) {
         repo.setUseFotomojiReactions(enabled)
         state = state.copy(useFotomojiReactions = repo.useFotomojiReactions())
+    }
+
+    private fun computeNotificationMaster(
+        auto: Boolean,
+        chat: Boolean,
+        feed: Boolean,
+        poll: Boolean,
+        invite: Boolean,
+        reaction: Boolean,
+        comment: Boolean,
+        bookmarked: Boolean
+    ): Boolean = auto && chat && feed && poll && invite && reaction && comment && bookmarked
+
+    private fun syncInteractionPushPrefs(user: User) {
+        repo.setChatPushLocalEnabled(user.chatPushEnabled)
+        repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
+        repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
+        repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
+        repo.setBookmarkedPhotoPushLocalEnabled(user.bookmarkedPhotoPushEnabled)
     }
 
     suspend fun setPollPushEnabled(enabled: Boolean) {
@@ -4916,14 +5031,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
         }
             .onSuccess { user ->
-                repo.setChatPushLocalEnabled(user.chatPushEnabled)
+                syncInteractionPushPrefs(user)
                 repo.setPollPushLocalEnabled(user.pollPushEnabled)
-                repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
-                repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
-                repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
@@ -5062,16 +5174,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val pollEnabled = state.user?.pollPushEnabled ?: repo.pollPushLocalEnabled()
         val reactionEnabled = state.user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val commentEnabled = state.user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
-        runCatching { repo.updatePreferences(enabled, pollEnabled, inviteEnabled, reactionEnabled, commentEnabled, allowDownload) }
+        val bookmarkedEnabled = state.user?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled()
+        runCatching { repo.updatePreferences(enabled, pollEnabled, inviteEnabled, reactionEnabled, commentEnabled, allowDownload, bookmarkedPhotoPushEnabled = bookmarkedEnabled) }
             .onSuccess { user ->
-                repo.setChatPushLocalEnabled(user.chatPushEnabled)
+                syncInteractionPushPrefs(user)
                 repo.setPollPushLocalEnabled(user.pollPushEnabled)
-                repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
-                repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
-                repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
@@ -5079,6 +5189,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     inviteRegistrationPushEnabled = user.inviteRegistrationPushEnabled,
                     photoReactionPushEnabled = user.photoReactionPushEnabled,
                     photoCommentPushEnabled = user.photoCommentPushEnabled,
+                    bookmarkedPhotoPushEnabled = user.bookmarkedPhotoPushEnabled,
                     loading = false,
                     notificationMasterEnabled = master,
                     message = "Chat-Push aktualisiert"
@@ -5096,10 +5207,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setInviteRegistrationPushLocalEnabled(enabled)
         repo.setPhotoReactionPushLocalEnabled(enabled)
         repo.setPhotoCommentPushLocalEnabled(enabled)
+        repo.setBookmarkedPhotoPushLocalEnabled(enabled)
         var nextUser = state.user
         if (state.user != null) {
             val allowDownload = state.user?.allowPhotoDownload ?: false
-            runCatching { repo.updatePreferences(enabled, enabled, enabled, enabled, enabled, allowDownload) }
+            runCatching { repo.updatePreferences(enabled, enabled, enabled, enabled, enabled, allowDownload, bookmarkedPhotoPushEnabled = enabled) }
                 .onSuccess {
                     nextUser = it
                     repo.setChatPushLocalEnabled(it.chatPushEnabled)
@@ -5107,6 +5219,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     repo.setInviteRegistrationPushLocalEnabled(it.inviteRegistrationPushEnabled)
                     repo.setPhotoReactionPushLocalEnabled(it.photoReactionPushEnabled)
                     repo.setPhotoCommentPushLocalEnabled(it.photoCommentPushEnabled)
+                    repo.setBookmarkedPhotoPushLocalEnabled(it.bookmarkedPhotoPushEnabled)
                 }
                 .onFailure {
                     state = state.copy(message = apiError(it, "Master-Benachrichtigung teilweise fehlgeschlagen"))
@@ -5117,6 +5230,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setInviteRegistrationPushLocalEnabled(enabled)
             repo.setPhotoReactionPushLocalEnabled(enabled)
             repo.setPhotoCommentPushLocalEnabled(enabled)
+            repo.setBookmarkedPhotoPushLocalEnabled(enabled)
         }
         val auto = repo.autoUpdateEnabled()
         val feed = repo.feedPostPushEnabled()
@@ -5125,7 +5239,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val invite = nextUser?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
         val reaction = nextUser?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val comment = nextUser?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
-        val masterEffective = auto && feed && chat && poll && invite && reaction && comment
+        val bookmarked = nextUser?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled()
+        val masterEffective = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked)
         repo.setNotificationMasterEnabled(masterEffective)
         state = state.copy(
             user = nextUser,
@@ -5135,6 +5250,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             inviteRegistrationPushEnabled = invite,
             photoReactionPushEnabled = reaction,
             photoCommentPushEnabled = comment,
+            bookmarkedPhotoPushEnabled = bookmarked,
             notificationMasterEnabled = masterEffective,
             loading = false,
             message = if (masterEffective == enabled) {
@@ -5243,12 +5359,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
         }
             .onSuccess { user ->
-                repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
-                repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
-                repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
+                syncInteractionPushPrefs(user)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
@@ -5256,6 +5370,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     inviteRegistrationPushEnabled = user.inviteRegistrationPushEnabled,
                     photoReactionPushEnabled = user.photoReactionPushEnabled,
                     photoCommentPushEnabled = user.photoCommentPushEnabled,
+                    bookmarkedPhotoPushEnabled = user.bookmarkedPhotoPushEnabled,
                     notificationMasterEnabled = master,
                     loading = false,
                     message = "Push bei neuen Mitgliedern aktualisiert"
@@ -5280,17 +5395,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
         }
             .onSuccess { user ->
-                repo.setChatPushLocalEnabled(user.chatPushEnabled)
-                repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
-                repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
-                repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
+                syncInteractionPushPrefs(user)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
                     pollPushEnabled = user.pollPushEnabled,
+                    bookmarkedPhotoPushEnabled = user.bookmarkedPhotoPushEnabled,
                     photoReactionPushEnabled = user.photoReactionPushEnabled,
                     notificationMasterEnabled = master,
                     loading = false,
@@ -5316,21 +5429,54 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
         }
             .onSuccess { user ->
-                repo.setChatPushLocalEnabled(user.chatPushEnabled)
-                repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
-                repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
-                repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
+                syncInteractionPushPrefs(user)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = auto && user.chatPushEnabled && feed && user.pollPushEnabled && user.inviteRegistrationPushEnabled && user.photoReactionPushEnabled && user.photoCommentPushEnabled
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
                     pollPushEnabled = user.pollPushEnabled,
+                    bookmarkedPhotoPushEnabled = user.bookmarkedPhotoPushEnabled,
                     photoCommentPushEnabled = user.photoCommentPushEnabled,
                     notificationMasterEnabled = master,
                     loading = false,
                     message = "Push bei Kommentaren aktualisiert"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Push-Einstellung speichern fehlgeschlagen"))
+            }
+    }
+
+    suspend fun setBookmarkedPhotoPushEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                current.pollPushEnabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload,
+                bookmarkedPhotoPushEnabled = enabled
+            )
+        }
+            .onSuccess { user ->
+                syncInteractionPushPrefs(user)
+                repo.setPollPushLocalEnabled(user.pollPushEnabled)
+                val auto = repo.autoUpdateEnabled()
+                val feed = repo.feedPostPushEnabled()
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
+                repo.setNotificationMasterEnabled(master)
+                state = state.copy(
+                    user = user,
+                    pollPushEnabled = user.pollPushEnabled,
+                    bookmarkedPhotoPushEnabled = user.bookmarkedPhotoPushEnabled,
+                    notificationMasterEnabled = master,
+                    loading = false,
+                    message = "Push bei gemerkten Beitraegen aktualisiert"
                 )
             }
             .onFailure {
@@ -6510,6 +6656,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     refreshing = state.feedRefreshing,
                     todayLocked = state.feedTodayLocked,
                     paging = state.feedPaging,
+                    showPublicPostNumbers = state.showPublicPostNumbers,
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
                     onRefresh = { scope.launch { vm.refreshFeed() } },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
@@ -6537,6 +6684,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     selected = state.calendarSelectedDay ?: state.prompt?.day.orEmpty(),
                     pickerExpanded = state.calendarPickerExpanded,
                     loading = state.calendarLoading,
+                    showPublicPostNumbers = state.showPublicPostNumbers,
                     onPickerExpandedChange = { vm.setCalendarPickerExpanded(it) },
                     onModeChange = { vm.setCalendarMode(it) },
                     onSearchQueryChange = { vm.setCalendarSearchQuery(it) },
@@ -6610,11 +6758,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     inviteRegistrationPushEnabled = state.user?.inviteRegistrationPushEnabled ?: state.inviteRegistrationPushEnabled,
                     photoReactionPushEnabled = state.user?.photoReactionPushEnabled ?: state.photoReactionPushEnabled,
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
+                    bookmarkedPhotoPushEnabled = state.user?.bookmarkedPhotoPushEnabled ?: state.bookmarkedPhotoPushEnabled,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     locationFeatureEnabled = state.user?.locationFeatureEnabled ?: false,
                     locationShareDefaultEnabled = state.user?.locationShareDefaultEnabled ?: false,
                     locationPermissionGranted = locationPermissionGranted,
                     feedPostPushEnabled = state.feedPostPushEnabled,
+                    showPublicPostNumbers = state.showPublicPostNumbers,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
                     diagnosticsUploadEnabled = state.diagnosticsUploadEnabled,
@@ -6648,6 +6798,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onInviteRegistrationPushEnabledChange = { scope.launch { vm.setInviteRegistrationPushEnabled(it) } },
                     onPhotoReactionPushEnabledChange = { scope.launch { vm.setPhotoReactionPushEnabled(it) } },
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
+                    onBookmarkedPhotoPushEnabledChange = { scope.launch { vm.setBookmarkedPhotoPushEnabled(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onLocationFeatureEnabledChange = { scope.launch { vm.setLocationFeatureEnabled(it) } },
                     onLocationShareDefaultEnabledChange = { scope.launch { vm.setLocationShareDefaultEnabled(it) } },
@@ -6738,6 +6889,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onCheckConnection = { scope.launch { vm.checkConnection() } },
                     onAllowInsecureHttpOverrideChange = { vm.setAllowInsecureHttpOverride(it) },
                     onApplyServerBaseUrlOverride = { input -> scope.launch { vm.applyServerBaseUrlOverride(input) } },
+                    onShowPublicPostNumbersChange = { vm.setShowPublicPostNumbers(it) },
+                    onClearAllBookmarks = { scope.launch { vm.clearAllBookmarks() } },
                     onRollInviteCode = { scope.launch { vm.rollInviteCode() } },
                     onShareInviteCode = {
                         val code = state.myInviteCode.trim()
@@ -7469,6 +7622,7 @@ fun FeedTab(
     refreshing: Boolean,
     todayLocked: Boolean,
     paging: Boolean,
+    showPublicPostNumbers: Boolean,
     onTakePhoto: () -> Unit,
     onRefresh: () -> Unit,
     onLoadOlder: () -> Unit,
@@ -7656,24 +7810,34 @@ fun FeedTab(
                                         )
                                     }
                                 }
-                                Box {
-                                    IconButton(onClick = { menuExpanded = true }) {
-                                        Icon(
-                                            imageVector = Icons.Filled.MoreVert,
-                                            contentDescription = "Beitragsaktionen"
+                                Column(horizontalAlignment = Alignment.End) {
+                                    if (showPublicPostNumbers && !item.photo.publicNumber.isNullOrBlank()) {
+                                        Text(
+                                            "#${item.photo.publicNumber}",
+                                            color = secondaryTextColor,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.SemiBold
                                         )
                                     }
-                                    androidx.compose.material3.DropdownMenu(
-                                        expanded = menuExpanded,
-                                        onDismissRequest = { menuExpanded = false }
-                                    ) {
-                                        androidx.compose.material3.DropdownMenuItem(
-                                            text = { Text(if (item.photo.bookmarkedByMe) "Nicht mehr merken" else "Merken") },
-                                            onClick = {
-                                                menuExpanded = false
-                                                onToggleBookmark(item.photo.id, !item.photo.bookmarkedByMe)
-                                            }
-                                        )
+                                    Box {
+                                        IconButton(onClick = { menuExpanded = true }) {
+                                            Icon(
+                                                imageVector = Icons.Filled.MoreVert,
+                                                contentDescription = "Beitragsaktionen"
+                                            )
+                                        }
+                                        androidx.compose.material3.DropdownMenu(
+                                            expanded = menuExpanded,
+                                            onDismissRequest = { menuExpanded = false }
+                                        ) {
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = { Text(if (item.photo.bookmarkedByMe) "Nicht mehr merken" else "Merken") },
+                                                onClick = {
+                                                    menuExpanded = false
+                                                    onToggleBookmark(item.photo.id, !item.photo.bookmarkedByMe)
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -7876,7 +8040,7 @@ private fun HashtagText(
         modifier = modifier,
         maxLines = maxLines,
         overflow = overflow,
-        style = MaterialTheme.typography.bodyMedium.copy(color = color),
+        style = MaterialTheme.typography.bodyLarge.copy(color = color),
         onClick = { offset ->
             annotated.getStringAnnotations("hashtag", offset, offset)
                 .firstOrNull()
@@ -7914,6 +8078,7 @@ fun CalendarTab(
     selected: String,
     pickerExpanded: Boolean,
     loading: Boolean,
+    showPublicPostNumbers: Boolean,
     onPickerExpandedChange: (Boolean) -> Unit,
     onModeChange: (CalendarMode) -> Unit,
     onSearchQueryChange: (String) -> Unit,
@@ -8054,6 +8219,13 @@ fun CalendarTab(
                                         fontWeight = FontWeight.SemiBold,
                                         color = parseUserColor(result.user.favoriteColor)
                                     )
+                                    if (showPublicPostNumbers && !result.photo.publicNumber.isNullOrBlank()) {
+                                        Text(
+                                            "#${result.photo.publicNumber}",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.labelMedium
+                                        )
+                                    }
                                     if (result.excerpt.isNotBlank()) {
                                         HashtagText(
                                             text = result.excerpt,
@@ -8098,6 +8270,13 @@ fun CalendarTab(
                         if (participantCount == 1L) "1 Nutzer hat gepostet" else "$participantCount Nutzer haben gepostet",
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (showPublicPostNumbers && !featured?.publicNumber.isNullOrBlank()) {
+                        Text(
+                            "Top-Post #${featured?.publicNumber}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
                     featured?.let {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             if (!it.secondUrl.isNullOrBlank()) {
@@ -8530,11 +8709,13 @@ fun ProfileTab(
     inviteRegistrationPushEnabled: Boolean,
     photoReactionPushEnabled: Boolean,
     photoCommentPushEnabled: Boolean,
+    bookmarkedPhotoPushEnabled: Boolean,
     allowPhotoDownload: Boolean,
     locationFeatureEnabled: Boolean,
     locationShareDefaultEnabled: Boolean,
     locationPermissionGranted: Boolean,
     feedPostPushEnabled: Boolean,
+    showPublicPostNumbers: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
     diagnosticsUploadEnabled: Boolean,
@@ -8568,6 +8749,7 @@ fun ProfileTab(
     onInviteRegistrationPushEnabledChange: (Boolean) -> Unit,
     onPhotoReactionPushEnabledChange: (Boolean) -> Unit,
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
+    onBookmarkedPhotoPushEnabledChange: (Boolean) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onLocationFeatureEnabledChange: (Boolean) -> Unit,
     onLocationShareDefaultEnabledChange: (Boolean) -> Unit,
@@ -8617,6 +8799,8 @@ fun ProfileTab(
     onCheckConnection: () -> Unit,
     onAllowInsecureHttpOverrideChange: (Boolean) -> Unit,
     onApplyServerBaseUrlOverride: (String) -> Unit,
+    onShowPublicPostNumbersChange: (Boolean) -> Unit,
+    onClearAllBookmarks: () -> Unit,
     onRollInviteCode: () -> Unit,
     onShareInviteCode: () -> Unit,
     onLogout: () -> Unit,
@@ -8636,6 +8820,7 @@ fun ProfileTab(
     var showAllowDownloadWarning by remember { mutableStateOf(false) }
     var showLocationEnableWarning by remember { mutableStateOf(false) }
     var showLocationDisableWarning by remember { mutableStateOf(false) }
+    var showClearBookmarksConfirm by remember { mutableStateOf(false) }
     var updatePulseTick by remember { mutableStateOf(0) }
     var updateChecked by remember { mutableStateOf(false) }
     var serverOverrideInput by remember(apiBaseUrlOverride) { mutableStateOf(apiBaseUrlOverride) }
@@ -9372,6 +9557,14 @@ fun ProfileTab(
                         onCheckedChange = onPhotoCommentPushEnabledChange
                     )
                 }
+                SettingsSubsection("Gemerkt", "Zusaetzliche Hinweise zu fremden Posts, die du gemerkt hast") {
+                    SettingsToggleRow(
+                        label = "Push bei Aktivitaet auf gemerkten Posts",
+                        checked = bookmarkedPhotoPushEnabled,
+                        onCheckedChange = onBookmarkedPhotoPushEnabledChange,
+                        supportingText = "Kommentare, Reaktionen und FotoMojis auf gemerkten fremden Posts."
+                    )
+                }
                 SettingsSubsection("Ton", "Klingelton und Test fuer deine Push-Benachrichtigungen") {
                     SettingsToggleRow(
                         label = "Custom-Benachrichtigungston",
@@ -9401,6 +9594,22 @@ fun ProfileTab(
                             Text("Test-Benachrichtigungston + Push")
                         }
                     }
+                }
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "Kalenderfunktionen",
+                subtitle = "Bookmarks und Aufraeumen",
+                expanded = sectionExpanded("calendar_functions"),
+                onExpandedChange = { onProfileSectionExpandedChange("calendar_functions", it) }
+            ) {
+                Text("Wenn du viele gemerkte Beitraege gesammelt hast, kannst du sie hier gesammelt entfernen.")
+                OutlinedButton(
+                    onClick = { showClearBookmarksConfirm = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Alle gemerkten Posts nicht mehr merken")
                 }
             }
         }
@@ -9478,6 +9687,9 @@ fun ProfileTab(
                                         if (photo.secondUrl != null) {
                                             Text("2 Bilder", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
+                                        if (showPublicPostNumbers && !photo.publicNumber.isNullOrBlank()) {
+                                            Text("#${photo.publicNumber}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
                                         Text("Zeit ${formatMomentTime(photo.createdAt)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         uploadTimeHint(photo)?.let { hint ->
                                             Text(hint, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -9535,6 +9747,12 @@ fun ProfileTab(
                       Text("Dark", color = if (themeSliderValue in 0.5f..1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                       Text("OLED", color = if (themeSliderValue > 1.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                   }
+                  SettingsToggleRow(
+                      label = "Post-Nummer anzeigen",
+                      checked = showPublicPostNumbers,
+                      onCheckedChange = onShowPublicPostNumbersChange,
+                      supportingText = "Zeigt die stabile Tages-ID wie #260526001 an sichtbaren Beitraegen."
+                  )
                   SettingsToggleRow(
                       label = "Erweiterte Einstellungen anzeigen",
                       checked = advancedSettingsVisible,
@@ -9845,6 +10063,25 @@ fun ProfileTab(
                     "Willst du diesen Beitrag wirklich loeschen?\n\nTag: ${formatDayLabel(photo.day)}\nHalte ein Bild 3 Sekunden gedrueckt, um diesen Dialog zu oeffnen."
                 )
             }
+        )
+    }
+
+    if (showClearBookmarksConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearBookmarksConfirm = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearBookmarksConfirm = false
+                        onClearAllBookmarks()
+                    }
+                ) { Text("Alles entfernen") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearBookmarksConfirm = false }) { Text("Abbrechen") }
+            },
+            title = { Text("Bookmarks aufraeumen?") },
+            text = { Text("Alle gemerkten Posts werden aus deiner Gemerkt-Liste entfernt. Die Posts selbst bleiben natuerlich bestehen.") }
         )
     }
 

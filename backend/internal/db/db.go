@@ -84,6 +84,9 @@ func Connect(path string) (*gorm.DB, error) {
 	if err := ensurePhotoSearchIndex(database); err != nil {
 		return nil, err
 	}
+	if err := ensurePhotoPublicNumbers(database); err != nil {
+		return nil, err
+	}
 
 	return database, nil
 }
@@ -326,4 +329,58 @@ func ensureFotomojiTemplateVersionBackfill(database *gorm.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensurePhotoPublicNumbers(database *gorm.DB) error {
+	var photos []models.Photo
+	if err := database.Order("day asc, created_at asc, id asc").Find(&photos).Error; err != nil {
+		return err
+	}
+	sequenceByDay := map[string]int{}
+	for _, photo := range photos {
+		day := strings.TrimSpace(photo.Day)
+		if day == "" {
+			continue
+		}
+		if number := strings.TrimSpace(photo.PublicNumber); number != "" {
+			if seq, ok := parsePublicPhotoSequence(day, number); ok && seq > sequenceByDay[day] {
+				sequenceByDay[day] = seq
+			}
+			continue
+		}
+		sequenceByDay[day]++
+		number := formatPublicPhotoNumber(day, sequenceByDay[day])
+		if err := database.Model(&models.Photo{}).Where("id = ?", photo.ID).Update("public_number", number).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func formatPublicPhotoNumber(day string, seq int) string {
+	parsed, err := time.Parse("2006-01-02", strings.TrimSpace(day))
+	if err != nil {
+		return ""
+	}
+	if seq < 1 {
+		seq = 1
+	}
+	return fmt.Sprintf("%02d%02d%02d%03d", parsed.Year()%100, int(parsed.Month()), parsed.Day(), seq)
+}
+
+func parsePublicPhotoSequence(day string, publicNumber string) (int, bool) {
+	prefix := formatPublicPhotoNumber(day, 0)
+	if len(prefix) != 9 {
+		return 0, false
+	}
+	prefix = prefix[:6]
+	number := strings.TrimSpace(publicNumber)
+	if len(number) != 9 || !strings.HasPrefix(number, prefix) {
+		return 0, false
+	}
+	seq, err := strconv.Atoi(number[6:])
+	if err != nil || seq < 1 {
+		return 0, false
+	}
+	return seq, true
 }

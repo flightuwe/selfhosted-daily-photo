@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 	"gorm.io/driver/sqlite"
@@ -83,5 +84,45 @@ func TestEnsureFotomojiTemplateVersionBackfill(t *testing.T) {
 	}
 	if preserved.ActiveVersionID != already.ActiveVersionID {
 		t.Fatalf("existing active version id changed: got %d want %d", preserved.ActiveVersionID, already.ActiveVersionID)
+	}
+}
+
+func TestEnsurePhotoPublicNumbersBackfill(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "app.db")
+	database, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "requires cgo") {
+			t.Skipf("sqlite driver requires cgo in this environment: %v", err)
+		}
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := database.AutoMigrate(&models.User{}, &models.Photo{}); err != nil {
+		t.Fatalf("automigrate: %v", err)
+	}
+
+	photos := []models.Photo{
+		{UserID: 1, Day: "2026-05-26", FilePath: "a.jpg", CreatedAt: time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)},
+		{UserID: 1, Day: "2026-05-26", FilePath: "b.jpg", CreatedAt: time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC)},
+		{UserID: 1, Day: "2026-05-27", FilePath: "c.jpg", CreatedAt: time.Date(2026, 5, 27, 9, 0, 0, 0, time.UTC)},
+	}
+	for _, photo := range photos {
+		if err := database.Create(&photo).Error; err != nil {
+			t.Fatalf("create photo: %v", err)
+		}
+	}
+
+	if err := ensurePhotoPublicNumbers(database); err != nil {
+		t.Fatalf("ensurePhotoPublicNumbers: %v", err)
+	}
+
+	var stored []models.Photo
+	if err := database.Order("day asc, created_at asc, id asc").Find(&stored).Error; err != nil {
+		t.Fatalf("load photos: %v", err)
+	}
+	want := []string{"260526001", "260526002", "260527001"}
+	for i, photo := range stored {
+		if photo.PublicNumber != want[i] {
+			t.Fatalf("photo %d public number = %q, want %q", i, photo.PublicNumber, want[i])
+		}
 	}
 }

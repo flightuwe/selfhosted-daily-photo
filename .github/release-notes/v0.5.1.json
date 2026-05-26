@@ -1,0 +1,10 @@
+{
+  "version": "0.5.1",
+  "releasedAt": "2026-05-26T00:00:00Z",
+  "highlights": [
+    "Feed- und Kommentartexte haben wieder die richtige Groesse, trotz klickbarer Hashtags.",
+    "Im Profil gibt es jetzt Kalenderfunktionen zum kompletten Aufraeumen aller gemerkten Posts.",
+    "Sichtbare Post-Nummern koennen optional eingeblendet werden und bleiben als stabile Tages-IDs erhalten."
+  ],
+  "details": []
+}
