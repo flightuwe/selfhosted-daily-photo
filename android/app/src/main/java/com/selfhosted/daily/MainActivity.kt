@@ -27,6 +27,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Animatable
@@ -67,9 +72,11 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.ExperimentalMaterialApi
@@ -84,6 +91,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -211,6 +219,7 @@ const val EXTRA_LAUNCH_PHOTO_ID = "daily_launch_photo_id"
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 enum class AuthMode { LOGIN, REGISTER }
+enum class CalendarMode { PUBLIC, BOOKMARKS, SEARCH }
 
 data class PendingLaunch(
     val action: String = "",
@@ -384,7 +393,8 @@ data class PromptPhoto(
     val capsuleLocked: Boolean = false,
     val locationShared: Boolean = false,
     val locationDisplay: String? = null,
-    val locationMapsUrl: String? = null
+    val locationMapsUrl: String? = null,
+    val bookmarkedByMe: Boolean = false
 )
 data class PromptResponse(
     val day: String,
@@ -504,7 +514,8 @@ data class CalendarFeaturedPhoto(
     val user: User,
     val reactionCount: Long = 0,
     val commentCount: Long = 0,
-    val interactionCount: Long = 0
+    val interactionCount: Long = 0,
+    val bookmarkedByMe: Boolean = false
 )
 data class DayStatItem(
     val day: String,
@@ -514,6 +525,31 @@ data class DayStatItem(
     val featuredPhoto: CalendarFeaturedPhoto? = null
 )
 data class DayStatsResponse(val items: List<DayStatItem>)
+data class CalendarUserOption(
+    val id: Long,
+    val username: String,
+    val favoriteColor: String = "#1F5FBF"
+)
+data class CalendarPayloadResponse(
+    val days: List<String> = emptyList(),
+    val dayStats: List<DayStatItem> = emptyList(),
+    val users: List<CalendarUserOption> = emptyList()
+)
+data class CalendarSearchMatchItem(
+    val photo: PromptPhoto,
+    val user: User,
+    val excerpt: String = "",
+    val matchedCaption: Boolean = false,
+    val matchedComments: List<String> = emptyList(),
+    val matchedHashtags: List<String> = emptyList()
+)
+data class CalendarSearchResponse(
+    val query: String = "",
+    val normalizedQuery: String = "",
+    val days: List<String> = emptyList(),
+    val dayStats: List<DayStatItem> = emptyList(),
+    val matchedPhotosByDay: Map<String, List<CalendarSearchMatchItem>> = emptyMap()
+)
 data class TopReactionStat(val emoji: String, val count: Long)
 data class LatestActiveUser(
     val username: String,
@@ -752,6 +788,21 @@ interface Api {
         @Query("to") to: String? = null
     ): DayStatsResponse
 
+    @GET("calendar/public")
+    suspend fun calendarPublic(@Header("Authorization") token: String): CalendarPayloadResponse
+
+    @GET("calendar/user/{id}")
+    suspend fun calendarUser(@Header("Authorization") token: String, @Path("id") id: Long): CalendarPayloadResponse
+
+    @GET("calendar/bookmarks")
+    suspend fun calendarBookmarks(@Header("Authorization") token: String): CalendarPayloadResponse
+
+    @GET("calendar/search")
+    suspend fun calendarSearch(
+        @Header("Authorization") token: String,
+        @Query("q") query: String
+    ): CalendarSearchResponse
+
     @GET("community/stats")
     suspend fun communityStats(@Header("Authorization") token: String): CommunityStatsResponse
 
@@ -852,6 +903,18 @@ interface Api {
         @Header("Authorization") token: String,
         @Path("id") id: Long
     ): PhotoInteractionsResponse
+
+    @POST("photos/{id}/bookmark")
+    suspend fun bookmarkPhoto(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): Map<String, Any?>
+
+    @DELETE("photos/{id}/bookmark")
+    suspend fun unbookmarkPhoto(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): Map<String, Any?>
 
     @POST("photos/{id}/reaction")
     suspend fun reactPhoto(
@@ -1760,6 +1823,12 @@ class AppRepo(
         authorizedCall("/api/feed/days") { token -> api.feedDays(token, from, to).items }
     suspend fun feedDayStats(from: String? = null, to: String? = null): List<DayStatItem> =
         authorizedCall("/api/feed/day-stats") { token -> api.feedDayStats(token, from, to).items }
+    suspend fun calendarPublic(): CalendarPayloadResponse =
+        authorizedCall("/api/calendar/public") { token -> api.calendarPublic(token) }
+    suspend fun calendarBookmarks(): CalendarPayloadResponse =
+        authorizedCall("/api/calendar/bookmarks") { token -> api.calendarBookmarks(token) }
+    suspend fun calendarSearch(query: String): CalendarSearchResponse =
+        authorizedCall("/api/calendar/search") { token -> api.calendarSearch(token, query) }
     suspend fun communityStats(): CommunityStatsResponse =
         authorizedCall("/api/community/stats") { token -> api.communityStats(token) }
 
@@ -1798,6 +1867,14 @@ class AppRepo(
 
     suspend fun photoInteractions(photoId: Long): PhotoInteractionsResponse =
         authorizedCall("/api/photos/:id/interactions") { token -> api.photoInteractions(token, photoId) }
+
+    suspend fun bookmarkPhoto(photoId: Long) {
+        authorizedCall("/api/photos/:id/bookmark") { token -> api.bookmarkPhoto(token, photoId) }
+    }
+
+    suspend fun unbookmarkPhoto(photoId: Long) {
+        authorizedCall("/api/photos/:id/bookmark") { token -> api.unbookmarkPhoto(token, photoId) }
+    }
 
     suspend fun reactPhoto(photoId: Long, emoji: String): PhotoInteractionsResponse =
         authorizedCall("/api/photos/:id/reaction") { token -> api.reactPhoto(token, photoId, PhotoReactionRequest(emoji)) }
@@ -2348,6 +2425,21 @@ private class ProgressRequestBody(
     }
 }
 
+data class CalendarDataset(
+    val days: List<String> = emptyList(),
+    val dayStats: Map<String, DayStatItem> = emptyMap()
+)
+
+data class CalendarSearchDataset(
+    val query: String = "",
+    val normalizedQuery: String = "",
+    val dataset: CalendarDataset = CalendarDataset(),
+    val matchesByDay: Map<String, List<CalendarSearchMatchItem>> = emptyMap()
+) {
+    val flatMatches: List<CalendarSearchMatchItem>
+        get() = dataset.days.flatMap { day -> matchesByDay[day].orEmpty() }
+}
+
 data class UiState(
     val token: String = "",
     val user: User? = null,
@@ -2361,6 +2453,14 @@ data class UiState(
     val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
     val calendarDays: List<String> = emptyList(),
     val calendarDayStats: Map<String, DayStatItem> = emptyMap(),
+    val calendarMode: CalendarMode = CalendarMode.PUBLIC,
+    val calendarPickerExpanded: Boolean = false,
+    val calendarSelectedDay: String? = null,
+    val calendarPublicData: CalendarDataset = CalendarDataset(),
+    val calendarBookmarksData: CalendarDataset = CalendarDataset(),
+    val calendarSearchData: CalendarSearchDataset = CalendarSearchDataset(),
+    val calendarSearchQuery: String = "",
+    val calendarLoading: Boolean = false,
     val communityStats: CommunityStatsResponse? = null,
     val communityStatsLoading: Boolean = false,
     val feedFocusDay: String? = null,
@@ -2544,6 +2644,96 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val id = nextFeedScrollRequestId
         nextFeedScrollRequestId += 1L
         return id
+    }
+
+    private fun CalendarPayloadResponse.toDataset(): CalendarDataset =
+        CalendarDataset(days = days, dayStats = dayStats.associateBy { it.day })
+
+    private fun CalendarSearchResponse.toDataset(): CalendarSearchDataset =
+        CalendarSearchDataset(
+            query = query,
+            normalizedQuery = normalizedQuery,
+            dataset = CalendarDataset(days = days, dayStats = dayStats.associateBy { it.day }),
+            matchesByDay = matchedPhotosByDay
+        )
+
+    private fun applyCalendarDataset(dataset: CalendarDataset) {
+        val selectedDay = state.calendarSelectedDay?.takeIf { dataset.days.contains(it) }
+            ?: dataset.days.firstOrNull()
+        state = state.copy(
+            calendarDays = dataset.days,
+            calendarDayStats = dataset.dayStats,
+            calendarSelectedDay = selectedDay
+        )
+    }
+
+    private fun applyCalendarModeDataset() {
+        val dataset = when (state.calendarMode) {
+            CalendarMode.PUBLIC -> state.calendarPublicData
+            CalendarMode.BOOKMARKS -> state.calendarBookmarksData
+            CalendarMode.SEARCH -> state.calendarSearchData.dataset
+        }
+        applyCalendarDataset(dataset)
+    }
+
+    private fun toggleBookmarkInPhoto(photo: PromptPhoto, bookmarked: Boolean): PromptPhoto =
+        photo.copy(bookmarkedByMe = bookmarked)
+
+    private fun toggleBookmarkInFeedItem(item: FeedItem, bookmarked: Boolean): FeedItem =
+        item.copy(photo = item.photo.copy(bookmarkedByMe = bookmarked))
+
+    private fun updateBookmarkStateLocally(photoId: Long, bookmarked: Boolean) {
+        val newFeedByDay = state.feedByDay.mapValues { (_, items) ->
+            items.map { item ->
+                if (item.photo.id == photoId) toggleBookmarkInFeedItem(item, bookmarked) else item
+            }
+        }
+        val newPhotos = state.photos.map { photo ->
+            if (photo.id == photoId) toggleBookmarkInPhoto(photo, bookmarked) else photo
+        }
+        val viewedProfile = state.viewedProfile
+        val newViewedProfile = viewedProfile?.copy(
+            photos = viewedProfile.photos.map { photo ->
+                if (photo.id == photoId) toggleBookmarkInPhoto(photo, bookmarked) else photo
+            }
+        )
+        fun updateDataset(dataset: CalendarDataset): CalendarDataset {
+            val updatedStats = dataset.dayStats.mapValues { (_, stat) ->
+                val featured = stat.featuredPhoto
+                if (featured?.photoId == photoId) featured.copy(bookmarkedByMe = bookmarked).let { stat.copy(featuredPhoto = it) } else stat
+            }
+            return dataset.copy(dayStats = updatedStats)
+        }
+        val updatedSearchMatches = state.calendarSearchData.matchesByDay.mapValues { (_, matches) ->
+            matches.map { match ->
+                if (match.photo.id == photoId) match.copy(photo = match.photo.copy(bookmarkedByMe = bookmarked)) else match
+            }
+        }
+        state = state.copy(
+            feedByDay = newFeedByDay,
+            feed = newFeedByDay[state.prompt?.day].orEmpty(),
+            photos = newPhotos,
+            viewedProfile = newViewedProfile,
+            calendarPublicData = updateDataset(state.calendarPublicData),
+            calendarBookmarksData = updateDataset(state.calendarBookmarksData),
+            calendarSearchData = state.calendarSearchData.copy(
+                dataset = updateDataset(state.calendarSearchData.dataset),
+                matchesByDay = updatedSearchMatches
+            )
+        )
+        applyCalendarModeDataset()
+    }
+
+    private fun removeBookmarkFromBookmarksDataset(photoId: Long) {
+        val remainingStats = state.calendarBookmarksData.dayStats.values.filterNot { it.featuredPhoto?.photoId == photoId }
+        val updated = CalendarDataset(
+            days = remainingStats.map { it.day }.sortedDescending(),
+            dayStats = remainingStats.associateBy { it.day }
+        )
+        state = state.copy(calendarBookmarksData = updated)
+        if (state.calendarMode == CalendarMode.BOOKMARKS) {
+            applyCalendarDataset(updated)
+        }
     }
 
     private fun cleanupPendingChatBodies(nowMs: Long) {
@@ -3157,10 +3347,116 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         if (tab == AppTab.CALENDAR) {
             state = state.copy(activeTab = tab)
-            viewModelScope.launch { ensureCalendarStatsPrefix(14) }
+            viewModelScope.launch { ensureCalendarModeLoaded(state.calendarMode, force = false) }
             return
         }
         state = state.copy(activeTab = tab)
+    }
+
+    fun setCalendarPickerExpanded(expanded: Boolean) {
+        state = state.copy(calendarPickerExpanded = expanded)
+    }
+
+    fun selectCalendarDay(day: String) {
+        state = state.copy(calendarSelectedDay = day)
+    }
+
+    fun setCalendarMode(mode: CalendarMode) {
+        state = state.copy(calendarMode = mode, calendarPickerExpanded = false)
+        viewModelScope.launch { ensureCalendarModeLoaded(mode, force = false) }
+    }
+
+    fun setCalendarSearchQuery(query: String) {
+        state = state.copy(calendarSearchQuery = query)
+    }
+
+    fun openCalendarSearch(query: String) {
+        state = state.copy(
+            activeTab = AppTab.CALENDAR,
+            calendarMode = CalendarMode.SEARCH,
+            calendarPickerExpanded = true,
+            calendarSearchQuery = query
+        )
+        viewModelScope.launch { ensureCalendarModeLoaded(CalendarMode.SEARCH, force = true) }
+    }
+
+    fun submitCalendarSearch() {
+        state = state.copy(calendarMode = CalendarMode.SEARCH)
+        viewModelScope.launch { ensureCalendarModeLoaded(CalendarMode.SEARCH, force = true) }
+    }
+
+    private suspend fun ensureCalendarModeLoaded(mode: CalendarMode, force: Boolean) {
+        if (state.calendarLoading && !force) return
+        state = state.copy(calendarLoading = true)
+        try {
+            when (mode) {
+                CalendarMode.PUBLIC -> {
+                    if (!force && state.calendarPublicData.days.isNotEmpty()) {
+                        applyCalendarDataset(state.calendarPublicData)
+                    } else {
+                        val payload = repo.calendarPublic()
+                        val dataset = payload.toDataset()
+                        state = state.copy(
+                            calendarPublicData = dataset
+                        )
+                        applyCalendarDataset(dataset)
+                    }
+                }
+                CalendarMode.BOOKMARKS -> {
+                    if (!force && state.calendarBookmarksData.days.isNotEmpty()) {
+                        applyCalendarDataset(state.calendarBookmarksData)
+                    } else {
+                        val payload = repo.calendarBookmarks()
+                        val dataset = payload.toDataset()
+                        state = state.copy(calendarBookmarksData = dataset)
+                        applyCalendarDataset(dataset)
+                    }
+                }
+                CalendarMode.SEARCH -> {
+                    val query = state.calendarSearchQuery.trim()
+                    if (query.isBlank()) {
+                        val empty = CalendarSearchDataset()
+                        state = state.copy(calendarSearchData = empty)
+                        applyCalendarDataset(empty.dataset)
+                    } else {
+                        val cached = state.calendarSearchData.takeIf { it.normalizedQuery == query.lowercase() }
+                        if (!force && cached != null && cached.dataset.days.isNotEmpty()) {
+                            applyCalendarDataset(cached.dataset)
+                        } else {
+                            val payload = repo.calendarSearch(query)
+                            val dataset = payload.toDataset()
+                            state = state.copy(
+                                calendarSearchData = dataset,
+                                calendarSearchQuery = payload.query.ifBlank { query }
+                            )
+                            applyCalendarDataset(dataset.dataset)
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            state = state.copy(message = apiError(t, "Kalender laden fehlgeschlagen"))
+        } finally {
+            state = state.copy(calendarLoading = false)
+        }
+    }
+
+    suspend fun toggleBookmark(photoId: Long, bookmarked: Boolean) {
+        updateBookmarkStateLocally(photoId, bookmarked)
+        try {
+            if (bookmarked) {
+                repo.bookmarkPhoto(photoId)
+            } else {
+                repo.unbookmarkPhoto(photoId)
+                removeBookmarkFromBookmarksDataset(photoId)
+            }
+            if (state.calendarMode == CalendarMode.BOOKMARKS || state.calendarBookmarksData.days.isNotEmpty()) {
+                ensureCalendarModeLoaded(CalendarMode.BOOKMARKS, force = true)
+            }
+        } catch (t: Throwable) {
+            updateBookmarkStateLocally(photoId, !bookmarked)
+            state = state.copy(message = apiError(t, "Merken fehlgeschlagen"))
+        }
     }
 
     fun clearFeedPhotoFocus() {
@@ -3451,6 +3747,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
             )
+            runCatching { repo.calendarPublic() }.getOrNull()?.let { publicCalendar ->
+                val dataset = publicCalendar.toDataset()
+                state = state.copy(
+                    calendarPublicData = dataset
+                )
+                if (state.calendarMode == CalendarMode.PUBLIC) {
+                    applyCalendarDataset(dataset)
+                }
+            }
             repo.setDiagnosticsConsentLocal(me.diagnosticsConsentGranted)
             if (!me.diagnosticsConsentGranted && state.diagnosticsUploadEnabled) {
                 repo.setDiagnosticsUploadEnabled(false)
@@ -5869,6 +6174,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             onOpenLocation = { url ->
                 openExternalUrl(context, url)
             },
+            onOpenHashtagSearch = { vm.openCalendarSearch(it) },
             onIndexChange = { viewerIndex = it },
             onClose = closeViewer
         )
@@ -6211,6 +6517,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
                     onFocusPhotoConsumed = { vm.clearFeedPhotoFocus() },
                     onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
+                    onToggleBookmark = { photoId, bookmarked -> scope.launch { vm.toggleBookmark(photoId, bookmarked) } },
+                    onOpenHashtagSearch = { vm.openCalendarSearch(it) },
                     onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
                         viewerIndex = 0
@@ -6221,15 +6529,20 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 )
 
                 AppTab.CALENDAR -> CalendarTab(
+                    mode = state.calendarMode,
                     days = state.calendarDays,
                     dayStats = state.calendarDayStats,
-                    monthRecapByDay = state.monthRecapByDay,
-                    promptMetaByDay = state.promptMetaByDay,
-                    selected = state.feedFocusDay ?: state.prompt?.day.orEmpty(),
-                    onLoadMoreStats = { scope.launch { vm.loadMoreCalendarStats() } },
-                    onSelect = { day ->
-                        scope.launch { vm.jumpToDay(day) }
-                    }
+                    searchQuery = state.calendarSearchQuery,
+                    searchResults = state.calendarSearchData.flatMatches,
+                    selected = state.calendarSelectedDay ?: state.prompt?.day.orEmpty(),
+                    pickerExpanded = state.calendarPickerExpanded,
+                    loading = state.calendarLoading,
+                    onPickerExpandedChange = { vm.setCalendarPickerExpanded(it) },
+                    onModeChange = { vm.setCalendarMode(it) },
+                    onSearchQueryChange = { vm.setCalendarSearchQuery(it) },
+                    onSearchSubmit = { vm.submitCalendarSearch() },
+                    onOpenHashtagSearch = { vm.openCalendarSearch(it) },
+                    onSelect = { day -> vm.selectCalendarDay(day) }
                 )
 
                 AppTab.CHAT -> ChatTab(
@@ -7163,6 +7476,8 @@ fun FeedTab(
     onJumpToCapsule: (day: String, photoId: Long) -> Unit,
     onFocusPhotoConsumed: () -> Unit,
     onOpenUserProfile: (Long) -> Unit,
+    onToggleBookmark: (photoId: Long, bookmarked: Boolean) -> Unit,
+    onOpenHashtagSearch: (String) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
     val context = LocalContext.current
@@ -7307,6 +7622,7 @@ fun FeedTab(
                     val item = row.item
                     val meta = promptMetaByDay[row.day]
                     val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
+                    var menuExpanded by remember(item.photo.id, item.photo.bookmarkedByMe) { mutableStateOf(false) }
                     val isMomentWindowPost = isWithinDailyMomentWindow(
                         item.photo.createdAt,
                         meta?.triggeredAt,
@@ -7317,12 +7633,50 @@ fun FeedTab(
                     val requestedByUserColor = item.specialRequestedByUserColor ?: meta?.specialRequestedByUserColor
                     Card {
                         Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                item.user.username,
-                                fontWeight = FontWeight.SemiBold,
-                                color = parseUserColor(item.user.favoriteColor),
-                                modifier = Modifier.clickable { onOpenUserProfile(item.user.id) }
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        item.user.username,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = parseUserColor(item.user.favoriteColor),
+                                        modifier = Modifier.clickable { onOpenUserProfile(item.user.id) }
+                                    )
+                                    if (item.photo.bookmarkedByMe) {
+                                        Text(
+                                            "Gemerkt",
+                                            color = Color(0xFF1F5FBF),
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
+                                Box {
+                                    IconButton(onClick = { menuExpanded = true }) {
+                                        Icon(
+                                            imageVector = Icons.Filled.MoreVert,
+                                            contentDescription = "Beitragsaktionen"
+                                        )
+                                    }
+                                    androidx.compose.material3.DropdownMenu(
+                                        expanded = menuExpanded,
+                                        onDismissRequest = { menuExpanded = false }
+                                    ) {
+                                        androidx.compose.material3.DropdownMenuItem(
+                                            text = { Text(if (item.photo.bookmarkedByMe) "Nicht mehr merken" else "Merken") },
+                                            onClick = {
+                                                menuExpanded = false
+                                                onToggleBookmark(item.photo.id, !item.photo.bookmarkedByMe)
+                                            }
+                                        )
+                                    }
+                                }
+                            }
                             if (item.user.statusVisible && (item.user.statusText.isNotBlank() || item.user.statusEmoji.isNotBlank())) {
                                 Text(
                                     "${item.user.statusEmoji} ${item.user.statusText}".trim(),
@@ -7437,18 +7791,24 @@ fun FeedTab(
                             }
                             if (comments.isNotEmpty()) {
                                 comments.forEach { comment ->
-                                    Text(
-                                        "${comment.user.username}: ${comment.body}",
-                                        color = secondaryTextColor
-                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                                        Text("${comment.user.username}:", color = secondaryTextColor, fontWeight = FontWeight.SemiBold)
+                                        HashtagText(
+                                            text = comment.body,
+                                            color = secondaryTextColor,
+                                            modifier = Modifier.weight(1f),
+                                            onHashtagClick = onOpenHashtagSearch
+                                        )
+                                    }
                                 }
                             }
                             if (!item.photo.caption.isNullOrBlank()) {
-                                Text(
-                                    item.photo.caption,
+                                HashtagText(
+                                    text = item.photo.caption,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
-                                    color = secondaryTextColor
+                                    color = secondaryTextColor,
+                                    onHashtagClick = onOpenHashtagSearch
                                 )
                             }
                         }
@@ -7480,6 +7840,51 @@ private sealed class FeedRow {
     data class MonthRecapItem(val day: String, val recap: MonthlyRecap) : FeedRow()
 }
 
+private val hashtagRegex = Regex("""(?<![\p{L}\p{N}_])#[\p{L}\p{N}_]+""")
+
+@Composable
+private fun HashtagText(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip,
+    onHashtagClick: (String) -> Unit
+) {
+    val annotated = remember(text, color) {
+        buildAnnotatedString {
+            var cursor = 0
+            hashtagRegex.findAll(text).forEach { match ->
+                if (match.range.first > cursor) {
+                    append(text.substring(cursor, match.range.first))
+                }
+                val tag = match.value
+                pushStringAnnotation(tag = "hashtag", annotation = tag)
+                withStyle(SpanStyle(color = Color(0xFF1F5FBF), fontWeight = FontWeight.SemiBold)) {
+                    append(tag)
+                }
+                pop()
+                cursor = match.range.last + 1
+            }
+            if (cursor < text.length) {
+                append(text.substring(cursor))
+            }
+        }
+    }
+    ClickableText(
+        text = annotated,
+        modifier = modifier,
+        maxLines = maxLines,
+        overflow = overflow,
+        style = MaterialTheme.typography.bodyMedium.copy(color = color),
+        onClick = { offset ->
+            annotated.getStringAnnotations("hashtag", offset, offset)
+                .firstOrNull()
+                ?.let { onHashtagClick(it.item) }
+        }
+    )
+}
+
 @Composable
 private fun MonthlyRecapCard(recap: MonthlyRecap) {
     Card {
@@ -7501,36 +7906,185 @@ private fun MonthlyRecapCard(recap: MonthlyRecap) {
 
 @Composable
 fun CalendarTab(
+    mode: CalendarMode,
     days: List<String>,
     dayStats: Map<String, DayStatItem>,
-    monthRecapByDay: Map<String, MonthlyRecap>,
-    promptMetaByDay: Map<String, PromptMeta>,
+    searchQuery: String,
+    searchResults: List<CalendarSearchMatchItem>,
     selected: String,
-    onLoadMoreStats: () -> Unit,
+    pickerExpanded: Boolean,
+    loading: Boolean,
+    onPickerExpandedChange: (Boolean) -> Unit,
+    onModeChange: (CalendarMode) -> Unit,
+    onSearchQueryChange: (String) -> Unit,
+    onSearchSubmit: () -> Unit,
+    onOpenHashtagSearch: (String) -> Unit,
     onSelect: (String) -> Unit
 ) {
-    if (days.isEmpty()) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Keine Tage mit Bildern vorhanden")
-        }
-        return
-    }
     val listState = rememberLazyListState()
-    LaunchedEffect(listState, days.size) {
-        snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-        }.collect { lastVisible ->
-            if (lastVisible >= days.lastIndex - 5) onLoadMoreStats()
+    val selectedIndex = remember(days, selected) { days.indexOf(selected).coerceAtLeast(0) }
+    LaunchedEffect(selectedIndex, days.size) {
+        if (days.isNotEmpty() && selectedIndex in days.indices) {
+            listState.animateScrollToItem(selectedIndex)
         }
+    }
+    val modeLabel = when (mode) {
+        CalendarMode.PUBLIC -> "Oeffentlich"
+        CalendarMode.BOOKMARKS -> "Gemerkt"
+        CalendarMode.SEARCH -> "Suche"
+    }
+    val subtitle = when (mode) {
+        CalendarMode.PUBLIC -> "Alle sichtbaren Posts im Kalender"
+        CalendarMode.BOOKMARKS -> "Deine gemerkten Beitraege"
+        CalendarMode.SEARCH -> if (searchQuery.isBlank()) "Suche nach Caption, Kommentaren und Hashtags" else "Treffer fuer \"$searchQuery\""
     }
     LazyColumn(
         state = listState,
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxSize()
     ) {
+        item("calendar-header") {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { onPickerExpandedChange(!pickerExpanded) },
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Kalender: $modeLabel", fontWeight = FontWeight.Bold)
+                            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text(if (pickerExpanded) "Weniger" else "Auswaehlen", color = Color(0xFF1F5FBF))
+                    }
+                    AnimatedVisibility(
+                        visible = pickerExpanded,
+                        enter = fadeIn() + expandVertically(),
+                        exit = fadeOut() + shrinkVertically()
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                items(CalendarMode.entries) { entry ->
+                                    FilterChip(
+                                        selected = mode == entry,
+                                        onClick = { onModeChange(entry) },
+                                        label = {
+                                            Text(
+                                                when (entry) {
+                                                    CalendarMode.PUBLIC -> "Oeffentlich"
+                                                    CalendarMode.BOOKMARKS -> "Gemerkt"
+                                                    CalendarMode.SEARCH -> "Suche"
+                                                }
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                            if (mode == CalendarMode.SEARCH) {
+                                OutlinedTextField(
+                                    value = searchQuery,
+                                    onValueChange = onSearchQueryChange,
+                                    label = { Text("Text oder Hashtag") },
+                                    placeholder = { Text("#klogrind oder see") },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    Button(onClick = onSearchSubmit, modifier = Modifier.weight(1f)) {
+                                        Text("Suchen")
+                                    }
+                                    OutlinedButton(
+                                        onClick = { onOpenHashtagSearch("#daily") },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("#daily")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (mode != CalendarMode.SEARCH || days.isNotEmpty()) {
+                        Text("Tag-Sprung", fontWeight = FontWeight.SemiBold)
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            items(days) { day ->
+                                FilterChip(
+                                    selected = day == selected,
+                                    onClick = { onSelect(day) },
+                                    label = { Text(formatDayLabel(day)) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (mode == CalendarMode.SEARCH && searchQuery.isBlank()) {
+            item("calendar-search-empty") {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Suche starten", fontWeight = FontWeight.Bold)
+                        Text("Finde alte Posts ueber Caption, Kommentare oder klickbare Hashtags.")
+                        Text("Beispiele: #klogrind, see, sunset")
+                    }
+                }
+            }
+        }
+        if (mode == CalendarMode.SEARCH && searchResults.isNotEmpty()) {
+            item("calendar-search-results") {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Treffer", fontWeight = FontWeight.Bold)
+                        searchResults.take(24).forEach { result ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelect(result.photo.day) },
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AsyncImage(
+                                    model = result.photo.url,
+                                    contentDescription = "Trefferbild",
+                                    modifier = Modifier.size(58.dp),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        "@${result.user.username} · ${formatDayLabel(result.photo.day)}",
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = parseUserColor(result.user.favoriteColor)
+                                    )
+                                    if (result.excerpt.isNotBlank()) {
+                                        HashtagText(
+                                            text = result.excerpt,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            onHashtagClick = onOpenHashtagSearch
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (days.isEmpty()) {
+            item("calendar-empty-state") {
+                Box(modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        when {
+                            loading -> "Kalender wird geladen ..."
+                            mode == CalendarMode.SEARCH -> "Keine Treffer gefunden"
+                            else -> "Keine Tage mit Bildern vorhanden"
+                        }
+                    )
+                }
+            }
+        }
         items(days) { day ->
             val selectedDay = day == selected
-            val meta = promptMetaByDay[day]
             val stats = dayStats[day]
             val participantCount = stats?.participantCount ?: 0
             val featured = stats?.featuredPhoto
@@ -7583,16 +8137,6 @@ fun CalendarTab(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                    }
-                    momentReasonLine(meta?.momentKind, meta?.triggerSource, meta?.requestedByUser)?.let { reason ->
-                        Text(reason, color = Color(0xFF1F5FBF))
-                    }
-                    monthRecapByDay[day]?.let { recap ->
-                        Text(
-                            "Monatsrueckblick: ${recap.monthLabel}",
-                            color = Color(0xFF0A7A42),
-                            fontWeight = FontWeight.SemiBold
-                        )
                     }
                     if (selectedDay) {
                         Text("Ausgewaehlt", color = Color(0xFF1F5FBF))
@@ -10041,6 +10585,7 @@ private fun FullscreenPhotoViewer(
     onDoubleTapReact: () -> Unit,
     onDownloadCurrent: (String) -> Unit,
     onOpenLocation: (String) -> Unit,
+    onOpenHashtagSearch: (String) -> Unit,
     onIndexChange: (Int) -> Unit,
     onClose: () -> Unit
 ) {
@@ -10094,7 +10639,8 @@ private fun FullscreenPhotoViewer(
                     onFotoMojiTap = onFotoMojiTap,
                     onFotoMojiLongPress = onFotoMojiLongPress,
                     onDownloadCurrent = onDownloadCurrent,
-                    onOpenLocation = onOpenLocation
+                    onOpenLocation = onOpenLocation,
+                    onOpenHashtagSearch = onOpenHashtagSearch
                 )
             },
             containerColor = viewerBg,
@@ -10175,7 +10721,8 @@ private fun ViewerInteractionSheet(
     onFotoMojiTap: (String) -> Unit,
     onFotoMojiLongPress: (String) -> Unit,
     onDownloadCurrent: (String) -> Unit,
-    onOpenLocation: (String) -> Unit
+    onOpenLocation: (String) -> Unit,
+    onOpenHashtagSearch: (String) -> Unit
 ) {
     var selectedFotoMoji by remember { mutableStateOf<PhotoMojiItem?>(null) }
     Column(
@@ -10305,7 +10852,11 @@ private fun ViewerInteractionSheet(
                         fontWeight = FontWeight.SemiBold,
                         color = parseUserColor(item.user.favoriteColor)
                     )
-                    Text(item.body)
+                    HashtagText(
+                        text = item.body,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        onHashtagClick = onOpenHashtagSearch
+                    )
                 }
             }
         }

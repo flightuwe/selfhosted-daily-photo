@@ -60,7 +60,7 @@ export type AdminStats = {
   diagnosticsConsentRate?: number;
 };
 
-export type AdminSearchScope = "users" | "reports" | "commands" | "history";
+export type AdminSearchScope = "users" | "reports" | "commands" | "history" | "posts";
 
 export type AdminSearchResult = {
   type: AdminSearchScope;
@@ -68,7 +68,7 @@ export type AdminSearchResult = {
   label: string;
   meta?: string;
   target: {
-    tab: "users" | "reports" | "commands" | "history";
+    tab: "users" | "reports" | "commands" | "history" | "feed";
     day?: string;
   };
 };

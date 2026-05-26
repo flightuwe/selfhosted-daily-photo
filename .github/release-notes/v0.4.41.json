@@ -1,0 +1,10 @@
+{
+  "version": "0.4.41",
+  "releasedAt": "2026-05-26T00:00:00Z",
+  "highlights": [
+    "Der Kalender hat jetzt eine Volltextsuche ueber Post-Captions, Kommentare und Hashtags.",
+    "Klickbare Hashtags im Feed und in Kommentaren springen direkt in die neue Kalendersuche.",
+    "Die Admin-Suche kann jetzt auch Posts nach Inhalt durchsuchen."
+  ],
+  "details": []
+}

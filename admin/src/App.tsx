@@ -876,6 +876,9 @@ export function App() {
 
   function onSelectSearchResult(item: AdminSearchResult) {
     navigateTab(item.target.tab);
+    if (item.target.tab === "feed" && item.target.day) {
+      setFeedDay(item.target.day);
+    }
     if (item.target.tab === "history" && item.target.day) {
       setHistoryOffset(0);
       setHistoryDays(30);
@@ -2119,7 +2122,7 @@ export function App() {
         <div className="admin-shell-head">
           <div className="search-box">
             <input
-              placeholder="Suche: Nutzer, Reports, Commands, Historie..."
+              placeholder="Suche: Nutzer, Reports, Commands, Historie, Posts..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -2135,6 +2138,7 @@ export function App() {
               <option value="reports">Reports</option>
               <option value="commands">Commands</option>
               <option value="history">Historie</option>
+              <option value="posts">Posts</option>
             </select>
             <button onClick={() => void runSearch()}>{searchLoading ? "Suche..." : "Suchen"}</button>
           </div>

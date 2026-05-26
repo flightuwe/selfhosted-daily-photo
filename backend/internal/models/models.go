@@ -297,6 +297,13 @@ type Photo struct {
 	CreatedAt                time.Time  `json:"createdAt"`
 }
 
+type PhotoBookmark struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	UserID    uint      `gorm:"not null;index:idx_photo_bookmark_user_photo,unique" json:"userId"`
+	PhotoID   uint      `gorm:"not null;index:idx_photo_bookmark_user_photo,unique;index" json:"photoId"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 type PhotoReaction struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	PhotoID   uint      `gorm:"index:idx_photo_user_reaction,unique;not null" json:"photoId"`

@@ -1,9 +1,12 @@
 package api
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/yosho/selfhosted-bereal/backend/internal/config"
+	"github.com/yosho/selfhosted-bereal/backend/internal/db"
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 )
 
@@ -163,5 +166,125 @@ func TestNormalizePollOptions(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("normalizePollOptions()[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestExtractHashtags(t *testing.T) {
+	got := extractHashtags("Am See mit #Klogrind und nochmal #klogrind plus #SunSet")
+	want := []string{"#klogrind", "#sunset"}
+	if len(got) != len(want) {
+		t.Fatalf("extractHashtags() len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("extractHashtags()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func newSearchTestServer(t *testing.T) *Server {
+	t.Helper()
+	database, err := db.Connect(filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Skipf("sqlite runtime unavailable: %v", err)
+	}
+	return &Server{
+		DB:       database,
+		Config:   config.Config{PublicBaseURL: "https://daily.example"},
+		Location: time.UTC,
+	}
+}
+
+func TestSearchPhotoHitsUsesCaptionAndComments(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	author := models.User{Username: "author", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if err := server.DB.Create(&author).Error; err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	photo := models.Photo{
+		UserID:    author.ID,
+		User:      author,
+		Day:       "2026-05-26",
+		FilePath:  "2026-05-26/test.jpg",
+		Caption:   "Sonnenuntergang am See #LakeTrip",
+		CreatedAt: time.Date(2026, 5, 26, 18, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	comment := models.PhotoComment{
+		PhotoID: photo.ID,
+		UserID:  viewer.ID,
+		Body:    "Das war kompletter klogrind",
+	}
+	if err := server.DB.Create(&comment).Error; err != nil {
+		t.Fatalf("create comment: %v", err)
+	}
+	if err := server.refreshPhotoSearchDocument(photo.ID); err != nil {
+		t.Fatalf("refreshPhotoSearchDocument() error = %v", err)
+	}
+	now := time.Date(2026, 5, 26, 20, 0, 0, 0, time.UTC)
+	normalized, hits, err := server.searchPhotoHits(viewer.ID, "#laketrip", now, false, 10)
+	if err != nil {
+		t.Fatalf("searchPhotoHits() hashtag error = %v", err)
+	}
+	if normalized != "#laketrip" {
+		t.Fatalf("normalized hashtag query = %q, want %q", normalized, "#laketrip")
+	}
+	if len(hits) != 1 || hits[0].Photo.ID != photo.ID {
+		t.Fatalf("searchPhotoHits() hashtag ids = %v, want [%d]", len(hits), photo.ID)
+	}
+	if len(hits[0].MatchedHashtags) != 1 || hits[0].MatchedHashtags[0] != "#laketrip" {
+		t.Fatalf("matched hashtags = %v, want [#laketrip]", hits[0].MatchedHashtags)
+	}
+	normalized, hits, err = server.searchPhotoHits(viewer.ID, "klogrind", now, false, 10)
+	if err != nil {
+		t.Fatalf("searchPhotoHits() comment error = %v", err)
+	}
+	if normalized != "klogrind" {
+		t.Fatalf("normalized comment query = %q, want %q", normalized, "klogrind")
+	}
+	if len(hits) != 1 || len(hits[0].MatchedComments) == 0 {
+		t.Fatalf("searchPhotoHits() comment matches = %+v, want comment excerpt", hits)
+	}
+}
+
+func TestSearchPhotoHitsRespectsVisibility(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	author := models.User{Username: "author", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if err := server.DB.Create(&author).Error; err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	visibleAt := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	photo := models.Photo{
+		UserID:           author.ID,
+		User:             author,
+		Day:              "2026-05-26",
+		FilePath:         "2026-05-26/locked.jpg",
+		Caption:          "Versteckt #secretspot",
+		CapsuleVisibleAt: &visibleAt,
+		CreatedAt:        time.Date(2026, 5, 26, 18, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.refreshPhotoSearchDocument(photo.ID); err != nil {
+		t.Fatalf("refreshPhotoSearchDocument() error = %v", err)
+	}
+	now := time.Date(2026, 5, 26, 20, 0, 0, 0, time.UTC)
+	_, hits, err := server.searchPhotoHits(viewer.ID, "#secretspot", now, false, 10)
+	if err != nil {
+		t.Fatalf("searchPhotoHits() error = %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("searchPhotoHits() returned hidden hit = %+v, want none", hits)
 	}
 }

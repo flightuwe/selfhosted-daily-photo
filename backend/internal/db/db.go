@@ -43,6 +43,7 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.DailySpikeEvent{},
 		&models.DailyTriggerAuditEvent{},
 		&models.Photo{},
+		&models.PhotoBookmark{},
 		&models.PhotoReaction{},
 		&models.PhotoFotomoji{},
 		&models.UserFotomojiTemplate{},
@@ -78,6 +79,9 @@ func Connect(path string) (*gorm.DB, error) {
 		return nil, err
 	}
 	if err := ensureFotomojiTemplateVersionBackfill(database); err != nil {
+		return nil, err
+	}
+	if err := ensurePhotoSearchIndex(database); err != nil {
 		return nil, err
 	}
 
@@ -135,6 +139,21 @@ func envInt(key string, fallback int, min int, max int) int {
 		return max
 	}
 	return n
+}
+
+func ensurePhotoSearchIndex(database *gorm.DB) error {
+	stmt := `
+CREATE VIRTUAL TABLE IF NOT EXISTS photo_search USING fts5(
+    photo_id UNINDEXED,
+    day UNINDEXED,
+    user_id UNINDEXED,
+    caption,
+    comments,
+    hashtags,
+    body,
+    tokenize = "unicode61 remove_diacritics 2 tokenchars '#_'"
+);`
+	return database.Exec(stmt).Error
 }
 
 func ensureDefaultSettings(database *gorm.DB) error {
