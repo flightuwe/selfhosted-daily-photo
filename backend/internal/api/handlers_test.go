@@ -249,6 +249,57 @@ func TestExtractHashtags(t *testing.T) {
 	}
 }
 
+func TestIsValidUserReportType(t *testing.T) {
+	valid := []string{"bug", "idea", "post", " POST "}
+	for _, candidate := range valid {
+		if !isValidUserReportType(candidate) {
+			t.Fatalf("isValidUserReportType(%q) = false, want true", candidate)
+		}
+	}
+	if isValidUserReportType("other") {
+		t.Fatal("isValidUserReportType(\"other\") = true, want false")
+	}
+}
+
+func TestUserReportJSONIncludesReportedPhoto(t *testing.T) {
+	server := &Server{Config: config.Config{PublicBaseURL: "https://daily.example"}}
+	number := "260526004"
+	photoID := uint(44)
+	row := server.userReportJSON(models.UserReport{
+		ID:      8,
+		UserID:  1,
+		User:    models.User{ID: 1, Username: "reporter", FavoriteColor: "#123456"},
+		Type:    "post",
+		PhotoID: &photoID,
+		Photo: models.Photo{
+			ID:           photoID,
+			UserID:       2,
+			User:         models.User{ID: 2, Username: "poster", FavoriteColor: "#654321"},
+			Day:          "2026-05-26",
+			FilePath:     "2026-05-26/test.jpg",
+			PublicNumber: &number,
+			CreatedAt:    time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC),
+		},
+	})
+	if got, ok := row["photoId"].(uint); !ok || got != photoID {
+		t.Fatalf("photoId = %#v, want %d", row["photoId"], photoID)
+	}
+	photo, ok := row["photo"].(gin.H)
+	if !ok {
+		t.Fatalf("photo missing or wrong type: %#v", row["photo"])
+	}
+	if got := photo["publicNumber"]; got != number {
+		t.Fatalf("photo publicNumber = %#v, want %q", got, number)
+	}
+	photoUser, ok := row["photoUser"].(gin.H)
+	if !ok {
+		t.Fatalf("photoUser missing or wrong type: %#v", row["photoUser"])
+	}
+	if got := photoUser["username"]; got != "poster" {
+		t.Fatalf("photoUser.username = %#v, want %q", got, "poster")
+	}
+}
+
 func newSearchTestServer(t *testing.T) *Server {
 	t.Helper()
 	database, err := db.Connect(filepath.Join(t.TempDir(), "app.db"))

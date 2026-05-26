@@ -253,6 +253,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.DELETE("/photos/bookmarks", s.handlePhotoBookmarksClear)
 			protected.POST("/photos/:id/bookmark", s.handlePhotoBookmarkCreate)
 			protected.DELETE("/photos/:id/bookmark", s.handlePhotoBookmarkDelete)
+			protected.POST("/photos/:id/report", s.handlePhotoReportCreate)
 			protected.POST("/photos/:id/reaction", s.handlePhotoReaction)
 			protected.POST("/photos/:id/fotomojis", s.handlePhotoFotomojiFromTemplate)
 			protected.POST("/photos/:id/fotomojis/upload", s.handlePhotoFotomojiUpload)
@@ -2796,7 +2797,7 @@ func (s *Server) handleAdminListReports(c *gin.Context) {
 	}
 
 	reportType := strings.ToLower(strings.TrimSpace(c.Query("type")))
-	if reportType != "" && reportType != "bug" && reportType != "idea" {
+	if reportType != "" && !isValidUserReportType(reportType) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid report type"})
 		return
 	}
@@ -2807,7 +2808,7 @@ func (s *Server) handleAdminListReports(c *gin.Context) {
 		return
 	}
 
-	q := s.DB.Preload("User").Order("created_at desc").Limit(limit)
+	q := s.DB.Preload("User").Preload("Photo").Preload("Photo.User").Order("created_at desc").Limit(limit)
 	if userID != 0 {
 		q = q.Where("user_id = ?", userID)
 	}
@@ -2826,7 +2827,7 @@ func (s *Server) handleAdminListReports(c *gin.Context) {
 
 	items := make([]gin.H, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, userReportJSON(row))
+		items = append(items, s.userReportJSON(row))
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
@@ -2863,7 +2864,7 @@ func (s *Server) handleAdminDeleteReports(c *gin.Context) {
 	}
 
 	reportType := strings.ToLower(strings.TrimSpace(c.Query("type")))
-	if reportType != "" && reportType != "bug" && reportType != "idea" {
+	if reportType != "" && !isValidUserReportType(reportType) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid report type"})
 		return
 	}
@@ -2924,7 +2925,7 @@ func (s *Server) handleAdminUpdateReport(c *gin.Context) {
 	}
 
 	var report models.UserReport
-	if err := s.DB.Preload("User").First(&report, id).Error; err != nil {
+	if err := s.DB.Preload("User").Preload("Photo").Preload("Photo.User").First(&report, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "report not found"})
 		return
 	}
@@ -2935,12 +2936,12 @@ func (s *Server) handleAdminUpdateReport(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
 		return
 	}
-	if err := s.DB.Preload("User").First(&report, id).Error; err != nil {
+	if err := s.DB.Preload("User").Preload("Photo").Preload("Photo.User").First(&report, id).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload failed"})
 		return
 	}
 
-	c.JSON(http.StatusOK, userReportJSON(report))
+	c.JSON(http.StatusOK, s.userReportJSON(report))
 }
 
 func (s *Server) handleAdminUpdateUser(c *gin.Context) {
@@ -4923,6 +4924,69 @@ func (s *Server) handlePhotoBookmarksClear(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deletedCount": result.RowsAffected})
 }
 
+func (s *Server) handlePhotoReportCreate(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photo, err := s.loadVisiblePhotoForViewer(user.ID, c.Param("id"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			status = http.StatusNotFound
+		case err.Error() == "invalid_photo_id":
+			status = http.StatusBadRequest
+		case err.Error() == "not_visible":
+			status = http.StatusForbidden
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+
+	if existing, ok, err := s.findExistingPhotoReport(user.ID, photo.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "report dedupe lookup failed"})
+		return
+	} else if ok {
+		c.JSON(http.StatusOK, gin.H{
+			"ok":           true,
+			"report":       true,
+			"reportId":     existing.ID,
+			"reportType":   existing.Type,
+			"reportStatus": existing.Status,
+			"message":      "Danke fuer dein Feedback, wir pruefen das.",
+		})
+		return
+	}
+
+	body := fmt.Sprintf("Post von @%s am %s gemeldet.", photo.User.Username, photo.Day)
+	if number := photoPublicNumberValue(photo); number != "" {
+		body = fmt.Sprintf("Post #%s von @%s am %s gemeldet.", number, photo.User.Username, photo.Day)
+	}
+	if caption := strings.TrimSpace(photo.Caption); caption != "" {
+		body = fmt.Sprintf("%s Caption: %s", body, caption)
+	}
+
+	report := models.UserReport{
+		UserID:  user.ID,
+		Type:    "post",
+		PhotoID: &photo.ID,
+		Body:    body,
+		Source:  "photo_menu",
+		Status:  "open",
+	}
+	if err := s.DB.Create(&report).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "report save failed"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"ok":           true,
+		"report":       true,
+		"reportId":     report.ID,
+		"reportType":   report.Type,
+		"reportStatus": report.Status,
+		"message":      "Danke fuer dein Feedback, wir pruefen das.",
+	})
+}
+
 func (s *Server) loadVisiblePhotoForViewer(viewerID uint, rawPhotoID string) (models.Photo, error) {
 	photoID, err := parseUintParam(rawPhotoID)
 	if err != nil {
@@ -6147,6 +6211,15 @@ func isValidUserReportStatus(v string) bool {
 	}
 }
 
+func isValidUserReportType(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "bug", "idea", "post":
+		return true
+	default:
+		return false
+	}
+}
+
 func parseAdminSinceHours(raw string) (int, error) {
 	sinceHours := 24
 	raw = strings.TrimSpace(raw)
@@ -6195,8 +6268,8 @@ func adminSinceCutoff(now time.Time, sinceHours int) time.Time {
 	return now.UTC().Add(-time.Duration(sinceHours) * time.Hour)
 }
 
-func userReportJSON(row models.UserReport) gin.H {
-	return gin.H{
+func (s *Server) userReportJSON(row models.UserReport) gin.H {
+	payload := gin.H{
 		"id":                row.ID,
 		"type":              strings.TrimSpace(row.Type),
 		"body":              row.Body,
@@ -6211,6 +6284,33 @@ func userReportJSON(row models.UserReport) gin.H {
 			"favoriteColor": defaultColor(row.User.FavoriteColor),
 		},
 	}
+	if row.PhotoID != nil && row.Photo.ID != 0 {
+		payload["photoId"] = row.Photo.ID
+		payload["photo"] = s.photoJSON(row.Photo)
+		payload["photoUser"] = gin.H{
+			"id":            row.Photo.User.ID,
+			"username":      row.Photo.User.Username,
+			"favoriteColor": defaultColor(row.Photo.User.FavoriteColor),
+		}
+	}
+	return payload
+}
+
+func (s *Server) findExistingPhotoReport(userID uint, photoID uint) (models.UserReport, bool, error) {
+	var report models.UserReport
+	if err := s.DB.
+		Preload("User").
+		Preload("Photo").
+		Preload("Photo.User").
+		Where("user_id = ? AND type = ? AND photo_id = ?", userID, "post", photoID).
+		Order("created_at desc, id desc").
+		First(&report).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return models.UserReport{}, false, nil
+		}
+		return models.UserReport{}, false, err
+	}
+	return report, true, nil
 }
 
 func (s *Server) findRecentDuplicateUserReport(userID uint, reportType string, body string, window time.Duration) (models.UserReport, bool, error) {

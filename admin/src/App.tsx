@@ -235,7 +235,7 @@ const areaSubtabs: Record<AdminArea, Array<{ key: AdminSubtab; label: string }>>
     { key: "polls", label: "Umfragen" },
     { key: "time_capsules", label: "Time-Capsules" },
     { key: "fotomojis", label: "FotoMojis" },
-    { key: "reports", label: "Reports" },
+    { key: "reports", label: "Meldungen" },
     { key: "locations", label: "Standorte" },
   ],
   analytics: [
@@ -530,7 +530,7 @@ export function App() {
   const [selectedFotomojiIds, setSelectedFotomojiIds] = useState<number[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
-  const [reportTypeFilter, setReportTypeFilter] = useState<"" | "bug" | "idea">("");
+  const [reportTypeFilter, setReportTypeFilter] = useState<"" | "bug" | "idea" | "post">("");
   const [reportStatusFilter, setReportStatusFilter] = useState<"" | "open" | "in_review" | "done" | "rejected">("");
   const [debugLogs, setDebugLogs] = useState<DebugLogItem[]>([]);
   const [debugFilterInfo, setDebugFilterInfo] = useState<{ since: string; serverNow: string; sinceHours: number }>({
@@ -1073,7 +1073,7 @@ export function App() {
   async function loadReports(
     authToken: string,
     userId?: number,
-    type: "" | "bug" | "idea" = "",
+    type: "" | "bug" | "idea" | "post" = "",
     status: "" | "open" | "in_review" | "done" | "rejected" = ""
   ) {
     try {
@@ -1097,7 +1097,7 @@ export function App() {
     try {
       const updated = await updateReport(token, id, { status, githubIssueNumber: githubIssueNumber ?? null });
       setReports((prev) => prev.map((item) => (item.id === id ? updated : item)));
-      setMessage("Report aktualisiert.");
+      setMessage("Meldung aktualisiert.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1110,7 +1110,7 @@ export function App() {
     try {
       await deleteReport(token, id);
       await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
-      setMessage("Report geloescht.");
+      setMessage("Meldung geloescht.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1122,7 +1122,15 @@ export function App() {
       return;
     }
     const scopeParts: string[] = [];
-    if (reportTypeFilter) scopeParts.push(reportTypeFilter === "bug" ? "Bug-Reports" : "Ideen");
+    if (reportTypeFilter) {
+      scopeParts.push(
+        reportTypeFilter === "bug"
+          ? "Bug-Reports"
+          : reportTypeFilter === "idea"
+            ? "Ideen"
+            : "Post-Meldungen"
+      );
+    }
     if (reportStatusFilter) {
       const label =
         reportStatusFilter === "open"
@@ -1138,7 +1146,7 @@ export function App() {
       scopeParts.push(`@${users.find((u) => u.id === reportUserFilter)?.username || `User ${reportUserFilter}`}`);
     }
     const scopeLabel = scopeParts.join(", ");
-    const confirmed = window.confirm(`Wirklich alle Reports mit diesem Filter loeschen: ${scopeLabel}?`);
+    const confirmed = window.confirm(`Wirklich alle Meldungen mit diesem Filter loeschen: ${scopeLabel}?`);
     if (!confirmed) return;
     setMessage("");
     try {
@@ -1148,7 +1156,7 @@ export function App() {
         status: reportStatusFilter,
       });
       await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
-      setMessage(`${result.deletedCount} Reports geloescht.`);
+      setMessage(`${result.deletedCount} Meldungen geloescht.`);
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -2135,7 +2143,7 @@ export function App() {
             <select value={searchScope} onChange={(e) => setSearchScope(e.target.value as "all" | AdminSearchScope)}>
               <option value="all">Alle Bereiche</option>
               <option value="users">Nutzer</option>
-              <option value="reports">Reports</option>
+              <option value="reports">Meldungen</option>
               <option value="commands">Commands</option>
               <option value="history">Historie</option>
               <option value="posts">Posts</option>
@@ -2196,7 +2204,7 @@ export function App() {
             <button className={activeTab === "trigger_audit" ? "tab active" : "tab"} onClick={() => navigateTab("trigger_audit")}>Trigger Audit</button>
             <button className={activeTab === "time_capsule" ? "tab active" : "tab"} onClick={() => navigateTab("time_capsule")}>Time-Capsule</button>
             <button className={activeTab === "fotomojis" ? "tab active" : "tab"} onClick={() => navigateTab("fotomojis")}>FotoMojis</button>
-            <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => navigateTab("reports")}>Reports</button>
+            <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => navigateTab("reports")}>Meldungen</button>
             <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => navigateTab("debug")}>Debug</button>
             <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => navigateTab("settings")}>Einstellungen</button>
             <button className={activeTab === "migration" ? "tab active" : "tab"} onClick={() => navigateTab("migration")}>Migration</button>
@@ -2256,7 +2264,7 @@ export function App() {
                 <p>{systemHealth?.ok ? "OK" : "CHECK"}</p>
               </article>
               <article className="stat clickable" onClick={() => navigateTab("reports")}>
-                <h3>Offene Reports</h3>
+                <h3>Offene Meldungen</h3>
                 <p>{openReportsCount}</p>
               </article>
               <article className="stat clickable" onClick={() => navigateTab("debug")}>
@@ -4324,7 +4332,7 @@ export function App() {
         {activeTab === "reports" && (
           <div className="stack">
             <div className="row">
-              <h2>Reports</h2>
+              <h2>Meldungen</h2>
               <div className="row">
                 <select value={reportUserFilter} onChange={(e) => setReportUserFilter(Number(e.target.value))}>
                   <option value={0}>Alle Nutzer</option>
@@ -4332,10 +4340,11 @@ export function App() {
                     <option key={u.id} value={u.id}>@{u.username}</option>
                   ))}
                 </select>
-                <select value={reportTypeFilter} onChange={(e) => setReportTypeFilter(e.target.value as "" | "bug" | "idea")}>
+                <select value={reportTypeFilter} onChange={(e) => setReportTypeFilter(e.target.value as "" | "bug" | "idea" | "post")}>
                   <option value="">Alle Typen</option>
                   <option value="bug">Bug</option>
                   <option value="idea">Idee</option>
+                  <option value="post">Post</option>
                 </select>
                 <select value={reportStatusFilter} onChange={(e) => setReportStatusFilter(e.target.value as "" | "open" | "in_review" | "done" | "rejected")}>
                   <option value="">Alle Status</option>
@@ -4346,19 +4355,19 @@ export function App() {
                 </select>
                 <button onClick={() => loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter)}>Aktualisieren</button>
                 <button className="danger" disabled={!hasReportDeleteFilter} onClick={() => void onDeleteFilteredReports()}>
-                  Gefilterte Reports loeschen
+                  Gefilterte Meldungen loeschen
                 </button>
               </div>
             </div>
-            <p className="small">Bulk-Loeschen wirkt auf alle Reports, die zum gesetzten Filter passen, nicht nur auf die aktuell geladene Tabelle.</p>
-            {reports.length === 0 && <p>Keine Reports vorhanden.</p>}
+            <p className="small">Bulk-Loeschen wirkt auf alle Meldungen, die zum gesetzten Filter passen, nicht nur auf die aktuell geladene Tabelle.</p>
+            {reports.length === 0 && <p>Keine Meldungen vorhanden.</p>}
             <table className="table">
               <thead>
                 <tr>
                   <th>Zeit</th>
-                  <th>Nutzer</th>
+                  <th>Gemeldet von</th>
                   <th>Typ</th>
-                  <th>Text</th>
+                  <th>Inhalt</th>
                   <th>Status</th>
                   <th>GitHub</th>
                   <th>Aktion</th>
@@ -4369,8 +4378,27 @@ export function App() {
                   <tr key={row.id}>
                     <td>{formatDateTime(row.createdAt)}</td>
                     <td>@{row.user?.username || "-"}</td>
-                    <td>{row.type === "bug" ? "Bug" : "Idee"}</td>
-                    <td>{row.body}</td>
+                    <td>{row.type === "bug" ? "Bug" : row.type === "idea" ? "Idee" : "Post"}</td>
+                    <td>
+                      {row.type === "post" && row.photo ? (
+                        <div className="report-photo-card">
+                          <a href={row.photo.url} target="_blank" rel="noreferrer">
+                            <img src={row.photo.url} alt={`Post ${row.photo.id}`} />
+                          </a>
+                          <div className="stack">
+                            <strong>
+                              {row.photoUser ? `@${row.photoUser.username}` : "Post"}
+                              {row.photo.publicNumber ? ` · #${row.photo.publicNumber}` : ""}
+                            </strong>
+                            <span className="small">{row.photo.day}</span>
+                            {row.photo.caption ? <span>{row.photo.caption}</span> : null}
+                            <span className="small">{row.body}</span>
+                          </div>
+                        </div>
+                      ) : (
+                        row.body
+                      )}
+                    </td>
                     <td>
                       <select
                         value={row.status}

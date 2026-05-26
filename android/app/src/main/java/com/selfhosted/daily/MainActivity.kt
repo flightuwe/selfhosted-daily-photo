@@ -563,6 +563,14 @@ data class BookmarkClearResponse(
     val ok: Boolean = false,
     val deletedCount: Int = 0
 )
+data class PhotoReportResponse(
+    val ok: Boolean = false,
+    val report: Boolean = false,
+    val reportId: Long? = null,
+    val reportType: String? = null,
+    val reportStatus: String? = null,
+    val message: String? = null
+)
 data class TopReactionStat(val emoji: String, val count: Long)
 data class LatestActiveUser(
     val username: String,
@@ -931,6 +939,12 @@ interface Api {
 
     @DELETE("photos/bookmarks")
     suspend fun clearBookmarks(@Header("Authorization") token: String): BookmarkClearResponse
+
+    @POST("photos/{id}/report")
+    suspend fun reportPhoto(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): PhotoReportResponse
 
     @POST("photos/{id}/reaction")
     suspend fun reactPhoto(
@@ -1908,6 +1922,9 @@ class AppRepo(
 
     suspend fun clearBookmarks(): Int =
         authorizedCall("/api/photos/bookmarks") { token -> api.clearBookmarks(token) }.deletedCount
+
+    suspend fun reportPhoto(photoId: Long): PhotoReportResponse =
+        authorizedCall("/api/photos/:id/report") { token -> api.reportPhoto(token, photoId) }
 
     suspend fun reactPhoto(photoId: Long, emoji: String): PhotoInteractionsResponse =
         authorizedCall("/api/photos/:id/reaction") { token -> api.reactPhoto(token, photoId, PhotoReactionRequest(emoji)) }
@@ -3543,6 +3560,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             updateBookmarkStateLocally(photoId, !bookmarked)
             state = state.copy(message = apiError(t, "Merken fehlgeschlagen"))
         }
+    }
+
+    suspend fun reportPhoto(photoId: Long) {
+        runCatching { repo.reportPhoto(photoId) }
+            .onSuccess {
+                state = state.copy(message = it.message?.takeIf(String::isNotBlank) ?: "Danke fuer dein Feedback, wir pruefen das.")
+            }
+            .onFailure {
+                state = state.copy(message = apiError(it, "Melden fehlgeschlagen"))
+            }
     }
 
     suspend fun clearAllBookmarks() {
@@ -6685,6 +6712,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onFocusPhotoConsumed = { vm.clearFeedPhotoFocus() },
                     onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
                     onToggleBookmark = { photoId, bookmarked -> scope.launch { vm.toggleBookmark(photoId, bookmarked) } },
+                    onReportPhoto = { photoId -> scope.launch { vm.reportPhoto(photoId) } },
                     onOpenHashtagSearch = { vm.openCalendarSearch(it) },
                     onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
@@ -7656,6 +7684,7 @@ fun FeedTab(
     onFocusPhotoConsumed: () -> Unit,
     onOpenUserProfile: (Long) -> Unit,
     onToggleBookmark: (photoId: Long, bookmarked: Boolean) -> Unit,
+    onReportPhoto: (photoId: Long) -> Unit,
     onOpenHashtagSearch: (String) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
@@ -7860,6 +7889,13 @@ fun FeedTab(
                                                 onClick = {
                                                     menuExpanded = false
                                                     onToggleBookmark(item.photo.id, !item.photo.bookmarkedByMe)
+                                                }
+                                            )
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = { Text("Melden") },
+                                                onClick = {
+                                                    menuExpanded = false
+                                                    onReportPhoto(item.photo.id)
                                                 }
                                             )
                                         }

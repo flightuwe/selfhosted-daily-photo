@@ -134,7 +134,7 @@ export type DebugLogsResponse = {
 
 export type AdminReportItem = {
   id: number;
-  type: "bug" | "idea";
+  type: "bug" | "idea" | "post";
   body: string;
   source: string;
   status: "open" | "in_review" | "done" | "rejected";
@@ -142,6 +142,9 @@ export type AdminReportItem = {
   createdAt: string;
   updatedAt: string;
   user: { id: number; username: string; favoriteColor?: string };
+  photoId?: number;
+  photo?: FeedPhoto;
+  photoUser?: { id: number; username: string; favoriteColor?: string };
 };
 
 export type FeedPhoto = {
@@ -152,6 +155,7 @@ export type FeedPhoto = {
   url: string;
   secondUrl?: string;
   createdAt: string;
+  publicNumber?: string;
   locationShared?: boolean;
   locationDisplay?: string;
   locationMapsUrl?: string;
@@ -2106,7 +2110,7 @@ export async function downloadDebugLogs(
 
 export async function getReports(
   token: string,
-  opts?: { userId?: number; type?: "" | "bug" | "idea"; status?: "" | "open" | "in_review" | "done" | "rejected"; limit?: number }
+  opts?: { userId?: number; type?: "" | "bug" | "idea" | "post"; status?: "" | "open" | "in_review" | "done" | "rejected"; limit?: number }
 ): Promise<AdminReportItem[]> {
   const qs = new URLSearchParams();
   qs.set("limit", String(opts?.limit ?? 200));
@@ -2171,7 +2175,7 @@ export async function deleteReport(
 
 export async function deleteReports(
   token: string,
-  opts?: { userId?: number; type?: "" | "bug" | "idea"; status?: "" | "open" | "in_review" | "done" | "rejected" }
+  opts?: { userId?: number; type?: "" | "bug" | "idea" | "post"; status?: "" | "open" | "in_review" | "done" | "rejected" }
 ): Promise<{ ok: boolean; deletedCount: number }> {
   const qs = new URLSearchParams();
   if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
