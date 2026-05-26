@@ -121,8 +121,12 @@ func TestEnsurePhotoPublicNumbersBackfill(t *testing.T) {
 	}
 	want := []string{"260526001", "260526002", "260527001"}
 	for i, photo := range stored {
-		if photo.PublicNumber != want[i] {
-			t.Fatalf("photo %d public number = %q, want %q", i, photo.PublicNumber, want[i])
+		if photo.PublicNumber == nil || *photo.PublicNumber != want[i] {
+			got := "<nil>"
+			if photo.PublicNumber != nil {
+				got = *photo.PublicNumber
+			}
+			t.Fatalf("photo %d public number = %q, want %q", i, got, want[i])
 		}
 	}
 }

@@ -342,14 +342,18 @@ func ensurePhotoPublicNumbers(database *gorm.DB) error {
 		if day == "" {
 			continue
 		}
-		if number := strings.TrimSpace(photo.PublicNumber); number != "" {
+		number := ""
+		if photo.PublicNumber != nil {
+			number = strings.TrimSpace(*photo.PublicNumber)
+		}
+		if number != "" {
 			if seq, ok := parsePublicPhotoSequence(day, number); ok && seq > sequenceByDay[day] {
 				sequenceByDay[day] = seq
 			}
 			continue
 		}
 		sequenceByDay[day]++
-		number := formatPublicPhotoNumber(day, sequenceByDay[day])
+		number = formatPublicPhotoNumber(day, sequenceByDay[day])
 		if err := database.Model(&models.Photo{}).Where("id = ?", photo.ID).Update("public_number", number).Error; err != nil {
 			return err
 		}

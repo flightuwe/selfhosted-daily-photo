@@ -5110,7 +5110,7 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 				"commentCount":     commentCount,
 				"interactionCount": reactionCount + commentCount,
 				"bookmarkedByMe":   bookmarkMap[photo.ID],
-				"publicNumber":     strings.TrimSpace(photo.PublicNumber),
+				"publicNumber":     photoPublicNumberValue(photo),
 			}
 			if strings.TrimSpace(photo.SecondPath) != "" {
 				featured["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, photo.SecondPath)
@@ -5524,7 +5524,7 @@ func (s *Server) calendarSearchPayload(viewerID uint, rawQuery string, now time.
 				"commentCount":     featuredComments,
 				"interactionCount": featuredReactions + featuredComments,
 				"bookmarkedByMe":   featured.BookmarkedByMe,
-				"publicNumber":     strings.TrimSpace(featured.Photo.PublicNumber),
+				"publicNumber":     photoPublicNumberValue(featured.Photo),
 			}
 			if strings.TrimSpace(featured.Photo.SecondPath) != "" {
 				featuredRow["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, featured.Photo.SecondPath)
@@ -8018,7 +8018,7 @@ func (s *Server) assignAndPersistPublicPhotoNumber(photo *models.Photo) error {
 	if photo == nil {
 		return errors.New("nil photo")
 	}
-	if strings.TrimSpace(photo.PublicNumber) != "" {
+	if photo.PublicNumber != nil && strings.TrimSpace(*photo.PublicNumber) != "" {
 		return nil
 	}
 	return s.DB.Transaction(func(tx *gorm.DB) error {
@@ -8041,7 +8041,7 @@ func (s *Server) assignAndPersistPublicPhotoNumber(photo *models.Photo) error {
 		if err := tx.Model(&models.Photo{}).Where("id = ?", photo.ID).Update("public_number", publicNumber).Error; err != nil {
 			return err
 		}
-		photo.PublicNumber = publicNumber
+		photo.PublicNumber = &publicNumber
 		return nil
 	})
 }
@@ -8075,6 +8075,13 @@ func photoTimeShifted(photo models.Photo) bool {
 		diff = -diff
 	}
 	return diff > photoTimeShiftThreshold
+}
+
+func photoPublicNumberValue(photo models.Photo) string {
+	if photo.PublicNumber == nil {
+		return ""
+	}
+	return strings.TrimSpace(*photo.PublicNumber)
 }
 
 func sortPhotosForFeed(photos []models.Photo) {
@@ -8470,6 +8477,10 @@ func (s *Server) photoFotomojiJSON(item models.PhotoFotomoji, includeUser bool) 
 
 func (s *Server) photoJSON(p models.Photo) gin.H {
 	effectiveAt := photoEffectiveTime(p)
+	publicNumber := ""
+	if p.PublicNumber != nil {
+		publicNumber = strings.TrimSpace(*p.PublicNumber)
+	}
 	out := gin.H{
 		"id":                 p.ID,
 		"day":                p.Day,
@@ -8491,7 +8502,7 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 		"locationMapsUrl":    "",
 		"deduplicated":       false,
 		"bookmarkedByMe":     false,
-		"publicNumber":       strings.TrimSpace(p.PublicNumber),
+		"publicNumber":       publicNumber,
 	}
 	if p.SecondPath != "" {
 		out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)

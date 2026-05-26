@@ -294,7 +294,7 @@ type Photo struct {
 	LocationShared           bool       `gorm:"default:false;index" json:"locationShared"`
 	LocationLatitude         *float64   `json:"locationLatitude"`
 	LocationLongitude        *float64   `json:"locationLongitude"`
-	PublicNumber             string     `gorm:"size:9;uniqueIndex" json:"publicNumber"`
+	PublicNumber             *string    `gorm:"size:9;uniqueIndex" json:"publicNumber"`
 	CapturedAt               *time.Time `gorm:"index" json:"capturedAt"`
 	CreatedAt                time.Time  `json:"createdAt"`
 }

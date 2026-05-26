@@ -127,11 +127,12 @@ func TestPublicPhotoNumberHelpers(t *testing.T) {
 
 func TestPhotoJSONIncludesPublicNumber(t *testing.T) {
 	server := &Server{Config: config.Config{PublicBaseURL: "https://daily.example"}}
+	number := "260526007"
 	photo := models.Photo{
 		ID:           7,
 		Day:          "2026-05-26",
 		FilePath:     "2026-05-26/test.jpg",
-		PublicNumber: "260526007",
+		PublicNumber: &number,
 		CreatedAt:    time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC),
 	}
 	row := server.photoJSON(photo)
