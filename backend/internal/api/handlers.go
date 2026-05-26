@@ -5087,9 +5087,16 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 	if err != nil {
 		return nil, err
 	}
-	_ = bookmarkMap
 
 	outStats := make([]gin.H, 0, len(days))
+	outPhotosByDay := make(map[string][]gin.H, len(days))
+	for _, photo := range filteredPhotos {
+		row := gin.H{
+			"photo": s.photoJSONForViewer(viewerID, photo, bookmarkMap),
+			"user":  s.userPublicJSON(viewerID, photo.User),
+		}
+		outPhotosByDay[photo.Day] = append(outPhotosByDay[photo.Day], row)
+	}
 	for _, day := range days {
 		item := gin.H{
 			"day":              day,
@@ -5125,9 +5132,10 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		return nil, err
 	}
 	return gin.H{
-		"days":     days,
-		"dayStats": outStats,
-		"users":    users,
+		"days":        days,
+		"dayStats":    outStats,
+		"photosByDay": outPhotosByDay,
+		"users":       users,
 	}, nil
 }
 

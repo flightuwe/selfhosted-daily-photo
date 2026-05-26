@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/yosho/selfhosted-bereal/backend/internal/config"
 	"github.com/yosho/selfhosted-bereal/backend/internal/db"
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
@@ -138,6 +139,44 @@ func TestPhotoJSONIncludesPublicNumber(t *testing.T) {
 	row := server.photoJSON(photo)
 	if got := row["publicNumber"]; got != "260526007" {
 		t.Fatalf("photoJSON publicNumber = %v, want %q", got, "260526007")
+	}
+}
+
+func TestCalendarBookmarksPayloadIncludesAllBookmarkedPhotosForSameDay(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	author := models.User{Username: "author", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if err := server.DB.Create(&author).Error; err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	day := "2026-05-26"
+	publicA := "260526001"
+	publicB := "260526002"
+	photos := []models.Photo{
+		{UserID: author.ID, User: author, Day: day, FilePath: "a.jpg", PublicNumber: &publicA, CreatedAt: time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)},
+		{UserID: author.ID, User: author, Day: day, FilePath: "b.jpg", PublicNumber: &publicB, CreatedAt: time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC)},
+	}
+	for _, photo := range photos {
+		if err := server.DB.Create(&photo).Error; err != nil {
+			t.Fatalf("create photo: %v", err)
+		}
+		if err := server.DB.Create(&models.PhotoBookmark{UserID: viewer.ID, PhotoID: photo.ID}).Error; err != nil {
+			t.Fatalf("create bookmark: %v", err)
+		}
+	}
+	payload, err := server.calendarPayload(viewer.ID, "bookmarks", 0, time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("calendarPayload: %v", err)
+	}
+	photosByDay, ok := payload["photosByDay"].(map[string][]gin.H)
+	if !ok {
+		t.Fatalf("photosByDay missing or wrong type: %#v", payload["photosByDay"])
+	}
+	if got := len(photosByDay[day]); got != 2 {
+		t.Fatalf("photosByDay[%s] len = %d, want 2", day, got)
 	}
 }
 
