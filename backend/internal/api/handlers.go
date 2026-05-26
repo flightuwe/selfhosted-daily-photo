@@ -130,15 +130,6 @@ func extractHashtags(text string) []string {
 	return out
 }
 
-func buildPhotoSearchMatchQuery(tokens []string) string {
-	parts := make([]string, 0, len(tokens))
-	for _, token := range tokens {
-		escaped := strings.ReplaceAll(token, `"`, `""`)
-		parts = append(parts, fmt.Sprintf(`"%s"`, escaped))
-	}
-	return strings.Join(parts, " AND ")
-}
-
 func containsAnyPhotoSearchToken(text string, tokens []string) bool {
 	if strings.TrimSpace(text) == "" || len(tokens) == 0 {
 		return false
@@ -5204,10 +5195,32 @@ func (s *Server) refreshPhotoSearchDocument(photoID uint) error {
 		commentText,
 		strings.Join(hashtags, " "),
 	}, "\n"))
-	if err := s.DB.Exec("DELETE FROM photo_search WHERE CAST(photo_id AS INTEGER) = ?", photoID).Error; err != nil {
+	terms := normalizePhotoSearchTokens(body)
+	if err := s.DB.Exec("DELETE FROM photo_search_terms WHERE photo_id = ?", photoID).Error; err != nil {
 		return err
 	}
-	return s.DB.Exec(
+	if err := s.DB.Exec("DELETE FROM photo_search_docs WHERE photo_id = ?", photoID).Error; err != nil {
+		return err
+	}
+	_ = s.DB.Exec("DELETE FROM photo_search WHERE CAST(photo_id AS INTEGER) = ?", photoID).Error
+	if err := s.DB.Exec(
+		"INSERT INTO photo_search_docs (photo_id, day, user_id, caption, comments, hashtags, body) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		photo.ID,
+		photo.Day,
+		photo.UserID,
+		strings.TrimSpace(photo.Caption),
+		commentText,
+		strings.Join(hashtags, " "),
+		body,
+	).Error; err != nil {
+		return err
+	}
+	for _, term := range terms {
+		if err := s.DB.Exec("INSERT INTO photo_search_terms (term, photo_id) VALUES (?, ?)", term, photo.ID).Error; err != nil {
+			return err
+		}
+	}
+	_ = s.DB.Exec(
 		"INSERT INTO photo_search (photo_id, day, user_id, caption, comments, hashtags, body) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		photo.ID,
 		photo.Day,
@@ -5217,10 +5230,18 @@ func (s *Server) refreshPhotoSearchDocument(photoID uint) error {
 		strings.Join(hashtags, " "),
 		body,
 	).Error
+	return nil
 }
 
 func (s *Server) deletePhotoSearchDocument(photoID uint) error {
-	return s.DB.Exec("DELETE FROM photo_search WHERE CAST(photo_id AS INTEGER) = ?", photoID).Error
+	if err := s.DB.Exec("DELETE FROM photo_search_terms WHERE photo_id = ?", photoID).Error; err != nil {
+		return err
+	}
+	if err := s.DB.Exec("DELETE FROM photo_search_docs WHERE photo_id = ?", photoID).Error; err != nil {
+		return err
+	}
+	_ = s.DB.Exec("DELETE FROM photo_search WHERE CAST(photo_id AS INTEGER) = ?", photoID).Error
+	return nil
 }
 
 func buildPhotoSearchHit(photo models.Photo, comments []models.PhotoComment, tokens []string, bookmarked bool) photoSearchHit {
@@ -5289,12 +5310,15 @@ func (s *Server) searchPhotoHits(viewerID uint, rawQuery string, now time.Time, 
 	}
 	var matches []searchRow
 	if err := s.DB.Raw(
-		`SELECT CAST(photo_id AS INTEGER) AS photo_id
-		 FROM photo_search
-		 WHERE photo_search MATCH ?
-		 ORDER BY bm25(photo_search), rowid DESC
+		`SELECT photo_id
+		 FROM photo_search_terms
+		 WHERE term IN ?
+		 GROUP BY photo_id
+		 HAVING COUNT(DISTINCT term) = ?
+		 ORDER BY MAX(photo_id) DESC
 		 LIMIT ?`,
-		buildPhotoSearchMatchQuery(tokens),
+		tokens,
+		len(tokens),
 		limit*4,
 	).Scan(&matches).Error; err != nil {
 		return normalized, nil, err

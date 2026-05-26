@@ -142,7 +142,31 @@ func envInt(key string, fallback int, min int, max int) int {
 }
 
 func ensurePhotoSearchIndex(database *gorm.DB) error {
-	stmt := `
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS photo_search_docs (
+			photo_id INTEGER PRIMARY KEY,
+			day TEXT NOT NULL,
+			user_id INTEGER NOT NULL,
+			caption TEXT NOT NULL DEFAULT '',
+			comments TEXT NOT NULL DEFAULT '',
+			hashtags TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE TABLE IF NOT EXISTS photo_search_terms (
+			term TEXT NOT NULL,
+			photo_id INTEGER NOT NULL,
+			PRIMARY KEY (term, photo_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_photo_search_terms_photo_id ON photo_search_terms(photo_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_photo_search_docs_day ON photo_search_docs(day);`,
+	}
+	for _, stmt := range stmts {
+		if err := database.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
+	// Best effort: some sqlite builds ship without FTS5. The app search falls back to the token table either way.
+	_ = database.Exec(`
 CREATE VIRTUAL TABLE IF NOT EXISTS photo_search USING fts5(
     photo_id UNINDEXED,
     day UNINDEXED,
@@ -152,8 +176,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS photo_search USING fts5(
     hashtags,
     body,
     tokenize = "unicode61 remove_diacritics 2 tokenchars '#_'"
-);`
-	return database.Exec(stmt).Error
+);`).Error
+	return nil
 }
 
 func ensureDefaultSettings(database *gorm.DB) error {
