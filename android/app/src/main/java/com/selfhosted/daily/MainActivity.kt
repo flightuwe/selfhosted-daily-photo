@@ -60,6 +60,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -137,12 +138,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.consumePositionChange
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
@@ -8113,7 +8116,6 @@ fun FeedTab(
                 is FeedRow.PhotoItem -> {
                     val item = row.item
                     val meta = promptMetaByDay[row.day]
-                    val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
                     var menuExpanded by remember(item.photo.id, item.photo.bookmarkedByMe, item.photo.markedByMe, item.photo.paintedByMe, item.photo.paints) { mutableStateOf(false) }
                     val isMomentWindowPost = isWithinDailyMomentWindow(
                         item.photo.createdAt,
@@ -8298,19 +8300,11 @@ fun FeedTab(
                                     color = secondaryTextColor
                                 )
                             } else {
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                    urls.forEach { url ->
-                                        AsyncImage(
-                                            model = url,
-                                            contentDescription = "${item.user.username} Foto",
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .height(180.dp)
-                                                .clickable { onOpenViewer(urls, item.photo.id) },
-                                            contentScale = ContentScale.Crop
-                                        )
-                                    }
-                                }
+                                FeedPhotoFrame(
+                                    photo = item.photo,
+                                    username = item.user.username,
+                                    onOpenViewer = onOpenViewer
+                                )
                             }
                             val reactions = item.reactions.orEmpty()
                             val photoMojis = item.photoMojis.orEmpty().sortedWith(
@@ -8502,11 +8496,54 @@ fun FeedTab(
 }
 
 @Composable
-private fun PhotoMarkLayer(photo: PromptPhoto) {
+private fun FeedPhotoFrame(
+    photo: PromptPhoto,
+    username: String,
+    onOpenViewer: (List<String>, Long?) -> Unit
+) {
+    val urls = remember(photo.url, photo.secondUrl) { listOfNotNull(photo.url, photo.secondUrl) }
+    if (urls.isEmpty()) return
+    val frameShape = RoundedCornerShape(18.dp)
+    val imageShape = RoundedCornerShape(12.dp)
+    val frameBand = if (urls.size > 1) 14.dp else 12.dp
+    val previewGap = 8.dp
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(196.dp)
+            .clip(frameShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable { onOpenViewer(urls, photo.id) }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(frameBand),
+            horizontalArrangement = Arrangement.spacedBy(previewGap)
+        ) {
+            urls.forEach { url ->
+                AsyncImage(
+                    model = url,
+                    contentDescription = "$username Foto",
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clip(imageShape),
+                    contentScale = ContentScale.Crop
+                )
+            }
+        }
+        PhotoMarkLayer(photo, Modifier.fillMaxSize())
+        PhotoPaintLayer(photo, Modifier.fillMaxSize())
+    }
+}
+
+@Composable
+private fun PhotoMarkLayer(photo: PromptPhoto, modifier: Modifier = Modifier) {
     if (photo.marks.isEmpty()) return
     Canvas(
-        modifier = Modifier
-            .fillMaxSize()
+        modifier = modifier
             .blur(6.dp)
     ) {
         photo.marks.sortedBy { it.layer }.forEach { mark ->
@@ -8573,12 +8610,12 @@ private fun parsePhotoPaintPaths(raw: String): List<PhotoPaintPath> {
 }
 
 @Composable
-private fun PhotoPaintLayer(photo: PromptPhoto) {
+private fun PhotoPaintLayer(photo: PromptPhoto, modifier: Modifier = Modifier) {
     if (photo.paints.isEmpty()) return
     val parsedPaints = remember(photo.paints) {
         photo.paints.map { it to parsePhotoPaintPaths(it.pathsJson) }
     }
-    Canvas(modifier = Modifier.fillMaxSize()) {
+    Canvas(modifier = modifier) {
         parsedPaints.forEach { (paint, paths) ->
             val strokeColor = parseUserColor(paint.color).copy(alpha = 0.9f)
             val strokeWidthPx = (size.minDimension * paint.strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(6f)

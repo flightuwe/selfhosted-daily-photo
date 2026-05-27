@@ -1,0 +1,12 @@
+{
+  "version": "0.5.4",
+  "releasedAt": "2026-05-27T00:00:00Z",
+  "highlights": [
+    "Markieren und Malen werden im Feed wieder auf dem echten Foto-Rahmen statt auf der gesamten Card gerendert.",
+    "Gemalte Linien landen nicht mehr als duenner Strich am oberen Rand, sondern folgen wieder der richtigen Rahmenflaeche.",
+    "Einzel- und Dual-Post-Vorschau teilen jetzt dieselbe Rahmengeometrie wie der Mal-Editor."
+  ],
+  "details": [
+    "Der Fix stellt die sichtbare Wirkung der Kreativspuren wieder her, ohne Backend-API oder Moderationslogik zu aendern."
+  ]
+}
