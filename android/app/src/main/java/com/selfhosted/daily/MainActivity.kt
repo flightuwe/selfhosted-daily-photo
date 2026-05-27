@@ -22,6 +22,7 @@ import android.media.RingtoneManager
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -127,6 +128,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -144,11 +146,13 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.consumePositionChange
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
@@ -162,6 +166,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
@@ -8715,7 +8720,7 @@ private fun mapOverlayHeight(value: Float, surface: String, height: Float, frame
 @Composable
 private fun PhotoMarkLayer(photo: PromptPhoto, frameRect: Rect, modifier: Modifier = Modifier) {
     if (photo.marks.isEmpty()) return
-    Canvas(modifier = modifier.blur(4.dp)) {
+    Canvas(modifier = modifier) {
         photo.marks.sortedBy { it.layer }.forEach { mark ->
             val baseColor = parseUserColor(mark.color)
             val width = mapOverlayWidth((mark.radiusX.coerceIn(0.05f, 0.28f) * 2f), mark.surface, size.width, frameRect)
@@ -8730,7 +8735,7 @@ private fun PhotoMarkLayer(photo: PromptPhoto, frameRect: Rect, modifier: Modifi
                         else -> 0.61f
                     }
                     drawOval(
-                        color = baseColor.copy(alpha = 0.11f + index * 0.035f),
+                        color = baseColor.copy(alpha = 0.18f + index * 0.06f),
                         topLeft = Offset(
                             x = cx - (width * scale) / 2f + when (index) { 1 -> width * 0.13f; 2 -> -width * 0.12f; else -> 0f },
                             y = cy - (height * scale) / 2f + when (index) { 1 -> -height * 0.07f; 2 -> height * 0.1f; else -> 0f }
@@ -8754,9 +8759,9 @@ private fun PhotoPaintLayer(photo: PromptPhoto, frameRect: Rect, modifier: Modif
     val parsedPaints = remember(photo.paints) { photo.paints.map { it to parsePhotoPaintPaths(it.pathsJson) } }
     Canvas(modifier = modifier) {
         parsedPaints.forEach { (paint, paths) ->
-            val strokeColor = parseUserColor(paint.color).copy(alpha = 0.52f)
+            val strokeColor = parseUserColor(paint.color).copy(alpha = 0.72f)
             val basis = if (normalizeOverlaySurface(paint.surface) == "card" || frameRect == Rect.Zero) size.minDimension else minOf(frameRect.width, frameRect.height)
-            val strokeWidthPx = (basis * paint.strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(5f)
+            val strokeWidthPx = (basis * paint.strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(6.5f)
             paths.forEach { pathItem ->
                 if (pathItem.points.size < 2) return@forEach
                 val drawPath = ComposePath().apply {
@@ -8795,7 +8800,7 @@ private fun PhotoPaintPathsLayer(
     if (paths.isEmpty()) return
     Canvas(modifier = modifier) {
         val basis = if (normalizeOverlaySurface(surface) == "card" || frameRect == Rect.Zero) size.minDimension else minOf(frameRect.width, frameRect.height)
-        val strokeWidthPx = (basis * strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(5f)
+        val strokeWidthPx = (basis * strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(6.5f)
         paths.forEach { pathItem ->
             if (pathItem.points.size < 2) return@forEach
             val drawPath = ComposePath().apply {
@@ -8810,6 +8815,7 @@ private fun PhotoPaintPathsLayer(
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun PhotoPaintEditorDialog(
     target: PaintEditorTarget,
@@ -8819,11 +8825,20 @@ private fun PhotoPaintEditorDialog(
     onDelete: (() -> Unit)?
 ) {
     val photo = target.item.photo
+    fun normalizeEditorPoint(offset: Offset, width: Float, height: Float): PhotoPaintPoint {
+        val safeWidth = width.coerceAtLeast(1f)
+        val safeHeight = height.coerceAtLeast(1f)
+        return PhotoPaintPoint(
+            x = (offset.x / safeWidth).coerceIn(0f, 1f),
+            y = (offset.y / safeHeight).coerceIn(0f, 1f)
+        )
+    }
     val initialPaths = remember(photo.id, viewerId, photo.paints) {
         photo.paints.firstOrNull { it.userId == viewerId }?.let { parsePhotoPaintPaths(it.pathsJson) } ?: emptyList()
     }
     var draftPaths by remember(photo.id, viewerId, photo.paints) { mutableStateOf(initialPaths) }
     var currentStroke by remember(photo.id, viewerId) { mutableStateOf<List<PhotoPaintPoint>>(emptyList()) }
+    var overlayCanvasSize by remember(photo.id) { mutableStateOf(IntSize.Zero) }
     val paintColor = parseUserColor(photo.paints.firstOrNull { it.userId == viewerId }?.color ?: target.item.user.favoriteColor)
     val strokeWidth = photo.paints.firstOrNull { it.userId == viewerId }?.strokeWidth ?: 0.035f
     val previewItem = remember(target.item, viewerId, photo.paints) {
@@ -8869,31 +8884,61 @@ private fun PhotoPaintEditorDialog(
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .pointerInput(draftPaths, currentStroke) {
-                                        detectDragGestures(
-                                            onDragStart = { offset ->
+                                    .onSizeChanged { overlayCanvasSize = it }
+                                    .pointerInteropFilter { event ->
+                                        val width = overlayCanvasSize.width.toFloat().coerceAtLeast(1f)
+                                        val height = overlayCanvasSize.height.toFloat().coerceAtLeast(1f)
+                                        when (event.actionMasked) {
+                                            MotionEvent.ACTION_DOWN -> {
                                                 currentStroke = listOf(
-                                                    PhotoPaintPoint(
-                                                        x = (offset.x / size.width.toFloat()).coerceIn(0f, 1f),
-                                                        y = (offset.y / size.height.toFloat()).coerceIn(0f, 1f)
+                                                    normalizeEditorPoint(Offset(event.x, event.y), width, height)
+                                                )
+                                                true
+                                            }
+                                            MotionEvent.ACTION_MOVE -> {
+                                                val historySize = event.historySize
+                                                var updatedStroke = currentStroke
+                                                for (index in 0 until historySize) {
+                                                    val point = normalizeEditorPoint(
+                                                        Offset(event.getHistoricalX(index), event.getHistoricalY(index)),
+                                                        width,
+                                                        height
                                                     )
-                                                )
-                                            },
-                                            onDrag = { change, _ ->
-                                                currentStroke = currentStroke + PhotoPaintPoint(
-                                                    x = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f),
-                                                    y = (change.position.y / size.height.toFloat()).coerceIn(0f, 1f)
-                                                )
-                                                change.consume()
-                                            },
-                                            onDragEnd = {
-                                                if (currentStroke.size >= 2) {
-                                                    draftPaths = (draftPaths + PhotoPaintPath(currentStroke)).takeLast(12)
+                                                    val last = updatedStroke.lastOrNull()
+                                                    if (last == null || abs(last.x - point.x) > 0.0015f || abs(last.y - point.y) > 0.0015f) {
+                                                        updatedStroke = updatedStroke + point
+                                                    }
+                                                }
+                                                val currentPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
+                                                val currentLast = updatedStroke.lastOrNull()
+                                                if (currentLast == null || abs(currentLast.x - currentPoint.x) > 0.0015f || abs(currentLast.y - currentPoint.y) > 0.0015f) {
+                                                    updatedStroke = updatedStroke + currentPoint
+                                                }
+                                                currentStroke = updatedStroke
+                                                true
+                                            }
+                                            MotionEvent.ACTION_UP -> {
+                                                val finalPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
+                                                val finalizedStroke = if (
+                                                    currentStroke.lastOrNull()?.let { abs(it.x - finalPoint.x) > 0.0015f || abs(it.y - finalPoint.y) > 0.0015f }
+                                                        ?: true
+                                                ) {
+                                                    currentStroke + finalPoint
+                                                } else {
+                                                    currentStroke
+                                                }
+                                                if (finalizedStroke.size >= 2) {
+                                                    draftPaths = (draftPaths + PhotoPaintPath(finalizedStroke)).takeLast(12)
                                                 }
                                                 currentStroke = emptyList()
-                                            },
-                                            onDragCancel = { currentStroke = emptyList() }
-                                        )
+                                                true
+                                            }
+                                            MotionEvent.ACTION_CANCEL -> {
+                                                currentStroke = emptyList()
+                                                true
+                                            }
+                                            else -> false
+                                        }
                                     }
                             )
                         }
@@ -8916,8 +8961,15 @@ private fun PhotoPaintEditorDialog(
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Abbrechen") }
                     Button(
-                        onClick = { onSave(draftPaths, strokeWidth) },
-                        enabled = draftPaths.isNotEmpty(),
+                        onClick = {
+                            val pathsToSave = if (currentStroke.size >= 2) {
+                                (draftPaths + PhotoPaintPath(currentStroke)).takeLast(12)
+                            } else {
+                                draftPaths
+                            }
+                            onSave(pathsToSave, strokeWidth)
+                        },
+                        enabled = draftPaths.isNotEmpty() || currentStroke.size >= 2,
                         modifier = Modifier.weight(1f)
                     ) { Text("Speichern") }
                 }

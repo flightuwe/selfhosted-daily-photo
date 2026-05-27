@@ -1,0 +1,12 @@
+{
+  "version": "0.5.6",
+  "releasedAt": "2026-05-27T00:00:00Z",
+  "highlights": [
+    "Hotfix fuer Kreativspuren: Markierungen werden im Feed wieder sichtbar gerendert.",
+    "Der Mal-Editor sammelt wieder echte zusammenhaengende Strokes mit Live-Pinsel.",
+    "Gespeicherte Paints bleiben nach dem Speichern auch ausserhalb des Editors sichtbar."
+  ],
+  "details": [
+    "Die Android-Touch-Erfassung fuer das freie Malen wurde auf einen robusteren Event-Pfad umgestellt und das Overlay-Rendering sichtbar verstaerkt."
+  ]
+}
