@@ -1,0 +1,12 @@
+{
+  "version": "0.5.5",
+  "releasedAt": "2026-05-27T00:00:00Z",
+  "highlights": [
+    "Der Feed nutzt jetzt einen dichteren Meta-Header und deutlich groessere Hero-Bilder pro Post.",
+    "Caption und Kommentare erscheinen als sauber eingerueckter Chat-Block unter dem Bildbereich.",
+    "Das Malen laeuft jetzt direkt ueber dem echten Post mit Live-Pinsel und einer card-basierten Overlay-Flaeche."
+  ],
+  "details": [
+    "Neue Paints und Marks nutzen eine card-surface, waehrend alte frame-basierte Kreativspuren kompatibel weiter angezeigt werden."
+  ]
+}

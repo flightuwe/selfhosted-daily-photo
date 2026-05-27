@@ -313,6 +313,7 @@ type PhotoMark struct {
 	UserID    uint      `gorm:"not null;index:idx_photo_mark_user_photo,unique;index" json:"userId"`
 	User      User      `json:"user"`
 	Color     string    `gorm:"size:7;not null" json:"color"`
+	Surface   string    `gorm:"size:16;not null;default:'frame'" json:"surface"`
 	CenterX   float64   `gorm:"not null" json:"centerX"`
 	CenterY   float64   `gorm:"not null" json:"centerY"`
 	RadiusX   float64   `gorm:"not null" json:"radiusX"`
@@ -330,6 +331,7 @@ type PhotoPaint struct {
 	UserID      uint      `gorm:"not null;index:idx_photo_paint_user_photo,unique;index" json:"userId"`
 	User        User      `json:"user"`
 	Color       string    `gorm:"size:7;not null" json:"color"`
+	Surface     string    `gorm:"size:16;not null;default:'frame'" json:"surface"`
 	StrokeWidth float64   `gorm:"not null" json:"strokeWidth"`
 	PathsJSON   string    `gorm:"type:text;not null" json:"pathsJson"`
 	CreatedAt   time.Time `json:"createdAt"`

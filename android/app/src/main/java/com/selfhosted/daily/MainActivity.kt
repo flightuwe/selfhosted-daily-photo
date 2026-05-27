@@ -63,6 +63,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.defaultMinSize
@@ -147,6 +148,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -432,6 +435,7 @@ data class PhotoMarkOverlay(
     val userId: Long,
     val username: String = "",
     val color: String = "#1F5FBF",
+    val surface: String = "frame",
     val centerX: Float = 0.5f,
     val centerY: Float = 0.5f,
     val radiusX: Float = 0.12f,
@@ -452,12 +456,14 @@ data class PhotoPaintOverlay(
     val userId: Long,
     val username: String = "",
     val color: String = "#1F5FBF",
+    val surface: String = "frame",
     val strokeWidth: Float = 0.035f,
     val pathsJson: String = ""
 )
 data class PhotoPaintRequest(
     val paths: List<PhotoPaintPath> = emptyList(),
-    val strokeWidth: Float = 0.035f
+    val strokeWidth: Float = 0.035f,
+    val surface: String = "card"
 )
 data class PromptResponse(
     val day: String,
@@ -501,6 +507,14 @@ data class FeedItem(
     val requestedByUser: String? = null,
     val momentKind: String? = null,
     val specialRequestedByUserColor: String? = null
+)
+
+private data class PaintEditorTarget(
+    val item: FeedItem,
+    val isMomentWindowPost: Boolean,
+    val postMomentKind: String?,
+    val requestedByUser: String?,
+    val requestedByUserColor: String?
 )
 
 data class PendingLocationPayload(
@@ -2026,7 +2040,7 @@ class AppRepo(
         strokeWidth: Float
     ): PromptPhoto? =
         authorizedCall("/api/photos/:id/paint") { token ->
-            api.savePhotoPaint(token, photoId, PhotoPaintRequest(paths = paths, strokeWidth = strokeWidth))
+            api.savePhotoPaint(token, photoId, PhotoPaintRequest(paths = paths, strokeWidth = strokeWidth, surface = "card"))
         }.photo
 
     suspend fun deletePhotoPaint(photoId: Long, targetUserId: Long? = null): PromptPhoto? =
@@ -7976,7 +7990,7 @@ fun FeedTab(
     val primaryTextColor = MaterialTheme.colorScheme.onSurface
     val secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant
     val pullRefreshState = rememberPullRefreshState(refreshing = refreshing, onRefresh = onRefresh)
-    var paintEditorPhoto by remember { mutableStateOf<PromptPhoto?>(null) }
+    var paintEditorPhoto by remember { mutableStateOf<PaintEditorTarget?>(null) }
     var paintModerationPhoto by remember { mutableStateOf<FeedItem?>(null) }
     var markModerationPhoto by remember { mutableStateOf<FeedItem?>(null) }
 
@@ -8125,259 +8139,39 @@ fun FeedTab(
                     val postMomentKind = normalizeMomentKind(item.momentKind ?: meta?.momentKind, item.triggerSource ?: meta?.triggerSource)
                     val requestedByUser = item.requestedByUser ?: meta?.specialRequestedByUser ?: meta?.requestedByUser
                     val requestedByUserColor = item.specialRequestedByUserColor ?: meta?.specialRequestedByUserColor
-                    Card {
-                        Box {
-                            PhotoMarkLayer(item.photo)
-                            PhotoPaintLayer(item.photo)
-                            Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        item.user.username,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = parseUserColor(item.user.favoriteColor),
-                                        modifier = Modifier.clickable { onOpenUserProfile(item.user.id) }
-                                    )
-                                    if (item.photo.bookmarkedByMe) {
-                                        Text(
-                                            "Gemerkt",
-                                            color = Color(0xFF1F5FBF),
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    }
-                                }
-                                Column(horizontalAlignment = Alignment.End) {
-                                    if (showPublicPostNumbers && !item.photo.publicNumber.isNullOrBlank()) {
-                                        Text(
-                                            "#${item.photo.publicNumber}",
-                                            color = secondaryTextColor,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    }
-                                    Box {
-                                        IconButton(onClick = { menuExpanded = true }) {
-                                            Icon(
-                                                imageVector = Icons.Filled.MoreVert,
-                                                contentDescription = "Beitragsaktionen"
-                                            )
-                                        }
-                                        androidx.compose.material3.DropdownMenu(
-                                            expanded = menuExpanded,
-                                            onDismissRequest = { menuExpanded = false }
-                                        ) {
-                                            androidx.compose.material3.DropdownMenuItem(
-                                                text = { Text(if (item.photo.bookmarkedByMe) "Nicht mehr merken" else "Merken") },
-                                                onClick = {
-                                                    menuExpanded = false
-                                                    onToggleBookmark(item.photo.id, !item.photo.bookmarkedByMe)
-                                                }
-                                            )
-                                            if (item.photo.canMark) {
-                                                androidx.compose.material3.DropdownMenuItem(
-                                                    text = { Text(if (item.photo.markedByMe) "Markierung entfernen" else "Markieren") },
-                                                    onClick = {
-                                                        menuExpanded = false
-                                                        onToggleMark(item.photo.id, !item.photo.markedByMe)
-                                                    }
-                                                )
-                                            }
-                                            if (viewerId == item.user.id && item.photo.marks.any { it.userId != viewerId }) {
-                                                androidx.compose.material3.DropdownMenuItem(
-                                                    text = { Text("Fremde Markierungen verwalten") },
-                                                    onClick = {
-                                                        menuExpanded = false
-                                                        markModerationPhoto = item
-                                                    }
-                                                )
-                                            }
-                                            if (item.photo.canPaint || item.photo.paintedByMe) {
-                                                androidx.compose.material3.DropdownMenuItem(
-                                                    text = { Text(if (item.photo.paintedByMe) "Malerei bearbeiten" else "Malen") },
-                                                    onClick = {
-                                                        menuExpanded = false
-                                                        paintEditorPhoto = item.photo
-                                                    }
-                                                )
-                                            }
-                                            if (item.photo.paintedByMe) {
-                                                androidx.compose.material3.DropdownMenuItem(
-                                                    text = { Text("Eigene Malerei entfernen") },
-                                                    onClick = {
-                                                        menuExpanded = false
-                                                        onDeletePaint(item.photo.id, null)
-                                                    }
-                                                )
-                                            }
-                                            if (viewerId == item.user.id && item.photo.paints.any { it.userId != viewerId }) {
-                                                androidx.compose.material3.DropdownMenuItem(
-                                                    text = { Text("Fremde Malereien verwalten") },
-                                                    onClick = {
-                                                        menuExpanded = false
-                                                        paintModerationPhoto = item
-                                                    }
-                                                )
-                                            }
-                                            androidx.compose.material3.DropdownMenuItem(
-                                                text = { Text("Melden") },
-                                                onClick = {
-                                                    menuExpanded = false
-                                                    onReportPhoto(item.photo.id)
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                            if (item.user.statusVisible && (item.user.statusText.isNotBlank() || item.user.statusEmoji.isNotBlank())) {
-                                Text(
-                                    "${item.user.statusEmoji} ${item.user.statusText}".trim(),
-                                    color = secondaryTextColor,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            if (!isMomentWindowPost) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        "🕒 ${formatMomentTime(item.photo.createdAt)}",
-                                        color = secondaryTextColor,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    if (item.photo.bookmarkCount > 0) {
-                                        Text(
-                                            "📌 ${item.photo.bookmarkCount}",
-                                            color = secondaryTextColor,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    }
-                                }
-                                uploadTimeHint(item.photo)?.let { hint ->
-                                    Text(
-                                        hint,
-                                        color = secondaryTextColor,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                if (item.photo.locationShared && !item.photo.locationMapsUrl.isNullOrBlank()) {
-                                    Text(
-                                        "📍 Standort",
-                                        color = Color(0xFFD32F2F),
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.clickable { openExternalUrl(context, item.photo.locationMapsUrl) }
-                                    )
-                                }
-                            } else {
-                                if (postMomentKind == "special") {
-                                    SpecialMomentBadge(requestedByUser, requestedByUserColor)
-                                } else {
-                                    DailyMomentBadge()
-                                }
-                                if (item.photo.locationShared && !item.photo.locationMapsUrl.isNullOrBlank()) {
-                                    Text(
-                                        "📍 Standort",
-                                        color = Color(0xFFD32F2F),
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.clickable { openExternalUrl(context, item.photo.locationMapsUrl) }
-                                    )
-                                }
-                            }
-                            if (item.capsuleLocked) {
-                                Text(
-                                    "🧊 Oeffnet wieder am ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}",
-                                    color = secondaryTextColor
-                                )
-                            } else {
-                                FeedPhotoFrame(
-                                    photo = item.photo,
-                                    username = item.user.username,
-                                    onOpenViewer = onOpenViewer
-                                )
-                            }
-                            val reactions = item.reactions.orEmpty()
-                            val photoMojis = item.photoMojis.orEmpty().sortedWith(
-                                compareBy<PhotoMojiItem>(
-                                    { parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN },
-                                    { it.id }
-                                )
+                    FeedPostCard(
+                        item = item,
+                        viewerId = viewerId,
+                        secondaryTextColor = secondaryTextColor,
+                        primaryTextColor = primaryTextColor,
+                        showPublicPostNumbers = showPublicPostNumbers,
+                        isMomentWindowPost = isMomentWindowPost,
+                        postMomentKind = postMomentKind,
+                        requestedByUser = requestedByUser,
+                        requestedByUserColor = requestedByUserColor,
+                        onOpenUserProfile = onOpenUserProfile,
+                        onOpenViewer = onOpenViewer,
+                        onOpenExternalUrl = { url -> openExternalUrl(context, url) },
+                        onOpenHashtagSearch = onOpenHashtagSearch,
+                        menuExpanded = menuExpanded,
+                        onMenuExpandedChange = { menuExpanded = it },
+                        onToggleBookmark = onToggleBookmark,
+                        onToggleMark = onToggleMark,
+                        onDeletePaint = onDeletePaint,
+                        onReportPhoto = onReportPhoto,
+                        onOpenPaintEditor = {
+                            paintEditorPhoto = PaintEditorTarget(
+                                item = item,
+                                isMomentWindowPost = isMomentWindowPost,
+                                postMomentKind = postMomentKind,
+                                requestedByUser = requestedByUser,
+                                requestedByUserColor = requestedByUserColor
                             )
-                            val comments = item.comments.orEmpty().sortedWith(
-                                compareBy<PhotoCommentItem>(
-                                    { parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN },
-                                    { it.id }
-                                )
-                            )
-                            if (reactions.isNotEmpty()) {
-                                Text(
-                                    reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
-                                    color = primaryTextColor
-                                )
-                            }
-                            if (photoMojis.isNotEmpty()) {
-                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                    items(photoMojis) { foto ->
-                                        Row(
-                                            modifier = Modifier
-                                                .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.large)
-                                                .clickable { onOpenViewer(listOf(foto.url), null) }
-                                                .padding(horizontal = 8.dp, vertical = 6.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                        ) {
-                                            AsyncImage(
-                                                model = foto.url,
-                                                contentDescription = "FotoMoji",
-                                                modifier = Modifier
-                                                    .size(34.dp)
-                                                    .background(Color.LightGray, CircleShape),
-                                                contentScale = ContentScale.Crop
-                                            )
-                                            Text(
-                                                foto.emoji,
-                                                fontWeight = FontWeight.Bold,
-                                                color = parseUserColor(foto.user.favoriteColor)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                            if (comments.isNotEmpty()) {
-                                comments.forEach { comment ->
-                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
-                                        Text("${comment.user.username}:", color = secondaryTextColor, fontWeight = FontWeight.SemiBold)
-                                        HashtagText(
-                                            text = comment.body,
-                                            color = secondaryTextColor,
-                                            modifier = Modifier.weight(1f),
-                                            onHashtagClick = onOpenHashtagSearch
-                                        )
-                                    }
-                                }
-                            }
-                            if (!item.photo.caption.isNullOrBlank()) {
-                                HashtagText(
-                                    text = item.photo.caption,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    color = secondaryTextColor,
-                                    onHashtagClick = onOpenHashtagSearch
-                                )
-                            }
-                        }
-                        }
-                    }
+                        },
+                        onOpenPaintModeration = { paintModerationPhoto = item },
+                        onOpenMarkModeration = { markModerationPhoto = item }
+                    )
+                    
                 }
                 is FeedRow.MonthRecapItem -> {
                     MonthlyRecapCard(row.recap)
@@ -8398,18 +8192,18 @@ fun FeedTab(
         )
     }
 
-    paintEditorPhoto?.let { photo ->
+    paintEditorPhoto?.let { target ->
         PhotoPaintEditorDialog(
-            photo = photo,
+            target = target,
             viewerId = viewerId,
             onDismiss = { paintEditorPhoto = null },
             onSave = { paths, strokeWidth ->
-                onSavePaint(photo.id, paths, strokeWidth)
+                onSavePaint(target.item.photo.id, paths, strokeWidth)
                 paintEditorPhoto = null
             },
-            onDelete = if (photo.paintedByMe) {
+            onDelete = if (target.item.photo.paintedByMe) {
                 {
-                    onDeletePaint(photo.id, null)
+                    onDeletePaint(target.item.photo.id, null)
                     paintEditorPhoto = null
                 }
             } else {
@@ -8495,91 +8289,389 @@ fun FeedTab(
     }
 }
 
-@Composable
-private fun FeedPhotoFrame(
-    photo: PromptPhoto,
-    username: String,
-    onOpenViewer: (List<String>, Long?) -> Unit
-) {
-    val urls = remember(photo.url, photo.secondUrl) { listOfNotNull(photo.url, photo.secondUrl) }
-    if (urls.isEmpty()) return
-    val frameShape = RoundedCornerShape(18.dp)
-    val imageShape = RoundedCornerShape(12.dp)
-    val frameBand = if (urls.size > 1) 14.dp else 12.dp
-    val previewGap = 8.dp
+private fun normalizeOverlaySurface(surface: String?): String =
+    if (surface.equals("card", ignoreCase = true)) "card" else "frame"
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(196.dp)
-            .clip(frameShape)
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable { onOpenViewer(urls, photo.id) }
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(frameBand),
-            horizontalArrangement = Arrangement.spacedBy(previewGap)
-        ) {
-            urls.forEach { url ->
-                AsyncImage(
-                    model = url,
-                    contentDescription = "$username Foto",
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .clip(imageShape),
-                    contentScale = ContentScale.Crop
-                )
+@Composable
+private fun FeedPostCard(
+    item: FeedItem,
+    viewerId: Long?,
+    secondaryTextColor: Color,
+    primaryTextColor: Color,
+    showPublicPostNumbers: Boolean,
+    isMomentWindowPost: Boolean,
+    postMomentKind: String?,
+    requestedByUser: String?,
+    requestedByUserColor: String?,
+    onOpenUserProfile: (Long) -> Unit,
+    onOpenViewer: (List<String>, Long?) -> Unit,
+    onOpenExternalUrl: (String) -> Unit,
+    onOpenHashtagSearch: (String) -> Unit,
+    menuExpanded: Boolean,
+    onMenuExpandedChange: (Boolean) -> Unit,
+    onToggleBookmark: (Long, Boolean) -> Unit,
+    onToggleMark: (Long, Boolean) -> Unit,
+    onDeletePaint: (Long, Long?) -> Unit,
+    onReportPhoto: (Long) -> Unit,
+    onOpenPaintEditor: () -> Unit,
+    onOpenPaintModeration: () -> Unit,
+    onOpenMarkModeration: () -> Unit
+) {
+    PostCanvasCard(
+        item = item,
+        viewerId = viewerId,
+        secondaryTextColor = secondaryTextColor,
+        primaryTextColor = primaryTextColor,
+        showPublicPostNumbers = showPublicPostNumbers,
+        isMomentWindowPost = isMomentWindowPost,
+        postMomentKind = postMomentKind,
+        requestedByUser = requestedByUser,
+        requestedByUserColor = requestedByUserColor,
+        onOpenUserProfile = onOpenUserProfile,
+        onOpenViewer = onOpenViewer,
+        onOpenExternalUrl = onOpenExternalUrl,
+        onOpenHashtagSearch = onOpenHashtagSearch,
+        headerTrailing = {
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                if (showPublicPostNumbers && !item.photo.publicNumber.isNullOrBlank()) {
+                    Text(
+                        "#${item.photo.publicNumber}",
+                        color = secondaryTextColor,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Box {
+                    IconButton(onClick = { onMenuExpandedChange(true) }) {
+                        Icon(imageVector = Icons.Filled.MoreVert, contentDescription = "Beitragsaktionen")
+                    }
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { onMenuExpandedChange(false) }
+                    ) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text(if (item.photo.bookmarkedByMe) "Nicht mehr merken" else "Merken") },
+                            onClick = {
+                                onMenuExpandedChange(false)
+                                onToggleBookmark(item.photo.id, !item.photo.bookmarkedByMe)
+                            }
+                        )
+                        if (item.photo.canMark) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text(if (item.photo.markedByMe) "Markierung entfernen" else "Markieren") },
+                                onClick = {
+                                    onMenuExpandedChange(false)
+                                    onToggleMark(item.photo.id, !item.photo.markedByMe)
+                                }
+                            )
+                        }
+                        if (viewerId == item.user.id && item.photo.marks.any { it.userId != viewerId }) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("Fremde Markierungen verwalten") },
+                                onClick = {
+                                    onMenuExpandedChange(false)
+                                    onOpenMarkModeration()
+                                }
+                            )
+                        }
+                        if (item.photo.canPaint || item.photo.paintedByMe) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text(if (item.photo.paintedByMe) "Malerei bearbeiten" else "Malen") },
+                                onClick = {
+                                    onMenuExpandedChange(false)
+                                    onOpenPaintEditor()
+                                }
+                            )
+                        }
+                        if (item.photo.paintedByMe) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("Eigene Malerei entfernen") },
+                                onClick = {
+                                    onMenuExpandedChange(false)
+                                    onDeletePaint(item.photo.id, null)
+                                }
+                            )
+                        }
+                        if (viewerId == item.user.id && item.photo.paints.any { it.userId != viewerId }) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("Fremde Malereien verwalten") },
+                                onClick = {
+                                    onMenuExpandedChange(false)
+                                    onOpenPaintModeration()
+                                }
+                            )
+                        }
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Melden") },
+                            onClick = {
+                                onMenuExpandedChange(false)
+                                onReportPhoto(item.photo.id)
+                            }
+                        )
+                    }
+                }
             }
+        },
+        overlay = { frameRect ->
+            PhotoMarkLayer(item.photo, frameRect, Modifier.fillMaxSize())
+            PhotoPaintLayer(item.photo, frameRect, Modifier.fillMaxSize())
         }
-        PhotoMarkLayer(photo, Modifier.fillMaxSize())
-        PhotoPaintLayer(photo, Modifier.fillMaxSize())
+    )
+}
+
+@Composable
+private fun PostCanvasCard(
+    item: FeedItem,
+    viewerId: Long?,
+    secondaryTextColor: Color,
+    primaryTextColor: Color,
+    showPublicPostNumbers: Boolean,
+    isMomentWindowPost: Boolean,
+    postMomentKind: String?,
+    requestedByUser: String?,
+    requestedByUserColor: String?,
+    onOpenUserProfile: ((Long) -> Unit)?,
+    onOpenViewer: ((List<String>, Long?) -> Unit)?,
+    onOpenExternalUrl: ((String) -> Unit)?,
+    onOpenHashtagSearch: (String) -> Unit,
+    headerTrailing: @Composable (() -> Unit)? = null,
+    overlay: @Composable (Rect) -> Unit = {}
+) {
+    val urls = remember(item.photo.url, item.photo.secondUrl) { listOfNotNull(item.photo.url, item.photo.secondUrl) }
+    val reactions = remember(item.reactions) { item.reactions.orEmpty() }
+    val photoMojis = remember(item.photoMojis) {
+        item.photoMojis.orEmpty().sortedWith(compareBy<PhotoMojiItem>({ parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN }, { it.id }))
+    }
+    val comments = remember(item.comments) {
+        item.comments.orEmpty().sortedWith(compareBy<PhotoCommentItem>({ parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN }, { it.id }))
+    }
+    var rootOrigin by remember(item.photo.id) { mutableStateOf(Offset.Zero) }
+    var frameOrigin by remember(item.photo.id) { mutableStateOf(Offset.Zero) }
+    var frameSize by remember(item.photo.id) { mutableStateOf(Size.Zero) }
+    val frameRect = remember(rootOrigin, frameOrigin, frameSize) {
+        Rect(
+            left = frameOrigin.x - rootOrigin.x,
+            top = frameOrigin.y - rootOrigin.y,
+            right = frameOrigin.x - rootOrigin.x + frameSize.width,
+            bottom = frameOrigin.y - rootOrigin.y + frameSize.height
+        )
+    }
+
+    Card {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .onGloballyPositioned { rootOrigin = it.positionInRoot() }
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Text(
+                            item.user.username,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = parseUserColor(item.user.favoriteColor),
+                            modifier = if (onOpenUserProfile != null) Modifier.clickable { onOpenUserProfile(item.user.id) } else Modifier
+                        )
+                        if (item.user.statusVisible && (item.user.statusText.isNotBlank() || item.user.statusEmoji.isNotBlank())) {
+                            Text(
+                                "${item.user.statusEmoji} ${item.user.statusText}".trim(),
+                                color = secondaryTextColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "🕒 ${formatMomentTime(item.photo.createdAt)}",
+                                color = secondaryTextColor,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            if (item.photo.bookmarkCount > 0) {
+                                Text(
+                                    "📌 ${item.photo.bookmarkCount}",
+                                    color = secondaryTextColor,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            if (item.photo.bookmarkedByMe) {
+                                Text(
+                                    "Gemerkt",
+                                    color = Color(0xFF1F5FBF),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                    headerTrailing?.invoke() ?: if (showPublicPostNumbers && !item.photo.publicNumber.isNullOrBlank()) {
+                        Text(
+                            "#${item.photo.publicNumber}",
+                            color = secondaryTextColor,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    } else {
+                        Spacer(Modifier)
+                    }
+                }
+
+                if (isMomentWindowPost) {
+                    if (postMomentKind == "special") {
+                        SpecialMomentBadge(requestedByUser, requestedByUserColor)
+                    } else {
+                        DailyMomentBadge()
+                    }
+                } else {
+                    uploadTimeHint(item.photo)?.let { hint ->
+                        Text(
+                            hint,
+                            color = secondaryTextColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                if (item.photo.locationShared && !item.photo.locationMapsUrl.isNullOrBlank() && onOpenExternalUrl != null) {
+                    Text(
+                        "📍 Standort",
+                        color = Color(0xFFD32F2F),
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clickable { onOpenExternalUrl(item.photo.locationMapsUrl) }
+                    )
+                }
+
+                if (item.capsuleLocked) {
+                    Text(
+                        "🧊 Oeffnet wieder am ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}",
+                        color = secondaryTextColor
+                    )
+                } else if (urls.isNotEmpty()) {
+                    val frameShape = RoundedCornerShape(22.dp)
+                    val imageShape = RoundedCornerShape(16.dp)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(if (urls.size > 1) 278.dp else 306.dp)
+                            .clip(frameShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f))
+                            .onGloballyPositioned {
+                                frameOrigin = it.positionInRoot()
+                                frameSize = Size(it.size.width.toFloat(), it.size.height.toFloat())
+                            }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            urls.forEach { url ->
+                                AsyncImage(
+                                    model = url,
+                                    contentDescription = "${item.user.username} Foto",
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                        .clip(imageShape)
+                                        .then(
+                                            if (onOpenViewer != null) Modifier.clickable { onOpenViewer(urls, item.photo.id) } else Modifier
+                                        ),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (reactions.isNotEmpty()) {
+                    Text(reactions.joinToString("  ") { "${it.emoji} ${it.count}" }, color = primaryTextColor)
+                }
+                if (photoMojis.isNotEmpty()) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        items(photoMojis) { foto ->
+                            Row(
+                                modifier = Modifier
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.large)
+                                    .then(if (onOpenViewer != null) Modifier.clickable { onOpenViewer(listOf(foto.url), null) } else Modifier)
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                AsyncImage(
+                                    model = foto.url,
+                                    contentDescription = "FotoMoji",
+                                    modifier = Modifier.size(34.dp).background(Color.LightGray, CircleShape),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Text(foto.emoji, fontWeight = FontWeight.Bold, color = parseUserColor(foto.user.favoriteColor))
+                            }
+                        }
+                    }
+                }
+
+                val hasCaption = !item.photo.caption.isNullOrBlank()
+                if (hasCaption || comments.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        if (hasCaption) {
+                            CompactCommentLine(
+                                username = item.user.username,
+                                usernameColor = parseUserColor(item.user.favoriteColor),
+                                body = item.photo.caption.orEmpty(),
+                                bodyColor = secondaryTextColor,
+                                onOpenHashtagSearch = onOpenHashtagSearch
+                            )
+                        }
+                        comments.forEach { comment ->
+                            CompactCommentLine(
+                                username = comment.user.username,
+                                usernameColor = parseUserColor(comment.user.favoriteColor),
+                                body = comment.body,
+                                bodyColor = secondaryTextColor,
+                                onOpenHashtagSearch = onOpenHashtagSearch
+                            )
+                        }
+                    }
+                }
+            }
+            overlay(frameRect)
+        }
     }
 }
 
 @Composable
-private fun PhotoMarkLayer(photo: PromptPhoto, modifier: Modifier = Modifier) {
-    if (photo.marks.isEmpty()) return
-    Canvas(
-        modifier = modifier
-            .blur(6.dp)
-    ) {
-        photo.marks.sortedBy { it.layer }.forEach { mark ->
-            val baseColor = parseUserColor(mark.color)
-            val width = size.width * mark.radiusX.coerceIn(0.05f, 0.28f) * 2f
-            val height = size.height * mark.radiusY.coerceIn(0.05f, 0.24f) * 2f
-            val cx = size.width * mark.centerX.coerceIn(0.05f, 0.95f)
-            val cy = size.height * mark.centerY.coerceIn(0.05f, 0.95f)
-            rotate(mark.rotation, pivot = Offset(cx, cy)) {
-                repeat(3) { index ->
-                    val shiftX = when (index) {
-                        0 -> 0f
-                        1 -> width * 0.16f
-                        else -> -width * 0.14f
-                    }
-                    val shiftY = when (index) {
-                        0 -> 0f
-                        1 -> -height * 0.08f
-                        else -> height * 0.12f
-                    }
-                    val scale = when (index) {
-                        0 -> 1f
-                        1 -> 0.74f
-                        else -> 0.62f
-                    }
-                    drawOval(
-                        color = baseColor.copy(alpha = 0.16f + index * 0.05f),
-                        topLeft = Offset(
-                            x = cx - (width * scale) / 2f + shiftX,
-                            y = cy - (height * scale) / 2f + shiftY
-                        ),
-                        size = Size(width = width * scale, height = height * scale)
-                    )
-                }
-            }
-        }
+private fun CompactCommentLine(
+    username: String,
+    usernameColor: Color,
+    body: String,
+    bodyColor: Color,
+    onOpenHashtagSearch: (String) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxWidth()) {
+        Text(
+            "$username:",
+            color = usernameColor,
+            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.titleSmall
+        )
+        HashtagText(
+            text = body,
+            color = bodyColor,
+            modifier = Modifier.padding(start = 12.dp),
+            onHashtagClick = onOpenHashtagSearch
+        )
     }
 }
 
@@ -8595,12 +8687,7 @@ private fun parsePhotoPaintPaths(raw: String): List<PhotoPaintPath> {
                 val points = buildList {
                     for (j in 0 until pointsArr.length()) {
                         val pointObj = pointsArr.optJSONObject(j) ?: continue
-                        add(
-                            PhotoPaintPoint(
-                                x = pointObj.optDouble("x", 0.0).toFloat().coerceIn(0f, 1f),
-                                y = pointObj.optDouble("y", 0.0).toFloat().coerceIn(0f, 1f)
-                            )
-                        )
+                        add(PhotoPaintPoint(pointObj.optDouble("x", 0.0).toFloat().coerceIn(0f, 1f), pointObj.optDouble("y", 0.0).toFloat().coerceIn(0f, 1f)))
                     }
                 }
                 if (points.size >= 2) add(PhotoPaintPath(points))
@@ -8609,275 +8696,224 @@ private fun parsePhotoPaintPaths(raw: String): List<PhotoPaintPath> {
     }.getOrDefault(emptyList())
 }
 
+private fun mapOverlayX(value: Float, surface: String, width: Float, frameRect: Rect): Float =
+    if (normalizeOverlaySurface(surface) == "card" || frameRect == Rect.Zero) width * value.coerceIn(0f, 1f)
+    else frameRect.left + frameRect.width * value.coerceIn(0f, 1f)
+
+private fun mapOverlayY(value: Float, surface: String, height: Float, frameRect: Rect): Float =
+    if (normalizeOverlaySurface(surface) == "card" || frameRect == Rect.Zero) height * value.coerceIn(0f, 1f)
+    else frameRect.top + frameRect.height * value.coerceIn(0f, 1f)
+
+private fun mapOverlayWidth(value: Float, surface: String, width: Float, frameRect: Rect): Float =
+    if (normalizeOverlaySurface(surface) == "card" || frameRect == Rect.Zero) width * value.coerceIn(0f, 1f)
+    else frameRect.width * value.coerceIn(0f, 1f)
+
+private fun mapOverlayHeight(value: Float, surface: String, height: Float, frameRect: Rect): Float =
+    if (normalizeOverlaySurface(surface) == "card" || frameRect == Rect.Zero) height * value.coerceIn(0f, 1f)
+    else frameRect.height * value.coerceIn(0f, 1f)
+
 @Composable
-private fun PhotoPaintLayer(photo: PromptPhoto, modifier: Modifier = Modifier) {
-    if (photo.paints.isEmpty()) return
-    val parsedPaints = remember(photo.paints) {
-        photo.paints.map { it to parsePhotoPaintPaths(it.pathsJson) }
-    }
-    Canvas(modifier = modifier) {
-        parsedPaints.forEach { (paint, paths) ->
-            val strokeColor = parseUserColor(paint.color).copy(alpha = 0.9f)
-            val strokeWidthPx = (size.minDimension * paint.strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(6f)
-            paths.forEach { pathItem ->
-                if (pathItem.points.size < 2) return@forEach
-                val drawPath = ComposePath().apply {
-                    val start = pathItem.points.first()
-                    moveTo(start.x * size.width, start.y * size.height)
-                    pathItem.points.drop(1).forEach { point ->
-                        lineTo(point.x * size.width, point.y * size.height)
+private fun PhotoMarkLayer(photo: PromptPhoto, frameRect: Rect, modifier: Modifier = Modifier) {
+    if (photo.marks.isEmpty()) return
+    Canvas(modifier = modifier.blur(4.dp)) {
+        photo.marks.sortedBy { it.layer }.forEach { mark ->
+            val baseColor = parseUserColor(mark.color)
+            val width = mapOverlayWidth((mark.radiusX.coerceIn(0.05f, 0.28f) * 2f), mark.surface, size.width, frameRect)
+            val height = mapOverlayHeight((mark.radiusY.coerceIn(0.05f, 0.24f) * 2f), mark.surface, size.height, frameRect)
+            val cx = mapOverlayX(mark.centerX.coerceIn(0.05f, 0.95f), mark.surface, size.width, frameRect)
+            val cy = mapOverlayY(mark.centerY.coerceIn(0.05f, 0.95f), mark.surface, size.height, frameRect)
+            rotate(mark.rotation, pivot = Offset(cx, cy)) {
+                repeat(3) { index ->
+                    val scale = when (index) {
+                        0 -> 1f
+                        1 -> 0.76f
+                        else -> 0.61f
                     }
+                    drawOval(
+                        color = baseColor.copy(alpha = 0.11f + index * 0.035f),
+                        topLeft = Offset(
+                            x = cx - (width * scale) / 2f + when (index) { 1 -> width * 0.13f; 2 -> -width * 0.12f; else -> 0f },
+                            y = cy - (height * scale) / 2f + when (index) { 1 -> -height * 0.07f; 2 -> height * 0.1f; else -> 0f }
+                        ),
+                        size = Size(width * scale, height * scale)
+                    )
                 }
-                drawPath(
-                    path = drawPath,
-                    color = strokeColor,
-                    style = Stroke(width = strokeWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                )
             }
         }
     }
 }
 
-private fun isPointInPaintFrame(point: Offset, width: Float, height: Float, frameBand: Float): Boolean {
-    if (width <= 0f || height <= 0f) return false
-    return point.x <= frameBand ||
-        point.x >= width - frameBand ||
-        point.y <= frameBand ||
-        point.y >= height - frameBand
+@Composable
+private fun PhotoMarkLayer(photo: PromptPhoto, modifier: Modifier = Modifier) {
+    PhotoMarkLayer(photo, Rect.Zero, modifier)
 }
 
-private fun computePaintPreviewRects(
-    width: Float,
-    height: Float,
-    frameBand: Float,
-    photoCount: Int,
-    gap: Float
-): List<Rect> {
-    if (width <= 0f || height <= 0f || photoCount <= 0) return emptyList()
-    val innerLeft = frameBand
-    val innerTop = frameBand
-    val innerWidth = (width - frameBand * 2f).coerceAtLeast(0f)
-    val innerHeight = (height - frameBand * 2f).coerceAtLeast(0f)
-    if (photoCount <= 1) {
-        return listOf(Rect(innerLeft, innerTop, innerLeft + innerWidth, innerTop + innerHeight))
-    }
-    val slotWidth = ((innerWidth - gap * (photoCount - 1)) / photoCount).coerceAtLeast(0f)
-    return List(photoCount) { index ->
-        val left = innerLeft + index * (slotWidth + gap)
-        Rect(left, innerTop, left + slotWidth, innerTop + innerHeight)
+@Composable
+private fun PhotoPaintLayer(photo: PromptPhoto, frameRect: Rect, modifier: Modifier = Modifier) {
+    if (photo.paints.isEmpty()) return
+    val parsedPaints = remember(photo.paints) { photo.paints.map { it to parsePhotoPaintPaths(it.pathsJson) } }
+    Canvas(modifier = modifier) {
+        parsedPaints.forEach { (paint, paths) ->
+            val strokeColor = parseUserColor(paint.color).copy(alpha = 0.52f)
+            val basis = if (normalizeOverlaySurface(paint.surface) == "card" || frameRect == Rect.Zero) size.minDimension else minOf(frameRect.width, frameRect.height)
+            val strokeWidthPx = (basis * paint.strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(5f)
+            paths.forEach { pathItem ->
+                if (pathItem.points.size < 2) return@forEach
+                val drawPath = ComposePath().apply {
+                    val start = pathItem.points.first()
+                    moveTo(
+                        mapOverlayX(start.x, paint.surface, size.width, frameRect),
+                        mapOverlayY(start.y, paint.surface, size.height, frameRect)
+                    )
+                    pathItem.points.drop(1).forEach { point ->
+                        lineTo(
+                            mapOverlayX(point.x, paint.surface, size.width, frameRect),
+                            mapOverlayY(point.y, paint.surface, size.height, frameRect)
+                        )
+                    }
+                }
+                drawPath(path = drawPath, color = strokeColor, style = Stroke(width = strokeWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round))
+            }
+        }
     }
 }
 
-private fun isPointAllowedForPaint(
-    point: Offset,
-    width: Float,
-    height: Float,
-    frameBand: Float,
-    photoCount: Int,
-    gap: Float
-): Boolean {
-    if (!isPointInPaintFrame(point, width, height, frameBand)) return false
-    return computePaintPreviewRects(width, height, frameBand, photoCount, gap).none { rect -> rect.contains(point) }
+@Composable
+private fun PhotoPaintLayer(photo: PromptPhoto, modifier: Modifier = Modifier) {
+    PhotoPaintLayer(photo, Rect.Zero, modifier)
+}
+
+@Composable
+private fun PhotoPaintPathsLayer(
+    paths: List<PhotoPaintPath>,
+    color: Color,
+    strokeWidth: Float,
+    surface: String,
+    frameRect: Rect,
+    modifier: Modifier = Modifier
+) {
+    if (paths.isEmpty()) return
+    Canvas(modifier = modifier) {
+        val basis = if (normalizeOverlaySurface(surface) == "card" || frameRect == Rect.Zero) size.minDimension else minOf(frameRect.width, frameRect.height)
+        val strokeWidthPx = (basis * strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(5f)
+        paths.forEach { pathItem ->
+            if (pathItem.points.size < 2) return@forEach
+            val drawPath = ComposePath().apply {
+                val start = pathItem.points.first()
+                moveTo(mapOverlayX(start.x, surface, size.width, frameRect), mapOverlayY(start.y, surface, size.height, frameRect))
+                pathItem.points.drop(1).forEach { point ->
+                    lineTo(mapOverlayX(point.x, surface, size.width, frameRect), mapOverlayY(point.y, surface, size.height, frameRect))
+                }
+            }
+            drawPath(path = drawPath, color = color, style = Stroke(width = strokeWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+    }
 }
 
 @Composable
 private fun PhotoPaintEditorDialog(
-    photo: PromptPhoto,
+    target: PaintEditorTarget,
     viewerId: Long?,
     onDismiss: () -> Unit,
     onSave: (List<PhotoPaintPath>, Float) -> Unit,
     onDelete: (() -> Unit)?
 ) {
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val frameBandPx = with(density) { 22.dp.toPx() }
-    val previewGapPx = with(density) { 10.dp.toPx() }
+    val photo = target.item.photo
     val initialPaths = remember(photo.id, viewerId, photo.paints) {
         photo.paints.firstOrNull { it.userId == viewerId }?.let { parsePhotoPaintPaths(it.pathsJson) } ?: emptyList()
     }
     var draftPaths by remember(photo.id, viewerId, photo.paints) { mutableStateOf(initialPaths) }
-    var showFrameHint by remember(photo.id, viewerId) { mutableStateOf(false) }
-    val paintColor = parseUserColor(photo.paints.firstOrNull { it.userId == viewerId }?.color ?: "#1F5FBF")
+    var currentStroke by remember(photo.id, viewerId) { mutableStateOf<List<PhotoPaintPoint>>(emptyList()) }
+    val paintColor = parseUserColor(photo.paints.firstOrNull { it.userId == viewerId }?.color ?: target.item.user.favoriteColor)
     val strokeWidth = photo.paints.firstOrNull { it.userId == viewerId }?.strokeWidth ?: 0.035f
-    val previewUrls = remember(photo.url, photo.secondUrl) { listOfNotNull(photo.url, photo.secondUrl) }
-    val previewCount = previewUrls.size.coerceAtLeast(1)
+    val previewItem = remember(target.item, viewerId, photo.paints) {
+        target.item.copy(photo = target.item.photo.copy(paints = target.item.photo.paints.filter { it.userId != viewerId }))
+    }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("Rahmen bemalen", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(
-                    "Du malst nur auf dem Rahmen. Der Bildbereich in der Mitte bleibt gesperrt.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                AnimatedVisibility(
-                    visible = showFrameHint,
-                    enter = fadeIn(),
-                    exit = fadeOut()
-                ) {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3CD))
-                    ) {
-                        Text(
-                            "Nur der Rahmen ist bemalbar. Die Bildmitte bleibt absichtlich frei, damit das Foto lesbar bleibt.",
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                            color = Color(0xFF7A4E00)
-                        )
-                    }
-                }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Card(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Post bemalen", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Du malst direkt ueber dem echten Post. Der Strich bleibt beim Zeichnen live sichtbar.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(320.dp)
-                        .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.medium)
+                        .heightIn(min = 360.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(with(density) { frameBandPx.toDp() }),
-                        horizontalArrangement = Arrangement.spacedBy(with(density) { previewGapPx.toDp() })
-                    ) {
-                        previewUrls.forEachIndexed { index, url ->
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                if (previewUrls.size > 1) {
-                                    Text(
-                                        if (index == 0) "Hinten" else "Vorne",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                                AsyncImage(
-                                    model = url,
-                                    contentDescription = "Foto-Vorschau",
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxWidth()
-                                        .border(1.dp, Color.White.copy(alpha = 0.65f), MaterialTheme.shapes.small),
-                                    contentScale = ContentScale.Crop
-                                )
-                            }
-                        }
-                    }
-                    Canvas(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .pointerInput(draftPaths, frameBandPx, previewGapPx, previewCount) {
-                                var currentPoints = mutableListOf<PhotoPaintPoint>()
-                                detectDragGestures(
-                                    onDragStart = { offset ->
-                                        if (isPointAllowedForPaint(offset, size.width.toFloat(), size.height.toFloat(), frameBandPx, previewCount, previewGapPx)) {
-                                            showFrameHint = false
-                                            currentPoints = mutableListOf(
-                                                PhotoPaintPoint(
-                                                    x = (offset.x / size.width.toFloat()).coerceIn(0f, 1f),
-                                                    y = (offset.y / size.height.toFloat()).coerceIn(0f, 1f)
-                                                )
-                                            )
-                                        } else {
-                                            showFrameHint = true
-                                            currentPoints = mutableListOf()
-                                        }
-                                    },
-                                    onDrag = { change, _ ->
-                                        val point = change.position
-                                        if (currentPoints.isNotEmpty() && isPointAllowedForPaint(point, size.width.toFloat(), size.height.toFloat(), frameBandPx, previewCount, previewGapPx)) {
-                                            showFrameHint = false
-                                            currentPoints.add(
-                                                PhotoPaintPoint(
-                                                    x = (point.x / size.width.toFloat()).coerceIn(0f, 1f),
-                                                    y = (point.y / size.height.toFloat()).coerceIn(0f, 1f)
-                                                )
-                                            )
-                                        }
-                                        change.consume()
-                                    },
-                                    onDragEnd = {
-                                        if (currentPoints.size >= 2) {
-                                            draftPaths = (draftPaths + PhotoPaintPath(points = currentPoints.toList())).takeLast(12)
-                                        }
-                                        currentPoints = mutableListOf()
-                                    }
-                                )
-                            }
-                    ) {
-                        val blockedRects = computePaintPreviewRects(size.width, size.height, frameBandPx, previewCount, previewGapPx)
-                        drawRect(
-                            color = Color.Black.copy(alpha = 0.08f),
-                            topLeft = Offset(frameBandPx, frameBandPx),
-                            size = Size(
-                                width = (size.width - frameBandPx * 2f).coerceAtLeast(0f),
-                                height = (size.height - frameBandPx * 2f).coerceAtLeast(0f)
-                            )
-                        )
-                        blockedRects.forEach { rect ->
-                            drawRect(
-                                color = Color.Black.copy(alpha = 0.12f),
-                                topLeft = rect.topLeft,
-                                size = rect.size
-                            )
-                        }
-                        draftPaths.forEach { pathItem ->
-                            if (pathItem.points.size < 2) return@forEach
-                            val drawPath = ComposePath().apply {
-                                val start = pathItem.points.first()
-                                moveTo(start.x * size.width, start.y * size.height)
-                                pathItem.points.drop(1).forEach { point ->
-                                    lineTo(point.x * size.width, point.y * size.height)
-                                }
-                            }
-                            drawPath(
-                                path = drawPath,
-                                color = paintColor,
-                                style = Stroke(
-                                    width = (size.minDimension * strokeWidth).coerceAtLeast(6f),
-                                    cap = StrokeCap.Round,
-                                    join = StrokeJoin.Round
-                                )
-                            )
-                        }
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            if (draftPaths.isNotEmpty()) {
-                                draftPaths = draftPaths.dropLast(1)
+                    PostCanvasCard(
+                        item = previewItem,
+                        viewerId = viewerId,
+                        secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        primaryTextColor = MaterialTheme.colorScheme.onSurface,
+                        showPublicPostNumbers = true,
+                        isMomentWindowPost = target.isMomentWindowPost,
+                        postMomentKind = target.postMomentKind,
+                        requestedByUser = target.requestedByUser,
+                        requestedByUserColor = target.requestedByUserColor,
+                        onOpenUserProfile = null,
+                        onOpenViewer = null,
+                        onOpenExternalUrl = null,
+                        onOpenHashtagSearch = {},
+                        headerTrailing = {
+                            if (!photo.publicNumber.isNullOrBlank()) {
+                                Text("#${photo.publicNumber}", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                             }
                         },
-                        enabled = draftPaths.isNotEmpty(),
+                        overlay = { frameRect ->
+                            PhotoMarkLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
+                            PhotoPaintLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
+                            PhotoPaintPathsLayer(draftPaths, paintColor.copy(alpha = 0.58f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
+                            if (currentStroke.size >= 2) {
+                                PhotoPaintPathsLayer(listOf(PhotoPaintPath(currentStroke)), paintColor.copy(alpha = 0.82f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .pointerInput(draftPaths, currentStroke) {
+                                        detectDragGestures(
+                                            onDragStart = { offset ->
+                                                currentStroke = listOf(
+                                                    PhotoPaintPoint(
+                                                        x = (offset.x / size.width.toFloat()).coerceIn(0f, 1f),
+                                                        y = (offset.y / size.height.toFloat()).coerceIn(0f, 1f)
+                                                    )
+                                                )
+                                            },
+                                            onDrag = { change, _ ->
+                                                currentStroke = currentStroke + PhotoPaintPoint(
+                                                    x = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f),
+                                                    y = (change.position.y / size.height.toFloat()).coerceIn(0f, 1f)
+                                                )
+                                                change.consume()
+                                            },
+                                            onDragEnd = {
+                                                if (currentStroke.size >= 2) {
+                                                    draftPaths = (draftPaths + PhotoPaintPath(currentStroke)).takeLast(12)
+                                                }
+                                                currentStroke = emptyList()
+                                            },
+                                            onDragCancel = { currentStroke = emptyList() }
+                                        )
+                                    }
+                            )
+                        }
+                    )
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            if (currentStroke.isNotEmpty()) currentStroke = emptyList()
+                            else if (draftPaths.isNotEmpty()) draftPaths = draftPaths.dropLast(1)
+                        },
+                        enabled = draftPaths.isNotEmpty() || currentStroke.isNotEmpty(),
                         modifier = Modifier.weight(1f)
                     ) { Text("Undo") }
-                    OutlinedButton(
-                        onClick = { draftPaths = emptyList() },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Leeren") }
+                    OutlinedButton(onClick = { draftPaths = emptyList(); currentStroke = emptyList() }, modifier = Modifier.weight(1f)) { Text("Leeren") }
                     if (onDelete != null) {
-                        OutlinedButton(
-                            onClick = onDelete,
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Loeschen") }
+                        OutlinedButton(onClick = onDelete, modifier = Modifier.weight(1f)) { Text("Loeschen") }
                     }
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Abbrechen") }
                     Button(
                         onClick = { onSave(draftPaths, strokeWidth) },

@@ -5027,26 +5027,17 @@ func canViewerPaintPhoto(viewerID uint, photo models.Photo) bool {
 func generatePhotoMark(user models.User, photo models.Photo) models.PhotoMark {
 	seed := time.Now().UTC().UnixNano() ^ (int64(user.ID) << 16) ^ (int64(photo.ID) << 32)
 	rng := mrand.New(mrand.NewSource(seed))
-	centerX := 0.18 + rng.Float64()*0.64
-	centerY := 0.18 + rng.Float64()*0.64
-	switch rng.Intn(4) {
-	case 0:
-		centerY = 0.08 + rng.Float64()*0.18
-	case 1:
-		centerX = 0.74 + rng.Float64()*0.18
-	case 2:
-		centerY = 0.74 + rng.Float64()*0.18
-	default:
-		centerX = 0.08 + rng.Float64()*0.18
-	}
+	centerX := 0.16 + rng.Float64()*0.68
+	centerY := 0.16 + rng.Float64()*0.68
 	return models.PhotoMark{
 		PhotoID:   photo.ID,
 		UserID:    user.ID,
 		Color:     defaultColor(user.FavoriteColor),
+		Surface:   "card",
 		CenterX:   centerX,
 		CenterY:   centerY,
-		RadiusX:   0.08 + rng.Float64()*0.10,
-		RadiusY:   0.06 + rng.Float64()*0.08,
+		RadiusX:   0.09 + rng.Float64()*0.09,
+		RadiusY:   0.07 + rng.Float64()*0.08,
 		Rotation:  -25 + rng.Float64()*50,
 		Seed:      seed,
 		Layer:     time.Now().UTC().UnixMilli(),
@@ -5210,6 +5201,7 @@ func (s *Server) handlePhotoPaintUpsert(c *gin.Context) {
 	var req struct {
 		Paths       []photoPaintPath `json:"paths"`
 		StrokeWidth float64          `json:"strokeWidth"`
+		Surface     string           `json:"surface"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_payload"})
@@ -5230,6 +5222,10 @@ func (s *Server) handlePhotoPaintUpsert(c *gin.Context) {
 	if strokeWidth > 0.12 {
 		strokeWidth = 0.12
 	}
+	surface := "card"
+	if strings.EqualFold(strings.TrimSpace(req.Surface), "frame") {
+		surface = "frame"
+	}
 	pathsJSON, err := json.Marshal(sanitizedPaths)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "paint_encode_failed"})
@@ -5239,6 +5235,7 @@ func (s *Server) handlePhotoPaintUpsert(c *gin.Context) {
 		PhotoID:     photo.ID,
 		UserID:      user.ID,
 		Color:       defaultColor(user.FavoriteColor),
+		Surface:     surface,
 		StrokeWidth: strokeWidth,
 		PathsJSON:   string(pathsJSON),
 		UpdatedAt:   time.Now().UTC(),
@@ -8973,11 +8970,16 @@ func (s *Server) photoFotomojiJSON(item models.PhotoFotomoji, includeUser bool) 
 }
 
 func (s *Server) photoMarkJSON(item models.PhotoMark) gin.H {
+	surface := strings.TrimSpace(item.Surface)
+	if surface == "" {
+		surface = "frame"
+	}
 	return gin.H{
 		"id":        item.ID,
 		"userId":    item.UserID,
 		"username":  strings.TrimSpace(item.User.Username),
 		"color":     defaultColor(item.Color),
+		"surface":   surface,
 		"centerX":   item.CenterX,
 		"centerY":   item.CenterY,
 		"radiusX":   item.RadiusX,
@@ -8991,11 +8993,16 @@ func (s *Server) photoMarkJSON(item models.PhotoMark) gin.H {
 }
 
 func (s *Server) photoPaintJSON(item models.PhotoPaint) gin.H {
+	surface := strings.TrimSpace(item.Surface)
+	if surface == "" {
+		surface = "frame"
+	}
 	return gin.H{
 		"id":          item.ID,
 		"userId":      item.UserID,
 		"username":    strings.TrimSpace(item.User.Username),
 		"color":       defaultColor(item.Color),
+		"surface":     surface,
 		"strokeWidth": item.StrokeWidth,
 		"pathsJson":   item.PathsJSON,
 		"createdAt":   item.CreatedAt,
