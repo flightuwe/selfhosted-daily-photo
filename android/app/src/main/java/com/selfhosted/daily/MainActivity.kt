@@ -2942,6 +2942,38 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         patchPhotoState(photo.id) { photo }
     }
 
+    fun applyLocalPhotoPaint(
+        photoId: Long,
+        viewerId: Long,
+        username: String,
+        color: String,
+        paths: List<PhotoPaintPath>,
+        strokeWidth: Float
+    ) {
+        val normalizedColor = normalizeHexColor(color)
+        val pathsJson = encodePhotoPaintPaths(paths)
+        patchPhotoState(photoId) { photo ->
+            val existing = photo.paints.firstOrNull { it.userId == viewerId }
+            val nextPaints = if (paths.isEmpty()) {
+                photo.paints.filterNot { it.userId == viewerId }
+            } else {
+                photo.paints.filterNot { it.userId == viewerId } + PhotoPaintOverlay(
+                    id = existing?.id ?: -((photoId * 1000L) + viewerId),
+                    userId = viewerId,
+                    username = existing?.username?.takeIf { it.isNotBlank() } ?: username,
+                    color = existing?.color?.takeIf { it.isNotBlank() } ?: normalizedColor,
+                    surface = "card",
+                    strokeWidth = strokeWidth,
+                    pathsJson = pathsJson
+                )
+            }
+            photo.copy(
+                paints = nextPaints,
+                paintedByMe = nextPaints.any { it.userId == viewerId }
+            )
+        }
+    }
+
     private fun updateBookmarkStateLocally(photoId: Long, bookmarked: Boolean) {
         patchPhotoState(photoId) { photo ->
             val nextCount = (photo.bookmarkCount + if (bookmarked) 1 else -1).coerceAtLeast(0)
@@ -7004,6 +7036,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onToggleBookmark = { photoId, bookmarked -> scope.launch { vm.toggleBookmark(photoId, bookmarked) } },
                     onToggleMark = { photoId, marked -> scope.launch { vm.toggleMark(photoId, marked) } },
                     onDeleteMark = { photoId, targetUserId -> scope.launch { vm.deletePhotoMark(photoId, targetUserId) } },
+                    onApplyLocalPaint = { photoId, viewerId, username, color, paths, strokeWidth ->
+                        vm.applyLocalPhotoPaint(photoId, viewerId, username, color, paths, strokeWidth)
+                    },
                     onSavePaint = { photoId, paths, strokeWidth -> scope.launch { vm.savePhotoPaint(photoId, paths, strokeWidth) } },
                     onDeletePaint = { photoId, targetUserId -> scope.launch { vm.deletePhotoPaint(photoId, targetUserId) } },
                     onReportPhoto = { photoId -> scope.launch { vm.reportPhoto(photoId) } },
@@ -7985,6 +8020,7 @@ fun FeedTab(
     onToggleBookmark: (photoId: Long, bookmarked: Boolean) -> Unit,
     onToggleMark: (photoId: Long, marked: Boolean) -> Unit,
     onDeleteMark: (photoId: Long, targetUserId: Long?) -> Unit,
+    onApplyLocalPaint: (photoId: Long, viewerId: Long, username: String, color: String, paths: List<PhotoPaintPath>, strokeWidth: Float) -> Unit,
     onSavePaint: (photoId: Long, paths: List<PhotoPaintPath>, strokeWidth: Float) -> Unit,
     onDeletePaint: (photoId: Long, targetUserId: Long?) -> Unit,
     onReportPhoto: (photoId: Long) -> Unit,
@@ -8203,11 +8239,33 @@ fun FeedTab(
             viewerId = viewerId,
             onDismiss = { paintEditorPhoto = null },
             onSave = { paths, strokeWidth ->
+                if (viewerId != null) {
+                    onApplyLocalPaint(
+                        target.item.photo.id,
+                        viewerId,
+                        target.item.user.username,
+                        target.item.photo.paints.firstOrNull { it.userId == viewerId }?.color
+                            ?: target.item.user.favoriteColor,
+                        paths,
+                        strokeWidth
+                    )
+                }
                 onSavePaint(target.item.photo.id, paths, strokeWidth)
                 paintEditorPhoto = null
             },
             onDelete = if (target.item.photo.paintedByMe) {
                 {
+                    if (viewerId != null) {
+                        onApplyLocalPaint(
+                            target.item.photo.id,
+                            viewerId,
+                            target.item.user.username,
+                            target.item.photo.paints.firstOrNull { it.userId == viewerId }?.color
+                                ?: target.item.user.favoriteColor,
+                            emptyList(),
+                            target.item.photo.paints.firstOrNull { it.userId == viewerId }?.strokeWidth ?: 0.035f
+                        )
+                    }
                     onDeletePaint(target.item.photo.id, null)
                     paintEditorPhoto = null
                 }
@@ -8701,6 +8759,24 @@ private fun parsePhotoPaintPaths(raw: String): List<PhotoPaintPath> {
     }.getOrDefault(emptyList())
 }
 
+private fun encodePhotoPaintPaths(paths: List<PhotoPaintPath>): String {
+    val arr = JSONArray()
+    paths.forEach { pathItem ->
+        if (pathItem.points.size < 2) return@forEach
+        val pathObj = JSONObject()
+        val pointsArr = JSONArray()
+        pathItem.points.forEach { point ->
+            val pointObj = JSONObject()
+            pointObj.put("x", point.x.coerceIn(0f, 1f))
+            pointObj.put("y", point.y.coerceIn(0f, 1f))
+            pointsArr.put(pointObj)
+        }
+        pathObj.put("points", pointsArr)
+        arr.put(pathObj)
+    }
+    return arr.toString()
+}
+
 private fun mapOverlayX(value: Float, surface: String, width: Float, frameRect: Rect): Float =
     if (normalizeOverlaySurface(surface) == "card" || frameRect == Rect.Zero) width * value.coerceIn(0f, 1f)
     else frameRect.left + frameRect.width * value.coerceIn(0f, 1f)
@@ -8844,12 +8920,23 @@ private fun PhotoPaintEditorDialog(
     val previewItem = remember(target.item, viewerId, photo.paints) {
         target.item.copy(photo = target.item.photo.copy(paints = target.item.photo.paints.filter { it.userId != viewerId }))
     }
+    fun composedPaths(): List<PhotoPaintPath> =
+        if (currentStroke.size >= 2) (draftPaths + PhotoPaintPath(currentStroke)).takeLast(12) else draftPaths
+    val initialPathsSignature = remember(initialPaths) { encodePhotoPaintPaths(initialPaths) }
+    fun dismissWithAutosave() {
+        val pathsToPersist = composedPaths()
+        if (encodePhotoPaintPaths(pathsToPersist) != initialPathsSignature) {
+            onSave(pathsToPersist, strokeWidth)
+        } else {
+            onDismiss()
+        }
+    }
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(onDismissRequest = ::dismissWithAutosave, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Card(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Post bemalen", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("Du malst direkt ueber dem echten Post. Der Strich bleibt beim Zeichnen live sichtbar.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Du malst direkt ueber dem echten Post. Der Strich bleibt beim Zeichnen live sichtbar und wird beim Schliessen automatisch gespeichert.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -8959,15 +9046,10 @@ private fun PhotoPaintEditorDialog(
                     }
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Abbrechen") }
+                    TextButton(onClick = ::dismissWithAutosave, modifier = Modifier.weight(1f)) { Text("Schliessen") }
                     Button(
                         onClick = {
-                            val pathsToSave = if (currentStroke.size >= 2) {
-                                (draftPaths + PhotoPaintPath(currentStroke)).takeLast(12)
-                            } else {
-                                draftPaths
-                            }
-                            onSave(pathsToSave, strokeWidth)
+                            onSave(composedPaths(), strokeWidth)
                         },
                         enabled = draftPaths.isNotEmpty() || currentStroke.size >= 2,
                         modifier = Modifier.weight(1f)

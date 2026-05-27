@@ -1,0 +1,12 @@
+{
+  "version": "0.5.7",
+  "releasedAt": "2026-05-27T00:00:00Z",
+  "highlights": [
+    "Malereien bleiben nach dem Schliessen des Editors erhalten und sind sofort im Feed sichtbar.",
+    "Der Paint-Editor speichert geaenderte Inhalte beim Schliessen automatisch.",
+    "Die lokale Feed-Darstellung wird fuer eigene Paints sofort optimistisch aktualisiert."
+  ],
+  "details": [
+    "Der Android-State patched eigene Paint-Overlays jetzt lokal direkt in den sichtbaren Post und serialisiert die Pfade im selben Format wie das Feed-Rendering."
+  ]
+}
