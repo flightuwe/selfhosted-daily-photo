@@ -156,6 +156,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.SpanStyle
@@ -2942,6 +2943,31 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         patchPhotoState(photo.id) { photo }
     }
 
+    private fun findPhotoDay(photoId: Long): String? {
+        state.feedByDay.forEach { (day, items) ->
+            if (items.any { it.photo.id == photoId }) return day
+        }
+        state.viewedProfile?.photos?.firstOrNull { it.id == photoId }?.day?.let { return it }
+        state.photos.firstOrNull { it.id == photoId }?.day?.let { return it }
+        state.calendarPublicData.photosByDay.forEach { (day, items) ->
+            if (items.any { it.photo.id == photoId }) return day
+        }
+        state.calendarBookmarksData.photosByDay.forEach { (day, items) ->
+            if (items.any { it.photo.id == photoId }) return day
+        }
+        state.calendarSearchData.matchesByDay.forEach { (day, items) ->
+            if (items.any { it.photo.id == photoId }) return day
+        }
+        return null
+    }
+
+    private suspend fun refreshVisibleFeedAfterCreativeMutation(photoId: Long, reason: String) {
+        findPhotoDay(photoId)?.let { staleFeedDays.add(it) }
+        if (state.activeTab == AppTab.FEED || state.feedByDay.isNotEmpty()) {
+            refreshFeed(reason)
+        }
+    }
+
     fun applyLocalPhotoPaint(
         photoId: Long,
         viewerId: Long,
@@ -3808,6 +3834,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.unmarkPhoto(photoId, null)
             }
             serverPhoto?.let(::applyServerPhoto)
+            refreshVisibleFeedAfterCreativeMutation(photoId, reason = "photo_mark")
         } catch (t: Throwable) {
             patchPhotoState(photoId) { photo -> photo.copy(markedByMe = !marked) }
             state = state.copy(message = apiError(t, "Markieren fehlgeschlagen"))
@@ -3818,6 +3845,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching { repo.unmarkPhoto(photoId, targetUserId) }
             .onSuccess { serverPhoto ->
                 serverPhoto?.let(::applyServerPhoto)
+                refreshVisibleFeedAfterCreativeMutation(photoId, reason = "photo_mark_delete")
                 state = state.copy(message = "Markierung entfernt")
             }
             .onFailure {
@@ -3829,6 +3857,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching { repo.savePhotoPaint(photoId, paths, strokeWidth) }
             .onSuccess { serverPhoto ->
                 serverPhoto?.let(::applyServerPhoto)
+                refreshVisibleFeedAfterCreativeMutation(photoId, reason = "photo_paint_save")
                 state = state.copy(message = "Malerei gespeichert")
             }
             .onFailure {
@@ -3840,6 +3869,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching { repo.deletePhotoPaint(photoId, targetUserId) }
             .onSuccess { serverPhoto ->
                 serverPhoto?.let(::applyServerPhoto)
+                refreshVisibleFeedAfterCreativeMutation(photoId, reason = "photo_paint_delete")
                 state = state.copy(message = "Malerei entfernt")
             }
             .onFailure {
@@ -8508,7 +8538,9 @@ private fun PostCanvasCard(
     val comments = remember(item.comments) {
         item.comments.orEmpty().sortedWith(compareBy<PhotoCommentItem>({ parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN }, { it.id }))
     }
+    val density = LocalDensity.current
     var rootOrigin by remember(item.photo.id) { mutableStateOf(Offset.Zero) }
+    var rootSize by remember(item.photo.id) { mutableStateOf(IntSize.Zero) }
     var frameOrigin by remember(item.photo.id) { mutableStateOf(Offset.Zero) }
     var frameSize by remember(item.photo.id) { mutableStateOf(Size.Zero) }
     val frameRect = remember(rootOrigin, frameOrigin, frameSize) {
@@ -8524,7 +8556,10 @@ private fun PostCanvasCard(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .onGloballyPositioned { rootOrigin = it.positionInRoot() }
+                .onGloballyPositioned {
+                    rootOrigin = it.positionInRoot()
+                    rootSize = it.size
+                }
         ) {
             Column(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -8709,7 +8744,15 @@ private fun PostCanvasCard(
                     }
                 }
             }
-            overlay(frameRect)
+            if (rootSize != IntSize.Zero) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(with(density) { rootSize.height.toDp() })
+                ) {
+                    overlay(frameRect)
+                }
+            }
         }
     }
 }

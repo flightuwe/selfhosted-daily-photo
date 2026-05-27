@@ -1,0 +1,13 @@
+{
+  "version": "0.5.8",
+  "releasedAt": "2026-05-27T00:00:00Z",
+  "highlights": [
+    "Kreativspuren werden jetzt auch auf der normalen Feed-Karte sichtbar gerendert.",
+    "Nach Speichern, Loeschen und Markier-Aktionen wird der Feed sofort neu geladen.",
+    "Der Paint-Editor fuehrt mit Speichern direkt zur aktualisierten Feed-Ansicht zurueck."
+  ],
+  "details": [
+    "Die Overlay-Flaeche der Feed-Card ist jetzt an die echte Kartenhoehe gebunden statt an eine kollabierende Canvas-Flaeche.",
+    "Erfolgreiche Mark- und Paint-Mutationen markieren den betroffenen Feed-Tag als stale und stossen direkt einen Feed-Refresh an."
+  ]
+}
