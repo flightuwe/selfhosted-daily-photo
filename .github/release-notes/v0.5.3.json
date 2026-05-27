@@ -1,0 +1,12 @@
+{
+  "version": "0.5.3",
+  "releasedAt": "2026-05-27T00:00:00Z",
+  "highlights": [
+    "Feed-Posts koennen jetzt oeffentlich am Rahmen markiert oder bemalt werden, wenn der Post-Eigentuemer das freigibt.",
+    "Der Feed zeigt Bookmark-Zaehler direkt am Post, und im Profil kommen Pin-Statistiken fuer gegebene und erhaltene Merker dazu.",
+    "Post-Eigentuemer koennen fremde Markierungen und Malereien auf den eigenen Posts direkt im Feed verwalten und entfernen."
+  ],
+  "details": [
+    "Das Malen ist auf den Rahmen begrenzt, bietet Undo pro Stroke und behandelt Dual-Posts mit einer klareren Vorschau."
+  ]
+}

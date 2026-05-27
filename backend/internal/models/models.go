@@ -17,6 +17,7 @@ type User struct {
 	PhotoCommentPushEnabled       bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
 	BookmarkedPhotoPushEnabled    bool       `gorm:"default:false" json:"bookmarkedPhotoPushEnabled"`
 	AllowPhotoDownload            bool       `gorm:"default:false" json:"allowPhotoDownload"`
+	CreativePostMode              string     `gorm:"size:16;default:'none'" json:"creativePostMode"`
 	LocationFeatureEnabled        bool       `gorm:"default:false" json:"locationFeatureEnabled"`
 	LocationShareDefaultEnabled   bool       `gorm:"default:false" json:"locationShareDefaultEnabled"`
 	AvatarPath                    string     `gorm:"size:255" json:"avatarUrl"`
@@ -304,6 +305,35 @@ type PhotoBookmark struct {
 	UserID    uint      `gorm:"not null;index:idx_photo_bookmark_user_photo,unique" json:"userId"`
 	PhotoID   uint      `gorm:"not null;index:idx_photo_bookmark_user_photo,unique;index" json:"photoId"`
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+type PhotoMark struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	PhotoID   uint      `gorm:"not null;index:idx_photo_mark_user_photo,unique;index" json:"photoId"`
+	UserID    uint      `gorm:"not null;index:idx_photo_mark_user_photo,unique;index" json:"userId"`
+	User      User      `json:"user"`
+	Color     string    `gorm:"size:7;not null" json:"color"`
+	CenterX   float64   `gorm:"not null" json:"centerX"`
+	CenterY   float64   `gorm:"not null" json:"centerY"`
+	RadiusX   float64   `gorm:"not null" json:"radiusX"`
+	RadiusY   float64   `gorm:"not null" json:"radiusY"`
+	Rotation  float64   `gorm:"not null" json:"rotation"`
+	Seed      int64     `gorm:"not null" json:"seed"`
+	Layer     int64     `gorm:"not null;index" json:"layer"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type PhotoPaint struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	PhotoID     uint      `gorm:"not null;index:idx_photo_paint_user_photo,unique;index" json:"photoId"`
+	UserID      uint      `gorm:"not null;index:idx_photo_paint_user_photo,unique;index" json:"userId"`
+	User        User      `json:"user"`
+	Color       string    `gorm:"size:7;not null" json:"color"`
+	StrokeWidth float64   `gorm:"not null" json:"strokeWidth"`
+	PathsJSON   string    `gorm:"type:text;not null" json:"pathsJson"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type PhotoReaction struct {

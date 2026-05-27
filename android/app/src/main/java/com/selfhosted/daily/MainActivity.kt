@@ -42,6 +42,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -50,6 +51,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -126,10 +128,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path as ComposePath
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.consumePositionChange
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -247,6 +256,7 @@ data class User(
     val photoCommentPushEnabled: Boolean = false,
     val bookmarkedPhotoPushEnabled: Boolean = false,
     val allowPhotoDownload: Boolean = false,
+    val creativePostMode: String = "none",
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
     val avatarUrl: String = "",
@@ -265,7 +275,13 @@ data class User(
     val diagnosticsConsentUpdatedAt: String? = null,
     val diagnosticsConsentSource: String? = null
 )
-data class MeResponse(val user: User, val dailyMomentCount: Int = 0, val streakDays: Int = 0)
+data class MeResponse(
+    val user: User,
+    val dailyMomentCount: Int = 0,
+    val streakDays: Int = 0,
+    val bookmarksGivenCount: Int = 0,
+    val bookmarksReceivedCount: Int = 0
+)
 data class ProfileUpdateRequest(
     val username: String,
     val favoriteColor: String,
@@ -290,6 +306,7 @@ data class PreferencesUpdateRequest(
     val photoCommentPushEnabled: Boolean,
     val bookmarkedPhotoPushEnabled: Boolean? = null,
     val allowPhotoDownload: Boolean,
+    val creativePostMode: String? = null,
     val locationFeatureEnabled: Boolean? = null,
     val locationShareDefaultEnabled: Boolean? = null,
     val diagnosticsConsentGranted: Boolean? = null,
@@ -397,7 +414,47 @@ data class PromptPhoto(
     val locationDisplay: String? = null,
     val locationMapsUrl: String? = null,
     val bookmarkedByMe: Boolean = false,
-    val publicNumber: String? = null
+    val bookmarkCount: Int = 0,
+    val publicNumber: String? = null,
+    val creativePostMode: String = "none",
+    val canMark: Boolean = false,
+    val canPaint: Boolean = false,
+    val markedByMe: Boolean = false,
+    val paintedByMe: Boolean = false,
+    val marks: List<PhotoMarkOverlay> = emptyList(),
+    val paints: List<PhotoPaintOverlay> = emptyList()
+)
+data class PhotoMarkOverlay(
+    val id: Long,
+    val userId: Long,
+    val username: String = "",
+    val color: String = "#1F5FBF",
+    val centerX: Float = 0.5f,
+    val centerY: Float = 0.5f,
+    val radiusX: Float = 0.12f,
+    val radiusY: Float = 0.1f,
+    val rotation: Float = 0f,
+    val seed: Long = 0L,
+    val layer: Long = 0L
+)
+data class PhotoPaintPoint(
+    val x: Float = 0f,
+    val y: Float = 0f
+)
+data class PhotoPaintPath(
+    val points: List<PhotoPaintPoint> = emptyList()
+)
+data class PhotoPaintOverlay(
+    val id: Long,
+    val userId: Long,
+    val username: String = "",
+    val color: String = "#1F5FBF",
+    val strokeWidth: Float = 0.035f,
+    val pathsJson: String = ""
+)
+data class PhotoPaintRequest(
+    val paths: List<PhotoPaintPath> = emptyList(),
+    val strokeWidth: Float = 0.035f
 )
 data class PromptResponse(
     val day: String,
@@ -519,6 +576,7 @@ data class CalendarFeaturedPhoto(
     val commentCount: Long = 0,
     val interactionCount: Long = 0,
     val bookmarkedByMe: Boolean = false,
+    val bookmarkCount: Int = 0,
     val publicNumber: String? = null
 )
 data class CalendarPhotoItem(
@@ -595,7 +653,13 @@ data class UserProfileResponse(
     val profileVisible: Boolean = false,
     val isSelf: Boolean = false,
     val user: User,
-    val photos: List<PromptPhoto> = emptyList()
+    val photos: List<PromptPhoto> = emptyList(),
+    val bookmarksGivenCount: Int = 0,
+    val bookmarksReceivedCount: Int = 0
+)
+data class PhotoMutationResponse(
+    val ok: Boolean = false,
+    val photo: PromptPhoto? = null
 )
 data class ChatItem(
     val id: Long,
@@ -929,13 +993,40 @@ interface Api {
     suspend fun bookmarkPhoto(
         @Header("Authorization") token: String,
         @Path("id") id: Long
-    ): Map<String, Any?>
+    ): PhotoMutationResponse
 
     @DELETE("photos/{id}/bookmark")
     suspend fun unbookmarkPhoto(
         @Header("Authorization") token: String,
         @Path("id") id: Long
-    ): Map<String, Any?>
+    ): PhotoMutationResponse
+
+    @POST("photos/{id}/mark")
+    suspend fun markPhoto(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): PhotoMutationResponse
+
+    @DELETE("photos/{id}/mark")
+    suspend fun unmarkPhoto(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long,
+        @Query("userId") userId: Long? = null
+    ): PhotoMutationResponse
+
+    @PUT("photos/{id}/paint")
+    suspend fun savePhotoPaint(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long,
+        @Body body: PhotoPaintRequest
+    ): PhotoMutationResponse
+
+    @DELETE("photos/{id}/paint")
+    suspend fun deletePhotoPaint(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long,
+        @Query("userId") userId: Long? = null
+    ): PhotoMutationResponse
 
     @DELETE("photos/bookmarks")
     suspend fun clearBookmarks(@Header("Authorization") token: String): BookmarkClearResponse
@@ -1816,6 +1907,7 @@ class AppRepo(
         photoReactionPushEnabled: Boolean,
         photoCommentPushEnabled: Boolean,
         allowPhotoDownload: Boolean,
+        creativePostMode: String? = null,
         bookmarkedPhotoPushEnabled: Boolean? = null,
         specialMomentPushEnabled: Boolean? = null,
         locationFeatureEnabled: Boolean? = null,
@@ -1833,6 +1925,7 @@ class AppRepo(
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
                 allowPhotoDownload = allowPhotoDownload,
+                creativePostMode = creativePostMode,
                 specialMomentPushEnabled = specialMomentPushEnabled,
                 locationFeatureEnabled = locationFeatureEnabled,
                 locationShareDefaultEnabled = locationShareDefaultEnabled,
@@ -1912,13 +2005,29 @@ class AppRepo(
     suspend fun photoInteractions(photoId: Long): PhotoInteractionsResponse =
         authorizedCall("/api/photos/:id/interactions") { token -> api.photoInteractions(token, photoId) }
 
-    suspend fun bookmarkPhoto(photoId: Long) {
-        authorizedCall("/api/photos/:id/bookmark") { token -> api.bookmarkPhoto(token, photoId) }
-    }
+    suspend fun bookmarkPhoto(photoId: Long): PromptPhoto? =
+        authorizedCall("/api/photos/:id/bookmark") { token -> api.bookmarkPhoto(token, photoId) }.photo
 
-    suspend fun unbookmarkPhoto(photoId: Long) {
-        authorizedCall("/api/photos/:id/bookmark") { token -> api.unbookmarkPhoto(token, photoId) }
-    }
+    suspend fun unbookmarkPhoto(photoId: Long): PromptPhoto? =
+        authorizedCall("/api/photos/:id/bookmark") { token -> api.unbookmarkPhoto(token, photoId) }.photo
+
+    suspend fun markPhoto(photoId: Long): PromptPhoto? =
+        authorizedCall("/api/photos/:id/mark") { token -> api.markPhoto(token, photoId) }.photo
+
+    suspend fun unmarkPhoto(photoId: Long, targetUserId: Long? = null): PromptPhoto? =
+        authorizedCall("/api/photos/:id/mark") { token -> api.unmarkPhoto(token, photoId, targetUserId) }.photo
+
+    suspend fun savePhotoPaint(
+        photoId: Long,
+        paths: List<PhotoPaintPath>,
+        strokeWidth: Float
+    ): PromptPhoto? =
+        authorizedCall("/api/photos/:id/paint") { token ->
+            api.savePhotoPaint(token, photoId, PhotoPaintRequest(paths = paths, strokeWidth = strokeWidth))
+        }.photo
+
+    suspend fun deletePhotoPaint(photoId: Long, targetUserId: Long? = null): PromptPhoto? =
+        authorizedCall("/api/photos/:id/paint") { token -> api.deletePhotoPaint(token, photoId, targetUserId) }.photo
 
     suspend fun clearBookmarks(): Int =
         authorizedCall("/api/photos/bookmarks") { token -> api.clearBookmarks(token) }.deletedCount
@@ -2525,6 +2634,8 @@ data class UiState(
     val photos: List<PromptPhoto> = emptyList(),
     val streakDays: Int = 0,
     val dailyMomentCount: Int = 0,
+    val bookmarksGivenCount: Int = 0,
+    val bookmarksReceivedCount: Int = 0,
     val chat: List<ChatItem> = emptyList(),
     val uploadQueue: List<QueuedUploadItem> = emptyList(),
     val photoInteractions: PhotoInteractionsResponse? = null,
@@ -2597,6 +2708,8 @@ data class DashboardData(
     val me: User,
     val streakDays: Int,
     val dailyMomentCount: Int,
+    val bookmarksGivenCount: Int,
+    val bookmarksReceivedCount: Int,
     val inviteCode: String,
     val prompt: PromptResponse,
     val rules: PromptRulesResponse,
@@ -2732,42 +2845,60 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         applyCalendarDataset(dataset)
     }
 
-    private fun toggleBookmarkInPhoto(photo: PromptPhoto, bookmarked: Boolean): PromptPhoto =
-        photo.copy(bookmarkedByMe = bookmarked)
-
-    private fun toggleBookmarkInFeedItem(item: FeedItem, bookmarked: Boolean): FeedItem =
-        item.copy(photo = item.photo.copy(bookmarkedByMe = bookmarked))
-
-    private fun updateBookmarkStateLocally(photoId: Long, bookmarked: Boolean) {
+    private fun patchPhotoState(
+        photoId: Long,
+        transform: (PromptPhoto) -> PromptPhoto
+    ) {
         val newFeedByDay = state.feedByDay.mapValues { (_, items) ->
             items.map { item ->
-                if (item.photo.id == photoId) toggleBookmarkInFeedItem(item, bookmarked) else item
+                if (item.photo.id == photoId) item.copy(photo = transform(item.photo)) else item
             }
         }
         val newPhotos = state.photos.map { photo ->
-            if (photo.id == photoId) toggleBookmarkInPhoto(photo, bookmarked) else photo
+            if (photo.id == photoId) transform(photo) else photo
         }
         val viewedProfile = state.viewedProfile
         val newViewedProfile = viewedProfile?.copy(
             photos = viewedProfile.photos.map { photo ->
-                if (photo.id == photoId) toggleBookmarkInPhoto(photo, bookmarked) else photo
+                if (photo.id == photoId) transform(photo) else photo
             }
         )
         fun updateDataset(dataset: CalendarDataset): CalendarDataset {
             val updatedStats = dataset.dayStats.mapValues { (_, stat) ->
                 val featured = stat.featuredPhoto
-                if (featured?.photoId == photoId) featured.copy(bookmarkedByMe = bookmarked).let { stat.copy(featuredPhoto = it) } else stat
+                if (featured?.photoId == photoId) {
+                    val patched = transform(
+                        PromptPhoto(
+                            id = featured.photoId,
+                            day = stat.day,
+                            promptOnly = false,
+                            caption = null,
+                            url = featured.url,
+                            secondUrl = featured.secondUrl,
+                            createdAt = "",
+                            bookmarkedByMe = featured.bookmarkedByMe,
+                            bookmarkCount = featured.bookmarkCount,
+                            publicNumber = featured.publicNumber
+                        )
+                    )
+                    stat.copy(
+                        featuredPhoto = featured.copy(
+                            bookmarkedByMe = patched.bookmarkedByMe,
+                            bookmarkCount = patched.bookmarkCount
+                        )
+                    )
+                } else stat
             }
             val updatedPhotosByDay = dataset.photosByDay.mapValues { (_, items) ->
                 items.map { item ->
-                    if (item.photo.id == photoId) item.copy(photo = item.photo.copy(bookmarkedByMe = bookmarked)) else item
+                    if (item.photo.id == photoId) item.copy(photo = transform(item.photo)) else item
                 }
             }
             return dataset.copy(dayStats = updatedStats, photosByDay = updatedPhotosByDay)
         }
         val updatedSearchMatches = state.calendarSearchData.matchesByDay.mapValues { (_, matches) ->
             matches.map { match ->
-                if (match.photo.id == photoId) match.copy(photo = match.photo.copy(bookmarkedByMe = bookmarked)) else match
+                if (match.photo.id == photoId) match.copy(photo = transform(match.photo)) else match
             }
         }
         state = state.copy(
@@ -2783,6 +2914,54 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
         )
         applyCalendarModeDataset()
+    }
+
+    private fun applyServerPhoto(photo: PromptPhoto) {
+        patchPhotoState(photo.id) { photo }
+    }
+
+    private fun updateBookmarkStateLocally(photoId: Long, bookmarked: Boolean) {
+        patchPhotoState(photoId) { photo ->
+            val nextCount = (photo.bookmarkCount + if (bookmarked) 1 else -1).coerceAtLeast(0)
+            photo.copy(bookmarkedByMe = bookmarked, bookmarkCount = nextCount)
+        }
+    }
+
+    private fun findPhotoOwnerId(photoId: Long): Long? {
+        state.feedByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.let { return it.user.id }
+        state.viewedProfile?.photos?.firstOrNull { it.id == photoId }?.let { return state.viewedProfile?.user?.id }
+        state.calendarPublicData.photosByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.let { return it.user.id }
+        state.calendarBookmarksData.photosByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.let { return it.user.id }
+        state.calendarSearchData.matchesByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.let { return it.user.id }
+        return null
+    }
+
+    private fun adjustBookmarkCounters(photoId: Long, delta: Int) {
+        if (delta == 0) return
+        val meId = state.user?.id ?: return
+        val ownerId = findPhotoOwnerId(photoId) ?: return
+        state = state.copy(
+            bookmarksGivenCount = (state.bookmarksGivenCount + delta).coerceAtLeast(0),
+            bookmarksReceivedCount = if (ownerId == meId) {
+                (state.bookmarksReceivedCount + delta).coerceAtLeast(0)
+            } else {
+                state.bookmarksReceivedCount
+            },
+            viewedProfile = state.viewedProfile?.let { profile ->
+                if (profile.isSelf) {
+                    profile.copy(
+                        bookmarksGivenCount = (profile.bookmarksGivenCount + delta).coerceAtLeast(0),
+                        bookmarksReceivedCount = if (ownerId == meId) {
+                            (profile.bookmarksReceivedCount + delta).coerceAtLeast(0)
+                        } else {
+                            profile.bookmarksReceivedCount
+                        }
+                    )
+                } else {
+                    profile
+                }
+            }
+        )
     }
 
     private fun removeBookmarkFromBookmarksDataset(photoId: Long) {
@@ -3546,20 +3725,72 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun toggleBookmark(photoId: Long, bookmarked: Boolean) {
         updateBookmarkStateLocally(photoId, bookmarked)
+        adjustBookmarkCounters(photoId, if (bookmarked) 1 else -1)
         try {
-            if (bookmarked) {
+            val serverPhoto = if (bookmarked) {
                 repo.bookmarkPhoto(photoId)
             } else {
-                repo.unbookmarkPhoto(photoId)
+                val updatedPhoto = repo.unbookmarkPhoto(photoId)
                 removeBookmarkFromBookmarksDataset(photoId)
+                updatedPhoto
             }
+            serverPhoto?.let(::applyServerPhoto)
             if (state.calendarMode == CalendarMode.BOOKMARKS || state.calendarBookmarksData.days.isNotEmpty()) {
                 ensureCalendarModeLoaded(CalendarMode.BOOKMARKS, force = true)
             }
         } catch (t: Throwable) {
             updateBookmarkStateLocally(photoId, !bookmarked)
+            adjustBookmarkCounters(photoId, if (bookmarked) -1 else 1)
             state = state.copy(message = apiError(t, "Merken fehlgeschlagen"))
         }
+    }
+
+    suspend fun toggleMark(photoId: Long, marked: Boolean) {
+        patchPhotoState(photoId) { photo -> photo.copy(markedByMe = marked) }
+        try {
+            val serverPhoto = if (marked) {
+                repo.markPhoto(photoId)
+            } else {
+                repo.unmarkPhoto(photoId, null)
+            }
+            serverPhoto?.let(::applyServerPhoto)
+        } catch (t: Throwable) {
+            patchPhotoState(photoId) { photo -> photo.copy(markedByMe = !marked) }
+            state = state.copy(message = apiError(t, "Markieren fehlgeschlagen"))
+        }
+    }
+
+    suspend fun deletePhotoMark(photoId: Long, targetUserId: Long? = null) {
+        runCatching { repo.unmarkPhoto(photoId, targetUserId) }
+            .onSuccess { serverPhoto ->
+                serverPhoto?.let(::applyServerPhoto)
+                state = state.copy(message = "Markierung entfernt")
+            }
+            .onFailure {
+                state = state.copy(message = apiError(it, "Markierung entfernen fehlgeschlagen"))
+            }
+    }
+
+    suspend fun savePhotoPaint(photoId: Long, paths: List<PhotoPaintPath>, strokeWidth: Float) {
+        runCatching { repo.savePhotoPaint(photoId, paths, strokeWidth) }
+            .onSuccess { serverPhoto ->
+                serverPhoto?.let(::applyServerPhoto)
+                state = state.copy(message = "Malerei gespeichert")
+            }
+            .onFailure {
+                state = state.copy(message = apiError(it, "Malerei speichern fehlgeschlagen"))
+            }
+    }
+
+    suspend fun deletePhotoPaint(photoId: Long, targetUserId: Long? = null) {
+        runCatching { repo.deletePhotoPaint(photoId, targetUserId) }
+            .onSuccess { serverPhoto ->
+                serverPhoto?.let(::applyServerPhoto)
+                state = state.copy(message = "Malerei entfernt")
+            }
+            .onFailure {
+                state = state.copy(message = apiError(it, "Malerei entfernen fehlgeschlagen"))
+            }
     }
 
     suspend fun reportPhoto(photoId: Long) {
@@ -3673,6 +3904,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     me = bootstrap.me.user,
                     streakDays = bootstrap.me.streakDays,
                     dailyMomentCount = bootstrap.me.dailyMomentCount,
+                    bookmarksGivenCount = bootstrap.me.bookmarksGivenCount,
+                    bookmarksReceivedCount = bootstrap.me.bookmarksReceivedCount,
                     inviteCode = bootstrap.inviteCode,
                     prompt = bootstrap.prompt,
                     rules = bootstrap.promptRules,
@@ -3705,7 +3938,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     MeResponse(
                         user = cachedUser,
                         dailyMomentCount = state.dailyMomentCount,
-                        streakDays = state.streakDays
+                        streakDays = state.streakDays,
+                        bookmarksGivenCount = state.bookmarksGivenCount,
+                        bookmarksReceivedCount = state.bookmarksReceivedCount
                     )
                 }
                 val fetchedInviteCode = runCatching { repo.myInviteCode() }.getOrElse {
@@ -3762,6 +3997,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     me = meResp.user,
                     streakDays = meResp.streakDays,
                     dailyMomentCount = meResp.dailyMomentCount,
+                    bookmarksGivenCount = meResp.bookmarksGivenCount,
+                    bookmarksReceivedCount = meResp.bookmarksReceivedCount,
                     inviteCode = fetchedInviteCode,
                     prompt = fetchedPrompt,
                     rules = fetchedRules,
@@ -3775,6 +4012,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             var me = payload.me
             val streakDays = payload.streakDays
             val dailyMomentCount = payload.dailyMomentCount
+            val bookmarksGivenCount = payload.bookmarksGivenCount
+            val bookmarksReceivedCount = payload.bookmarksReceivedCount
             val inviteCode = payload.inviteCode
             if (repo.pollPushPendingSync()) {
                 val desiredPollPush = repo.pollPushLocalEnabled()
@@ -3852,6 +4091,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photos = photos,
                 streakDays = streakDays,
                 dailyMomentCount = dailyMomentCount,
+                bookmarksGivenCount = bookmarksGivenCount,
+                bookmarksReceivedCount = bookmarksReceivedCount,
                 chat = chat,
                 chatHasOtherMessages = true,
                 chatHasUnreadMessages = hasUnreadChat,
@@ -5333,6 +5574,32 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
+    suspend fun setCreativePostMode(mode: String) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                current.pollPushEnabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload,
+                creativePostMode = mode
+            )
+        }
+            .onSuccess { user ->
+                state = state.copy(
+                    user = user,
+                    loading = false,
+                    message = "Kreativfreigabe gespeichert"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Kreativfreigabe speichern fehlgeschlagen"))
+            }
+    }
+
     suspend fun setLocationFeatureEnabled(enabled: Boolean) {
         val current = state.user ?: return
         state = state.copy(loading = true)
@@ -6692,6 +6959,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
 
                 AppTab.FEED -> FeedTab(
                     prompt = state.prompt,
+                    viewerId = state.user?.id,
                     days = state.feedDays,
                     byDay = state.feedByDay,
                     monthRecapByDay = state.monthRecapByDay,
@@ -6712,6 +6980,10 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onFocusPhotoConsumed = { vm.clearFeedPhotoFocus() },
                     onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
                     onToggleBookmark = { photoId, bookmarked -> scope.launch { vm.toggleBookmark(photoId, bookmarked) } },
+                    onToggleMark = { photoId, marked -> scope.launch { vm.toggleMark(photoId, marked) } },
+                    onDeleteMark = { photoId, targetUserId -> scope.launch { vm.deletePhotoMark(photoId, targetUserId) } },
+                    onSavePaint = { photoId, paths, strokeWidth -> scope.launch { vm.savePhotoPaint(photoId, paths, strokeWidth) } },
+                    onDeletePaint = { photoId, targetUserId -> scope.launch { vm.deletePhotoPaint(photoId, targetUserId) } },
                     onReportPhoto = { photoId -> scope.launch { vm.reportPhoto(photoId) } },
                     onOpenHashtagSearch = { vm.openCalendarSearch(it) },
                     onOpenViewer = { urls, photoId ->
@@ -6783,6 +7055,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     inviteCode = state.myInviteCode,
                     streakDays = state.streakDays,
                     dailyMomentCount = state.dailyMomentCount,
+                    bookmarksGivenCount = state.bookmarksGivenCount,
+                    bookmarksReceivedCount = state.bookmarksReceivedCount,
                     promptRules = state.promptRules,
                     photos = state.photos,
                     themeMode = themeModeValue(state.darkMode, state.oledMode),
@@ -6813,6 +7087,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
                     bookmarkedPhotoPushEnabled = state.user?.bookmarkedPhotoPushEnabled ?: state.bookmarkedPhotoPushEnabled,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
+                    creativePostMode = state.user?.creativePostMode ?: "none",
                     locationFeatureEnabled = state.user?.locationFeatureEnabled ?: false,
                     locationShareDefaultEnabled = state.user?.locationShareDefaultEnabled ?: false,
                     locationPermissionGranted = locationPermissionGranted,
@@ -6853,6 +7128,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
                     onBookmarkedPhotoPushEnabledChange = { scope.launch { vm.setBookmarkedPhotoPushEnabled(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
+                    onCreativePostModeChange = { scope.launch { vm.setCreativePostMode(it) } },
                     onLocationFeatureEnabledChange = { scope.launch { vm.setLocationFeatureEnabled(it) } },
                     onLocationShareDefaultEnabledChange = { scope.launch { vm.setLocationShareDefaultEnabled(it) } },
                     onRequestLocationPermission = ::requestLocationPermission,
@@ -7664,6 +7940,7 @@ fun ChatTabIcon(showIndicator: Boolean, unread: Boolean) {
 @OptIn(ExperimentalMaterialApi::class)
 fun FeedTab(
     prompt: PromptResponse?,
+    viewerId: Long?,
     days: List<String>,
     byDay: Map<String, List<FeedItem>>,
     monthRecapByDay: Map<String, MonthlyRecap>,
@@ -7684,6 +7961,10 @@ fun FeedTab(
     onFocusPhotoConsumed: () -> Unit,
     onOpenUserProfile: (Long) -> Unit,
     onToggleBookmark: (photoId: Long, bookmarked: Boolean) -> Unit,
+    onToggleMark: (photoId: Long, marked: Boolean) -> Unit,
+    onDeleteMark: (photoId: Long, targetUserId: Long?) -> Unit,
+    onSavePaint: (photoId: Long, paths: List<PhotoPaintPath>, strokeWidth: Float) -> Unit,
+    onDeletePaint: (photoId: Long, targetUserId: Long?) -> Unit,
     onReportPhoto: (photoId: Long) -> Unit,
     onOpenHashtagSearch: (String) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
@@ -7692,6 +7973,9 @@ fun FeedTab(
     val primaryTextColor = MaterialTheme.colorScheme.onSurface
     val secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant
     val pullRefreshState = rememberPullRefreshState(refreshing = refreshing, onRefresh = onRefresh)
+    var paintEditorPhoto by remember { mutableStateOf<PromptPhoto?>(null) }
+    var paintModerationPhoto by remember { mutableStateOf<FeedItem?>(null) }
+    var markModerationPhoto by remember { mutableStateOf<FeedItem?>(null) }
 
     val rows = remember(days, byDay, monthRecapByDay, promptMetaByDay) {
         buildList {
@@ -7830,7 +8114,7 @@ fun FeedTab(
                     val item = row.item
                     val meta = promptMetaByDay[row.day]
                     val urls = listOfNotNull(item.photo.url, item.photo.secondUrl)
-                    var menuExpanded by remember(item.photo.id, item.photo.bookmarkedByMe) { mutableStateOf(false) }
+                    var menuExpanded by remember(item.photo.id, item.photo.bookmarkedByMe, item.photo.markedByMe, item.photo.paintedByMe, item.photo.paints) { mutableStateOf(false) }
                     val isMomentWindowPost = isWithinDailyMomentWindow(
                         item.photo.createdAt,
                         meta?.triggeredAt,
@@ -7840,7 +8124,10 @@ fun FeedTab(
                     val requestedByUser = item.requestedByUser ?: meta?.specialRequestedByUser ?: meta?.requestedByUser
                     val requestedByUserColor = item.specialRequestedByUserColor ?: meta?.specialRequestedByUserColor
                     Card {
-                        Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box {
+                            PhotoMarkLayer(item.photo)
+                            PhotoPaintLayer(item.photo)
+                            Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -7891,6 +8178,51 @@ fun FeedTab(
                                                     onToggleBookmark(item.photo.id, !item.photo.bookmarkedByMe)
                                                 }
                                             )
+                                            if (item.photo.canMark) {
+                                                androidx.compose.material3.DropdownMenuItem(
+                                                    text = { Text(if (item.photo.markedByMe) "Markierung entfernen" else "Markieren") },
+                                                    onClick = {
+                                                        menuExpanded = false
+                                                        onToggleMark(item.photo.id, !item.photo.markedByMe)
+                                                    }
+                                                )
+                                            }
+                                            if (viewerId == item.user.id && item.photo.marks.any { it.userId != viewerId }) {
+                                                androidx.compose.material3.DropdownMenuItem(
+                                                    text = { Text("Fremde Markierungen verwalten") },
+                                                    onClick = {
+                                                        menuExpanded = false
+                                                        markModerationPhoto = item
+                                                    }
+                                                )
+                                            }
+                                            if (item.photo.canPaint || item.photo.paintedByMe) {
+                                                androidx.compose.material3.DropdownMenuItem(
+                                                    text = { Text(if (item.photo.paintedByMe) "Malerei bearbeiten" else "Malen") },
+                                                    onClick = {
+                                                        menuExpanded = false
+                                                        paintEditorPhoto = item.photo
+                                                    }
+                                                )
+                                            }
+                                            if (item.photo.paintedByMe) {
+                                                androidx.compose.material3.DropdownMenuItem(
+                                                    text = { Text("Eigene Malerei entfernen") },
+                                                    onClick = {
+                                                        menuExpanded = false
+                                                        onDeletePaint(item.photo.id, null)
+                                                    }
+                                                )
+                                            }
+                                            if (viewerId == item.user.id && item.photo.paints.any { it.userId != viewerId }) {
+                                                androidx.compose.material3.DropdownMenuItem(
+                                                    text = { Text("Fremde Malereien verwalten") },
+                                                    onClick = {
+                                                        menuExpanded = false
+                                                        paintModerationPhoto = item
+                                                    }
+                                                )
+                                            }
                                             androidx.compose.material3.DropdownMenuItem(
                                                 text = { Text("Melden") },
                                                 onClick = {
@@ -7911,11 +8243,24 @@ fun FeedTab(
                                 )
                             }
                             if (!isMomentWindowPost) {
-                                Text(
-                                    "🕒 ${formatMomentTime(item.photo.createdAt)}",
-                                    color = secondaryTextColor,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "🕒 ${formatMomentTime(item.photo.createdAt)}",
+                                        color = secondaryTextColor,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    if (item.photo.bookmarkCount > 0) {
+                                        Text(
+                                            "📌 ${item.photo.bookmarkCount}",
+                                            color = secondaryTextColor,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
                                 uploadTimeHint(item.photo)?.let { hint ->
                                     Text(
                                         hint,
@@ -8037,6 +8382,7 @@ fun FeedTab(
                                 )
                             }
                         }
+                        }
                     }
                 }
                 is FeedRow.MonthRecapItem -> {
@@ -8056,6 +8402,454 @@ fun FeedTab(
             state = pullRefreshState,
             modifier = Modifier.align(Alignment.TopCenter)
         )
+    }
+
+    paintEditorPhoto?.let { photo ->
+        PhotoPaintEditorDialog(
+            photo = photo,
+            viewerId = viewerId,
+            onDismiss = { paintEditorPhoto = null },
+            onSave = { paths, strokeWidth ->
+                onSavePaint(photo.id, paths, strokeWidth)
+                paintEditorPhoto = null
+            },
+            onDelete = if (photo.paintedByMe) {
+                {
+                    onDeletePaint(photo.id, null)
+                    paintEditorPhoto = null
+                }
+            } else {
+                null
+            }
+        )
+    }
+
+    paintModerationPhoto?.let { item ->
+        AlertDialog(
+            onDismissRequest = { paintModerationPhoto = null },
+            confirmButton = {
+                TextButton(onClick = { paintModerationPhoto = null }) { Text("Schliessen") }
+            },
+            title = { Text("Fremde Malereien") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val others = item.photo.paints.filter { it.userId != viewerId }
+                    if (others.isEmpty()) {
+                        Text("Keine fremden Malereien mehr vorhanden.")
+                    } else {
+                        others.forEach { paint ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    paint.username.ifBlank { "User ${paint.userId}" },
+                                    color = parseUserColor(paint.color),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                TextButton(
+                                    onClick = {
+                                        onDeletePaint(item.photo.id, paint.userId)
+                                        paintModerationPhoto = null
+                                    }
+                                ) { Text("Entfernen") }
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    markModerationPhoto?.let { item ->
+        AlertDialog(
+            onDismissRequest = { markModerationPhoto = null },
+            confirmButton = {
+                TextButton(onClick = { markModerationPhoto = null }) { Text("Schliessen") }
+            },
+            title = { Text("Fremde Markierungen") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val others = item.photo.marks.filter { it.userId != viewerId }
+                    if (others.isEmpty()) {
+                        Text("Keine fremden Markierungen mehr vorhanden.")
+                    } else {
+                        others.forEach { mark ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    mark.username.ifBlank { "User ${mark.userId}" },
+                                    color = parseUserColor(mark.color),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                TextButton(
+                                    onClick = {
+                                        onDeleteMark(item.photo.id, mark.userId)
+                                        markModerationPhoto = null
+                                    }
+                                ) { Text("Entfernen") }
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun PhotoMarkLayer(photo: PromptPhoto) {
+    if (photo.marks.isEmpty()) return
+    Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .blur(6.dp)
+    ) {
+        photo.marks.sortedBy { it.layer }.forEach { mark ->
+            val baseColor = parseUserColor(mark.color)
+            val width = size.width * mark.radiusX.coerceIn(0.05f, 0.28f) * 2f
+            val height = size.height * mark.radiusY.coerceIn(0.05f, 0.24f) * 2f
+            val cx = size.width * mark.centerX.coerceIn(0.05f, 0.95f)
+            val cy = size.height * mark.centerY.coerceIn(0.05f, 0.95f)
+            rotate(mark.rotation, pivot = Offset(cx, cy)) {
+                repeat(3) { index ->
+                    val shiftX = when (index) {
+                        0 -> 0f
+                        1 -> width * 0.16f
+                        else -> -width * 0.14f
+                    }
+                    val shiftY = when (index) {
+                        0 -> 0f
+                        1 -> -height * 0.08f
+                        else -> height * 0.12f
+                    }
+                    val scale = when (index) {
+                        0 -> 1f
+                        1 -> 0.74f
+                        else -> 0.62f
+                    }
+                    drawOval(
+                        color = baseColor.copy(alpha = 0.16f + index * 0.05f),
+                        topLeft = Offset(
+                            x = cx - (width * scale) / 2f + shiftX,
+                            y = cy - (height * scale) / 2f + shiftY
+                        ),
+                        size = Size(width = width * scale, height = height * scale)
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun parsePhotoPaintPaths(raw: String): List<PhotoPaintPath> {
+    val clean = raw.trim()
+    if (clean.isBlank()) return emptyList()
+    return runCatching {
+        val arr = JSONArray(clean)
+        buildList {
+            for (i in 0 until arr.length()) {
+                val pathObj = arr.optJSONObject(i) ?: continue
+                val pointsArr = pathObj.optJSONArray("points") ?: continue
+                val points = buildList {
+                    for (j in 0 until pointsArr.length()) {
+                        val pointObj = pointsArr.optJSONObject(j) ?: continue
+                        add(
+                            PhotoPaintPoint(
+                                x = pointObj.optDouble("x", 0.0).toFloat().coerceIn(0f, 1f),
+                                y = pointObj.optDouble("y", 0.0).toFloat().coerceIn(0f, 1f)
+                            )
+                        )
+                    }
+                }
+                if (points.size >= 2) add(PhotoPaintPath(points))
+            }
+        }
+    }.getOrDefault(emptyList())
+}
+
+@Composable
+private fun PhotoPaintLayer(photo: PromptPhoto) {
+    if (photo.paints.isEmpty()) return
+    val parsedPaints = remember(photo.paints) {
+        photo.paints.map { it to parsePhotoPaintPaths(it.pathsJson) }
+    }
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        parsedPaints.forEach { (paint, paths) ->
+            val strokeColor = parseUserColor(paint.color).copy(alpha = 0.9f)
+            val strokeWidthPx = (size.minDimension * paint.strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(6f)
+            paths.forEach { pathItem ->
+                if (pathItem.points.size < 2) return@forEach
+                val drawPath = ComposePath().apply {
+                    val start = pathItem.points.first()
+                    moveTo(start.x * size.width, start.y * size.height)
+                    pathItem.points.drop(1).forEach { point ->
+                        lineTo(point.x * size.width, point.y * size.height)
+                    }
+                }
+                drawPath(
+                    path = drawPath,
+                    color = strokeColor,
+                    style = Stroke(width = strokeWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                )
+            }
+        }
+    }
+}
+
+private fun isPointInPaintFrame(point: Offset, width: Float, height: Float, frameBand: Float): Boolean {
+    if (width <= 0f || height <= 0f) return false
+    return point.x <= frameBand ||
+        point.x >= width - frameBand ||
+        point.y <= frameBand ||
+        point.y >= height - frameBand
+}
+
+private fun computePaintPreviewRects(
+    width: Float,
+    height: Float,
+    frameBand: Float,
+    photoCount: Int,
+    gap: Float
+): List<Rect> {
+    if (width <= 0f || height <= 0f || photoCount <= 0) return emptyList()
+    val innerLeft = frameBand
+    val innerTop = frameBand
+    val innerWidth = (width - frameBand * 2f).coerceAtLeast(0f)
+    val innerHeight = (height - frameBand * 2f).coerceAtLeast(0f)
+    if (photoCount <= 1) {
+        return listOf(Rect(innerLeft, innerTop, innerLeft + innerWidth, innerTop + innerHeight))
+    }
+    val slotWidth = ((innerWidth - gap * (photoCount - 1)) / photoCount).coerceAtLeast(0f)
+    return List(photoCount) { index ->
+        val left = innerLeft + index * (slotWidth + gap)
+        Rect(left, innerTop, left + slotWidth, innerTop + innerHeight)
+    }
+}
+
+private fun isPointAllowedForPaint(
+    point: Offset,
+    width: Float,
+    height: Float,
+    frameBand: Float,
+    photoCount: Int,
+    gap: Float
+): Boolean {
+    if (!isPointInPaintFrame(point, width, height, frameBand)) return false
+    return computePaintPreviewRects(width, height, frameBand, photoCount, gap).none { rect -> rect.contains(point) }
+}
+
+@Composable
+private fun PhotoPaintEditorDialog(
+    photo: PromptPhoto,
+    viewerId: Long?,
+    onDismiss: () -> Unit,
+    onSave: (List<PhotoPaintPath>, Float) -> Unit,
+    onDelete: (() -> Unit)?
+) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val frameBandPx = with(density) { 22.dp.toPx() }
+    val previewGapPx = with(density) { 10.dp.toPx() }
+    val initialPaths = remember(photo.id, viewerId, photo.paints) {
+        photo.paints.firstOrNull { it.userId == viewerId }?.let { parsePhotoPaintPaths(it.pathsJson) } ?: emptyList()
+    }
+    var draftPaths by remember(photo.id, viewerId, photo.paints) { mutableStateOf(initialPaths) }
+    var showFrameHint by remember(photo.id, viewerId) { mutableStateOf(false) }
+    val paintColor = parseUserColor(photo.paints.firstOrNull { it.userId == viewerId }?.color ?: "#1F5FBF")
+    val strokeWidth = photo.paints.firstOrNull { it.userId == viewerId }?.strokeWidth ?: 0.035f
+    val previewUrls = remember(photo.url, photo.secondUrl) { listOfNotNull(photo.url, photo.secondUrl) }
+    val previewCount = previewUrls.size.coerceAtLeast(1)
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("Rahmen bemalen", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "Du malst nur auf dem Rahmen. Der Bildbereich in der Mitte bleibt gesperrt.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                AnimatedVisibility(
+                    visible = showFrameHint,
+                    enter = fadeIn(),
+                    exit = fadeOut()
+                ) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3CD))
+                    ) {
+                        Text(
+                            "Nur der Rahmen ist bemalbar. Die Bildmitte bleibt absichtlich frei, damit das Foto lesbar bleibt.",
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            color = Color(0xFF7A4E00)
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(320.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.medium)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(with(density) { frameBandPx.toDp() }),
+                        horizontalArrangement = Arrangement.spacedBy(with(density) { previewGapPx.toDp() })
+                    ) {
+                        previewUrls.forEachIndexed { index, url ->
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (previewUrls.size > 1) {
+                                    Text(
+                                        if (index == 0) "Hinten" else "Vorne",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                                AsyncImage(
+                                    model = url,
+                                    contentDescription = "Foto-Vorschau",
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxWidth()
+                                        .border(1.dp, Color.White.copy(alpha = 0.65f), MaterialTheme.shapes.small),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                        }
+                    }
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(draftPaths, frameBandPx, previewGapPx, previewCount) {
+                                var currentPoints = mutableListOf<PhotoPaintPoint>()
+                                detectDragGestures(
+                                    onDragStart = { offset ->
+                                        if (isPointAllowedForPaint(offset, size.width.toFloat(), size.height.toFloat(), frameBandPx, previewCount, previewGapPx)) {
+                                            showFrameHint = false
+                                            currentPoints = mutableListOf(
+                                                PhotoPaintPoint(
+                                                    x = (offset.x / size.width.toFloat()).coerceIn(0f, 1f),
+                                                    y = (offset.y / size.height.toFloat()).coerceIn(0f, 1f)
+                                                )
+                                            )
+                                        } else {
+                                            showFrameHint = true
+                                            currentPoints = mutableListOf()
+                                        }
+                                    },
+                                    onDrag = { change, _ ->
+                                        val point = change.position
+                                        if (currentPoints.isNotEmpty() && isPointAllowedForPaint(point, size.width.toFloat(), size.height.toFloat(), frameBandPx, previewCount, previewGapPx)) {
+                                            showFrameHint = false
+                                            currentPoints.add(
+                                                PhotoPaintPoint(
+                                                    x = (point.x / size.width.toFloat()).coerceIn(0f, 1f),
+                                                    y = (point.y / size.height.toFloat()).coerceIn(0f, 1f)
+                                                )
+                                            )
+                                        }
+                                        change.consume()
+                                    },
+                                    onDragEnd = {
+                                        if (currentPoints.size >= 2) {
+                                            draftPaths = (draftPaths + PhotoPaintPath(points = currentPoints.toList())).takeLast(12)
+                                        }
+                                        currentPoints = mutableListOf()
+                                    }
+                                )
+                            }
+                    ) {
+                        val blockedRects = computePaintPreviewRects(size.width, size.height, frameBandPx, previewCount, previewGapPx)
+                        drawRect(
+                            color = Color.Black.copy(alpha = 0.08f),
+                            topLeft = Offset(frameBandPx, frameBandPx),
+                            size = Size(
+                                width = (size.width - frameBandPx * 2f).coerceAtLeast(0f),
+                                height = (size.height - frameBandPx * 2f).coerceAtLeast(0f)
+                            )
+                        )
+                        blockedRects.forEach { rect ->
+                            drawRect(
+                                color = Color.Black.copy(alpha = 0.12f),
+                                topLeft = rect.topLeft,
+                                size = rect.size
+                            )
+                        }
+                        draftPaths.forEach { pathItem ->
+                            if (pathItem.points.size < 2) return@forEach
+                            val drawPath = ComposePath().apply {
+                                val start = pathItem.points.first()
+                                moveTo(start.x * size.width, start.y * size.height)
+                                pathItem.points.drop(1).forEach { point ->
+                                    lineTo(point.x * size.width, point.y * size.height)
+                                }
+                            }
+                            drawPath(
+                                path = drawPath,
+                                color = paintColor,
+                                style = Stroke(
+                                    width = (size.minDimension * strokeWidth).coerceAtLeast(6f),
+                                    cap = StrokeCap.Round,
+                                    join = StrokeJoin.Round
+                                )
+                            )
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (draftPaths.isNotEmpty()) {
+                                draftPaths = draftPaths.dropLast(1)
+                            }
+                        },
+                        enabled = draftPaths.isNotEmpty(),
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Undo") }
+                    OutlinedButton(
+                        onClick = { draftPaths = emptyList() },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Leeren") }
+                    if (onDelete != null) {
+                        OutlinedButton(
+                            onClick = onDelete,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Loeschen") }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Abbrechen") }
+                    Button(
+                        onClick = { onSave(draftPaths, strokeWidth) },
+                        enabled = draftPaths.isNotEmpty(),
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Speichern") }
+                }
+            }
+        }
     }
 }
 
@@ -8799,6 +9593,8 @@ fun ProfileTab(
     inviteCode: String,
     streakDays: Int,
     dailyMomentCount: Int,
+    bookmarksGivenCount: Int,
+    bookmarksReceivedCount: Int,
     promptRules: PromptRulesResponse?,
     photos: List<PromptPhoto>,
     themeMode: Int,
@@ -8829,6 +9625,7 @@ fun ProfileTab(
     photoCommentPushEnabled: Boolean,
     bookmarkedPhotoPushEnabled: Boolean,
     allowPhotoDownload: Boolean,
+    creativePostMode: String,
     locationFeatureEnabled: Boolean,
     locationShareDefaultEnabled: Boolean,
     locationPermissionGranted: Boolean,
@@ -8869,6 +9666,7 @@ fun ProfileTab(
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
     onBookmarkedPhotoPushEnabledChange: (Boolean) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
+    onCreativePostModeChange: (String) -> Unit,
     onLocationFeatureEnabledChange: (Boolean) -> Unit,
     onLocationShareDefaultEnabledChange: (Boolean) -> Unit,
     onRequestLocationPermission: () -> Unit,
@@ -9053,6 +9851,13 @@ fun ProfileTab(
                         Text("@$username", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                         Text("🔥 $streakDays", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         Text("🌈 $dailyMomentCount", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("📌 bekommen $bookmarksReceivedCount", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Text("📍 gemerkt $bookmarksGivenCount", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     }
                     Text(
                         "Dein Hub fuer Konto, Hilfe und Updates",
@@ -9323,6 +10128,44 @@ fun ProfileTab(
                                 },
                                 supportingText = "Nur wenn du das aktiv einschaltest, erscheint im Bildbetrachter ein Download-Button."
                             )
+                            Text(
+                                "Kreativspuren auf meinen Posts",
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                "Du entscheidest, ob andere deine Post-Rahmen markieren oder spaeter bemalen duerfen.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilterChip(
+                                    selected = creativePostMode == "none",
+                                    onClick = { onCreativePostModeChange("none") },
+                                    label = { Text("Nichts") }
+                                )
+                                FilterChip(
+                                    selected = creativePostMode == "mark",
+                                    onClick = { onCreativePostModeChange("mark") },
+                                    label = { Text("Markieren") }
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                FilterChip(
+                                    selected = creativePostMode == "paint",
+                                    onClick = { onCreativePostModeChange("paint") },
+                                    label = { Text("Malen") }
+                                )
+                                FilterChip(
+                                    selected = creativePostMode == "both",
+                                    onClick = { onCreativePostModeChange("both") },
+                                    label = { Text("Beides") }
+                                )
+                            }
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = CardDefaults.cardColors(

@@ -44,6 +44,8 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.DailyTriggerAuditEvent{},
 		&models.Photo{},
 		&models.PhotoBookmark{},
+		&models.PhotoMark{},
+		&models.PhotoPaint{},
 		&models.PhotoReaction{},
 		&models.PhotoFotomoji{},
 		&models.UserFotomojiTemplate{},

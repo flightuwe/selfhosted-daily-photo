@@ -15,6 +15,7 @@ import (
 	_ "image/png"
 	"io"
 	"math"
+	mrand "math/rand"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -68,6 +69,8 @@ type Server struct {
 
 const photoTimeShiftThreshold = 5 * time.Minute
 const duplicateDigestWindow = time.Minute
+const maxPhotoPaintPaths = 12
+const maxPhotoPaintPointsPerPath = 96
 
 var photoSearchTokenPattern = regexp.MustCompile(`(?i)#[\p{L}\p{N}_]+|[\p{L}\p{N}_]+`)
 var photoHashtagPattern = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}_])(#[\p{L}\p{N}_]+)`)
@@ -75,10 +78,29 @@ var photoHashtagPattern = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{N}_])(#[\p{L}\p
 type photoSearchHit struct {
 	Photo           models.Photo
 	BookmarkedByMe  bool
+	BookmarkCount   int64
 	Excerpt         string
 	MatchedCaption  bool
 	MatchedComments []string
 	MatchedHashtags []string
+}
+
+type photoPaintPoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+type photoPaintPath struct {
+	Points []photoPaintPoint `json:"points"`
+}
+
+type viewerPhotoDecorations struct {
+	bookmarkMap    map[uint]bool
+	bookmarkCounts map[uint]int64
+	marksByPhoto   map[uint][]gin.H
+	paintsByPhoto  map[uint][]gin.H
+	myMarked       map[uint]bool
+	myPainted      map[uint]bool
 }
 
 func normalizePhotoSearchTokens(raw string) []string {
@@ -177,6 +199,25 @@ func clipSearchExcerpt(text string, tokens []string) string {
 	return clean
 }
 
+func normalizeCreativePostMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "mark", "paint", "both":
+		return strings.ToLower(strings.TrimSpace(v))
+	default:
+		return "none"
+	}
+}
+
+func creativeModeAllowsMark(v string) bool {
+	mode := normalizeCreativePostMode(v)
+	return mode == "mark" || mode == "both"
+}
+
+func creativeModeAllowsPaint(v string) bool {
+	mode := normalizeCreativePostMode(v)
+	return mode == "paint" || mode == "both"
+}
+
 func (s *Server) Router() *gin.Engine {
 	r := gin.Default()
 	r.Use(s.requestIDMiddleware(), s.responseMetaMiddleware(), s.metricsMiddleware())
@@ -253,6 +294,10 @@ func (s *Server) Router() *gin.Engine {
 			protected.DELETE("/photos/bookmarks", s.handlePhotoBookmarksClear)
 			protected.POST("/photos/:id/bookmark", s.handlePhotoBookmarkCreate)
 			protected.DELETE("/photos/:id/bookmark", s.handlePhotoBookmarkDelete)
+			protected.POST("/photos/:id/mark", s.handlePhotoMarkCreate)
+			protected.DELETE("/photos/:id/mark", s.handlePhotoMarkDelete)
+			protected.PUT("/photos/:id/paint", s.handlePhotoPaintUpsert)
+			protected.DELETE("/photos/:id/paint", s.handlePhotoPaintDelete)
 			protected.POST("/photos/:id/report", s.handlePhotoReportCreate)
 			protected.POST("/photos/:id/reaction", s.handlePhotoReaction)
 			protected.POST("/photos/:id/fotomojis", s.handlePhotoFotomojiFromTemplate)
@@ -534,11 +579,14 @@ func (s *Server) handleMe(c *gin.Context) {
 	}
 
 	dailyMomentCount, streakDays, _ := s.computeUserMomentStats(user.ID)
+	bookmarksGivenCount, bookmarksReceivedCount, _ := s.computeUserBookmarkStats(user.ID)
 
 	c.JSON(http.StatusOK, gin.H{
-		"user":             s.userOwnJSON(user),
-		"dailyMomentCount": dailyMomentCount,
-		"streakDays":       streakDays,
+		"user":                   s.userOwnJSON(user),
+		"dailyMomentCount":       dailyMomentCount,
+		"streakDays":             streakDays,
+		"bookmarksGivenCount":    bookmarksGivenCount,
+		"bookmarksReceivedCount": bookmarksReceivedCount,
 	})
 }
 
@@ -617,6 +665,21 @@ func (s *Server) computeUserMomentStats(userID uint) (int64, int64, error) {
 		}
 	}
 	return dailyMomentCount, streakDays, nil
+}
+
+func (s *Server) computeUserBookmarkStats(userID uint) (int64, int64, error) {
+	bookmarksGivenCount := int64(0)
+	if err := s.DB.Model(&models.PhotoBookmark{}).Where("user_id = ?", userID).Count(&bookmarksGivenCount).Error; err != nil {
+		return 0, 0, err
+	}
+	bookmarksReceivedCount := int64(0)
+	if err := s.DB.Table("photo_bookmarks").
+		Joins("JOIN photos ON photos.id = photo_bookmarks.photo_id").
+		Where("photos.user_id = ?", userID).
+		Count(&bookmarksReceivedCount).Error; err != nil {
+		return 0, 0, err
+	}
+	return bookmarksGivenCount, bookmarksReceivedCount, nil
 }
 
 func (s *Server) handleMyInvite(c *gin.Context) {
@@ -764,19 +827,20 @@ func (s *Server) handleUpdateProfile(c *gin.Context) {
 func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	user, _ := userFromContext(c)
 	var req struct {
-		ChatPushEnabled               *bool  `json:"chatPushEnabled"`
-		PollPushEnabled               *bool  `json:"pollPushEnabled"`
-		SpecialMomentPushEnabled      *bool  `json:"specialMomentPushEnabled"`
-		InviteRegistrationPushEnabled *bool  `json:"inviteRegistrationPushEnabled"`
-		PhotoReactionPushEnabled      *bool  `json:"photoReactionPushEnabled"`
-		PhotoFotomojiPushEnabled      *bool  `json:"photoFotomojiPushEnabled"`
-		PhotoCommentPushEnabled       *bool  `json:"photoCommentPushEnabled"`
-		BookmarkedPhotoPushEnabled    *bool  `json:"bookmarkedPhotoPushEnabled"`
-		AllowPhotoDownload            *bool  `json:"allowPhotoDownload"`
-		LocationFeatureEnabled        *bool  `json:"locationFeatureEnabled"`
-		LocationShareDefaultEnabled   *bool  `json:"locationShareDefaultEnabled"`
-		DiagnosticsConsentGranted     *bool  `json:"diagnosticsConsentGranted"`
-		DiagnosticsConsentSource      string `json:"diagnosticsConsentSource"`
+		ChatPushEnabled               *bool   `json:"chatPushEnabled"`
+		PollPushEnabled               *bool   `json:"pollPushEnabled"`
+		SpecialMomentPushEnabled      *bool   `json:"specialMomentPushEnabled"`
+		InviteRegistrationPushEnabled *bool   `json:"inviteRegistrationPushEnabled"`
+		PhotoReactionPushEnabled      *bool   `json:"photoReactionPushEnabled"`
+		PhotoFotomojiPushEnabled      *bool   `json:"photoFotomojiPushEnabled"`
+		PhotoCommentPushEnabled       *bool   `json:"photoCommentPushEnabled"`
+		BookmarkedPhotoPushEnabled    *bool   `json:"bookmarkedPhotoPushEnabled"`
+		AllowPhotoDownload            *bool   `json:"allowPhotoDownload"`
+		CreativePostMode              *string `json:"creativePostMode"`
+		LocationFeatureEnabled        *bool   `json:"locationFeatureEnabled"`
+		LocationShareDefaultEnabled   *bool   `json:"locationShareDefaultEnabled"`
+		DiagnosticsConsentGranted     *bool   `json:"diagnosticsConsentGranted"`
+		DiagnosticsConsentSource      string  `json:"diagnosticsConsentSource"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
@@ -809,6 +873,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.AllowPhotoDownload != nil {
 		updates["allow_photo_download"] = *req.AllowPhotoDownload
+	}
+	if req.CreativePostMode != nil {
+		updates["creative_post_mode"] = normalizeCreativePostMode(*req.CreativePostMode)
 	}
 	if req.LocationFeatureEnabled != nil {
 		updates["location_feature_enabled"] = *req.LocationFeatureEnabled
@@ -915,12 +982,19 @@ func (s *Server) handleUserProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "profile query failed"})
 		return
 	}
+	bookmarksGivenCount := int64(0)
+	bookmarksReceivedCount := int64(0)
+	if sameUser {
+		bookmarksGivenCount, bookmarksReceivedCount, _ = s.computeUserBookmarkStats(target.ID)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"profileVisible": true,
-		"user":           s.userPublicJSON(viewer.ID, target),
-		"photos":         photos,
-		"isSelf":         sameUser,
+		"profileVisible":         true,
+		"user":                   s.userPublicJSON(viewer.ID, target),
+		"photos":                 photos,
+		"isSelf":                 sameUser,
+		"bookmarksGivenCount":    bookmarksGivenCount,
+		"bookmarksReceivedCount": bookmarksReceivedCount,
 	})
 }
 
@@ -1114,6 +1188,7 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 	includeCommunity := parseQueryBool(c.Query("includeCommunity"), true)
 
 	dailyMomentCount, streakDays, _ := s.computeUserMomentStats(user.ID)
+	bookmarksGivenCount, bookmarksReceivedCount, _ := s.computeUserBookmarkStats(user.ID)
 
 	inviteCode := ""
 	if invite, err := s.loadOrCreateInviteCode(user.ID); err == nil {
@@ -1183,9 +1258,11 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 			"lightweightCommentPost": true,
 		},
 		"me": gin.H{
-			"user":             s.userOwnJSON(user),
-			"dailyMomentCount": dailyMomentCount,
-			"streakDays":       streakDays,
+			"user":                   s.userOwnJSON(user),
+			"dailyMomentCount":       dailyMomentCount,
+			"streakDays":             streakDays,
+			"bookmarksGivenCount":    bookmarksGivenCount,
+			"bookmarksReceivedCount": bookmarksReceivedCount,
 		},
 		"inviteCode": inviteCode,
 		"prompt": gin.H{
@@ -1831,9 +1908,9 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 	for _, p := range photos {
 		photoIDs = append(photoIDs, p.ID)
 	}
-	bookmarkMap, err := s.bookmarkMapForViewer(adminUser.ID, photoIDs)
+	decorations, err := s.photoDecorationsForViewer(adminUser.ID, photoIDs)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark query failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
 	interactionStart := time.Now()
@@ -1877,7 +1954,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 			"isLate":                      isLate,
 			"capsuleLocked":               capsuleLocked,
 			"capsuleReleased":             capsuleReleased,
-			"photo":                       s.photoJSONForViewer(adminUser.ID, p, bookmarkMap),
+			"photo":                       s.photoJSONForViewer(adminUser.ID, p, decorations),
 			"user":                        s.userPublicJSON(adminUser.ID, p.User),
 			"reactions":                   reactions,
 			"comments":                    comments,
@@ -2044,9 +2121,9 @@ func (s *Server) handleFeed(c *gin.Context) {
 	for _, p := range photos {
 		photoIDs = append(photoIDs, p.ID)
 	}
-	bookmarkMap, err := s.bookmarkMapForViewer(user.ID, photoIDs)
+	decorations, err := s.photoDecorationsForViewer(user.ID, photoIDs)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark query failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
 	reactionByPhoto, commentByPhoto, photoMojiByPhoto, err := s.feedInteractionPreview(photoIDs)
@@ -2088,7 +2165,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 			"isLate":                      isLate,
 			"capsuleLocked":               capsuleLocked,
 			"capsuleReleased":             capsuleReleased,
-			"photo":                       s.photoJSONForViewer(user.ID, p, bookmarkMap),
+			"photo":                       s.photoJSONForViewer(user.ID, p, decorations),
 			"user":                        s.userPublicJSON(user.ID, p.User),
 			"reactions":                   reactions,
 			"comments":                    comments,
@@ -4887,8 +4964,12 @@ func (s *Server) handlePhotoBookmarkCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark failed"})
 		return
 	}
-	bookmarkMap := map[uint]bool{photo.ID: true}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, bookmarkMap)})
+	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
 func (s *Server) handlePhotoBookmarkDelete(c *gin.Context) {
@@ -4911,7 +4992,12 @@ func (s *Server) handlePhotoBookmarkDelete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark delete failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, map[uint]bool{})})
+	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
 func (s *Server) handlePhotoBookmarksClear(c *gin.Context) {
@@ -4922,6 +5008,304 @@ func (s *Server) handlePhotoBookmarksClear(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deletedCount": result.RowsAffected})
+}
+
+func canViewerMarkPhoto(viewerID uint, photo models.Photo) bool {
+	if viewerID == photo.UserID {
+		return true
+	}
+	return creativeModeAllowsMark(photo.User.CreativePostMode)
+}
+
+func canViewerPaintPhoto(viewerID uint, photo models.Photo) bool {
+	if viewerID == photo.UserID {
+		return true
+	}
+	return creativeModeAllowsPaint(photo.User.CreativePostMode)
+}
+
+func generatePhotoMark(user models.User, photo models.Photo) models.PhotoMark {
+	seed := time.Now().UTC().UnixNano() ^ (int64(user.ID) << 16) ^ (int64(photo.ID) << 32)
+	rng := mrand.New(mrand.NewSource(seed))
+	centerX := 0.18 + rng.Float64()*0.64
+	centerY := 0.18 + rng.Float64()*0.64
+	switch rng.Intn(4) {
+	case 0:
+		centerY = 0.08 + rng.Float64()*0.18
+	case 1:
+		centerX = 0.74 + rng.Float64()*0.18
+	case 2:
+		centerY = 0.74 + rng.Float64()*0.18
+	default:
+		centerX = 0.08 + rng.Float64()*0.18
+	}
+	return models.PhotoMark{
+		PhotoID:   photo.ID,
+		UserID:    user.ID,
+		Color:     defaultColor(user.FavoriteColor),
+		CenterX:   centerX,
+		CenterY:   centerY,
+		RadiusX:   0.08 + rng.Float64()*0.10,
+		RadiusY:   0.06 + rng.Float64()*0.08,
+		Rotation:  -25 + rng.Float64()*50,
+		Seed:      seed,
+		Layer:     time.Now().UTC().UnixMilli(),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+}
+
+func sanitizePhotoPaintPaths(paths []photoPaintPath) ([]photoPaintPath, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("paint_empty")
+	}
+	if len(paths) > maxPhotoPaintPaths {
+		return nil, errors.New("paint_too_many_paths")
+	}
+	out := make([]photoPaintPath, 0, len(paths))
+	for _, path := range paths {
+		if len(path.Points) < 2 {
+			continue
+		}
+		if len(path.Points) > maxPhotoPaintPointsPerPath {
+			return nil, errors.New("paint_too_many_points")
+		}
+		points := make([]photoPaintPoint, 0, len(path.Points))
+		for _, point := range path.Points {
+			points = append(points, photoPaintPoint{
+				X: math.Max(0, math.Min(1, point.X)),
+				Y: math.Max(0, math.Min(1, point.Y)),
+			})
+		}
+		out = append(out, photoPaintPath{Points: points})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("paint_empty")
+	}
+	return out, nil
+}
+
+func parsePhotoPaintDeleteTarget(c *gin.Context, caller models.User, photo models.Photo) (uint, error) {
+	targetUserID := caller.ID
+	if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+		parsed, err := parseUintParam(raw)
+		if err != nil {
+			return 0, errors.New("invalid_user_id")
+		}
+		targetUserID = parsed
+	}
+	if targetUserID != caller.ID && caller.ID != photo.UserID {
+		return 0, errors.New("forbidden_target_user")
+	}
+	return targetUserID, nil
+}
+
+func (s *Server) handlePhotoMarkCreate(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photo, err := s.loadVisiblePhotoForViewer(user.ID, c.Param("id"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			status = http.StatusNotFound
+		case err.Error() == "invalid_photo_id":
+			status = http.StatusBadRequest
+		case err.Error() == "not_visible":
+			status = http.StatusForbidden
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	if !canViewerMarkPhoto(user.ID, photo) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "marking_not_allowed"})
+		return
+	}
+
+	mark := generatePhotoMark(user, photo)
+	var existing models.PhotoMark
+	err = s.DB.Where("photo_id = ? AND user_id = ?", photo.ID, user.ID).First(&existing).Error
+	switch {
+	case err == nil:
+		mark.ID = existing.ID
+		mark.CreatedAt = existing.CreatedAt
+		if err := s.DB.Save(&mark).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "mark_save_failed"})
+			return
+		}
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		if err := s.DB.Create(&mark).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "mark_create_failed"})
+			return
+		}
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "mark_query_failed"})
+		return
+	}
+
+	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
+}
+
+func (s *Server) handlePhotoMarkDelete(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photo, err := s.loadVisiblePhotoForViewer(user.ID, c.Param("id"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			status = http.StatusNotFound
+		case err.Error() == "invalid_photo_id":
+			status = http.StatusBadRequest
+		case err.Error() == "not_visible":
+			status = http.StatusForbidden
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	targetUserID, err := parsePhotoPaintDeleteTarget(c, user, photo)
+	if err != nil {
+		status := http.StatusForbidden
+		if err.Error() == "invalid_user_id" {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	if err := s.DB.Where("photo_id = ? AND user_id = ?", photo.ID, targetUserID).Delete(&models.PhotoMark{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "mark_delete_failed"})
+		return
+	}
+	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
+}
+
+func (s *Server) handlePhotoPaintUpsert(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photo, err := s.loadVisiblePhotoForViewer(user.ID, c.Param("id"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			status = http.StatusNotFound
+		case err.Error() == "invalid_photo_id":
+			status = http.StatusBadRequest
+		case err.Error() == "not_visible":
+			status = http.StatusForbidden
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	if !canViewerPaintPhoto(user.ID, photo) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "painting_not_allowed"})
+		return
+	}
+	var req struct {
+		Paths       []photoPaintPath `json:"paths"`
+		StrokeWidth float64          `json:"strokeWidth"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_payload"})
+		return
+	}
+	sanitizedPaths, err := sanitizePhotoPaintPaths(req.Paths)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	strokeWidth := req.StrokeWidth
+	if strokeWidth <= 0 {
+		strokeWidth = 0.035
+	}
+	if strokeWidth < 0.01 {
+		strokeWidth = 0.01
+	}
+	if strokeWidth > 0.12 {
+		strokeWidth = 0.12
+	}
+	pathsJSON, err := json.Marshal(sanitizedPaths)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "paint_encode_failed"})
+		return
+	}
+	paint := models.PhotoPaint{
+		PhotoID:     photo.ID,
+		UserID:      user.ID,
+		Color:       defaultColor(user.FavoriteColor),
+		StrokeWidth: strokeWidth,
+		PathsJSON:   string(pathsJSON),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	var existing models.PhotoPaint
+	err = s.DB.Where("photo_id = ? AND user_id = ?", photo.ID, user.ID).First(&existing).Error
+	switch {
+	case err == nil:
+		paint.ID = existing.ID
+		paint.CreatedAt = existing.CreatedAt
+		if err := s.DB.Save(&paint).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "paint_save_failed"})
+			return
+		}
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		paint.CreatedAt = time.Now().UTC()
+		if err := s.DB.Create(&paint).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "paint_create_failed"})
+			return
+		}
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "paint_query_failed"})
+		return
+	}
+	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
+}
+
+func (s *Server) handlePhotoPaintDelete(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photo, err := s.loadVisiblePhotoForViewer(user.ID, c.Param("id"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			status = http.StatusNotFound
+		case err.Error() == "invalid_photo_id":
+			status = http.StatusBadRequest
+		case err.Error() == "not_visible":
+			status = http.StatusForbidden
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	targetUserID, err := parsePhotoPaintDeleteTarget(c, user, photo)
+	if err != nil {
+		status := http.StatusForbidden
+		if err.Error() == "invalid_user_id" {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	if err := s.DB.Where("photo_id = ? AND user_id = ?", photo.ID, targetUserID).Delete(&models.PhotoPaint{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "paint_delete_failed"})
+		return
+	}
+	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
 func (s *Server) handlePhotoReportCreate(c *gin.Context) {
@@ -5147,7 +5531,7 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		bestCommentByDay[photo.Day] = commentCount
 	}
 
-	bookmarkMap, err := s.bookmarkMapForViewer(viewerID, photoIDs)
+	decorations, err := s.photoDecorationsForViewer(viewerID, photoIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -5156,7 +5540,7 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 	outPhotosByDay := make(map[string][]gin.H, len(days))
 	for _, photo := range filteredPhotos {
 		row := gin.H{
-			"photo": s.photoJSONForViewer(viewerID, photo, bookmarkMap),
+			"photo": s.photoJSONForViewer(viewerID, photo, decorations),
 			"user":  s.userPublicJSON(viewerID, photo.User),
 		}
 		outPhotosByDay[photo.Day] = append(outPhotosByDay[photo.Day], row)
@@ -5180,7 +5564,8 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 				"reactionCount":    reactionCount,
 				"commentCount":     commentCount,
 				"interactionCount": reactionCount + commentCount,
-				"bookmarkedByMe":   bookmarkMap[photo.ID],
+				"bookmarkedByMe":   decorations.bookmarkMap[photo.ID],
+				"bookmarkCount":    decorations.bookmarkCounts[photo.ID],
 				"publicNumber":     photoPublicNumberValue(photo),
 			}
 			if strings.TrimSpace(photo.SecondPath) != "" {
@@ -5338,7 +5723,7 @@ func (s *Server) deletePhotoSearchDocument(photoID uint) error {
 	return nil
 }
 
-func buildPhotoSearchHit(photo models.Photo, comments []models.PhotoComment, tokens []string, bookmarked bool) photoSearchHit {
+func buildPhotoSearchHit(photo models.Photo, comments []models.PhotoComment, tokens []string, bookmarked bool, bookmarkCount int64) photoSearchHit {
 	matchedComments := make([]string, 0, 2)
 	for _, comment := range comments {
 		if !containsAnyPhotoSearchToken(comment.Body, tokens) {
@@ -5380,6 +5765,7 @@ func buildPhotoSearchHit(photo models.Photo, comments []models.PhotoComment, tok
 	return photoSearchHit{
 		Photo:           photo,
 		BookmarkedByMe:  bookmarked,
+		BookmarkCount:   bookmarkCount,
 		Excerpt:         excerpt,
 		MatchedCaption:  containsAnyPhotoSearchToken(photo.Caption, tokens),
 		MatchedComments: matchedComments,
@@ -5440,7 +5826,7 @@ func (s *Server) searchPhotoHits(viewerID uint, rawQuery string, now time.Time, 
 	for _, comment := range allComments {
 		commentsByPhotoID[comment.PhotoID] = append(commentsByPhotoID[comment.PhotoID], comment)
 	}
-	bookmarkMap, err := s.bookmarkMapForViewer(viewerID, photoIDs)
+	decorations, err := s.photoDecorationsForViewer(viewerID, photoIDs)
 	if err != nil {
 		return normalized, nil, err
 	}
@@ -5458,7 +5844,7 @@ func (s *Server) searchPhotoHits(viewerID uint, rawQuery string, now time.Time, 
 		if !includeHidden && !photoVisibleToViewer(viewerID, photo, now) {
 			continue
 		}
-		hits = append(hits, buildPhotoSearchHit(photo, commentsByPhotoID[photo.ID], tokens, bookmarkMap[photo.ID]))
+		hits = append(hits, buildPhotoSearchHit(photo, commentsByPhotoID[photo.ID], tokens, decorations.bookmarkMap[photo.ID], decorations.bookmarkCounts[photo.ID]))
 		if len(hits) >= limit {
 			break
 		}
@@ -5532,6 +5918,10 @@ func (s *Server) calendarSearchPayload(viewerID uint, rawQuery string, now time.
 	for _, row := range commentRows {
 		commentCounts[row.PhotoID] = row.Count
 	}
+	decorations, err := s.photoDecorationsForViewer(viewerID, photoIDs)
+	if err != nil {
+		return nil, err
+	}
 	matchedPhotosByDay := make(gin.H, len(days))
 	dayStats := make([]gin.H, 0, len(days))
 	for _, day := range days {
@@ -5543,8 +5933,7 @@ func (s *Server) calendarSearchPayload(viewerID uint, rawQuery string, now time.
 		matchRows := make([]gin.H, 0, len(dayHits))
 		for _, hit := range dayHits {
 			participants[hit.Photo.UserID] = struct{}{}
-			photoRow := s.photoJSON(hit.Photo)
-			photoRow["bookmarkedByMe"] = hit.BookmarkedByMe
+			photoRow := s.photoJSONForViewer(viewerID, hit.Photo, decorations)
 			matchRows = append(matchRows, gin.H{
 				"photo":           photoRow,
 				"user":            s.userPublicJSON(viewerID, hit.Photo.User),
@@ -6889,7 +7278,7 @@ func (s *Server) myPhotosPayload(userID uint, now time.Time) ([]gin.H, error) {
 	for _, p := range photos {
 		photoIDs = append(photoIDs, p.ID)
 	}
-	bookmarkMap, err := s.bookmarkMapForViewer(userID, photoIDs)
+	decorations, err := s.photoDecorationsForViewer(userID, photoIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -6899,7 +7288,7 @@ func (s *Server) myPhotosPayload(userID uint, now time.Time) ([]gin.H, error) {
 		if p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt) {
 			continue
 		}
-		row := s.photoJSONForViewer(userID, p, bookmarkMap)
+		row := s.photoJSONForViewer(userID, p, decorations)
 		dailyMoment := false
 		if prompt, ok := promptByDay[p.Day]; ok && prompt.TriggeredAt != nil && prompt.UploadUntil != nil {
 			effectiveAt := photoEffectiveTime(p)
@@ -8583,11 +8972,46 @@ func (s *Server) photoFotomojiJSON(item models.PhotoFotomoji, includeUser bool) 
 	return out
 }
 
+func (s *Server) photoMarkJSON(item models.PhotoMark) gin.H {
+	return gin.H{
+		"id":        item.ID,
+		"userId":    item.UserID,
+		"username":  strings.TrimSpace(item.User.Username),
+		"color":     defaultColor(item.Color),
+		"centerX":   item.CenterX,
+		"centerY":   item.CenterY,
+		"radiusX":   item.RadiusX,
+		"radiusY":   item.RadiusY,
+		"rotation":  item.Rotation,
+		"seed":      item.Seed,
+		"layer":     item.Layer,
+		"createdAt": item.CreatedAt,
+		"updatedAt": item.UpdatedAt,
+	}
+}
+
+func (s *Server) photoPaintJSON(item models.PhotoPaint) gin.H {
+	return gin.H{
+		"id":          item.ID,
+		"userId":      item.UserID,
+		"username":    strings.TrimSpace(item.User.Username),
+		"color":       defaultColor(item.Color),
+		"strokeWidth": item.StrokeWidth,
+		"pathsJson":   item.PathsJSON,
+		"createdAt":   item.CreatedAt,
+		"updatedAt":   item.UpdatedAt,
+	}
+}
+
 func (s *Server) photoJSON(p models.Photo) gin.H {
 	effectiveAt := photoEffectiveTime(p)
 	publicNumber := ""
 	if p.PublicNumber != nil {
 		publicNumber = strings.TrimSpace(*p.PublicNumber)
+	}
+	creativeMode := "none"
+	if p.User.ID != 0 {
+		creativeMode = normalizeCreativePostMode(p.User.CreativePostMode)
 	}
 	out := gin.H{
 		"id":                 p.ID,
@@ -8610,7 +9034,15 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 		"locationMapsUrl":    "",
 		"deduplicated":       false,
 		"bookmarkedByMe":     false,
+		"bookmarkCount":      0,
 		"publicNumber":       publicNumber,
+		"creativePostMode":   creativeMode,
+		"canMark":            false,
+		"canPaint":           false,
+		"markedByMe":         false,
+		"paintedByMe":        false,
+		"marks":              []gin.H{},
+		"paints":             []gin.H{},
 	}
 	if p.SecondPath != "" {
 		out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
@@ -8626,11 +9058,36 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 	return out
 }
 
-func (s *Server) photoJSONForViewer(viewerID uint, p models.Photo, bookmarkMap map[uint]bool) gin.H {
+func (s *Server) photoJSONForViewer(viewerID uint, p models.Photo, decorations *viewerPhotoDecorations) gin.H {
 	row := s.photoJSON(p)
-	if viewerID != 0 && bookmarkMap != nil {
-		row["bookmarkedByMe"] = bookmarkMap[p.ID]
+	creativeMode := normalizeCreativePostMode(strings.TrimSpace(p.User.CreativePostMode))
+	if decorations != nil {
+		if decorations.bookmarkMap != nil {
+			row["bookmarkedByMe"] = decorations.bookmarkMap[p.ID]
+		}
+		if decorations.bookmarkCounts != nil {
+			row["bookmarkCount"] = decorations.bookmarkCounts[p.ID]
+		}
+		if decorations.marksByPhoto != nil {
+			if marks := decorations.marksByPhoto[p.ID]; marks != nil {
+				row["marks"] = marks
+			}
+		}
+		if decorations.paintsByPhoto != nil {
+			if paints := decorations.paintsByPhoto[p.ID]; paints != nil {
+				row["paints"] = paints
+			}
+		}
+		if decorations.myMarked != nil {
+			row["markedByMe"] = decorations.myMarked[p.ID]
+		}
+		if decorations.myPainted != nil {
+			row["paintedByMe"] = decorations.myPainted[p.ID]
+		}
 	}
+	row["creativePostMode"] = creativeMode
+	row["canMark"] = viewerID == p.UserID || creativeModeAllowsMark(creativeMode)
+	row["canPaint"] = viewerID == p.UserID || creativeModeAllowsPaint(creativeMode)
 	return row
 }
 
@@ -8649,6 +9106,81 @@ func (s *Server) bookmarkMapForViewer(viewerID uint, photoIDs []uint) (map[uint]
 		out[row.PhotoID] = true
 	}
 	return out, nil
+}
+
+func (s *Server) bookmarkCountsForPhotos(photoIDs []uint) (map[uint]int64, error) {
+	out := make(map[uint]int64, len(photoIDs))
+	if len(photoIDs) == 0 {
+		return out, nil
+	}
+	var rows []struct {
+		PhotoID uint
+		Count   int64
+	}
+	if err := s.DB.Model(&models.PhotoBookmark{}).
+		Select("photo_id, COUNT(*) AS count").
+		Where("photo_id IN ?", photoIDs).
+		Group("photo_id").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.PhotoID] = row.Count
+	}
+	return out, nil
+}
+
+func (s *Server) photoDecorationsForViewer(viewerID uint, photoIDs []uint) (*viewerPhotoDecorations, error) {
+	decorations := &viewerPhotoDecorations{
+		bookmarkMap:    map[uint]bool{},
+		bookmarkCounts: map[uint]int64{},
+		marksByPhoto:   map[uint][]gin.H{},
+		paintsByPhoto:  map[uint][]gin.H{},
+		myMarked:       map[uint]bool{},
+		myPainted:      map[uint]bool{},
+	}
+	if len(photoIDs) == 0 {
+		return decorations, nil
+	}
+	bookmarkMap, err := s.bookmarkMapForViewer(viewerID, photoIDs)
+	if err != nil {
+		return nil, err
+	}
+	bookmarkCounts, err := s.bookmarkCountsForPhotos(photoIDs)
+	if err != nil {
+		return nil, err
+	}
+	decorations.bookmarkMap = bookmarkMap
+	decorations.bookmarkCounts = bookmarkCounts
+
+	var marks []models.PhotoMark
+	if err := s.DB.Preload("User").
+		Where("photo_id IN ?", photoIDs).
+		Order("layer asc, updated_at asc, id asc").
+		Find(&marks).Error; err != nil {
+		return nil, err
+	}
+	for _, mark := range marks {
+		decorations.marksByPhoto[mark.PhotoID] = append(decorations.marksByPhoto[mark.PhotoID], s.photoMarkJSON(mark))
+		if viewerID != 0 && mark.UserID == viewerID {
+			decorations.myMarked[mark.PhotoID] = true
+		}
+	}
+
+	var paints []models.PhotoPaint
+	if err := s.DB.Preload("User").
+		Where("photo_id IN ?", photoIDs).
+		Order("updated_at asc, id asc").
+		Find(&paints).Error; err != nil {
+		return nil, err
+	}
+	for _, paint := range paints {
+		decorations.paintsByPhoto[paint.PhotoID] = append(decorations.paintsByPhoto[paint.PhotoID], s.photoPaintJSON(paint))
+		if viewerID != 0 && paint.UserID == viewerID {
+			decorations.myPainted[paint.PhotoID] = true
+		}
+	}
+	return decorations, nil
 }
 
 func formatLocationDisplay(lat float64, lon float64) string {
@@ -8702,6 +9234,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
 		"bookmarkedPhotoPushEnabled":    u.BookmarkedPhotoPushEnabled,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
+		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":        u.LocationFeatureEnabled,
 		"locationShareDefaultEnabled":   u.LocationShareDefaultEnabled,
 		"avatarUrl":                     avatarURL,
@@ -8739,6 +9272,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"photoCommentPushEnabled":       false,
 		"bookmarkedPhotoPushEnabled":    false,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
+		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":        false,
 		"locationShareDefaultEnabled":   false,
 		"avatarUrl":                     "",
@@ -8791,7 +9325,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 
 func (s *Server) loadVisibleUserPhotos(viewerID uint, targetID uint) ([]gin.H, error) {
 	var photos []models.Photo
-	if err := s.DB.Where("user_id = ?", targetID).Order("created_at desc").Limit(120).Find(&photos).Error; err != nil {
+	if err := s.DB.Preload("User").Where("user_id = ?", targetID).Order("created_at desc").Limit(120).Find(&photos).Error; err != nil {
 		return nil, err
 	}
 	sortPhotosForFeed(photos)
@@ -8800,7 +9334,7 @@ func (s *Server) loadVisibleUserPhotos(viewerID uint, targetID uint) ([]gin.H, e
 	for _, p := range photos {
 		photoIDs = append(photoIDs, p.ID)
 	}
-	bookmarkMap, err := s.bookmarkMapForViewer(viewerID, photoIDs)
+	decorations, err := s.photoDecorationsForViewer(viewerID, photoIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -8808,11 +9342,11 @@ func (s *Server) loadVisibleUserPhotos(viewerID uint, targetID uint) ([]gin.H, e
 	for _, p := range photos {
 		locked := p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt)
 		if locked {
-			row := s.profilePhotoJSONForViewer(viewerID, p, locked, bookmarkMap)
+			row := s.profilePhotoJSONForViewer(viewerID, p, locked, decorations)
 			out = append(out, row)
 			continue
 		}
-		out = append(out, s.profilePhotoJSONForViewer(viewerID, p, false, bookmarkMap))
+		out = append(out, s.profilePhotoJSONForViewer(viewerID, p, false, decorations))
 	}
 	return out, nil
 }
@@ -8821,8 +9355,8 @@ func (s *Server) profilePhotoJSON(p models.Photo, locked bool) gin.H {
 	return s.profilePhotoJSONForViewer(0, p, locked, nil)
 }
 
-func (s *Server) profilePhotoJSONForViewer(viewerID uint, p models.Photo, locked bool, bookmarkMap map[uint]bool) gin.H {
-	row := s.photoJSONForViewer(viewerID, p, bookmarkMap)
+func (s *Server) profilePhotoJSONForViewer(viewerID uint, p models.Photo, locked bool, decorations *viewerPhotoDecorations) gin.H {
+	row := s.photoJSONForViewer(viewerID, p, decorations)
 	row["capsulePrivate"] = false
 	row["capsuleLocked"] = locked
 	if !locked {
