@@ -4,6 +4,10 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-05-30
 
+- Prepared Android release `v0.5.10` with `versionName=0.5.10`, `versionCode=141519` and release notes for the new feed/calendar scroll quick navigation.
+- Added Android-only UX improvements for long feed and calendar sessions: floating jump actions, faster return to today/current anchor and clearer jump landing highlights.
+- Re-verified Android locally with `gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain` before GitHub rollout.
+
 - Hardened Android queued uploads for unstable/offline networks with shared auth refresh, richer queue state tracking, German user-facing status text and additional upload telemetry/debug events.
 - Added backend offline-grace handling for delayed prompt uploads based on `captured_at`, including `acceptedViaOfflineGrace` responses and regression coverage in `backend/internal/api/handlers_test.go`.
 - Added new admin analytics surfaces for upload debugging: upload timeline, condensed debug summary view and copyable timeline log output for faster incident forensics.

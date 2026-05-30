@@ -80,8 +80,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Today
+import androidx.compose.material.icons.filled.VerticalAlignTop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.ExperimentalMaterialApi
@@ -102,6 +106,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.LinearProgressIndicator
@@ -118,6 +123,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -7604,6 +7610,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onRefresh = { scope.launch { vm.refreshFeed() } },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
                     onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
+                    onJumpToDay = { day -> scope.launch { vm.jumpToDay(day) } },
                     onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
                     onFocusPhotoConsumed = { vm.clearFeedPhotoFocus() },
                     onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
@@ -7646,7 +7653,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onSearchQueryChange = { vm.setCalendarSearchQuery(it) },
                     onSearchSubmit = { vm.submitCalendarSearch() },
                     onOpenHashtagSearch = { vm.openCalendarSearch(it) },
-                    onSelect = { day -> vm.selectCalendarDay(day) }
+                    onSelect = { day -> vm.selectCalendarDay(day) },
+                    onOpenDayInFeed = { day -> scope.launch { vm.jumpToDay(day) } },
+                    onOpenPhotoInFeed = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } }
                 )
 
                 AppTab.CHAT -> ChatTab(
@@ -8601,6 +8610,7 @@ fun FeedTab(
     onRefresh: () -> Unit,
     onLoadOlder: () -> Unit,
     onLoadNewer: () -> Unit,
+    onJumpToDay: (String) -> Unit,
     onJumpToCapsule: (day: String, photoId: Long) -> Unit,
     onFocusPhotoConsumed: () -> Unit,
     onOpenUserProfile: (Long) -> Unit,
@@ -8614,6 +8624,7 @@ fun FeedTab(
     onOpenHashtagSearch: (String) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val primaryTextColor = MaterialTheme.colorScheme.onSurface
     val secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -8645,6 +8656,42 @@ fun FeedTab(
             .distinct()
             .toList()
     }
+    val currentAnchorDay = remember(focusDay, prompt?.day, days) {
+        when {
+            !focusDay.isNullOrBlank() -> focusDay
+            !prompt?.day.isNullOrBlank() -> prompt?.day
+            else -> days.firstOrNull()
+        }
+    }
+    val dayHeaderIndexByDay = remember(rows) {
+        buildMap<String, Int> {
+            rows.forEachIndexed { index, row ->
+                if (row is FeedRow.DayHeader) put(row.day, index)
+            }
+        }
+    }
+    var highlightedDay by remember { mutableStateOf<String?>(null) }
+    val visibleRange = remember(listState) {
+        derivedStateOf {
+            val visible = listState.layoutInfo.visibleItemsInfo
+            val first = visible.firstOrNull()?.index ?: -1
+            val last = visible.lastOrNull()?.index ?: -1
+            first to last
+        }
+    }
+    val firstVisibleIndex by remember { derivedStateOf { visibleRange.value.first } }
+    val lastVisibleIndex by remember { derivedStateOf { visibleRange.value.second } }
+    val showScrollTop by remember { derivedStateOf { firstVisibleIndex > 2 } }
+    val showScrollBottom by remember { derivedStateOf { rows.isNotEmpty() && lastVisibleIndex in 0 until rows.lastIndex - 1 } }
+    val currentAnchorVisible by remember(currentAnchorDay, dayHeaderIndexByDay) {
+        derivedStateOf {
+            val anchorIndex = currentAnchorDay?.let(dayHeaderIndexByDay::get) ?: return@derivedStateOf true
+            anchorIndex in firstVisibleIndex..lastVisibleIndex
+        }
+    }
+    val showJumpToCurrentAnchor by remember(currentAnchorDay) {
+        derivedStateOf { !currentAnchorDay.isNullOrBlank() && !currentAnchorVisible }
+    }
 
     var handledScrollRequestId by remember { mutableLongStateOf(0L) }
     LaunchedEffect(scrollRequestId, rows.size) {
@@ -8656,9 +8703,21 @@ fun FeedTab(
             rows.indexOfFirst { it is FeedRow.DayHeader && it.day == target }
         }
         if (idx < 0) return@LaunchedEffect
-        listState.scrollToItem(idx)
+        val distance = if (firstVisibleIndex >= 0) kotlin.math.abs(idx - firstVisibleIndex) else Int.MAX_VALUE
+        if (distance <= 6) {
+            listState.animateScrollToItem(idx)
+        } else {
+            listState.scrollToItem(idx)
+        }
         handledScrollRequestId = scrollRequestId
+        highlightedDay = focusDay ?: (rows.getOrNull(idx) as? FeedRow.DayHeader)?.day
         if (focusPhotoId != null) onFocusPhotoConsumed()
+    }
+    LaunchedEffect(highlightedDay) {
+        if (highlightedDay != null) {
+            delay(1800)
+            highlightedDay = null
+        }
     }
 
     LaunchedEffect(listState, rows.size, paging) {
@@ -8723,7 +8782,15 @@ fun FeedTab(
             when (row) {
                 is FeedRow.DayHeader -> {
                     val headerColor = weekdayRainbowColor(row.day)
-                    Card(colors = CardDefaults.cardColors(containerColor = headerColor)) {
+                    val isHighlighted = highlightedDay == row.day
+                    Card(
+                        colors = CardDefaults.cardColors(if (isHighlighted) headerColor.copy(alpha = 0.88f) else headerColor),
+                        modifier = if (isHighlighted) {
+                            Modifier.border(2.dp, Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+                        } else {
+                            Modifier
+                        }
+                    ) {
                         Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -8817,6 +8884,48 @@ fun FeedTab(
             refreshing = refreshing,
             state = pullRefreshState,
             modifier = Modifier.align(Alignment.TopCenter)
+        )
+        ScrollQuickActions(
+            showTop = showScrollTop,
+            showBottom = showScrollBottom,
+            showAnchor = showJumpToCurrentAnchor,
+            anchorLabel = if (currentAnchorDay == prompt?.day) "Heute" else "Zum Tag",
+            onTopClick = {
+                scope.launch {
+                    if (rows.isNotEmpty()) {
+                        listState.animateScrollToItem(0)
+                    }
+                }
+            },
+            onBottomClick = {
+                scope.launch {
+                    if (rows.isNotEmpty()) {
+                        listState.animateScrollToItem(rows.lastIndex)
+                    }
+                }
+            },
+            onAnchorClick = {
+                val anchorDay = currentAnchorDay
+                if (anchorDay != null) {
+                    val anchorIndex = dayHeaderIndexByDay[anchorDay]
+                    scope.launch {
+                        if (anchorIndex != null && anchorIndex in rows.indices) {
+                            val distance = if (firstVisibleIndex >= 0) kotlin.math.abs(anchorIndex - firstVisibleIndex) else Int.MAX_VALUE
+                            highlightedDay = anchorDay
+                            if (distance <= 6) {
+                                listState.animateScrollToItem(anchorIndex)
+                            } else {
+                                onJumpToDay(anchorDay)
+                            }
+                        } else {
+                            onJumpToDay(anchorDay)
+                        }
+                    }
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp, bottom = 20.dp)
         )
     }
 
@@ -9747,14 +9856,43 @@ fun CalendarTab(
     onSearchQueryChange: (String) -> Unit,
     onSearchSubmit: () -> Unit,
     onOpenHashtagSearch: (String) -> Unit,
-    onSelect: (String) -> Unit
+    onSelect: (String) -> Unit,
+    onOpenDayInFeed: (String) -> Unit,
+    onOpenPhotoInFeed: (String, Long) -> Unit
 ) {
+    val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     var tagJumpExpanded by remember(mode, days) { mutableStateOf(false) }
     val selectedIndex = remember(days, selected) { days.indexOf(selected).coerceAtLeast(0) }
+    val dayListStartIndex = remember(mode, searchQuery, searchResults, days) {
+        var prefix = 1
+        if (mode == CalendarMode.SEARCH && searchQuery.isBlank()) prefix += 1
+        if (mode == CalendarMode.SEARCH && searchResults.isNotEmpty()) prefix += 1
+        if (days.isEmpty()) prefix += 1
+        prefix
+    }
+    val visibleRange = remember(listState) {
+        derivedStateOf {
+            val visible = listState.layoutInfo.visibleItemsInfo
+            val first = visible.firstOrNull()?.index ?: -1
+            val last = visible.lastOrNull()?.index ?: -1
+            first to last
+        }
+    }
+    val showScrollToTop by remember { derivedStateOf { visibleRange.value.first > 2 } }
+    val selectedDayVisible by remember(days, selectedIndex) {
+        derivedStateOf {
+            if (selectedIndex !in days.indices) return@derivedStateOf true
+            val listIndex = dayListStartIndex + selectedIndex
+            listIndex in visibleRange.value.first..visibleRange.value.second
+        }
+    }
+    val showScrollToSelected by remember(selected, selectedIndex) {
+        derivedStateOf { selected.isNotBlank() && selectedIndex in days.indices && !selectedDayVisible }
+    }
     LaunchedEffect(selectedIndex, days.size) {
         if (days.isNotEmpty() && selectedIndex in days.indices) {
-            listState.animateScrollToItem(selectedIndex)
+            listState.animateScrollToItem(dayListStartIndex + selectedIndex)
         }
     }
     val modeLabel = when (mode) {
@@ -9767,11 +9905,12 @@ fun CalendarTab(
         CalendarMode.BOOKMARKS -> "Deine gemerkten Beitraege"
         CalendarMode.SEARCH -> if (searchQuery.isBlank()) "Suche nach Caption, Kommentaren und Hashtags" else "Treffer fuer \"$searchQuery\""
     }
-    LazyColumn(
-        state = listState,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.fillMaxSize()
-    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxSize()
+        ) {
         item("calendar-header") {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -9878,7 +10017,10 @@ fun CalendarTab(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { onSelect(result.photo.day) },
+                                    .clickable {
+                                        onSelect(result.photo.day)
+                                        onOpenPhotoInFeed(result.photo.day, result.photo.id)
+                                    },
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -9956,7 +10098,12 @@ fun CalendarTab(
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             if (!it.secondUrl.isNullOrBlank()) {
                                 Row(
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            onSelect(day)
+                                            onOpenPhotoInFeed(day, it.photoId)
+                                        },
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     AsyncImage(
@@ -9982,7 +10129,11 @@ fun CalendarTab(
                                     contentDescription = "Kalender-Vorschau",
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(120.dp),
+                                        .height(120.dp)
+                                        .clickable {
+                                            onSelect(day)
+                                            onOpenPhotoInFeed(day, it.photoId)
+                                        },
                                     contentScale = ContentScale.Crop
                                 )
                             }
@@ -9999,7 +10150,12 @@ fun CalendarTab(
                             Text("Gemerkt an diesem Tag", fontWeight = FontWeight.SemiBold)
                             bookmarkedPosts.forEach { entry ->
                                 Row(
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            onSelect(day)
+                                            onOpenPhotoInFeed(day, entry.photo.id)
+                                        },
                                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
@@ -10037,9 +10193,129 @@ fun CalendarTab(
                         }
                     }
                     if (selectedDay) {
-                        Text("Ausgewaehlt", color = Color(0xFF1F5FBF))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Ausgewaehlt", color = Color(0xFF1F5FBF))
+                            TextButton(onClick = { onOpenDayInFeed(day) }) {
+                                Text("Im Feed oeffnen")
+                            }
+                        }
+                    } else {
+                        TextButton(
+                            onClick = {
+                                onSelect(day)
+                                onOpenDayInFeed(day)
+                            },
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("Im Feed oeffnen")
+                        }
                     }
                 }
+            }
+        }
+        }
+        CalendarQuickActions(
+            showTop = showScrollToTop,
+            showSelected = showScrollToSelected,
+            selectedLabel = "Zum Tag",
+            onTopClick = {
+                scope.launch { listState.animateScrollToItem(0) }
+            },
+            onSelectedClick = {
+                if (selectedIndex in days.indices) {
+                    scope.launch { listState.animateScrollToItem(dayListStartIndex + selectedIndex) }
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp, bottom = 20.dp)
+        )
+    }
+}
+
+@Composable
+private fun ScrollQuickActions(
+    showTop: Boolean,
+    showBottom: Boolean,
+    showAnchor: Boolean,
+    anchorLabel: String,
+    onTopClick: () -> Unit,
+    onBottomClick: () -> Unit,
+    onAnchorClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalAlignment = Alignment.End
+    ) {
+        AnimatedVisibility(visible = showBottom, enter = fadeIn(), exit = fadeOut()) {
+            SmallFloatingActionButton(
+                onClick = onBottomClick,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface
+            ) {
+                Icon(Icons.Filled.ArrowDownward, contentDescription = "Zum Listenende")
+            }
+        }
+        AnimatedVisibility(visible = showAnchor, enter = fadeIn(), exit = fadeOut()) {
+            SmallFloatingActionButton(
+                onClick = onAnchorClick,
+                containerColor = Color(0xFF1F5FBF),
+                contentColor = Color.White
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Today,
+                    contentDescription = anchorLabel
+                )
+            }
+        }
+        AnimatedVisibility(visible = showTop, enter = fadeIn(), exit = fadeOut()) {
+            SmallFloatingActionButton(
+                onClick = onTopClick,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface
+            ) {
+                Icon(Icons.Filled.ArrowUpward, contentDescription = "Zum Listenanfang")
+            }
+        }
+    }
+}
+
+@Composable
+private fun CalendarQuickActions(
+    showTop: Boolean,
+    showSelected: Boolean,
+    selectedLabel: String,
+    onTopClick: () -> Unit,
+    onSelectedClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalAlignment = Alignment.End
+    ) {
+        AnimatedVisibility(visible = showSelected, enter = fadeIn(), exit = fadeOut()) {
+            SmallFloatingActionButton(
+                onClick = onSelectedClick,
+                containerColor = Color(0xFF1F5FBF),
+                contentColor = Color.White
+            ) {
+                Icon(Icons.Filled.Today, contentDescription = selectedLabel)
+            }
+        }
+        AnimatedVisibility(visible = showTop, enter = fadeIn(), exit = fadeOut()) {
+            SmallFloatingActionButton(
+                onClick = onTopClick,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface
+            ) {
+                Icon(Icons.Filled.VerticalAlignTop, contentDescription = "Zum Kalenderanfang")
             }
         }
     }

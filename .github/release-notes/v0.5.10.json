@@ -1,0 +1,14 @@
+{
+  "version": "0.5.10",
+  "releasedAt": "2026-05-30T00:00:00Z",
+  "highlights": [
+    "Der Feed hat jetzt schwebende Schnellaktionen fuer oben, unten und die Rueckkehr zum aktuellen Tag.",
+    "Der Kalender fuehrt ausgewaehlte Tage, Suchtreffer und gemerkte Posts direkter und schneller in den Feed.",
+    "Programmgesteuerte Spruenge im Feed heben den Ziel-Tag kurz hervor und verbessern so die Orientierung."
+  ],
+  "details": [
+    "Die Feed-Navigation nutzt weiterhin die bestehende jumpToDay- und jumpToPhoto-Logik statt einer separaten Sprungschicht.",
+    "Der Kalender besitzt jetzt eine leichtere Schnellnavigation fuer den Ruecksprung nach oben oder zum ausgewaehlten Tag.",
+    "Die Aenderung ist rein Android-seitig; Backend, API, Persistenz und Server-Deployments bleiben unveraendert."
+  ]
+}
