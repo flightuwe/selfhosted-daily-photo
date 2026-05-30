@@ -277,6 +277,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.POST("/uploads", s.handleUpload)
 			protected.POST("/uploads/dual", s.handleDualUpload)
 			protected.GET("/feed", s.handleFeed)
+			protected.GET("/feed/window", s.handleFeedWindow)
 			protected.GET("/feed/days", s.handleFeedDays)
 			protected.GET("/feed/day-stats", s.handleFeedDayStats)
 			protected.GET("/calendar/public", s.handleCalendarPublic)
@@ -1250,28 +1251,28 @@ func buildUploadTimelineItem(row models.ClientDebugLog, location *time.Location)
 	}
 
 	item := gin.H{
-		"id":             row.ID,
-		"timelineId":     timelineID,
-		"createdAt":      row.CreatedAt.In(location),
-		"type":           row.Type,
-		"stage":          stage,
-		"source":         source,
-		"message":        row.Message,
-		"meta":           row.Meta,
-		"appVersion":     row.AppVersion,
-		"deviceName":     row.DeviceName,
-		"sessionId":      row.SessionID,
-		"requestId":      row.RequestID,
-		"uploadClientId": uploadClientID,
-		"queueItemId":    queueItemID,
-		"kind":           strings.TrimSpace(meta["kind"]),
-		"failureClass":   strings.TrimSpace(meta["failureClass"]),
-		"failureFamily":  debugFailureFamily(row),
-		"securityFailureClass": strings.TrimSpace(meta["securityFailureClass"]),
-		"networkStateClass": strings.TrimSpace(meta["networkStateClass"]),
+		"id":                    row.ID,
+		"timelineId":            timelineID,
+		"createdAt":             row.CreatedAt.In(location),
+		"type":                  row.Type,
+		"stage":                 stage,
+		"source":                source,
+		"message":               row.Message,
+		"meta":                  row.Meta,
+		"appVersion":            row.AppVersion,
+		"deviceName":            row.DeviceName,
+		"sessionId":             row.SessionID,
+		"requestId":             row.RequestID,
+		"uploadClientId":        uploadClientID,
+		"queueItemId":           queueItemID,
+		"kind":                  strings.TrimSpace(meta["kind"]),
+		"failureClass":          strings.TrimSpace(meta["failureClass"]),
+		"failureFamily":         debugFailureFamily(row),
+		"securityFailureClass":  strings.TrimSpace(meta["securityFailureClass"]),
+		"networkStateClass":     strings.TrimSpace(meta["networkStateClass"]),
 		"retrySuppressedReason": strings.TrimSpace(meta["retrySuppressedReason"]),
-		"userAdviceShown": debugMetaBool(meta, "userAdviceShown"),
-		"networkKind":    strings.TrimSpace(meta["network"]),
+		"userAdviceShown":       debugMetaBool(meta, "userAdviceShown"),
+		"networkKind":           strings.TrimSpace(meta["network"]),
 		"user": gin.H{
 			"id":       row.User.ID,
 			"username": row.User.Username,
@@ -1454,7 +1455,7 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 	settings = normalizeSettings(settings)
 
 	specialStatus, _ := s.specialMomentStatus(user.ID)
-	feedDays, _ := s.feedDaysForUser(user.ID, "", "", now)
+	feedDays, _, _, _ := s.feedDaysForUser(user.ID, "", "", "", "", 60, "", now)
 
 	photos := []gin.H{}
 	if includePhotos {
@@ -2287,7 +2288,6 @@ func (s *Server) handleFeed(c *gin.Context) {
 	if day == "" {
 		day = time.Now().In(s.Location).Format("2006-01-02")
 	}
-	today := time.Now().In(s.Location).Format("2006-01-02")
 	now := time.Now().In(s.Location)
 	if allow, retryAfter := s.allowFeedRead(user.ID, now); !allow {
 		if s.Monitor != nil {
@@ -2311,18 +2311,118 @@ func (s *Server) handleFeed(c *gin.Context) {
 			return
 		}
 	}
-	if day == today {
-		hasPosted, err := s.userHasVisiblePhotoForDay(user.ID, day, now)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-			return
-		}
-		if !hasPosted {
+	payload, status, err := s.feedPayloadForDay(user.ID, day, now, true)
+	if err != nil {
+		if status == http.StatusForbidden {
 			c.JSON(http.StatusForbidden, gin.H{
 				"error": "Poste zuerst einen sichtbaren Beitrag, um die Beitraege der anderen zu sehen",
 				"code":  "feed_locked",
 			})
 			return
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	if s.shouldUseFeedCache(day, now) {
+		s.putFeedCachedPayload(user.ID, day, payload, now)
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+func (s *Server) handleFeedWindow(c *gin.Context) {
+	user, _ := userFromContext(c)
+	now := time.Now().In(s.Location)
+	if allow, retryAfter := s.allowFeedRead(user.ID, now); !allow {
+		if s.Monitor != nil {
+			s.Monitor.RecordThrottle("feed_spike_poll_guard")
+		}
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		c.Header("X-RateLimit-Policy", "soft")
+		c.Header("X-RateLimit-Reason", "feed_spike_poll_guard")
+		c.Header("X-RateLimit-Scope", "feed")
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":      "Zu viele Feed-Aktualisierungen in kurzer Zeit. Bitte gleich erneut versuchen.",
+			"code":       "feed_rate_limited",
+			"reasonTag":  "feed_spike_poll_guard",
+			"retryAfter": retryAfter,
+		})
+		return
+	}
+
+	anchorDay := strings.TrimSpace(c.Query("anchor_day"))
+	if anchorDay == "" {
+		anchorDay = now.Format("2006-01-02")
+	}
+	if _, err := time.ParseInLocation("2006-01-02", anchorDay, s.Location); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid anchor_day"})
+		return
+	}
+	beforeDays, err := parseNonNegativeQueryInt(c, "before_days", 2)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	afterDays, err := parseNonNegativeQueryInt(c, "after_days", 2)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	focusPhotoID := strings.TrimSpace(c.Query("focus_photo_id"))
+
+	newerDays, _, hasNewer, err := s.feedDaysForUser(user.ID, "", "", "", anchorDay, beforeDays, "", now)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	olderDays, hasOlder, _, err := s.feedDaysForUser(user.ID, "", "", anchorDay, "", afterDays, "", now)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	selectedDays := append(append(newerDays, anchorDay), olderDays...)
+	selectedDays = uniqueDays(selectedDays)
+	items := make([]gin.H, 0, len(selectedDays))
+	for _, day := range selectedDays {
+		payload, status, payloadErr := s.feedPayloadForDay(user.ID, day, now, false)
+		if payloadErr != nil && status >= http.StatusInternalServerError {
+			c.JSON(status, gin.H{"error": payloadErr.Error()})
+			return
+		}
+		items = append(items, payload)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"anchorDay":            anchorDay,
+		"days":                 items,
+		"hasOlder":             hasOlder,
+		"hasNewer":             hasNewer,
+		"oldestLoadedDay":      selectedDays[len(selectedDays)-1],
+		"newestLoadedDay":      selectedDays[0],
+		"resolvedFocusPhotoId": parseOptionalInt64(focusPhotoID),
+	})
+}
+
+func (s *Server) feedPayloadForDay(userID uint, day string, now time.Time, enforceTodayLock bool) (gin.H, int, error) {
+	today := now.Format("2006-01-02")
+	if s.shouldUseFeedCache(day, now) {
+		if cached, ok := s.feedCachedPayload(userID, day, now); ok {
+			return cached, http.StatusOK, nil
+		}
+	}
+	if enforceTodayLock && day == today {
+		hasPosted, err := s.userHasVisiblePhotoForDay(userID, day, now)
+		if err != nil {
+			return nil, http.StatusInternalServerError, errors.New("query failed")
+		}
+		if !hasPosted {
+			return nil, http.StatusForbidden, errors.New("feed locked")
 		}
 	}
 
@@ -2338,8 +2438,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 
 	var photos []models.Photo
 	if err := s.DB.Preload("User").Where("day = ?", day).Order("created_at desc").Find(&photos).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-		return
+		return nil, http.StatusInternalServerError, errors.New("query failed")
 	}
 	sortPhotosForFeed(photos)
 
@@ -2347,20 +2446,18 @@ func (s *Server) handleFeed(c *gin.Context) {
 	for _, p := range photos {
 		photoIDs = append(photoIDs, p.ID)
 	}
-	decorations, err := s.photoDecorationsForViewer(user.ID, photoIDs)
+	decorations, err := s.photoDecorationsForViewer(userID, photoIDs)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
-		return
+		return nil, http.StatusInternalServerError, errors.New("photo decorations query failed")
 	}
 	reactionByPhoto, commentByPhoto, photoMojiByPhoto, err := s.feedInteractionPreview(photoIDs)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "interaction query failed"})
-		return
+		return nil, http.StatusInternalServerError, errors.New("interaction query failed")
 	}
 
 	out := make([]gin.H, 0, len(photos))
 	for _, p := range photos {
-		if !photoVisibleToViewer(user.ID, p, now) {
+		if !photoVisibleToViewer(userID, p, now) {
 			continue
 		}
 		capsuleLocked := p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt)
@@ -2391,8 +2488,8 @@ func (s *Server) handleFeed(c *gin.Context) {
 			"isLate":                      isLate,
 			"capsuleLocked":               capsuleLocked,
 			"capsuleReleased":             capsuleReleased,
-			"photo":                       s.photoJSONForViewer(user.ID, p, decorations),
-			"user":                        s.userPublicJSON(user.ID, p.User),
+			"photo":                       s.photoJSONForViewer(userID, p, decorations),
+			"user":                        s.userPublicJSON(userID, p.User),
 			"reactions":                   reactions,
 			"comments":                    comments,
 			"photoMojis":                  photoMojis,
@@ -2404,7 +2501,7 @@ func (s *Server) handleFeed(c *gin.Context) {
 	}
 
 	recapStart := time.Now()
-	recap, _ := s.monthlyRecapForDay(day, user.ID)
+	recap, _ := s.monthlyRecapForDay(day, userID)
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/feed", "feed_monthly_recap", time.Since(recapStart))
 	}
@@ -2424,9 +2521,9 @@ func (s *Server) handleFeed(c *gin.Context) {
 		"monthRecap":                  recap,
 	}
 	if s.shouldUseFeedCache(day, now) {
-		s.putFeedCachedPayload(user.ID, day, payload, now)
+		s.putFeedCachedPayload(userID, day, payload, now)
 	}
-	c.JSON(http.StatusOK, payload)
+	return payload, http.StatusOK, nil
 }
 
 func (s *Server) handleGetSettings(c *gin.Context) {
@@ -4817,6 +4914,74 @@ func minInt(a, b int) int {
 	return b
 }
 
+func parsePositiveQueryInt(c *gin.Context, key string, fallback int, maxAllowed int) (int, error) {
+	raw := strings.TrimSpace(c.Query(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("invalid %s", key)
+	}
+	if maxAllowed > 0 && value > maxAllowed {
+		return maxAllowed, nil
+	}
+	return value, nil
+}
+
+func parseNonNegativeQueryInt(c *gin.Context, key string, fallback int) (int, error) {
+	raw := strings.TrimSpace(c.Query(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("invalid %s", key)
+	}
+	return value, nil
+}
+
+func slicesIndex(items []string, target string) int {
+	for idx, item := range items {
+		if item == target {
+			return idx
+		}
+	}
+	return -1
+}
+
+func uniqueDays(days []string) []string {
+	if len(days) == 0 {
+		return days
+	}
+	out := make([]string, 0, len(days))
+	seen := make(map[string]struct{}, len(days))
+	for _, day := range days {
+		day = strings.TrimSpace(day)
+		if day == "" {
+			continue
+		}
+		if _, ok := seen[day]; ok {
+			continue
+		}
+		seen[day] = struct{}{}
+		out = append(out, day)
+	}
+	return out
+}
+
+func parseOptionalInt64(raw string) *int64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &value
+}
+
 func (s *Server) handleBroadcastNotification(c *gin.Context) {
 	var req struct {
 		Body string `json:"body" binding:"required,min=3,max=255"`
@@ -5114,17 +5279,25 @@ func (s *Server) handleFeedDays(c *gin.Context) {
 	user, _ := userFromContext(c)
 	fromDay := strings.TrimSpace(c.Query("from"))
 	toDay := strings.TrimSpace(c.Query("to"))
-	now := time.Now().In(s.Location)
-	days, err := s.feedDaysForUser(user.ID, fromDay, toDay, now)
+	beforeDay := strings.TrimSpace(c.Query("before_day"))
+	afterDay := strings.TrimSpace(c.Query("after_day"))
+	anchorDay := strings.TrimSpace(c.Query("anchor_day"))
+	limit, err := parsePositiveQueryInt(c, "limit", 60, 180)
 	if err != nil {
-		if strings.Contains(err.Error(), "invalid from") || strings.Contains(err.Error(), "invalid to") || strings.Contains(err.Error(), "from/to") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	now := time.Now().In(s.Location)
+	days, hasOlder, hasNewer, err := s.feedDaysForUser(user.ID, fromDay, toDay, beforeDay, afterDay, limit, anchorDay, now)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "from/to") || strings.Contains(err.Error(), "before_day/after_day") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": days})
+	c.JSON(http.StatusOK, gin.H{"items": days, "hasOlder": hasOlder, "hasNewer": hasNewer})
 }
 
 func (s *Server) handleFeedDayStats(c *gin.Context) {
@@ -7737,24 +7910,60 @@ func (s *Server) myPhotosPayload(userID uint, now time.Time) ([]gin.H, error) {
 	return out, nil
 }
 
-func (s *Server) feedDaysForUser(userID uint, fromDay string, toDay string, now time.Time) ([]string, error) {
+func (s *Server) feedDaysForUser(
+	userID uint,
+	fromDay string,
+	toDay string,
+	beforeDay string,
+	afterDay string,
+	limit int,
+	anchorDay string,
+	now time.Time,
+) ([]string, bool, bool, error) {
 	fromDay = strings.TrimSpace(fromDay)
 	toDay = strings.TrimSpace(toDay)
+	beforeDay = strings.TrimSpace(beforeDay)
+	afterDay = strings.TrimSpace(afterDay)
+	anchorDay = strings.TrimSpace(anchorDay)
 	if (fromDay == "") != (toDay == "") {
-		return nil, errors.New("from/to must be provided together")
+		return nil, false, false, errors.New("from/to must be provided together")
+	}
+	if fromDay != "" && (beforeDay != "" || afterDay != "" || anchorDay != "") {
+		return nil, false, false, errors.New("from/to cannot be combined with before_day, after_day or anchor_day")
+	}
+	if beforeDay != "" && afterDay != "" {
+		return nil, false, false, errors.New("before_day/after_day must be used individually")
 	}
 	if fromDay != "" {
 		fromParsed, err := time.ParseInLocation("2006-01-02", fromDay, s.Location)
 		if err != nil {
-			return nil, errors.New("invalid from date")
+			return nil, false, false, errors.New("invalid from date")
 		}
 		toParsed, err := time.ParseInLocation("2006-01-02", toDay, s.Location)
 		if err != nil {
-			return nil, errors.New("invalid to date")
+			return nil, false, false, errors.New("invalid to date")
 		}
 		if fromParsed.After(toParsed) {
-			return nil, errors.New("from must be before or equal to to")
+			return nil, false, false, errors.New("from must be before or equal to to")
 		}
+	}
+	if beforeDay != "" {
+		if _, err := time.ParseInLocation("2006-01-02", beforeDay, s.Location); err != nil {
+			return nil, false, false, errors.New("invalid before_day date")
+		}
+	}
+	if afterDay != "" {
+		if _, err := time.ParseInLocation("2006-01-02", afterDay, s.Location); err != nil {
+			return nil, false, false, errors.New("invalid after_day date")
+		}
+	}
+	if anchorDay != "" {
+		if _, err := time.ParseInLocation("2006-01-02", anchorDay, s.Location); err != nil {
+			return nil, false, false, errors.New("invalid anchor_day date")
+		}
+	}
+	if limit <= 0 {
+		limit = 60
 	}
 	type row struct {
 		Day string
@@ -7765,13 +7974,21 @@ func (s *Server) feedDaysForUser(userID uint, fromDay string, toDay string, now 
 		Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", userID, now)
 	if fromDay != "" {
 		query = query.Where("day >= ? AND day <= ?", fromDay, toDay)
+	} else if beforeDay != "" {
+		query = query.Where("day < ?", beforeDay)
+	} else if afterDay != "" {
+		query = query.Where("day > ?", afterDay)
+	}
+	order := "day desc"
+	if afterDay != "" {
+		order = "day asc"
 	}
 	if err := query.
 		Select("DISTINCT day").
-		Order("day desc").
-		Limit(365).
+		Order(order).
+		Limit(limit + 1).
 		Scan(&rows).Error; err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/feed/days", "feed_days_query", time.Since(queryStart))
@@ -7783,7 +8000,7 @@ func (s *Server) feedDaysForUser(userID uint, fromDay string, toDay string, now 
 		var err error
 		hasPostedToday, err = s.userHasVisiblePhotoForDay(userID, today, now)
 		if err != nil {
-			return nil, err
+			return nil, false, false, err
 		}
 	}
 	days := make([]string, 0, len(rows))
@@ -7793,7 +8010,37 @@ func (s *Server) feedDaysForUser(userID uint, fromDay string, toDay string, now 
 		}
 		days = append(days, r.Day)
 	}
-	return days, nil
+	if afterDay != "" {
+		sort.Slice(days, func(i, j int) bool { return days[i] > days[j] })
+	}
+	hasExtra := len(days) > limit
+	if hasExtra {
+		days = days[:limit]
+	}
+	if anchorDay != "" {
+		idx := slicesIndex(days, anchorDay)
+		if idx < 0 {
+			days = append(days, anchorDay)
+			sort.Slice(days, func(i, j int) bool { return days[i] > days[j] })
+		}
+	}
+	hasOlder := false
+	hasNewer := false
+	switch {
+	case fromDay != "":
+		hasOlder = false
+		hasNewer = false
+	case beforeDay != "":
+		hasOlder = hasExtra
+		hasNewer = true
+	case afterDay != "":
+		hasOlder = true
+		hasNewer = hasExtra
+	default:
+		hasOlder = hasExtra
+		hasNewer = false
+	}
+	return days, hasOlder, hasNewer, nil
 }
 
 func (s *Server) handleDeleteMyPhoto(c *gin.Context) {
