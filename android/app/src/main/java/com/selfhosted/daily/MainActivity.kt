@@ -10036,6 +10036,15 @@ fun CalendarTab(
 ) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val openPrimaryFeedTarget: (String, Long?) -> Unit = remember(onOpenDayInFeed, onOpenPhotoInFeed) {
+        { day, featuredPhotoId ->
+            if (featuredPhotoId != null) {
+                onOpenPhotoInFeed(day, featuredPhotoId)
+            } else {
+                onOpenDayInFeed(day)
+            }
+        }
+    }
     var tagJumpExpanded by remember(mode, days) { mutableStateOf(false) }
     val selectedIndex = remember(days, selected) { days.indexOf(selected).coerceAtLeast(0) }
     val dayListStartIndex = remember(mode, searchQuery, searchResults, days) {
@@ -10373,7 +10382,7 @@ fun CalendarTab(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text("Ausgewaehlt", color = Color(0xFF1F5FBF))
-                            TextButton(onClick = { onOpenDayInFeed(day) }) {
+                            TextButton(onClick = { openPrimaryFeedTarget(day, featured?.photoId) }) {
                                 Text("Im Feed oeffnen")
                             }
                         }
@@ -10381,7 +10390,7 @@ fun CalendarTab(
                         TextButton(
                             onClick = {
                                 onSelect(day)
-                                onOpenDayInFeed(day)
+                                openPrimaryFeedTarget(day, featured?.photoId)
                             },
                             contentPadding = PaddingValues(0.dp)
                         ) {

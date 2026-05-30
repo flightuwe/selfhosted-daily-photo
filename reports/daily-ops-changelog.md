@@ -4,6 +4,10 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-05-30
 
+- Prepared Android release `v0.5.13` with `versionName=0.5.13`, `versionCode=141522` for the calendar featured-post jump fix.
+- Adjusted calendar day-level feed actions so `Im Feed oeffnen` targets the day’s highlighted top post whenever `featuredPhoto.photoId` is present.
+- Re-verified Android locally with `gradle :app:compileDebugKotlin` before the patch release.
+
 - Prepared Android release `v0.5.12` with `versionName=0.5.12`, `versionCode=141521` for the feed quick-action jump fix.
 - Adjusted feed quick-action buttons so `nach oben` and `nach unten` target the real known feed edges instead of only the currently loaded window.
 - Re-verified Android locally with `gradle :app:compileDebugKotlin` before the patch release.
