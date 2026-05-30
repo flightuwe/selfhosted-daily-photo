@@ -4,6 +4,11 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-05-30
 
+- Prepared Android release `v0.5.11` with `versionName=0.5.11`, `versionCode=141520` and release notes for anchor-window feed loading.
+- Split feed navigation rollout into two phases: backend on `main` first, Android release second, because the app now depends on the new `/api/feed/window` endpoint.
+- Added anchor-window feed loading for the Android app so calendar jumps fetch the target day plus neighboring days in one request and show an immediate loading state at the landing day.
+- Re-verified Android locally with `gradle :app:compileDebugKotlin` before release push; backend API tests for the supporting server endpoint were already green on commit `077af6f`.
+
 - Prepared Android release `v0.5.10` with `versionName=0.5.10`, `versionCode=141519` and release notes for the new feed/calendar scroll quick navigation.
 - Added Android-only UX improvements for long feed and calendar sessions: floating jump actions, faster return to today/current anchor and clearer jump landing highlights.
 - Re-verified Android locally with `gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain` before GitHub rollout.

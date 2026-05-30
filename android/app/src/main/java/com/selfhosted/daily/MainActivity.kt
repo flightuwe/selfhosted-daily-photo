@@ -598,7 +598,20 @@ data class FeedResponse(
     val specialRequestedByUserColor: String? = null,
     val monthRecap: MonthlyRecap? = null
 )
-data class DayListResponse(val items: List<String>)
+data class FeedWindowResponse(
+    val anchorDay: String,
+    val days: List<FeedResponse> = emptyList(),
+    val hasOlder: Boolean = false,
+    val hasNewer: Boolean = false,
+    val oldestLoadedDay: String? = null,
+    val newestLoadedDay: String? = null,
+    val resolvedFocusPhotoId: Long? = null
+)
+data class DayListResponse(
+    val items: List<String>,
+    val hasOlder: Boolean = false,
+    val hasNewer: Boolean = false
+)
 data class CalendarFeaturedPhoto(
     val photoId: Long,
     val url: String,
@@ -990,11 +1003,24 @@ interface Api {
     @GET("feed")
     suspend fun feed(@Header("Authorization") token: String, @Query("day") day: String): FeedResponse
 
+    @GET("feed/window")
+    suspend fun feedWindow(
+        @Header("Authorization") token: String,
+        @Query("anchor_day") anchorDay: String,
+        @Query("before_days") beforeDays: Int = 2,
+        @Query("after_days") afterDays: Int = 2,
+        @Query("focus_photo_id") focusPhotoId: Long? = null
+    ): FeedWindowResponse
+
     @GET("feed/days")
     suspend fun feedDays(
         @Header("Authorization") token: String,
         @Query("from") from: String? = null,
-        @Query("to") to: String? = null
+        @Query("to") to: String? = null,
+        @Query("before_day") beforeDay: String? = null,
+        @Query("after_day") afterDay: String? = null,
+        @Query("anchor_day") anchorDay: String? = null,
+        @Query("limit") limit: Int? = null
     ): DayListResponse
 
     @GET("feed/day-stats")
@@ -2234,8 +2260,25 @@ class AppRepo(
     }
 
     suspend fun feedByDay(day: String): FeedResponse = authorizedCall("/api/feed") { token -> api.feed(token, day) }
-    suspend fun feedDays(from: String? = null, to: String? = null): List<String> =
-        authorizedCall("/api/feed/days") { token -> api.feedDays(token, from, to).items }
+    suspend fun feedWindow(
+        anchorDay: String,
+        beforeDays: Int = 2,
+        afterDays: Int = 2,
+        focusPhotoId: Long? = null
+    ): FeedWindowResponse = authorizedCall("/api/feed/window") { token ->
+        api.feedWindow(token, anchorDay, beforeDays, afterDays, focusPhotoId)
+    }
+    suspend fun feedDays(
+        from: String? = null,
+        to: String? = null,
+        beforeDay: String? = null,
+        afterDay: String? = null,
+        anchorDay: String? = null,
+        limit: Int? = null
+    ): DayListResponse =
+        authorizedCall("/api/feed/days") { token ->
+            api.feedDays(token, from, to, beforeDay, afterDay, anchorDay, limit)
+        }
     suspend fun feedDayStats(from: String? = null, to: String? = null): List<DayStatItem> =
         authorizedCall("/api/feed/day-stats") { token -> api.feedDayStats(token, from, to).items }
     suspend fun calendarPublic(): CalendarPayloadResponse =
@@ -3139,6 +3182,8 @@ data class UiState(
     val monthRecapByDay: Map<String, MonthlyRecap> = emptyMap(),
     val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
     val calendarDays: List<String> = emptyList(),
+    val feedIndexHasOlder: Boolean = true,
+    val feedIndexHasNewer: Boolean = false,
     val calendarDayStats: Map<String, DayStatItem> = emptyMap(),
     val calendarMode: CalendarMode = CalendarMode.PUBLIC,
     val calendarPickerExpanded: Boolean = false,
@@ -3156,6 +3201,7 @@ data class UiState(
     val feedPaging: Boolean = false,
     val feedRefreshing: Boolean = false,
     val feedTodayLocked: Boolean = false,
+    val feedJumpLoadingDay: String? = null,
     val chatHasOtherMessages: Boolean = true,
     val chatHasUnreadMessages: Boolean = false,
     val photos: List<PromptPhoto> = emptyList(),
@@ -4476,7 +4522,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedFocusPhotoId = null,
             feedScrollRequestId = scrollRequestId
         )
-        loadFeedWindow(day, around = 0, forceReload = false)
+        runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
+            .onFailure {
+                state = state.copy(message = apiError(it, "Feed-Sprung fehlgeschlagen"))
+            }
         state = state.copy(
             activeTab = AppTab.FEED,
             feedFocusDay = day,
@@ -4493,7 +4542,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedFocusPhotoId = photoId,
             feedScrollRequestId = scrollRequestId
         )
-        loadFeedWindow(day, around = 3, forceReload = false)
+        runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
+            .onFailure {
+                state = state.copy(message = apiError(it, "Beitrag laden fehlgeschlagen"))
+            }
         state = state.copy(
             activeTab = AppTab.FEED,
             feedFocusDay = day,
@@ -4629,9 +4681,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     failedCall = "chat"
                     state.chat
                 }
-                val feedDays = runCatching { repo.feedDays() }.getOrElse {
+                val feedDays = runCatching { repo.feedDays(limit = 60) }.getOrElse {
                     failedCall = "feedDays"
-                    state.calendarDays
+                    DayListResponse(
+                        items = state.calendarDays,
+                        hasOlder = state.feedIndexHasOlder,
+                        hasNewer = state.feedIndexHasNewer
+                    )
                 }
                 val communityStats = runCatching { repo.communityStats() }.getOrElse {
                     failedCall = "communityStats"
@@ -4649,7 +4705,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     special = fetchedSpecial,
                     photos = fetchedPhotos,
                     chat = fetchedChat,
-                    feedDays = feedDays,
+                    feedDays = feedDays.items,
                     communityStats = communityStats
                 )
             }
@@ -4685,6 +4741,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photos = payload.photos
             val chat = payload.chat
             val calendarDays = payload.feedDays
+            val feedIndexHasOlder = calendarDays.size >= 60
             val previousCalendarDays = state.calendarDays
             val calendarChanged = previousCalendarDays != calendarDays
             if (calendarChanged) {
@@ -4741,6 +4798,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 chatHasOtherMessages = true,
                 chatHasUnreadMessages = hasUnreadChat,
                 calendarDays = calendarDays,
+                feedIndexHasOlder = feedIndexHasOlder,
+                feedIndexHasNewer = false,
                 calendarDayStats = calendarDayStats,
                 communityStats = payload.communityStats,
                 communityStatsLoading = false,
@@ -4930,139 +4989,202 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun loadOlderFeedDays(count: Int = 3) {
-        if (state.feedPaging || state.calendarDays.isEmpty()) return
+        if (state.feedPaging) return
         val base = state.feedDays.lastOrNull() ?: return
-        val all = state.calendarDays
-        val idx = all.indexOf(base)
+        var all = state.calendarDays
+        var idx = all.indexOf(base)
+        if ((idx < 0 || idx >= all.lastIndex) && state.feedIndexHasOlder) {
+            val page = runCatching { repo.feedDays(beforeDay = all.lastOrNull(), limit = count) }.getOrNull() ?: return
+            all = mergeDayIndex(all, page.items)
+            idx = all.indexOf(base)
+            state = state.copy(
+                calendarDays = all,
+                feedIndexHasOlder = page.hasOlder,
+                feedIndexHasNewer = state.feedIndexHasNewer || page.hasNewer
+            )
+        }
         if (idx < 0) return
         val newDays = all.drop(idx + 1).take(count)
         if (newDays.isEmpty()) return
-        state = state.copy(feedPaging = true)
-        val newMap = state.feedByDay.toMutableMap()
-        val newPromptMap = state.promptMetaByDay.toMutableMap()
-        val newRecapMap = state.monthRecapByDay.toMutableMap()
-        for (day in newDays) {
-            if (!newMap.containsKey(day)) {
-                val fetched = fetchDaySafe(day, forceReload = false)
-                newMap[day] = fetched.items
-                newPromptMap[day] = fetched.meta
-                fetched.monthRecap?.let { newRecapMap[day] = it }
-            }
-        }
-        state = state.copy(feedDays = state.feedDays + newDays, feedByDay = newMap, monthRecapByDay = newRecapMap, promptMetaByDay = newPromptMap, feedPaging = false)
+        loadFeedEdgeWindow(anchorDay = newDays.first(), beforeDays = 0, afterDays = newDays.size - 1, appendOlder = true)
     }
 
     suspend fun loadNewerFeedDays(count: Int = 3) {
-        if (state.feedPaging || state.calendarDays.isEmpty()) return
+        if (state.feedPaging) return
         val base = state.feedDays.firstOrNull() ?: return
-        val all = state.calendarDays
-        val idx = all.indexOf(base)
+        var all = state.calendarDays
+        var idx = all.indexOf(base)
+        if (idx <= 0 && state.feedIndexHasNewer) {
+            val page = runCatching { repo.feedDays(afterDay = all.firstOrNull(), limit = count) }.getOrNull() ?: return
+            all = mergeDayIndex(all, page.items)
+            idx = all.indexOf(base)
+            state = state.copy(
+                calendarDays = all,
+                feedIndexHasOlder = state.feedIndexHasOlder || page.hasOlder,
+                feedIndexHasNewer = page.hasNewer
+            )
+        }
         if (idx <= 0) return
         val start = maxOf(0, idx - count)
         val prependDays = all.subList(start, idx)
         if (prependDays.isEmpty()) return
-        state = state.copy(feedPaging = true)
-        val newMap = state.feedByDay.toMutableMap()
-        val newPromptMap = state.promptMetaByDay.toMutableMap()
-        val newRecapMap = state.monthRecapByDay.toMutableMap()
-        for (day in prependDays) {
-            if (!newMap.containsKey(day)) {
-                val fetched = fetchDaySafe(day, forceReload = false)
-                newMap[day] = fetched.items
-                newPromptMap[day] = fetched.meta
-                fetched.monthRecap?.let { newRecapMap[day] = it }
-            }
-        }
-        state = state.copy(feedDays = prependDays + state.feedDays, feedByDay = newMap, monthRecapByDay = newRecapMap, promptMetaByDay = newPromptMap, feedPaging = false)
+        loadFeedEdgeWindow(anchorDay = prependDays.last(), beforeDays = prependDays.size - 1, afterDays = 0, appendOlder = false)
     }
 
     private suspend fun loadFeedWindow(anchorDay: String, around: Int, forceReload: Boolean): Int {
-        val fetchedDays = if (state.calendarDays.isEmpty()) {
-            runCatching { repo.feedDays() }.getOrDefault(emptyList())
-        } else {
-            state.calendarDays
+        if (state.calendarDays.isEmpty()) {
+            runCatching { repo.feedDays(limit = 60) }.getOrNull()?.let { page ->
+                state = state.copy(
+                    calendarDays = mergeDayIndex(state.calendarDays, page.items),
+                    feedIndexHasOlder = page.hasOlder,
+                    feedIndexHasNewer = page.hasNewer
+                )
+            }
         }
-        if (state.calendarDays.isEmpty() && fetchedDays.isNotEmpty()) {
-            state = state.copy(calendarDays = fetchedDays)
+        val target = anchorDay
+        state = state.copy(
+            feedDays = listOf(target),
+            promptMetaByDay = state.promptMetaByDay + (target to PromptMeta(day = target)),
+            feedJumpLoadingDay = target,
+            feedPaging = true
+        )
+        return try {
+            val window = repo.feedWindow(
+                anchorDay = target,
+                beforeDays = around,
+                afterDays = around,
+                focusPhotoId = state.feedFocusPhotoId
+            )
+            applyFeedWindow(window, target, replaceVisibleDays = true, forceReload = forceReload)
+        } catch (t: Throwable) {
+            state = state.copy(feedJumpLoadingDay = null, feedPaging = false)
+            throw t
         }
-        val allDays = if (state.calendarDays.isNotEmpty()) state.calendarDays else fetchedDays
-        if (allDays.isEmpty()) {
+    }
+
+    private suspend fun loadFeedEdgeWindow(anchorDay: String, beforeDays: Int, afterDays: Int, appendOlder: Boolean) {
+        state = state.copy(feedPaging = true)
+        try {
+            runCatching { repo.feedWindow(anchorDay = anchorDay, beforeDays = beforeDays, afterDays = afterDays) }
+                .onSuccess { window ->
+                    applyFeedWindow(window, anchorDay, replaceVisibleDays = false, forceReload = false, appendOlder = appendOlder)
+                }
+        } finally {
+            if (state.feedPaging) {
+                state = state.copy(feedPaging = false)
+            }
+        }
+    }
+
+    private fun applyFeedWindow(
+        window: FeedWindowResponse,
+        requestedAnchorDay: String,
+        replaceVisibleDays: Boolean,
+        forceReload: Boolean,
+        appendOlder: Boolean = false
+    ): Int {
+        val windowDays = window.days.mapNotNull { it.day }.distinct()
+        if (windowDays.isEmpty()) {
+            val today = state.prompt?.day ?: LocalDate.now().toString()
             state = state.copy(
                 feedDays = emptyList(),
-                feedByDay = emptyMap(),
-                monthRecapByDay = emptyMap(),
-                promptMetaByDay = emptyMap(),
                 feed = emptyList(),
-                feedTodayLocked = state.prompt?.hasVisiblePostToday == false,
-                feedFocusDay = state.prompt?.day,
-                feedFocusPhotoId = null
+                feedJumpLoadingDay = null,
+                feedPaging = false,
+                feedTodayLocked = state.prompt?.hasVisiblePostToday == false && today == requestedAnchorDay
             )
             return 0
         }
-        val target = if (allDays.contains(anchorDay)) anchorDay else allDays.first()
-        val idx = allDays.indexOf(target)
-        val start = maxOf(0, idx - around)
-        val end = minOf(allDays.lastIndex, idx + around)
-        val days = allDays.subList(start, end + 1)
-        val map = mutableMapOf<String, List<FeedItem>>()
-        val monthRecapMap = mutableMapOf<String, MonthlyRecap>()
-        val promptMap = mutableMapOf<String, PromptMeta>()
-        var reloadedCount = 0
-        var reloadErrors = 0
-        for (day in days.distinct()) {
-            val cachedItems = state.feedByDay[day]
-            val cachedMeta = state.promptMetaByDay[day]
-            val shouldReloadDay = forceReload || staleFeedDays.contains(day)
-            if (!shouldReloadDay && cachedItems != null && cachedMeta != null) {
-                map[day] = cachedItems
-                promptMap[day] = cachedMeta
-                state.monthRecapByDay[day]?.let { monthRecapMap[day] = it }
-                continue
+        val cacheMap = state.feedByDay.toMutableMap()
+        val promptMap = state.promptMetaByDay.toMutableMap()
+        val recapMap = state.monthRecapByDay.toMutableMap()
+        window.days.forEach { dayPayload ->
+            val day = dayPayload.day ?: return@forEach
+            cacheMap[day] = dayPayload.items
+            promptMap[day] = PromptMeta(
+                day = day,
+                triggeredAt = dayPayload.triggeredAt,
+                uploadUntil = dayPayload.uploadUntil,
+                triggerSource = dayPayload.triggerSource,
+                requestedByUser = dayPayload.requestedByUser,
+                momentKind = dayPayload.momentKind,
+                specialRequestedByUser = dayPayload.specialRequestedByUser,
+                specialRequestedByUserColor = dayPayload.specialRequestedByUserColor
+            )
+            if (dayPayload.monthRecap != null) {
+                recapMap[day] = dayPayload.monthRecap
             }
-
-            val fetched = runCatching { fetchDaySafe(day, forceReload = true) }.getOrNull()
-            if (fetched != null) {
-                map[day] = fetched.items
-                promptMap[day] = fetched.meta
-                fetched.monthRecap?.let { monthRecapMap[day] = it }
-                staleFeedDays.remove(day)
-                reloadedCount++
-                continue
-            }
-            reloadErrors++
-
-            if (cachedItems != null && cachedMeta != null) {
-                map[day] = cachedItems
-                promptMap[day] = cachedMeta
-                state.monthRecapByDay[day]?.let { monthRecapMap[day] = it }
-            } else {
-                map[day] = emptyList()
-                promptMap[day] = PromptMeta(day = day)
-            }
+            staleFeedDays.remove(day)
         }
+        val mergedKnownDays = mergeDayIndex(state.calendarDays, windowDays)
+        val visibleDays = when {
+            replaceVisibleDays -> windowDays
+            appendOlder -> (state.feedDays + windowDays).distinct()
+            else -> (windowDays + state.feedDays).distinct()
+        }
+        val prunedCache = pruneFeedCaches(cacheMap, promptMap, recapMap, visibleDays, requestedAnchorDay)
         val today = state.prompt?.day ?: LocalDate.now().toString()
         val postedToday = state.prompt?.hasVisiblePostToday == true
-        val hasVisibleTodayFeed = map[today].orEmpty().isNotEmpty()
+        val hasVisibleTodayFeed = prunedCache.feedByDay[today].orEmpty().isNotEmpty()
         val todayLocked = !postedToday && !hasVisibleTodayFeed
         state = state.copy(
-            feedDays = days.distinct(),
-            feedByDay = map,
-            monthRecapByDay = monthRecapMap,
-            promptMetaByDay = promptMap,
-            feed = map[today] ?: emptyList(),
+            calendarDays = mergedKnownDays,
+            feedIndexHasOlder = state.feedIndexHasOlder || window.hasOlder,
+            feedIndexHasNewer = state.feedIndexHasNewer || window.hasNewer,
+            feedDays = visibleDays,
+            feedByDay = prunedCache.feedByDay,
+            monthRecapByDay = prunedCache.monthRecapByDay,
+            promptMetaByDay = prunedCache.promptMetaByDay,
+            feed = prunedCache.feedByDay[today].orEmpty(),
             feedTodayLocked = todayLocked,
-            feedFocusDay = target,
-            feedFocusPhotoId = state.feedFocusPhotoId
+            feedFocusDay = window.anchorDay.ifBlank { requestedAnchorDay },
+            feedFocusPhotoId = window.resolvedFocusPhotoId ?: state.feedFocusPhotoId,
+            feedJumpLoadingDay = null,
+            feedPaging = false
         )
-        if (reloadErrors > 0 && (forceReload || staleFeedDays.isNotEmpty())) {
+        if (forceReload) {
             repo.logDebug(
-                type = "feed_refresh_failed",
-                message = "partial day reload fallback",
-                meta = "anchor=$anchorDay;days=${days.size};errors=$reloadErrors;reloaded=$reloadedCount"
+                type = "feed_window_refresh",
+                message = "feed window loaded",
+                meta = "anchor=${window.anchorDay};days=${windowDays.size}"
             )
         }
-        return reloadedCount
+        return windowDays.size
     }
+
+    private data class FeedCacheBundle(
+        val feedByDay: Map<String, List<FeedItem>>,
+        val promptMetaByDay: Map<String, PromptMeta>,
+        val monthRecapByDay: Map<String, MonthlyRecap>
+    )
+
+    private fun pruneFeedCaches(
+        feedByDay: MutableMap<String, List<FeedItem>>,
+        promptMetaByDay: MutableMap<String, PromptMeta>,
+        monthRecapByDay: MutableMap<String, MonthlyRecap>,
+        visibleDays: List<String>,
+        anchorDay: String
+    ): FeedCacheBundle {
+        val keepDays = linkedSetOf<String>()
+        keepDays.addAll(visibleDays)
+        keepDays.add(anchorDay)
+        val cachedOrdered = mergeDayIndex(state.calendarDays, feedByDay.keys.toList())
+        for (day in cachedOrdered) {
+            if (keepDays.size >= 30) break
+            keepDays.add(day)
+        }
+        val keepSet = keepDays.toSet()
+        val prunedFeed = feedByDay.filterKeys(keepSet::contains)
+        val prunedPrompt = promptMetaByDay.filterKeys(keepSet::contains)
+        val prunedRecap = monthRecapByDay.filterKeys(keepSet::contains)
+        return FeedCacheBundle(prunedFeed, prunedPrompt, prunedRecap)
+    }
+
+    private fun mergeDayIndex(existing: List<String>, incoming: List<String>): List<String> =
+        (existing + incoming)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sortedDescending()
 
     private data class DayFetchResult(val items: List<FeedItem>, val meta: PromptMeta, val monthRecap: MonthlyRecap? = null)
 
@@ -7601,6 +7723,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     focusDay = state.feedFocusDay,
                     focusPhotoId = state.feedFocusPhotoId,
                     scrollRequestId = state.feedScrollRequestId,
+                    jumpLoadingDay = state.feedJumpLoadingDay,
                     listState = feedListState,
                     refreshing = state.feedRefreshing,
                     todayLocked = state.feedTodayLocked,
@@ -8601,6 +8724,7 @@ fun FeedTab(
     focusDay: String?,
     focusPhotoId: Long?,
     scrollRequestId: Long,
+    jumpLoadingDay: String?,
     listState: LazyListState,
     refreshing: Boolean,
     todayLocked: Boolean,
@@ -8633,12 +8757,15 @@ fun FeedTab(
     var paintModerationPhoto by remember { mutableStateOf<FeedItem?>(null) }
     var markModerationPhoto by remember { mutableStateOf<FeedItem?>(null) }
 
-    val rows = remember(days, byDay, monthRecapByDay, promptMetaByDay) {
+    val rows = remember(days, byDay, monthRecapByDay, promptMetaByDay, jumpLoadingDay) {
         buildList {
             for (day in days) {
                 add(FeedRow.DayHeader(day, promptMetaByDay[day]))
                 byDay[day].orEmpty().forEach { add(FeedRow.PhotoItem(day, it)) }
                 monthRecapByDay[day]?.let { add(FeedRow.MonthRecapItem(day, it)) }
+                if (byDay[day].isNullOrEmpty() && jumpLoadingDay == day) {
+                    add(FeedRow.LoadingItem(day))
+                }
             }
         }
     }
@@ -8777,6 +8904,7 @@ fun FeedTab(
                 is FeedRow.DayHeader -> "day-${it.day}"
                 is FeedRow.PhotoItem -> "photo-${it.item.photo.id}"
                 is FeedRow.MonthRecapItem -> "recap-${it.recap.month}"
+                is FeedRow.LoadingItem -> "loading-${it.day}"
             }
         }) { row ->
             when (row) {
@@ -8870,6 +8998,24 @@ fun FeedTab(
                 }
                 is FeedRow.MonthRecapItem -> {
                     MonthlyRecapCard(row.recap)
+                }
+                is FeedRow.LoadingItem -> {
+                    Card {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("Lade ${formatDayWithWeekday(row.day)} ...", fontWeight = FontWeight.SemiBold)
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            Text(
+                                "Wir holen direkt diesen Bereich und ein paar Tage drumherum.",
+                                color = secondaryTextColor,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -9773,6 +9919,7 @@ private sealed class FeedRow {
     data class DayHeader(val day: String, val meta: PromptMeta?) : FeedRow()
     data class PhotoItem(val day: String, val item: FeedItem) : FeedRow()
     data class MonthRecapItem(val day: String, val recap: MonthlyRecap) : FeedRow()
+    data class LoadingItem(val day: String) : FeedRow()
 }
 
 private val hashtagRegex = Regex("""(?<![\p{L}\p{N}_])#[\p{L}\p{N}_]+""")
