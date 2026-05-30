@@ -2,6 +2,13 @@
 
 This file is append-only operational history for Forge-side Daily continuity.
 
+## 2026-05-30
+
+- Hardened Android queued uploads for unstable/offline networks with shared auth refresh, richer queue state tracking, German user-facing status text and additional upload telemetry/debug events.
+- Added backend offline-grace handling for delayed prompt uploads based on `captured_at`, including `acceptedViaOfflineGrace` responses and regression coverage in `backend/internal/api/handlers_test.go`.
+- Added new admin analytics surfaces for upload debugging: upload timeline, condensed debug summary view and copyable timeline log output for faster incident forensics.
+- Re-verified repository health locally with `go test ./internal/api/...`, `npm run build` and `gradle :app:compileDebugKotlin`; Android still emits only pre-existing warnings.
+
 ## 2026-04-17
 
 - Prepared GitHub release `v0.4.28` with Android `versionName=0.4.28` and `versionCode=79`.
@@ -9,6 +16,14 @@ This file is append-only operational history for Forge-side Daily continuity.
 - Recorded release notes pair for `v0.4.28` and refreshed deploy guidance for `APP_VERSION` placeholder handling.
 - Revalidated the active production path on Broutschek (`daily.broutschek.de`, CT `9204`) including manual backend rollout from Proxmox host via `pct exec ... docker compose ...`.
 - Verified post-rollout live backend version on production as `srv-249.1`.
+
+## 2026-05-26
+
+- Released calendar full-text search and clickable hashtag support on `main` commit `82ec3cc`.
+- Published GHCR server images for commit `82ec3cc` with runtime version `srv-266.1`.
+- Published Android release `v0.4.41` with `versionName=0.4.41`, `versionCode=92`, signed APK asset and `changelog.json`.
+- Verified GitHub Actions health had recovered and monitored the successful runs for `CI`, `Publish Server Images` and `Release Android APK`.
+- Production runtime is still on `srv-262.1`; manual Broutschek rollout remains pending because the documented `CT 9204` host path could not be reached from this workstation on the currently known node access path.
 
 ## 2026-04-14
 

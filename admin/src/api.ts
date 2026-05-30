@@ -132,6 +132,89 @@ export type DebugLogsResponse = {
   serverNow: string;
 };
 
+export type DebugLogSummaryItem = {
+  count: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  sampleMessage: string;
+  sampleMeta?: string;
+  failureFamily?: string;
+  topTransport?: string;
+  deviceName?: string;
+  signature: string;
+  user: { id: number; username: string };
+};
+
+export type DebugLogSummaryResponse = {
+  items: DebugLogSummaryItem[];
+  sinceHours: number;
+  since: string;
+  serverNow: string;
+};
+
+export type UploadTimelineItem = {
+  id: number;
+  timelineId: string;
+  createdAt: string;
+  type: string;
+  stage: string;
+  source: "direct" | "queue" | string;
+  message: string;
+  meta?: string;
+  appVersion?: string;
+  deviceName?: string;
+  sessionId?: string;
+  requestId?: string;
+  responseRequestId?: string;
+  uploadClientId?: string;
+  queueItemId?: string;
+  kind?: string;
+  failureClass?: string;
+  failureFamily?: string;
+  securityFailureClass?: string;
+  networkStateClass?: string;
+  retrySuppressedReason?: string;
+  userAdviceShown?: boolean | null;
+  networkKind?: string;
+  aggregateCount?: number;
+  attempt?: number;
+  bytesTotal?: number;
+  bytesSent?: number;
+  durationMs?: number;
+  pingMs?: number;
+  pingFailure?: string;
+  capturedAt?: string;
+  queuedAt?: string;
+  firstSeenAt?: string;
+  lastSeenAt?: string;
+  httpCode?: number;
+  network?: {
+    activeNetwork?: boolean | null;
+    internet?: boolean | null;
+    validated?: boolean | null;
+    metered?: boolean | null;
+    stable?: boolean | null;
+    transport?: string;
+    downKbps?: number | null;
+    upKbps?: number | null;
+  };
+  user: { id: number; username: string };
+};
+
+export type UploadTimelineResponse = {
+  items: UploadTimelineItem[];
+  sinceHours: number;
+  since: string;
+  serverNow: string;
+  summary: {
+    total: number;
+    uniqueUploads: number;
+    failedCount: number;
+    waitingForNetworkCount: number;
+    liveCount: number;
+  };
+};
+
 export type AdminReportItem = {
   id: number;
   type: "bug" | "idea" | "post";
@@ -2057,6 +2140,47 @@ export async function getDebugLogs(token: string, userId?: number, limit = 150, 
     sinceHours: data.sinceHours ?? sinceHours,
     since: data.since || "",
     serverNow: data.serverNow || "",
+  };
+}
+
+export async function getDebugLogsSummary(token: string, userId?: number, limit = 1000, sinceHours = 24): Promise<DebugLogSummaryResponse> {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(limit));
+  qs.set("sinceHours", String(sinceHours));
+  if (userId && userId > 0) qs.set("userId", String(userId));
+  const res = await fetch(`${apiBase}/admin/debug/logs/summary?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<DebugLogSummaryResponse>(res);
+  return {
+    items: data.items || [],
+    sinceHours: data.sinceHours ?? sinceHours,
+    since: data.since || "",
+    serverNow: data.serverNow || "",
+  };
+}
+
+export async function getUploadTimeline(token: string, userId?: number, limit = 150, sinceHours = 24): Promise<UploadTimelineResponse> {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(limit));
+  qs.set("sinceHours", String(sinceHours));
+  if (userId && userId > 0) qs.set("userId", String(userId));
+  const res = await fetch(`${apiBase}/admin/debug/upload-timeline?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<UploadTimelineResponse>(res);
+  return {
+    items: data.items || [],
+    sinceHours: data.sinceHours ?? sinceHours,
+    since: data.since || "",
+    serverNow: data.serverNow || "",
+    summary: {
+      total: data.summary?.total ?? 0,
+      uniqueUploads: data.summary?.uniqueUploads ?? 0,
+      failedCount: data.summary?.failedCount ?? 0,
+      waitingForNetworkCount: data.summary?.waitingForNetworkCount ?? 0,
+      liveCount: data.summary?.liveCount ?? 0,
+    },
   };
 }
 

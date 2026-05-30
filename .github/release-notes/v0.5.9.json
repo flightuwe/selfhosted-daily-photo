@@ -1,0 +1,16 @@
+{
+  "version": "0.5.9",
+  "releasedAt": "2026-05-30T00:00:00Z",
+  "highlights": [
+    "Queue-Uploads werden bei instabilen Netzwerken robuster wiederaufgenommen und sauberer diagnostiziert.",
+    "Verspaetete Daily-Moments koennen nach Verbindungsproblemen weiterhin korrekt aus der Queue angenommen werden.",
+    "Das Adminpanel hat jetzt eine Upload-Timeline mit Live-Sicht auf Uploads, Queue-Zustaende und Netzqualitaet.",
+    "Debug-Logs unterscheiden Problemnetzwerke jetzt klarer in DNS, keine Verbindung, TLS-Handshake und Zertifikat/Firmennetz."
+  ],
+  "details": [
+    "Queue-Uploads nutzen jetzt den gemeinsamen Auth-Refresh-Pfad statt eingefrorener Token-Snapshots.",
+    "Die Android-App protokolliert fuer Upload- und Refresh-Fehler zusaetzlich Root-Exception, Cause-Chain und kompakte TLS-/Zertifikatsdetails.",
+    "Das Backend akzeptiert verspaetete Prompt-Uploads innerhalb der Offline-Grace-Frist auf Basis von captured_at.",
+    "Die neue Admin-Upload-Timeline und die verdichtete Debug-Summary machen Upload-Incidents schneller auswertbar."
+  ]
+}

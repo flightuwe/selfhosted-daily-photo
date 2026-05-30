@@ -1,9 +1,12 @@
 package com.selfhosted.daily
 
 import android.content.Context
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 private const val PREF_NAME = "app"
 private const val PREF_KEY_SERVER_BASE_URL_OVERRIDE = "server_base_url_override"
@@ -102,4 +105,24 @@ fun buildApiService(baseUrl: String, httpClient: OkHttpClient): Api {
         .addConverterFactory(GsonConverterFactory.create())
         .build()
         .create(Api::class.java)
+}
+
+fun buildStandardHttpClient(
+    extraInterceptors: List<Interceptor> = emptyList()
+): OkHttpClient {
+    val builder = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(25, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .addInterceptor { chain ->
+            val requestId = "req_${UUID.randomUUID()}"
+            val newReq = chain.request().newBuilder()
+                .header("X-Request-ID", requestId)
+                .build()
+            chain.proceed(newReq)
+        }
+    extraInterceptors.forEach(builder::addInterceptor)
+    return builder.build()
 }

@@ -47,6 +47,123 @@ func TestIsPromptWindowActiveWithoutBounds(t *testing.T) {
 	}
 }
 
+func TestResolvePromptUploadDayUsesCapturedAtGrace(t *testing.T) {
+	server := newSearchTestServer(t)
+	triggeredAt := time.Date(2026, 3, 12, 13, 0, 0, 0, time.UTC)
+	uploadUntil := triggeredAt.Add(10 * time.Minute)
+	prompt := models.DailyPrompt{
+		Day:         "2026-03-12",
+		TriggeredAt: &triggeredAt,
+		UploadUntil: &uploadUntil,
+	}
+	if err := server.DB.Create(&prompt).Error; err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+	now := time.Date(2026, 3, 13, 10, 0, 0, 0, time.UTC)
+	capturedAt := triggeredAt.Add(5 * time.Minute)
+
+	day, allowed, acceptedGrace := server.resolvePromptUploadDay("2026-03-13", now, &capturedAt)
+	if day != "2026-03-12" || !allowed || !acceptedGrace {
+		t.Fatalf("resolvePromptUploadDay() = (%q, %v, %v), want (%q, true, true)", day, allowed, acceptedGrace, "2026-03-12")
+	}
+}
+
+func TestResolvePromptUploadDayRejectsTooOldCapturedAt(t *testing.T) {
+	server := newSearchTestServer(t)
+	triggeredAt := time.Date(2026, 3, 12, 13, 0, 0, 0, time.UTC)
+	uploadUntil := triggeredAt.Add(10 * time.Minute)
+	prompt := models.DailyPrompt{
+		Day:         "2026-03-12",
+		TriggeredAt: &triggeredAt,
+		UploadUntil: &uploadUntil,
+	}
+	if err := server.DB.Create(&prompt).Error; err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+	now := time.Date(2026, 3, 21, 10, 0, 0, 0, time.UTC)
+	capturedAt := triggeredAt.Add(5 * time.Minute)
+
+	day, allowed, acceptedGrace := server.resolvePromptUploadDay("2026-03-21", now, &capturedAt)
+	if day != "2026-03-21" || allowed || acceptedGrace {
+		t.Fatalf("resolvePromptUploadDay() = (%q, %v, %v), want (%q, false, false)", day, allowed, acceptedGrace, "2026-03-21")
+	}
+}
+
+func TestBuildUploadTimelineItemParsesStructuredUploadMeta(t *testing.T) {
+	row := models.ClientDebugLog{
+		ID:         7,
+		Type:       "upload_queue_failed",
+		Message:    "Server antwortet zu langsam. Upload wird spaeter automatisch fortgesetzt.",
+		Meta:       "uploadClientId=up_123;queueItemId=q_123;kind=prompt;attempt=3;bytesTotal=4096;durationMs=25000;pingMs=420;failureClass=timeout;network=timeout;networkStable=false;activeNetwork=true;internet=true;validated=false;metered=true;transport=cellular;downKbps=18000;upKbps=2200;capturedAt=2026-05-29T18:10:00Z;queuedAt=2026-05-29T18:11:00Z",
+		AppVersion: "0.5.8",
+		DeviceName: "Pixel",
+		SessionID:  "sess_1",
+		RequestID:  "req_1",
+		User:       models.User{ID: 9, Username: "alice"},
+		CreatedAt:  time.Date(2026, 5, 29, 18, 12, 0, 0, time.UTC),
+	}
+
+	item, ok := buildUploadTimelineItem(row, time.UTC)
+	if !ok {
+		t.Fatal("buildUploadTimelineItem() returned ok=false")
+	}
+	if got := item["stage"]; got != "fehlgeschlagen" {
+		t.Fatalf("stage = %#v, want fehlgeschlagen", got)
+	}
+	if got := item["source"]; got != "queue" {
+		t.Fatalf("source = %#v, want queue", got)
+	}
+	if got := item["uploadClientId"]; got != "up_123" {
+		t.Fatalf("uploadClientId = %#v, want up_123", got)
+	}
+	if got := item["kind"]; got != "prompt" {
+		t.Fatalf("kind = %#v, want prompt", got)
+	}
+	network, ok := item["network"].(gin.H)
+	if !ok {
+		t.Fatalf("network missing or wrong type: %#v", item["network"])
+	}
+	if got, ok := network["transport"].(string); !ok || got != "cellular" {
+		t.Fatalf("network.transport = %#v, want cellular", network["transport"])
+	}
+	if got, ok := network["stable"].(*bool); !ok || got == nil || *got {
+		t.Fatalf("network.stable = %#v, want pointer to false", network["stable"])
+	}
+	if got, ok := item["attempt"].(int64); !ok || got != 3 {
+		t.Fatalf("attempt = %#v, want 3", item["attempt"])
+	}
+}
+
+func TestUploadTimelineStageRecognizesDirectAndQueueStages(t *testing.T) {
+	stage, source, ok := uploadTimelineStage("upload_direct_succeeded")
+	if !ok || stage != "erfolgreich" || source != "direct" {
+		t.Fatalf("uploadTimelineStage(direct) = (%q, %q, %v)", stage, source, ok)
+	}
+	stage, source, ok = uploadTimelineStage("upload_queue_waiting_for_network")
+	if !ok || stage != "wartet_auf_verbindung" || source != "queue" {
+		t.Fatalf("uploadTimelineStage(queue) = (%q, %q, %v)", stage, source, ok)
+	}
+}
+
+func TestDebugFailureFamilyRecognizesCertAndDns(t *testing.T) {
+	row := models.ClientDebugLog{
+		Type:    "dashboard_load_failed",
+		Message: "java.security.cert.CertPathValidatorException: Trust anchor for certification path not found.",
+		Meta:    "failureClass=cert_path_validator;transport=wifi",
+	}
+	if got := debugFailureFamily(row); got != "cert_path_validator" {
+		t.Fatalf("debugFailureFamily(cert) = %q, want cert_path_validator", got)
+	}
+	row = models.ClientDebugLog{
+		Type:    "feed_refresh_failed",
+		Message: "Servername konnte nicht aufgeloest werden",
+		Meta:    "failureClass=dns;network=dns",
+	}
+	if got := debugFailureFamily(row); got != "dns" {
+		t.Fatalf("debugFailureFamily(dns) = %q, want dns", got)
+	}
+}
+
 func TestInvalidPromptOnlyPhotoIDs(t *testing.T) {
 	triggeredAt := time.Date(2026, 3, 12, 13, 0, 0, 0, time.UTC)
 	uploadUntil := triggeredAt.Add(10 * time.Minute)

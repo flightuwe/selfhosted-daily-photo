@@ -1,17 +1,19 @@
 package com.selfhosted.daily
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
-import okhttp3.OkHttpClient
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -21,16 +23,20 @@ import okio.ForwardingSink
 import okio.buffer
 import org.json.JSONArray
 import org.json.JSONObject
-import retrofit2.Retrofit
 import retrofit2.HttpException
-import retrofit2.converter.gson.GsonConverterFactory
 import java.io.File
+import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.security.cert.CertPathValidatorException
+import java.time.Instant
 import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLException
 
 data class QueuedUploadItem(
     val id: String,
@@ -44,35 +50,57 @@ data class QueuedUploadItem(
     val locationShared: Boolean,
     val locationLatitude: Double?,
     val locationLongitude: Double?,
-    val authToken: String,
     val status: String,
     val attempts: Int,
     val lastError: String,
-    val progressPercent: Int,
+    val transferProgressPercent: Int,
+    val serverAckState: String,
     val nextRetryAtMs: Long,
     val capturedAtMs: Long,
     val createdAtMs: Long,
-    val updatedAtMs: Long
+    val updatedAtMs: Long,
+    val lastAttemptStartedAtMs: Long,
+    val lastAttemptFinishedAtMs: Long,
+    val lastFailureClass: String,
+    val lastHttpCode: Int?,
+    val retentionUntilMs: Long,
+    val leaseExpiresAtMs: Long
 )
 
 object UploadQueueStatus {
     const val WAITING = "waiting"
     const val RUNNING = "running"
-    const val FAILED = "failed"
+    const val WAITING_FOR_NETWORK = "waiting_for_network"
+    const val WAITING_FOR_SECURE_NETWORK = "waiting_for_secure_network"
+    const val AWAITING_SERVER_ACK = "awaiting_server_ack"
+    const val FAILED_TRANSIENT = "failed_transient"
+    const val FAILED_PERMANENT = "failed_permanent"
     const val SUCCESS = "success"
+    const val PAUSED = "paused"
+}
+
+object UploadQueueServerAckState {
+    const val NONE = "none"
+    const val PENDING = "pending"
+    const val CONFIRMED = "confirmed"
 }
 
 private data class QueuedUploadFailureInfo(
     val message: String,
     val reason: String,
     val httpCode: Int?,
-    val network: String?
+    val network: String?,
+    val permanent: Boolean = false,
+    val pauseQueue: Boolean = false
 )
+
+private const val queueRetryRetentionMs = 7L * 24L * 60L * 60L * 1000L
+private const val queueLeaseMs = 10L * 60L * 1000L
+private const val queueMaxBackoffSec = 6L * 60L * 60L
 
 object UploadQueueManager {
     private const val PREF_NAME = "app"
     private const val PREF_KEY_ITEMS = "upload_queue_items"
-    private const val MAX_ATTEMPTS = 8
 
     @Synchronized
     fun list(context: Context): List<QueuedUploadItem> = read(context)
@@ -98,8 +126,7 @@ object UploadQueueManager {
         locationShared: Boolean = false,
         locationLatitude: Double? = null,
         locationLongitude: Double? = null,
-        capturedAtMs: Long = 0L,
-        authToken: String
+        capturedAtMs: Long = 0L
     ): QueuedUploadItem {
         val now = System.currentTimeMillis()
         val item = QueuedUploadItem(
@@ -114,15 +141,21 @@ object UploadQueueManager {
             locationShared = locationShared && locationLatitude != null && locationLongitude != null,
             locationLatitude = locationLatitude,
             locationLongitude = locationLongitude,
-            authToken = authToken,
             status = UploadQueueStatus.WAITING,
             attempts = 0,
             lastError = "",
-            progressPercent = 0,
+            transferProgressPercent = 0,
+            serverAckState = UploadQueueServerAckState.NONE,
             nextRetryAtMs = 0L,
             capturedAtMs = capturedAtMs,
             createdAtMs = now,
-            updatedAtMs = now
+            updatedAtMs = now,
+            lastAttemptStartedAtMs = 0L,
+            lastAttemptFinishedAtMs = 0L,
+            lastFailureClass = "",
+            lastHttpCode = null,
+            retentionUntilMs = now + queueRetryRetentionMs,
+            leaseExpiresAtMs = 0L
         )
         val all = read(context).toMutableList()
         all.add(item)
@@ -134,17 +167,21 @@ object UploadQueueManager {
     @Synchronized
     fun markWaiting(context: Context, id: String): Boolean {
         val now = System.currentTimeMillis()
-        val all = read(context).toMutableList()
         var found = false
-        val next = all.map {
+        val next = read(context).map {
             if (it.id == id) {
                 found = true
                 it.copy(
                     status = UploadQueueStatus.WAITING,
                     lastError = "",
-                    progressPercent = 0,
+                    transferProgressPercent = 0,
+                    serverAckState = UploadQueueServerAckState.NONE,
                     nextRetryAtMs = 0L,
-                    updatedAtMs = now
+                    updatedAtMs = now,
+                    lastFailureClass = "",
+                    lastHttpCode = null,
+                    retentionUntilMs = now + queueRetryRetentionMs,
+                    leaseExpiresAtMs = 0L
                 )
             } else it
         }
@@ -158,9 +195,8 @@ object UploadQueueManager {
     @Synchronized
     fun convertToExtraAndRetry(context: Context, id: String): Boolean {
         val now = System.currentTimeMillis()
-        val all = read(context).toMutableList()
         var found = false
-        val next = all.map {
+        val next = read(context).map {
             if (it.id == id && it.isPrompt) {
                 found = true
                 it.copy(
@@ -168,9 +204,14 @@ object UploadQueueManager {
                     status = UploadQueueStatus.WAITING,
                     attempts = 0,
                     lastError = "",
-                    progressPercent = 0,
+                    transferProgressPercent = 0,
+                    serverAckState = UploadQueueServerAckState.NONE,
                     nextRetryAtMs = 0L,
-                    updatedAtMs = now
+                    updatedAtMs = now,
+                    lastFailureClass = "",
+                    lastHttpCode = null,
+                    retentionUntilMs = now + queueRetryRetentionMs,
+                    leaseExpiresAtMs = 0L
                 )
             } else it
         }
@@ -191,11 +232,57 @@ object UploadQueueManager {
     }
 
     @Synchronized
+    fun recoverStaleEntries(context: Context, nowMs: Long = System.currentTimeMillis()) {
+        var recoveredCount = 0
+        val next = read(context).map { item ->
+            when {
+                item.status == UploadQueueStatus.RUNNING || item.status == UploadQueueStatus.AWAITING_SERVER_ACK -> {
+                    if (item.leaseExpiresAtMs > 0L && item.leaseExpiresAtMs < nowMs) {
+                        recoveredCount += 1
+                        item.copy(
+                            status = UploadQueueStatus.FAILED_TRANSIENT,
+                            lastError = "Vorheriger Upload wurde unterbrochen. Neuer Versuch folgt automatisch.",
+                            serverAckState = UploadQueueServerAckState.NONE,
+                            transferProgressPercent = 0,
+                            nextRetryAtMs = nowMs + 15_000L,
+                            updatedAtMs = nowMs,
+                            lastAttemptFinishedAtMs = nowMs,
+                            lastFailureClass = "worker_interrupted",
+                            lastHttpCode = null,
+                            leaseExpiresAtMs = 0L
+                        )
+                    } else item
+                }
+                isAutoRetryState(item.status) && item.retentionUntilMs in 1 until nowMs -> {
+                    recoveredCount += 1
+                    item.copy(
+                        status = UploadQueueStatus.PAUSED,
+                        nextRetryAtMs = 0L,
+                        lastError = item.lastError.ifBlank { "Upload wurde pausiert. Bitte spaeter manuell fortsetzen." },
+                        updatedAtMs = nowMs,
+                        leaseExpiresAtMs = 0L
+                    )
+                }
+                else -> item
+            }
+        }
+        write(context, prune(next))
+        if (recoveredCount > 0) {
+            appendDebugLog(
+                context = context,
+                type = "upload_queue_state_recovered",
+                message = "Unterbrochene Warteschlangen-Uploads wurden wiederhergestellt.",
+                meta = "source=queue;recoveredCount=$recoveredCount"
+            )
+        }
+    }
+
+    @Synchronized
     fun nextRunnable(context: Context, nowMs: Long = System.currentTimeMillis()): QueuedUploadItem? {
         return read(context).firstOrNull {
-            (it.status == UploadQueueStatus.WAITING || it.status == UploadQueueStatus.FAILED) &&
-                it.attempts < MAX_ATTEMPTS &&
-                (it.nextRetryAtMs <= 0L || it.nextRetryAtMs <= nowMs)
+            isAutoRetryState(it.status) &&
+                (it.nextRetryAtMs <= 0L || it.nextRetryAtMs <= nowMs) &&
+                (it.retentionUntilMs <= 0L || it.retentionUntilMs > nowMs)
         }
     }
 
@@ -203,7 +290,33 @@ object UploadQueueManager {
     fun markRunning(context: Context, id: String) {
         val now = System.currentTimeMillis()
         val next = read(context).map {
-            if (it.id == id) it.copy(status = UploadQueueStatus.RUNNING, progressPercent = 1, updatedAtMs = now) else it
+            if (it.id == id) {
+                it.copy(
+                    status = UploadQueueStatus.RUNNING,
+                    transferProgressPercent = 1,
+                    serverAckState = UploadQueueServerAckState.NONE,
+                    updatedAtMs = now,
+                    lastAttemptStartedAtMs = now,
+                    leaseExpiresAtMs = now + queueLeaseMs
+                )
+            } else it
+        }
+        write(context, prune(next))
+    }
+
+    @Synchronized
+    fun markAwaitingServerAck(context: Context, id: String) {
+        val now = System.currentTimeMillis()
+        val next = read(context).map {
+            if (it.id == id) {
+                it.copy(
+                    status = UploadQueueStatus.AWAITING_SERVER_ACK,
+                    transferProgressPercent = it.transferProgressPercent.coerceAtLeast(95),
+                    serverAckState = UploadQueueServerAckState.PENDING,
+                    updatedAtMs = now,
+                    leaseExpiresAtMs = now + queueLeaseMs
+                )
+            } else it
         }
         write(context, prune(next))
     }
@@ -212,9 +325,16 @@ object UploadQueueManager {
     fun markProgress(context: Context, id: String, percent: Int) {
         val now = System.currentTimeMillis()
         val clamped = percent.coerceIn(0, 100)
+        val displayPercent = if (clamped >= 100) 95 else clamped
         val next = read(context).map {
-            if (it.id == id && it.status == UploadQueueStatus.RUNNING) {
-                if (clamped >= it.progressPercent) it.copy(progressPercent = clamped, updatedAtMs = now) else it
+            if (it.id == id && (it.status == UploadQueueStatus.RUNNING || it.status == UploadQueueStatus.AWAITING_SERVER_ACK)) {
+                if (displayPercent >= it.transferProgressPercent) {
+                    it.copy(
+                        transferProgressPercent = displayPercent,
+                        updatedAtMs = now,
+                        leaseExpiresAtMs = now + queueLeaseMs
+                    )
+                } else it
             } else it
         }
         write(context, prune(next))
@@ -223,16 +343,20 @@ object UploadQueueManager {
     @Synchronized
     fun markSuccess(context: Context, id: String) {
         val now = System.currentTimeMillis()
-        val all = read(context).toMutableList()
-        val next = all.map {
+        val next = read(context).map {
             if (it.id == id) {
                 deleteFilesForItem(it)
                 it.copy(
                     status = UploadQueueStatus.SUCCESS,
                     lastError = "",
-                    progressPercent = 100,
+                    transferProgressPercent = 100,
+                    serverAckState = UploadQueueServerAckState.CONFIRMED,
                     nextRetryAtMs = 0L,
-                    updatedAtMs = now
+                    updatedAtMs = now,
+                    lastAttemptFinishedAtMs = now,
+                    lastFailureClass = "",
+                    lastHttpCode = null,
+                    leaseExpiresAtMs = 0L
                 )
             } else it
         }
@@ -240,19 +364,94 @@ object UploadQueueManager {
     }
 
     @Synchronized
-    fun markFailed(context: Context, id: String, error: String) {
+    fun markFailedTransient(
+        context: Context,
+        id: String,
+        error: String,
+        failureClass: String,
+        httpCode: Int?,
+        networkWaiting: Boolean,
+        secureNetworkWaiting: Boolean = false,
+        countAttempt: Boolean = true,
+        overrideDelayMs: Long? = null
+    ) {
         val now = System.currentTimeMillis()
         val next = read(context).map {
             if (it.id == id) {
-                val nextAttempts = it.attempts + 1
-                val backoffSec = (30L * (1L shl (nextAttempts - 1).coerceAtMost(6))).coerceAtMost(6 * 60 * 60L)
+                val nextAttempts = if (countAttempt) it.attempts + 1 else it.attempts
+                val delayMs = overrideDelayMs ?: retryDelayMs(nextAttempts.coerceAtLeast(1))
                 it.copy(
-                    status = UploadQueueStatus.FAILED,
+                    status = when {
+                        secureNetworkWaiting -> UploadQueueStatus.WAITING_FOR_SECURE_NETWORK
+                        networkWaiting -> UploadQueueStatus.WAITING_FOR_NETWORK
+                        else -> UploadQueueStatus.FAILED_TRANSIENT
+                    },
                     attempts = nextAttempts,
                     lastError = error.take(300),
-                    progressPercent = 0,
-                    nextRetryAtMs = now + backoffSec * 1000L,
-                    updatedAtMs = now
+                    transferProgressPercent = 0,
+                    serverAckState = UploadQueueServerAckState.NONE,
+                    nextRetryAtMs = now + delayMs,
+                    updatedAtMs = now,
+                    lastAttemptFinishedAtMs = now,
+                    lastFailureClass = failureClass.take(64),
+                    lastHttpCode = httpCode,
+                    retentionUntilMs = maxOf(it.retentionUntilMs, now + queueRetryRetentionMs),
+                    leaseExpiresAtMs = 0L
+                )
+            } else it
+        }
+        write(context, prune(next))
+    }
+
+    @Synchronized
+    fun markFailedPermanent(
+        context: Context,
+        id: String,
+        error: String,
+        failureClass: String,
+        httpCode: Int?
+    ) {
+        val now = System.currentTimeMillis()
+        val next = read(context).map {
+            if (it.id == id) {
+                it.copy(
+                    status = UploadQueueStatus.FAILED_PERMANENT,
+                    attempts = it.attempts + 1,
+                    lastError = error.take(300),
+                    transferProgressPercent = 0,
+                    serverAckState = UploadQueueServerAckState.NONE,
+                    nextRetryAtMs = 0L,
+                    updatedAtMs = now,
+                    lastAttemptFinishedAtMs = now,
+                    lastFailureClass = failureClass.take(64),
+                    lastHttpCode = httpCode,
+                    leaseExpiresAtMs = 0L
+                )
+            } else it
+        }
+        write(context, prune(next))
+    }
+
+    @Synchronized
+    fun markPaused(
+        context: Context,
+        id: String,
+        error: String,
+        failureClass: String
+    ) {
+        val now = System.currentTimeMillis()
+        val next = read(context).map {
+            if (it.id == id) {
+                it.copy(
+                    status = UploadQueueStatus.PAUSED,
+                    lastError = error.take(300),
+                    transferProgressPercent = 0,
+                    serverAckState = UploadQueueServerAckState.NONE,
+                    nextRetryAtMs = 0L,
+                    updatedAtMs = now,
+                    lastAttemptFinishedAtMs = now,
+                    lastFailureClass = failureClass.take(64),
+                    leaseExpiresAtMs = 0L
                 )
             } else it
         }
@@ -261,10 +460,8 @@ object UploadQueueManager {
 
     @Synchronized
     fun hasPending(context: Context): Boolean {
-        val now = System.currentTimeMillis()
         return read(context).any {
-            (it.status == UploadQueueStatus.WAITING || it.status == UploadQueueStatus.FAILED || it.status == UploadQueueStatus.RUNNING) &&
-                it.attempts < MAX_ATTEMPTS
+            isAutoRetryState(it.status) || it.status == UploadQueueStatus.RUNNING || it.status == UploadQueueStatus.AWAITING_SERVER_ACK
         }
     }
 
@@ -272,17 +469,19 @@ object UploadQueueManager {
     fun nextDelaySeconds(context: Context): Long? {
         val now = System.currentTimeMillis()
         val items = read(context).filter {
-            (it.status == UploadQueueStatus.WAITING || it.status == UploadQueueStatus.FAILED || it.status == UploadQueueStatus.RUNNING) &&
-                it.attempts < MAX_ATTEMPTS
+            (isAutoRetryState(it.status) || it.status == UploadQueueStatus.RUNNING || it.status == UploadQueueStatus.AWAITING_SERVER_ACK) &&
+                (it.retentionUntilMs <= 0L || it.retentionUntilMs > now)
         }
         if (items.isEmpty()) return null
         val immediate = items.any {
-            it.status == UploadQueueStatus.WAITING || it.status == UploadQueueStatus.RUNNING || it.nextRetryAtMs <= now
+            it.status == UploadQueueStatus.WAITING ||
+                it.status == UploadQueueStatus.RUNNING ||
+                it.status == UploadQueueStatus.AWAITING_SERVER_ACK ||
+                it.nextRetryAtMs <= now
         }
         if (immediate) return 5L
         val minNext = items.minOfOrNull { it.nextRetryAtMs } ?: return 20L
-        val sec = ((minNext - now) / 1000L).coerceAtLeast(5L)
-        return sec
+        return ((minNext - now) / 1000L).coerceAtLeast(5L)
     }
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -293,6 +492,22 @@ object UploadQueueManager {
         val out = mutableListOf<QueuedUploadItem>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
+            val createdAtMs = o.optLong("createdAtMs", 0L)
+            val updatedAtMs = o.optLong("updatedAtMs", createdAtMs)
+            val oldStatus = o.optString("status", UploadQueueStatus.WAITING)
+            val mappedStatus = when (oldStatus) {
+                "failed" -> UploadQueueStatus.FAILED_TRANSIENT
+                "success" -> UploadQueueStatus.SUCCESS
+                "running" -> UploadQueueStatus.RUNNING
+                "waiting" -> UploadQueueStatus.WAITING
+                UploadQueueStatus.WAITING_FOR_NETWORK,
+                UploadQueueStatus.WAITING_FOR_SECURE_NETWORK,
+                UploadQueueStatus.AWAITING_SERVER_ACK,
+                UploadQueueStatus.FAILED_TRANSIENT,
+                UploadQueueStatus.FAILED_PERMANENT,
+                UploadQueueStatus.PAUSED -> oldStatus
+                else -> UploadQueueStatus.WAITING
+            }
             out.add(
                 QueuedUploadItem(
                     id = o.optString("id"),
@@ -306,15 +521,21 @@ object UploadQueueManager {
                     locationShared = o.optBoolean("locationShared", false),
                     locationLatitude = if (o.has("locationLatitude") && !o.isNull("locationLatitude")) o.optDouble("locationLatitude") else null,
                     locationLongitude = if (o.has("locationLongitude") && !o.isNull("locationLongitude")) o.optDouble("locationLongitude") else null,
-                    authToken = o.optString("authToken"),
-                    status = o.optString("status", UploadQueueStatus.WAITING),
+                    status = mappedStatus,
                     attempts = o.optInt("attempts", 0),
                     lastError = o.optString("lastError"),
-                    progressPercent = o.optInt("progressPercent", 0),
+                    transferProgressPercent = o.optInt("transferProgressPercent", o.optInt("progressPercent", 0)),
+                    serverAckState = o.optString("serverAckState", UploadQueueServerAckState.NONE).ifBlank { UploadQueueServerAckState.NONE },
                     nextRetryAtMs = o.optLong("nextRetryAtMs", 0L),
                     capturedAtMs = o.optLong("capturedAtMs", 0L),
-                    createdAtMs = o.optLong("createdAtMs", 0L),
-                    updatedAtMs = o.optLong("updatedAtMs", 0L)
+                    createdAtMs = createdAtMs,
+                    updatedAtMs = updatedAtMs,
+                    lastAttemptStartedAtMs = o.optLong("lastAttemptStartedAtMs", 0L),
+                    lastAttemptFinishedAtMs = o.optLong("lastAttemptFinishedAtMs", 0L),
+                    lastFailureClass = o.optString("lastFailureClass"),
+                    lastHttpCode = if (o.has("lastHttpCode") && !o.isNull("lastHttpCode")) o.optInt("lastHttpCode") else null,
+                    retentionUntilMs = o.optLong("retentionUntilMs", if (createdAtMs > 0L) createdAtMs + queueRetryRetentionMs else 0L),
+                    leaseExpiresAtMs = o.optLong("leaseExpiresAtMs", 0L)
                 )
             )
         }
@@ -337,15 +558,21 @@ object UploadQueueManager {
                     put("locationShared", item.locationShared)
                     put("locationLatitude", item.locationLatitude)
                     put("locationLongitude", item.locationLongitude)
-                    put("authToken", item.authToken)
                     put("status", item.status)
                     put("attempts", item.attempts)
                     put("lastError", item.lastError)
-                    put("progressPercent", item.progressPercent)
+                    put("transferProgressPercent", item.transferProgressPercent)
+                    put("serverAckState", item.serverAckState)
                     put("nextRetryAtMs", item.nextRetryAtMs)
                     put("capturedAtMs", item.capturedAtMs)
                     put("createdAtMs", item.createdAtMs)
                     put("updatedAtMs", item.updatedAtMs)
+                    put("lastAttemptStartedAtMs", item.lastAttemptStartedAtMs)
+                    put("lastAttemptFinishedAtMs", item.lastAttemptFinishedAtMs)
+                    put("lastFailureClass", item.lastFailureClass)
+                    put("lastHttpCode", item.lastHttpCode)
+                    put("retentionUntilMs", item.retentionUntilMs)
+                    put("leaseExpiresAtMs", item.leaseExpiresAtMs)
                 }
             )
         }
@@ -355,7 +582,7 @@ object UploadQueueManager {
     private fun prune(items: List<QueuedUploadItem>): List<QueuedUploadItem> {
         val now = System.currentTimeMillis()
         val keep = items.filterNot {
-            it.status == UploadQueueStatus.SUCCESS && (now - it.updatedAtMs) > 24 * 60 * 60 * 1000L
+            it.status == UploadQueueStatus.SUCCESS && (now - it.updatedAtMs) > 24L * 60L * 60L * 1000L
         }
         return keep.sortedByDescending { it.createdAtMs }.take(60)
     }
@@ -372,56 +599,178 @@ class UploadQueueWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
+        UploadQueueManager.recoverStaleEntries(applicationContext)
         val item = UploadQueueManager.nextRunnable(applicationContext) ?: return Result.success()
-        if (item.authToken.isBlank()) {
-            UploadQueueManager.markFailed(applicationContext, item.id, "Kein Auth-Token")
-            UploadQueueScheduler.scheduleSoon(applicationContext)
+        val networkSnapshot = queueNetworkSnapshotMeta(applicationContext)
+        if (!queueHasStableNetwork(applicationContext)) {
+            UploadQueueManager.markFailedTransient(
+                context = applicationContext,
+                id = item.id,
+                error = "Keine stabile Verbindung. Upload wird spaeter automatisch fortgesetzt.",
+                failureClass = "no_active_network",
+                httpCode = null,
+                networkWaiting = true,
+                countAttempt = false,
+                overrideDelayMs = 30_000L
+            )
+            appendDebugLog(
+                context = applicationContext,
+                type = "upload_queue_waiting_for_network",
+                message = "Keine stabile Verbindung. Upload wird spaeter automatisch fortgesetzt.",
+                meta = "source=queue;kind=${if (item.isPrompt) "prompt" else "extra"};queueItemId=${item.id};uploadClientId=${item.uploadClientId};failureClass=no_active_network;network=no_active_network;networkStable=false;snapshot=$networkSnapshot"
+            )
+            UploadQueueScheduler.sync(applicationContext)
             return Result.success()
         }
 
         UploadQueueManager.markRunning(applicationContext, item.id)
-        val result = runCatching { upload(item) }
+        val repo = AppRepo(applicationContext, buildStandardHttpClient())
+        val probe = repo.measureUploadTelemetryProbe()
+        appendDebugLog(
+            context = applicationContext,
+            type = "upload_queue_attempt_started",
+            message = "Warteschlangen-Upload gestartet.",
+            meta = buildString {
+                append("source=queue")
+                append(";kind=").append(if (item.isPrompt) "prompt" else "extra")
+                append(";uploadClientId=").append(item.uploadClientId)
+                append(";queueItemId=").append(item.id)
+                append(";attempt=").append(item.attempts + 1)
+                append(";bytesTotal=").append((File(item.backPath).length() + File(item.frontPath).length()).coerceAtLeast(1L))
+                append(";networkStable=").append(probe.networkStable)
+                if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                item.capturedAtMs.takeIf { it > 0L }?.let {
+                    append(";capturedAt=").append(OffsetDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault()))
+                }
+                append(";queuedAt=").append(OffsetDateTime.ofInstant(Instant.ofEpochMilli(item.createdAtMs), ZoneId.systemDefault()))
+                append(";").append(probe.networkSnapshot)
+            }
+        )
+        val result = runCatching { upload(item, repo, probe) }
         if (result.isSuccess) {
             UploadQueueManager.markSuccess(applicationContext, item.id)
+            appendDebugLog(
+                context = applicationContext,
+                type = "upload_queue_succeeded",
+                message = "Warteschlangen-Upload erfolgreich bestaetigt.",
+                meta = buildString {
+                    append("source=queue")
+                    append(";kind=").append(if (item.isPrompt) "prompt" else "extra")
+                    append(";uploadClientId=").append(item.uploadClientId)
+                    append(";queueItemId=").append(item.id)
+                    append(";attempt=").append(item.attempts + 1)
+                    append(";bytesTotal=").append((File(item.backPath).length() + File(item.frontPath).length()).coerceAtLeast(1L))
+                    append(";http=200")
+                    append(";networkStable=").append(probe.networkStable)
+                    if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                    if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                    item.capturedAtMs.takeIf { it > 0L }?.let {
+                        append(";capturedAt=").append(OffsetDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault()))
+                    }
+                    append(";queuedAt=").append(OffsetDateTime.ofInstant(Instant.ofEpochMilli(item.createdAtMs), ZoneId.systemDefault()))
+                    append(";").append(probe.networkSnapshot)
+                }
+            )
         } else {
             val failure = result.exceptionOrNull()
             val failureInfo = failure?.let(::queuedUploadFailureInfo)
             val displayError = failureInfo?.message ?: "Upload fehlgeschlagen"
-            UploadQueueManager.markFailed(applicationContext, item.id, displayError)
+            when {
+                failureInfo == null -> {
+                    UploadQueueManager.markFailedTransient(
+                        context = applicationContext,
+                        id = item.id,
+                        error = displayError,
+                        failureClass = "unknown",
+                        httpCode = null,
+                        networkWaiting = false
+                    )
+                }
+                failureInfo.pauseQueue -> {
+                    UploadQueueManager.markPaused(
+                        context = applicationContext,
+                        id = item.id,
+                        error = displayError,
+                        failureClass = failureInfo.reason
+                    )
+                }
+                failureInfo.permanent -> {
+                    UploadQueueManager.markFailedPermanent(
+                        context = applicationContext,
+                        id = item.id,
+                        error = displayError,
+                        failureClass = failureInfo.reason,
+                        httpCode = failureInfo.httpCode
+                    )
+                }
+                else -> {
+                    UploadQueueManager.markFailedTransient(
+                        context = applicationContext,
+                        id = item.id,
+                        error = displayError,
+                        failureClass = failureInfo.reason,
+                        httpCode = failureInfo.httpCode,
+                        networkWaiting = failureInfo.network != null && failureInfo.reason != "ssl_handshake" && failureInfo.reason != "cert_path_validator" && failureInfo.reason != "ssl_other",
+                        secureNetworkWaiting = failureInfo.reason == "ssl_handshake" || failureInfo.reason == "cert_path_validator" || failureInfo.reason == "ssl_other",
+                        overrideDelayMs = if (failureInfo.reason == "ssl_handshake" || failureInfo.reason == "cert_path_validator" || failureInfo.reason == "ssl_other") 15L * 60L * 1000L else null
+                    )
+                }
+            }
             if (failure != null && failureInfo != null) {
-                logQueuedUploadFailure(applicationContext, item, failure, failureInfo)
+                logQueuedUploadFailure(applicationContext, item, failure, failureInfo, networkSnapshot, probe)
             }
         }
 
-        val nextDelay = UploadQueueManager.nextDelaySeconds(applicationContext)
-        if (nextDelay != null) {
-            UploadQueueScheduler.scheduleIn(applicationContext, nextDelay)
-        }
+        UploadQueueScheduler.sync(applicationContext)
         return Result.success()
     }
 
-    private suspend fun upload(item: QueuedUploadItem) {
+    private suspend fun upload(item: QueuedUploadItem, repo: AppRepo, probe: UploadTelemetryProbe) {
         val backFile = File(item.backPath)
         val frontFile = File(item.frontPath)
         if (!backFile.exists() || !frontFile.exists()) {
             error("Dateien fehlen fuer Queue-Upload")
         }
 
-        val apiBaseUrl = resolveApiBaseUrl(applicationContext)
-        val api = Retrofit.Builder()
-            .baseUrl(apiBaseUrl)
-            .client(OkHttpClient.Builder().build())
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-            .create(Api::class.java)
-
         val totalBytes = (backFile.length() + frontFile.length()).coerceAtLeast(1L)
         var backSent = 0L
         var frontSent = 0L
+        var awaitingAckLogged = false
         var lastSavedPercent = -1
+        val startedAt = System.currentTimeMillis()
+
         fun pushProgressIfNeeded() {
             val percent = (((backSent + frontSent).coerceAtMost(totalBytes) * 100) / totalBytes).toInt().coerceIn(0, 100)
-            if (percent == 100 || percent >= lastSavedPercent + 5) {
+            if (!awaitingAckLogged && (backSent + frontSent) >= totalBytes) {
+                awaitingAckLogged = true
+                UploadQueueManager.markAwaitingServerAck(applicationContext, item.id)
+                appendDebugLog(
+                    context = applicationContext,
+                    type = "upload_queue_server_ack_pending",
+                    message = "Upload gesendet, warte auf Bestaetigung.",
+                    meta = buildString {
+                        append("source=queue")
+                        append(";kind=").append(if (item.isPrompt) "prompt" else "extra")
+                        append(";queueItemId=").append(item.id)
+                        append(";uploadClientId=").append(item.uploadClientId)
+                        append(";attempt=").append(item.attempts + 1)
+                        append(";bytesTotal=").append(totalBytes)
+                        append(";bytesSent=").append((backSent + frontSent).coerceAtMost(totalBytes))
+                        append(";durationMs=").append((System.currentTimeMillis() - startedAt).coerceAtLeast(0L))
+                        append(";networkStable=").append(probe.networkStable)
+                        if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                        if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                        item.capturedAtMs.takeIf { it > 0L }?.let {
+                            append(";capturedAt=").append(OffsetDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault()))
+                        }
+                        append(";queuedAt=").append(OffsetDateTime.ofInstant(Instant.ofEpochMilli(item.createdAtMs), ZoneId.systemDefault()))
+                        append(";").append(probe.networkSnapshot)
+                    }
+                )
+                return
+            }
+            if (percent >= lastSavedPercent + 5) {
                 lastSavedPercent = percent
                 UploadQueueManager.markProgress(applicationContext, item.id, percent)
             }
@@ -436,16 +785,8 @@ class UploadQueueWorker(
             pushProgressIfNeeded()
         }
 
-        val backPart = MultipartBody.Part.createFormData(
-            "photo_back",
-            backFile.name,
-            backBody
-        )
-        val frontPart = MultipartBody.Part.createFormData(
-            "photo_front",
-            frontFile.name,
-            frontBody
-        )
+        val backPart = MultipartBody.Part.createFormData("photo_back", backFile.name, backBody)
+        val frontPart = MultipartBody.Part.createFormData("photo_front", frontFile.name, frontBody)
         val kind = (if (item.isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
         val capturedAtPart = item.capturedAtMs.takeIf { it > 0L }
             ?.let { OffsetDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault()).toString() }
@@ -465,22 +806,21 @@ class UploadQueueWorker(
         } else null
         val locationLatitudePart = item.locationLatitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
         val locationLongitudePart = item.locationLongitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+
         UploadQueueManager.markProgress(applicationContext, item.id, 1)
-        api.uploadDual(
-            "Bearer ${item.authToken}",
-            backPart,
-            frontPart,
-            kind,
-            capturedAtPart,
-            uploadClientIdPart,
-            capsuleModePart,
-            capsulePrivatePart,
-            capsuleGroupRemindPart,
-            locationSharedPart,
-            locationLatitudePart,
-            locationLongitudePart
+        repo.uploadDualAuthorized(
+            backPart = backPart,
+            frontPart = frontPart,
+            kind = kind,
+            capturedAtPart = capturedAtPart,
+            uploadClientIdPart = uploadClientIdPart,
+            capsuleModePart = capsuleModePart,
+            capsulePrivatePart = capsulePrivatePart,
+            capsuleGroupRemindPart = capsuleGroupRemindPart,
+            locationSharedPart = locationSharedPart,
+            locationLatitudePart = locationLatitudePart,
+            locationLongitudePart = locationLongitudePart
         )
-        UploadQueueManager.markProgress(applicationContext, item.id, 100)
     }
 }
 
@@ -488,19 +828,43 @@ private fun logQueuedUploadFailure(
     context: Context,
     item: QueuedUploadItem,
     throwable: Throwable,
-    failureInfo: QueuedUploadFailureInfo
+    failureInfo: QueuedUploadFailureInfo,
+    networkSnapshot: String,
+    probe: UploadTelemetryProbe
 ) {
     val meta = buildString {
-        append("endpoint=upload_dual_queue")
+        append("source=queue")
+        append(";endpoint=upload_dual_queue")
         append(";http=").append(failureInfo.httpCode ?: -1)
         append(";error=").append(throwable::class.java.simpleName)
         append(";kind=").append(if (item.isPrompt) "prompt" else "extra")
         append(";queueItemId=").append(item.id)
+        append(";uploadClientId=").append(item.uploadClientId)
         append(";attempt=").append(item.attempts + 1)
         append(";reason=").append(failureInfo.reason)
+        append(";failureClass=").append(failureInfo.reason)
+        append(";securityFailureClass=").append(failureInfo.reason)
+        append(";networkStateClass=").append(if (probe.networkStable) "stable" else "unstable")
+        append(";retrySuppressedReason=").append(
+            if (failureInfo.reason == "ssl_handshake" || failureInfo.reason == "cert_path_validator" || failureInfo.reason == "ssl_other") "waiting_for_secure_network" else "-"
+        )
+        append(";userAdviceShown=").append(
+            failureInfo.reason == "ssl_handshake" || failureInfo.reason == "cert_path_validator" || failureInfo.reason == "ssl_other"
+        )
+        append(";stateBefore=").append(item.status)
+        append(";networkStable=").append(probe.networkStable)
+        append(";networkSnapshot=").append(networkSnapshot)
+        append(";bytesTotal=").append((File(item.backPath).length() + File(item.frontPath).length()).coerceAtLeast(1L))
+        if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+        if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+        item.capturedAtMs.takeIf { it > 0L }?.let {
+            append(";capturedAt=").append(OffsetDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault()))
+        }
+        append(";queuedAt=").append(OffsetDateTime.ofInstant(Instant.ofEpochMilli(item.createdAtMs), ZoneId.systemDefault()))
         if (failureInfo.network != null) {
             append(";network=").append(failureInfo.network)
         }
+        append(";").append(debugThrowableMetaShared(throwable))
     }
     appendDebugLog(
         context = context,
@@ -512,10 +876,14 @@ private fun logQueuedUploadFailure(
 
 private fun queuedUploadNetworkFailureKind(throwable: Throwable): String? {
     val root = generateSequence(throwable) { it.cause }.last()
-    return when (root) {
-        is UnknownHostException -> "dns"
-        is ConnectException -> "connect"
-        is SocketTimeoutException -> "timeout"
+    return when {
+        root is CertPathValidatorException -> "cert_path_validator"
+        root is SSLHandshakeException -> "ssl_handshake"
+        root is UnknownHostException -> "dns"
+        root is ConnectException -> "connect"
+        root is SocketTimeoutException -> "timeout"
+        root is SSLException -> "ssl_other"
+        root is IOException -> "io"
         else -> null
     }
 }
@@ -523,8 +891,17 @@ private fun queuedUploadNetworkFailureKind(throwable: Throwable): String? {
 private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureInfo {
     val networkKind = queuedUploadNetworkFailureKind(throwable)
     if (networkKind != null) {
+        val message = when (networkKind) {
+            "dns" -> "Servername konnte nicht aufgeloest werden. Upload wird spaeter automatisch fortgesetzt."
+            "connect" -> "Keine stabile Verbindung. Upload wird spaeter automatisch fortgesetzt."
+            "timeout" -> "Server antwortet zu langsam. Upload wird spaeter automatisch fortgesetzt."
+            "ssl_handshake" -> "Sichere Verbindung fehlgeschlagen. Upload wartet auf sichere Verbindung."
+            "cert_path_validator" -> "Dieses Netzwerk vertraut dem Daily-Zertifikat nicht oder veraendert die Verbindung. Upload wartet auf sichere Verbindung."
+            "ssl_other" -> "Sichere Verbindung fehlgeschlagen. Upload wartet auf sichere Verbindung."
+            else -> "Upload wird spaeter automatisch fortgesetzt."
+        }
         return QueuedUploadFailureInfo(
-            message = throwable.message ?: networkKind,
+            message = message,
             reason = networkKind,
             httpCode = null,
             network = networkKind
@@ -533,6 +910,8 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
     if (throwable is HttpException) {
         val raw = runCatching { throwable.response()?.errorBody()?.string().orEmpty() }.getOrDefault("").lowercase()
         val reason = when (throwable.code()) {
+            400 -> "invalid_request"
+            401 -> "http_401"
             403 -> when {
                 raw.contains("prompt inactive") -> "prompt_inactive"
                 raw.contains("extra unavailable during daily moment window") -> "extra_window_blocked"
@@ -541,9 +920,13 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
                 else -> "forbidden"
             }
             409 -> "already_posted"
+            in 500..599 -> "http_${throwable.code()}"
             else -> "http_${throwable.code()}"
         }
+        val permanent = throwable.code() in 400..499 && throwable.code() !in listOf(401, 408, 429)
         val message = when (throwable.code()) {
+            400 -> "Upload-Daten sind ungueltig. Bitte neu aufnehmen oder erneut versuchen."
+            401 -> "Sitzung abgelaufen. Bitte App oeffnen und erneut anmelden."
             403 -> when {
                 raw.contains("prompt inactive") -> "Kein aktiver Daily-Moment mehr. Diesen Upload loeschen oder als Extra posten."
                 raw.contains("extra unavailable during daily moment window") -> "Waehrend des aktiven Daily-Moments sind Extras gesperrt."
@@ -551,13 +934,36 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
                 raw.contains("poste zuerst dein tagesmoment") -> "Poste zuerst dein Tagesmoment."
                 else -> "Aktion nicht erlaubt"
             }
-            409 -> when {
-                raw.contains("username exists") -> "Benutzername ist bereits vergeben."
-                else -> "Du hast heute bereits gepostet"
-            }
+            409 -> "Du hast fuer diesen Fall bereits gepostet."
+            in 500..599 -> "Serverfehler. Upload wird spaeter automatisch fortgesetzt."
             else -> throwable.message ?: "Upload fehlgeschlagen"
         }
-        return QueuedUploadFailureInfo(message = message, reason = reason, httpCode = throwable.code(), network = null)
+        return QueuedUploadFailureInfo(
+            message = message,
+            reason = reason,
+            httpCode = throwable.code(),
+            network = null,
+            permanent = permanent,
+            pauseQueue = throwable.code() == 401
+        )
+    }
+    if (throwable is IllegalStateException) {
+        val raw = throwable.message.orEmpty()
+        return when {
+            raw.contains("missing_access_token") || raw.contains("token_expired_refresh_failed") -> QueuedUploadFailureInfo(
+                message = "Sitzung abgelaufen. Bitte App oeffnen und erneut anmelden.",
+                reason = "auth_missing",
+                httpCode = 401,
+                network = null,
+                pauseQueue = true
+            )
+            else -> QueuedUploadFailureInfo(
+                message = raw.ifBlank { "Upload fehlgeschlagen" },
+                reason = "illegal_state",
+                httpCode = null,
+                network = null
+            )
+        }
     }
     return QueuedUploadFailureInfo(
         message = throwable.message ?: throwable::class.java.simpleName,
@@ -626,7 +1032,11 @@ object UploadQueueScheduler {
         .build()
 
     fun sync(context: Context) {
+        UploadQueueManager.recoverStaleEntries(context)
         val nextDelay = UploadQueueManager.nextDelaySeconds(context)
+        if (hasRunningWork(context)) {
+            return
+        }
         if (nextDelay != null) {
             scheduleIn(context, nextDelay)
         } else {
@@ -635,6 +1045,7 @@ object UploadQueueScheduler {
     }
 
     fun enqueueNow(context: Context) {
+        if (hasRunningWork(context)) return
         val req = OneTimeWorkRequestBuilder<UploadQueueWorker>()
             .setConstraints(constraints)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
@@ -651,6 +1062,7 @@ object UploadQueueScheduler {
     }
 
     fun scheduleIn(context: Context, delaySeconds: Long) {
+        if (hasRunningWork(context)) return
         val req = OneTimeWorkRequestBuilder<UploadQueueWorker>()
             .setConstraints(constraints)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
@@ -663,5 +1075,47 @@ object UploadQueueScheduler {
         )
     }
 
+    private fun hasRunningWork(context: Context): Boolean {
+        val infos = runCatching { WorkManager.getInstance(context).getWorkInfosForUniqueWork(WORK_NAME).get() }.getOrNull()
+            ?: return false
+        return infos.any { it.state == WorkInfo.State.RUNNING }
+    }
+
     private const val WORK_NAME = "daily_upload_queue_worker"
+}
+
+private fun retryDelayMs(attemptNumber: Int): Long {
+    val backoffSec = (30L * (1L shl (attemptNumber - 1).coerceAtMost(6))).coerceAtMost(queueMaxBackoffSec)
+    return backoffSec * 1000L
+}
+
+private fun isAutoRetryState(status: String): Boolean {
+    return status == UploadQueueStatus.WAITING ||
+        status == UploadQueueStatus.WAITING_FOR_NETWORK ||
+        status == UploadQueueStatus.WAITING_FOR_SECURE_NETWORK ||
+        status == UploadQueueStatus.FAILED_TRANSIENT
+}
+
+private fun queueHasStableNetwork(context: Context): Boolean {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+    val network = cm.activeNetwork ?: return false
+    val caps = cm.getNetworkCapabilities(network) ?: return false
+    return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+}
+
+private fun queueNetworkSnapshotMeta(context: Context): String {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        ?: return "activeNetwork=false;capabilities=false;reason=no_connectivity_manager"
+    val network = cm.activeNetwork ?: return "activeNetwork=false;capabilities=false;reason=no_active_network"
+    val caps = cm.getNetworkCapabilities(network)
+        ?: return "activeNetwork=true;capabilities=false;reason=no_capabilities"
+    val transports = mutableListOf<String>()
+    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) transports += "wifi"
+    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) transports += "cellular"
+    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) transports += "ethernet"
+    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) transports += "vpn"
+    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) transports += "bluetooth"
+    val transport = if (transports.isEmpty()) "unknown" else transports.joinToString("|")
+    return "activeNetwork=true;capabilities=true;internet=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)};validated=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)};metered=${!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)};transport=$transport"
 }

@@ -339,6 +339,8 @@ func (s *Server) Router() *gin.Engine {
 			admin.POST("/fotomojis/bulk-delete", s.handleAdminBulkDeleteFotomojis)
 			admin.DELETE("/fotomojis/:id", s.handleAdminDeleteFotomoji)
 			admin.GET("/debug/logs", s.handleAdminDebugLogs)
+			admin.GET("/debug/logs/summary", s.handleAdminDebugLogsSummary)
+			admin.GET("/debug/upload-timeline", s.handleAdminUploadTimeline)
 			admin.DELETE("/debug/logs", s.handleAdminDeleteDebugLogs)
 			admin.GET("/debug/logs/export", s.handleAdminDebugLogsExport)
 			admin.GET("/system/health", s.handleAdminSystemHealth)
@@ -1108,6 +1110,226 @@ func (s *Server) handleClientDebugLog(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func debugMetaPairs(meta string) map[string]string {
+	out := map[string]string{}
+	for _, raw := range strings.Split(meta, ";") {
+		part := strings.TrimSpace(raw)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func debugMetaInt(meta map[string]string, key string) *int64 {
+	raw := strings.TrimSpace(meta[key])
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &value
+}
+
+func debugMetaBool(meta map[string]string, key string) *bool {
+	raw := strings.TrimSpace(strings.ToLower(meta[key]))
+	if raw == "" {
+		return nil
+	}
+	switch raw {
+	case "true":
+		value := true
+		return &value
+	case "false":
+		value := false
+		return &value
+	default:
+		return nil
+	}
+}
+
+func debugMetaTime(meta map[string]string, key string) *time.Time {
+	raw := strings.TrimSpace(meta[key])
+	if raw == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func debugMetaCount(meta map[string]string) int64 {
+	if value := debugMetaInt(meta, "aggregateCount"); value != nil && *value > 0 {
+		return *value
+	}
+	return 1
+}
+
+func debugFailureFamily(row models.ClientDebugLog) string {
+	meta := debugMetaPairs(row.Meta)
+	failureClass := strings.TrimSpace(strings.ToLower(meta["failureClass"]))
+	network := strings.TrimSpace(strings.ToLower(meta["network"]))
+	reason := strings.TrimSpace(strings.ToLower(meta["reason"]))
+	joined := strings.ToLower(strings.Join([]string{row.Type, row.Message, row.Meta, failureClass, network, reason}, ";"))
+	switch {
+	case strings.Contains(joined, "cert_path_validator"):
+		return "cert_path_validator"
+	case strings.Contains(joined, "ssl_handshake"):
+		return "ssl_handshake"
+	case strings.Contains(joined, "reason=no_active_network"), strings.Contains(joined, "network=no_active_network"), strings.Contains(joined, "failureclass=no_active_network"):
+		return "no_active_network"
+	case strings.Contains(joined, "network=dns"), strings.Contains(joined, "failureclass=dns"), strings.Contains(joined, "unknownhostexception"):
+		return "dns"
+	case strings.Contains(joined, "ssl_other"):
+		return "ssl_other"
+	default:
+		return ""
+	}
+}
+
+func uploadTimelineStage(logType string) (stage string, source string, ok bool) {
+	switch strings.TrimSpace(logType) {
+	case "upload_direct_started":
+		return "gestartet", "direct", true
+	case "upload_direct_server_ack_pending":
+		return "wartet_auf_bestaetigung", "direct", true
+	case "upload_direct_succeeded":
+		return "erfolgreich", "direct", true
+	case "upload_direct_failed":
+		return "fehlgeschlagen", "direct", true
+	case "upload_queue_enqueued":
+		return "wartend", "queue", true
+	case "upload_queue_attempt_started":
+		return "gestartet", "queue", true
+	case "upload_queue_waiting_for_network":
+		return "wartet_auf_verbindung", "queue", true
+	case "upload_queue_server_ack_pending":
+		return "wartet_auf_bestaetigung", "queue", true
+	case "upload_queue_succeeded":
+		return "erfolgreich", "queue", true
+	case "upload_queue_failed":
+		return "fehlgeschlagen", "queue", true
+	case "upload_queue_state_recovered":
+		return "wiederhergestellt", "queue", true
+	default:
+		return "", "", false
+	}
+}
+
+func buildUploadTimelineItem(row models.ClientDebugLog, location *time.Location) (gin.H, bool) {
+	stage, source, ok := uploadTimelineStage(row.Type)
+	if !ok {
+		return nil, false
+	}
+	meta := debugMetaPairs(row.Meta)
+	uploadClientID := strings.TrimSpace(meta["uploadClientId"])
+	queueItemID := strings.TrimSpace(meta["queueItemId"])
+	timelineID := uploadClientID
+	if timelineID == "" {
+		timelineID = queueItemID
+	}
+	if timelineID == "" {
+		timelineID = strings.TrimSpace(row.RequestID)
+	}
+	if timelineID == "" {
+		timelineID = fmt.Sprintf("log_%d", row.ID)
+	}
+
+	item := gin.H{
+		"id":             row.ID,
+		"timelineId":     timelineID,
+		"createdAt":      row.CreatedAt.In(location),
+		"type":           row.Type,
+		"stage":          stage,
+		"source":         source,
+		"message":        row.Message,
+		"meta":           row.Meta,
+		"appVersion":     row.AppVersion,
+		"deviceName":     row.DeviceName,
+		"sessionId":      row.SessionID,
+		"requestId":      row.RequestID,
+		"uploadClientId": uploadClientID,
+		"queueItemId":    queueItemID,
+		"kind":           strings.TrimSpace(meta["kind"]),
+		"failureClass":   strings.TrimSpace(meta["failureClass"]),
+		"failureFamily":  debugFailureFamily(row),
+		"securityFailureClass": strings.TrimSpace(meta["securityFailureClass"]),
+		"networkStateClass": strings.TrimSpace(meta["networkStateClass"]),
+		"retrySuppressedReason": strings.TrimSpace(meta["retrySuppressedReason"]),
+		"userAdviceShown": debugMetaBool(meta, "userAdviceShown"),
+		"networkKind":    strings.TrimSpace(meta["network"]),
+		"user": gin.H{
+			"id":       row.User.ID,
+			"username": row.User.Username,
+		},
+		"network": gin.H{
+			"activeNetwork": debugMetaBool(meta, "activeNetwork"),
+			"internet":      debugMetaBool(meta, "internet"),
+			"validated":     debugMetaBool(meta, "validated"),
+			"metered":       debugMetaBool(meta, "metered"),
+			"stable":        debugMetaBool(meta, "networkStable"),
+			"transport":     strings.TrimSpace(meta["transport"]),
+			"downKbps":      debugMetaInt(meta, "downKbps"),
+			"upKbps":        debugMetaInt(meta, "upKbps"),
+		},
+	}
+
+	if v := debugMetaInt(meta, "attempt"); v != nil {
+		item["attempt"] = *v
+	}
+	if count := debugMetaCount(meta); count > 1 {
+		item["aggregateCount"] = count
+	}
+	if v := debugMetaInt(meta, "bytesTotal"); v != nil {
+		item["bytesTotal"] = *v
+	}
+	if v := debugMetaInt(meta, "bytesSent"); v != nil {
+		item["bytesSent"] = *v
+	}
+	if v := debugMetaInt(meta, "durationMs"); v != nil {
+		item["durationMs"] = *v
+	}
+	if v := debugMetaInt(meta, "pingMs"); v != nil {
+		item["pingMs"] = *v
+	}
+	if v := debugMetaInt(meta, "http"); v != nil {
+		item["httpCode"] = *v
+	}
+	if v := debugMetaTime(meta, "capturedAt"); v != nil {
+		item["capturedAt"] = v.In(location)
+	}
+	if v := debugMetaTime(meta, "queuedAt"); v != nil {
+		item["queuedAt"] = v.In(location)
+	}
+	if v := debugMetaTime(meta, "firstSeenAt"); v != nil {
+		item["firstSeenAt"] = v.In(location)
+	}
+	if v := debugMetaTime(meta, "lastSeenAt"); v != nil {
+		item["lastSeenAt"] = v.In(location)
+	}
+	if v := strings.TrimSpace(meta["pingFailure"]); v != "" {
+		item["pingFailure"] = v
+	}
+	if v := strings.TrimSpace(meta["responseRequestId"]); v != "" {
+		item["responseRequestId"] = v
+	}
+	return item, true
+}
+
 func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	user, _ := userFromContext(c)
 	now := time.Now().In(s.Location)
@@ -1507,20 +1729,30 @@ func (s *Server) handleUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid captured_at"})
 		return
 	}
+	acceptedViaOfflineGrace := false
 	uploadClientID := normalizeUploadClientID(c.PostForm("upload_client_id"))
 	if uploadClientID != "" {
 		if existing, ok, err := s.findPhotoByUploadClientID(user.ID, uploadClientID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 			return
 		} else if ok {
-			c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true})
+			c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true, "acceptedViaOfflineGrace": false})
 			return
 		}
 	}
 
-	day := time.Now().In(s.Location).Format("2006-01-02")
 	now := time.Now().In(s.Location)
+	day := now.Format("2006-01-02")
 	todayWindowActive := s.isDailyWindowActive(day, now)
+	if kind == "prompt" {
+		resolvedDay, allowed, acceptedOffline := s.resolvePromptUploadDay(day, now, capturedAt)
+		day = resolvedDay
+		acceptedViaOfflineGrace = acceptedOffline
+		if !allowed {
+			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
+			return
+		}
+	}
 
 	if _, err := s.cleanupInvalidPromptOnlyPhotosForDay(day); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -1533,12 +1765,6 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	}
 
-	if kind == "prompt" {
-		if !s.isPromptUploadAllowed(day, now) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
-			return
-		}
-	}
 	if kind == "extra" && todayWindowActive {
 		c.JSON(http.StatusForbidden, gin.H{"error": "extra unavailable during daily moment window"})
 		return
@@ -1613,7 +1839,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	} else if ok {
 		s.removePhotoFiles(photo)
-		c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true})
+		c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true, "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 		return
 	}
 	if kind == "prompt" && hasPromptPosted {
@@ -1641,7 +1867,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 
 	s.invalidateFeedDayCache(photo.Day)
 	s.notifyPostCreated(user, photo)
-	c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
+	c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo), "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 }
 
 func (s *Server) handleAdminCalendar(c *gin.Context) {
@@ -2680,6 +2906,216 @@ func (s *Server) handleAdminDebugLogs(c *gin.Context) {
 		})
 	}
 
+	c.JSON(http.StatusOK, gin.H{
+		"items":      items,
+		"sinceHours": sinceHours,
+		"since":      since.In(s.Location),
+		"serverNow":  serverNow.In(s.Location),
+	})
+}
+
+func (s *Server) handleAdminUploadTimeline(c *gin.Context) {
+	limit := 150
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			if n < 20 {
+				n = 20
+			}
+			if n > 500 {
+				n = 500
+			}
+			limit = n
+		}
+	}
+	userID := uint(0)
+	if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+		parsed, err := parseUintParam(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+			return
+		}
+		userID = parsed
+	}
+	sinceHours, err := parseAdminSinceHours(c.Query("sinceHours"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
+		return
+	}
+	serverNow := time.Now().UTC()
+	since := adminSinceCutoff(serverNow, sinceHours)
+	q := s.DB.Preload("User").
+		Where("created_at >= ?", since).
+		Where("type LIKE ?", "upload_%").
+		Order("created_at desc").
+		Limit(limit)
+	if userID != 0 {
+		q = q.Where("user_id = ?", userID)
+	}
+
+	var rows []models.ClientDebugLog
+	if err := q.Find(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	items := make([]gin.H, 0, len(rows))
+	uniqueUploads := map[string]struct{}{}
+	failedCount := 0
+	waitingForNetworkCount := 0
+	liveCount := 0
+	for _, row := range rows {
+		item, ok := buildUploadTimelineItem(row, s.Location)
+		if !ok {
+			continue
+		}
+		items = append(items, item)
+		key := fmt.Sprint(item["timelineId"])
+		if key != "" {
+			uniqueUploads[key] = struct{}{}
+		}
+		stage := fmt.Sprint(item["stage"])
+		switch stage {
+		case "fehlgeschlagen":
+			failedCount++
+		case "wartet_auf_verbindung":
+			waitingForNetworkCount++
+		}
+		if stage == "gestartet" || stage == "wartet_auf_bestaetigung" || stage == "wartend" || stage == "wartet_auf_verbindung" {
+			liveCount++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":      items,
+		"sinceHours": sinceHours,
+		"since":      since.In(s.Location),
+		"serverNow":  serverNow.In(s.Location),
+		"summary": gin.H{
+			"total":                  len(items),
+			"uniqueUploads":          len(uniqueUploads),
+			"failedCount":            failedCount,
+			"waitingForNetworkCount": waitingForNetworkCount,
+			"liveCount":              liveCount,
+		},
+	})
+}
+
+func (s *Server) handleAdminDebugLogsSummary(c *gin.Context) {
+	limit := 1000
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			if n < 50 {
+				n = 50
+			}
+			if n > 5000 {
+				n = 5000
+			}
+			limit = n
+		}
+	}
+	userID := uint(0)
+	if raw := strings.TrimSpace(c.Query("userId")); raw != "" {
+		parsed, err := parseUintParam(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+			return
+		}
+		userID = parsed
+	}
+	sinceHours, err := parseAdminSinceHours(c.Query("sinceHours"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sinceHours"})
+		return
+	}
+	serverNow := time.Now().UTC()
+	since := adminSinceCutoff(serverNow, sinceHours)
+	q := s.DB.Preload("User").Where("created_at >= ?", since).Order("created_at desc").Limit(limit)
+	if userID != 0 {
+		q = q.Where("user_id = ?", userID)
+	}
+	var rows []models.ClientDebugLog
+	if err := q.Find(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	type summaryRow struct {
+		Count         int64
+		FirstSeenAt   time.Time
+		LastSeenAt    time.Time
+		SampleMessage string
+		SampleMeta    string
+		FailureFamily string
+		TopTransport  string
+		UserID        uint
+		Username      string
+		DeviceName    string
+		Signature     string
+	}
+	grouped := map[string]*summaryRow{}
+	for _, row := range rows {
+		meta := debugMetaPairs(row.Meta)
+		failureFamily := debugFailureFamily(row)
+		transport := strings.TrimSpace(meta["transport"])
+		signature := strings.Join([]string{
+			strconv.FormatUint(uint64(row.UserID), 10),
+			row.DeviceName,
+			row.Type,
+			failureFamily,
+			strings.TrimSpace(meta["endpoint"]),
+			transport,
+			strings.TrimSpace(meta["failureClass"]),
+		}, "|")
+		entry := grouped[signature]
+		if entry == nil {
+			entry = &summaryRow{
+				Count:         0,
+				FirstSeenAt:   row.CreatedAt,
+				LastSeenAt:    row.CreatedAt,
+				SampleMessage: row.Message,
+				SampleMeta:    row.Meta,
+				FailureFamily: failureFamily,
+				TopTransport:  transport,
+				UserID:        row.UserID,
+				Username:      row.User.Username,
+				DeviceName:    row.DeviceName,
+				Signature:     signature,
+			}
+			grouped[signature] = entry
+		}
+		if row.CreatedAt.Before(entry.FirstSeenAt) {
+			entry.FirstSeenAt = row.CreatedAt
+		}
+		if row.CreatedAt.After(entry.LastSeenAt) {
+			entry.LastSeenAt = row.CreatedAt
+			entry.SampleMessage = row.Message
+			entry.SampleMeta = row.Meta
+		}
+		entry.Count += debugMetaCount(meta)
+		if entry.TopTransport == "" && transport != "" {
+			entry.TopTransport = transport
+		}
+	}
+	items := make([]gin.H, 0, len(grouped))
+	for _, row := range grouped {
+		items = append(items, gin.H{
+			"count":         row.Count,
+			"firstSeenAt":   row.FirstSeenAt.In(s.Location),
+			"lastSeenAt":    row.LastSeenAt.In(s.Location),
+			"sampleMessage": row.SampleMessage,
+			"sampleMeta":    row.SampleMeta,
+			"failureFamily": row.FailureFamily,
+			"topTransport":  row.TopTransport,
+			"deviceName":    row.DeviceName,
+			"signature":     row.Signature,
+			"user": gin.H{
+				"id":       row.UserID,
+				"username": row.Username,
+			},
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i]["count"].(int64) > items[j]["count"].(int64)
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"items":      items,
 		"sinceHours": sinceHours,
@@ -7066,13 +7502,14 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid captured_at"})
 		return
 	}
+	acceptedViaOfflineGrace := false
 	uploadClientID := normalizeUploadClientID(c.PostForm("upload_client_id"))
 	if uploadClientID != "" {
 		if existing, ok, err := s.findPhotoByUploadClientID(user.ID, uploadClientID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 			return
 		} else if ok {
-			c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true})
+			c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true, "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 			return
 		}
 	}
@@ -7080,6 +7517,15 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	now := time.Now().In(s.Location)
 	day := now.Format("2006-01-02")
 	todayWindowActive := s.isDailyWindowActive(day, now)
+	if kind == "prompt" {
+		resolvedDay, allowed, acceptedOffline := s.resolvePromptUploadDay(day, now, capturedAt)
+		day = resolvedDay
+		acceptedViaOfflineGrace = acceptedOffline
+		if !allowed {
+			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
+			return
+		}
+	}
 
 	if _, err := s.cleanupInvalidPromptOnlyPhotosForDay(day); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -7092,12 +7538,6 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		return
 	}
 
-	if kind == "prompt" {
-		if !s.isPromptUploadAllowed(day, now) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
-			return
-		}
-	}
 	if kind == "extra" && todayWindowActive {
 		c.JSON(http.StatusForbidden, gin.H{"error": "extra unavailable during daily moment window"})
 		return
@@ -7183,7 +7623,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		return
 	} else if ok {
 		s.removePhotoFiles(photo)
-		c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true})
+		c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true, "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 		return
 	}
 	if kind == "prompt" && hasPromptPosted {
@@ -7211,7 +7651,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 
 	s.invalidateFeedDayCache(photo.Day)
 	s.notifyPostCreated(user, photo)
-	c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo)})
+	c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo), "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 }
 
 func (s *Server) handleHealth(c *gin.Context) {
@@ -9679,6 +10119,24 @@ func (s *Server) isPromptUploadAllowed(day string, now time.Time) bool {
 		return false
 	}
 	return isPromptWindowActive(prompt, now)
+}
+
+func (s *Server) resolvePromptUploadDay(defaultDay string, now time.Time, capturedAt *time.Time) (string, bool, bool) {
+	if s.isPromptUploadAllowed(defaultDay, now) {
+		return defaultDay, true, false
+	}
+	if capturedAt == nil || capturedAt.IsZero() {
+		return defaultDay, false, false
+	}
+	capturedLocal := capturedAt.In(s.Location)
+	if now.Sub(capturedLocal) > 7*24*time.Hour {
+		return defaultDay, false, false
+	}
+	capturedDay := capturedLocal.Format("2006-01-02")
+	if s.isPromptUploadAllowed(capturedDay, capturedLocal) {
+		return capturedDay, true, true
+	}
+	return defaultDay, false, false
 }
 
 type dayTriggerStatus struct {

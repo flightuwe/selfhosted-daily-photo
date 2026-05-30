@@ -42,6 +42,8 @@ import {
   getChat,
   getChatCommands,
   getDebugLogs,
+  getDebugLogsSummary,
+  getUploadTimeline,
   downloadDebugLogs,
   downloadPerformanceExport,
   downloadPerformanceTrackingExport,
@@ -118,16 +120,20 @@ import {
   type FeedItem,
   type DebugLogItem,
   type DebugLogsResponse,
+  type DebugLogSummaryItem,
+  type DebugLogSummaryResponse,
+  type UploadTimelineItem,
+  type UploadTimelineResponse,
   type MonthlyRecap,
   type Settings,
   type SystemHealth,
   type UserPromptRule,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "fotomojis" | "reports" | "debug" | "settings" | "migration" | "locations";
+type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "fotomojis" | "reports" | "debug" | "upload_timeline" | "settings" | "migration" | "locations";
 type AdminArea = "operations" | "analytics" | "config";
 type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "polls" | "time_capsules" | "fotomojis" | "reports" | "locations";
-type AnalyticsSubtab = "history" | "performance" | "incident_export" | "trigger_audit" | "debug" | "system";
+type AnalyticsSubtab = "history" | "performance" | "incident_export" | "trigger_audit" | "upload_timeline" | "debug" | "system";
 type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
 
@@ -214,6 +220,7 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
     performance: "performance",
     incident_export: "incident_export",
     trigger_audit: "trigger_audit",
+    upload_timeline: "upload_timeline",
     debug: "debug",
     system: "system",
   },
@@ -243,6 +250,7 @@ const areaSubtabs: Record<AdminArea, Array<{ key: AdminSubtab; label: string }>>
     { key: "performance", label: "Performance" },
     { key: "incident_export", label: "Incident Export" },
     { key: "trigger_audit", label: "Trigger Audit" },
+    { key: "upload_timeline", label: "Upload Timeline" },
     { key: "debug", label: "Debug Logs" },
     { key: "system", label: "System Health" },
   ],
@@ -355,6 +363,8 @@ function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
       return { area: "analytics", subtab: "incident_export" };
     case "trigger_audit":
       return { area: "analytics", subtab: "trigger_audit" };
+    case "upload_timeline":
+      return { area: "analytics", subtab: "upload_timeline" };
     case "debug":
       return { area: "analytics", subtab: "debug" };
     case "system":
@@ -540,6 +550,24 @@ export function App() {
   });
   const [debugUserFilter, setDebugUserFilter] = useState<number>(0);
   const [debugSinceHours, setDebugSinceHours] = useState<1 | 12 | 24>(24);
+  const [debugViewMode, setDebugViewMode] = useState<"events" | "summary">("events");
+  const [debugSummaryItems, setDebugSummaryItems] = useState<DebugLogSummaryItem[]>([]);
+  const [uploadTimelineItems, setUploadTimelineItems] = useState<UploadTimelineItem[]>([]);
+  const [uploadTimelineFilterInfo, setUploadTimelineFilterInfo] = useState<{ since: string; serverNow: string; sinceHours: number }>({
+    since: "",
+    serverNow: "",
+    sinceHours: 24,
+  });
+  const [uploadTimelineSummary, setUploadTimelineSummary] = useState({
+    total: 0,
+    uniqueUploads: 0,
+    failedCount: 0,
+    waitingForNetworkCount: 0,
+    liveCount: 0,
+  });
+  const [uploadTimelineUserFilter, setUploadTimelineUserFilter] = useState<number>(0);
+  const [uploadTimelineSinceHours, setUploadTimelineSinceHours] = useState<1 | 12 | 24>(24);
+  const [uploadTimelineAutoRefresh, setUploadTimelineAutoRefresh] = useState(true);
   const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [message, setMessage] = useState("");
   const initialNav = useMemo(() => parseQueryAreaSubtab(), []);
@@ -803,8 +831,12 @@ export function App() {
     }
     if (activeTab === "debug") {
       void loadDebugLogs(token, debugUserFilter, debugSinceHours);
+      void loadDebugLogsSummary(token, debugUserFilter, debugSinceHours);
     }
-  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, locationFromDay, locationToDay, locationUserId, debugUserFilter, debugSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
+    if (activeTab === "upload_timeline") {
+      void loadUploadTimeline(token, uploadTimelineUserFilter, uploadTimelineSinceHours);
+    }
+  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, locationFromDay, locationToDay, locationUserId, debugUserFilter, debugSinceHours, uploadTimelineUserFilter, uploadTimelineSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -813,6 +845,14 @@ export function App() {
     }, 10000);
     return () => window.clearInterval(id);
   }, [token, activeTab]);
+
+  useEffect(() => {
+    if (!token || activeTab !== "upload_timeline" || !uploadTimelineAutoRefresh) return;
+    const id = window.setInterval(() => {
+      void loadUploadTimeline(token, uploadTimelineUserFilter, uploadTimelineSinceHours);
+    }, 10000);
+    return () => window.clearInterval(id);
+  }, [token, activeTab, uploadTimelineAutoRefresh, uploadTimelineUserFilter, uploadTimelineSinceHours]);
 
   useEffect(() => {
     localStorage.setItem("admin-dark-mode", darkMode ? "1" : "0");
@@ -1070,6 +1110,30 @@ export function App() {
     }
   }
 
+  async function loadDebugLogsSummary(authToken: string, userId?: number, sinceHours: 1 | 12 | 24 = 24) {
+    try {
+      const response: DebugLogSummaryResponse = await getDebugLogsSummary(authToken, userId && userId > 0 ? userId : undefined, 1000, sinceHours);
+      setDebugSummaryItems(response.items);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function loadUploadTimeline(authToken: string, userId?: number, sinceHours: 1 | 12 | 24 = 24) {
+    try {
+      const response: UploadTimelineResponse = await getUploadTimeline(authToken, userId && userId > 0 ? userId : undefined, 250, sinceHours);
+      setUploadTimelineItems(response.items);
+      setUploadTimelineFilterInfo({
+        since: response.since,
+        serverNow: response.serverNow,
+        sinceHours: response.sinceHours,
+      });
+      setUploadTimelineSummary(response.summary);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function loadReports(
     authToken: string,
     userId?: number,
@@ -1179,6 +1243,16 @@ export function App() {
     try {
       await downloadDebugLogs(token, { sinceHours: hours, format });
       setMessage(`Gesamte Logs (${hours}h, ${format.toUpperCase()}) wurden heruntergeladen.`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
+  async function onCopyUploadTimelineLog() {
+    try {
+      const text = buildUploadTimelineCopyText(uploadTimelineItems, uploadTimelineFilterInfo);
+      await copyToClipboard(text);
+      setMessage("Upload-Timeline wurde in die Zwischenablage kopiert.");
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -4178,6 +4252,131 @@ export function App() {
           </div>
         )}
 
+        {activeTab === "upload_timeline" && (
+          <div className="stack">
+            <div className="debug-toolbar">
+              <div className="debug-toolbar-head">
+                <div className="stack" style={{ marginBottom: 0 }}>
+                  <h2>Upload Timeline</h2>
+                  <p className="small">Live-Sicht auf Uploads, Queue-Zustaende, Netzqualitaet und Bestaetigungsphasen.</p>
+                </div>
+                <div className="debug-actions">
+                  <button onClick={() => loadUploadTimeline(token, uploadTimelineUserFilter, uploadTimelineSinceHours)}>Aktualisieren</button>
+                  <button className="accent" onClick={onCopyUploadTimelineLog}>Kopierlog erzeugen</button>
+                </div>
+              </div>
+              <div className="debug-filters">
+                <label>
+                  Nutzer
+                  <select value={uploadTimelineUserFilter} onChange={(e) => setUploadTimelineUserFilter(Number(e.target.value))}>
+                    <option value={0}>Alle Nutzer</option>
+                    {users.map((u) => (
+                      <option key={u.id} value={u.id}>@{u.username}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="debug-range">
+                  <span className="small"><strong>Zeitraum</strong></span>
+                  <div className="debug-range-buttons">
+                    {[1, 12, 24].map((hours) => (
+                      <button
+                        key={hours}
+                        type="button"
+                        className={uploadTimelineSinceHours === hours ? "active" : ""}
+                        onClick={() => setUploadTimelineSinceHours(hours as 1 | 12 | 24)}
+                      >
+                        {hours}h
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      className={uploadTimelineAutoRefresh ? "active" : ""}
+                      onClick={() => setUploadTimelineAutoRefresh((prev) => !prev)}
+                    >
+                      Live {uploadTimelineAutoRefresh ? "an" : "aus"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className="debug-summary-grid">
+                <CardStat title="Timeline-Events" value={uploadTimelineSummary.total} />
+                <CardStat title="Uploads" value={uploadTimelineSummary.uniqueUploads} />
+                <CardStat title="Live aktiv" value={uploadTimelineSummary.liveCount} />
+                <CardStat title="Wartet auf Netz" value={uploadTimelineSummary.waitingForNetworkCount} />
+                <CardStat title="Fehlgeschlagen" value={uploadTimelineSummary.failedCount} />
+                <CardStat title="Serverzeit" value={uploadTimelineFilterInfo.serverNow ? formatDateTime(uploadTimelineFilterInfo.serverNow) : "-"} />
+              </div>
+              <p className="small">
+                {uploadTimelineFilterInfo.since
+                  ? `Zeige Upload-Timeline seit ${formatDateTime(uploadTimelineFilterInfo.since)} (Serverzeit).`
+                  : `Zeige Upload-Timeline fuer die letzten ${uploadTimelineSinceHours}h.`}
+              </p>
+            </div>
+            {uploadTimelineItems.length === 0 && <p>Keine Upload-Eintraege vorhanden.</p>}
+            {uploadTimelineItems.length > 0 && (
+              <div className="upload-timeline-list">
+                {uploadTimelineItems.map((row) => (
+                  <article key={`${row.id}_${row.timelineId}`} className="upload-timeline-card">
+                    <div className="upload-timeline-head">
+                      <div className="upload-timeline-title">
+                        <span className={`debug-chip ${uploadTimelineStageClass(row.stage)}`}>{uploadTimelineStageLabel(row.stage)}</span>
+                        <strong>@{row.user?.username || "-"}</strong>
+                        <span className="small">{uploadTimelineSourceLabel(row.source, row.kind)}</span>
+                      </div>
+                      <div className="upload-timeline-title">
+                        <span className="small">{formatDateTime(row.createdAt)}</span>
+                        <code className="debug-type-code">{row.uploadClientId || row.timelineId}</code>
+                      </div>
+                    </div>
+                    <div className="upload-timeline-grid">
+                      <div>
+                        <strong>Geraet</strong>
+                        <p>{row.deviceName || "-"}</p>
+                        <p className="small">{row.appVersion || "-"}</p>
+                      </div>
+                      <div>
+                        <strong>Dauer</strong>
+                        <p>{row.durationMs != null ? `${Math.round(row.durationMs / 100) / 10}s` : "-"}</p>
+                        <p className="small">Ping: {row.pingMs != null ? `${row.pingMs} ms` : row.pingFailure || "-"}</p>
+                      </div>
+                      <div>
+                        <strong>Uploadgroesse</strong>
+                        <p>{row.bytesTotal != null ? formatBytes(row.bytesTotal) : "-"}</p>
+                        <p className="small">Gesendet: {row.bytesSent != null ? formatBytes(row.bytesSent) : "-"}</p>
+                      </div>
+                      <div>
+                        <strong>Netz</strong>
+                        <p>{uploadTimelineNetworkLabel(row)}</p>
+                        <p className="small">{uploadTimelineBandwidthLabel(row)}</p>
+                      </div>
+                      <div>
+                        <strong>Zeitpunkte</strong>
+                        <p className="small">Aufgenommen: {row.capturedAt ? formatDateTime(row.capturedAt) : "-"}</p>
+                        <p className="small">In Queue seit: {row.queuedAt ? formatDateTime(row.queuedAt) : "-"}</p>
+                      </div>
+                      <div>
+                        <strong>Fehlerbild</strong>
+                        <p>
+                          <span className={`debug-chip ${debugFailureFamilyClass(row.failureFamily || row.securityFailureClass || row.failureClass)}`}>
+                            {debugFailureFamilyLabel(row.failureFamily || row.securityFailureClass || row.failureClass)}
+                          </span>
+                        </p>
+                        <p className="small">HTTP: {row.httpCode != null ? row.httpCode : "-"}</p>
+                      </div>
+                    </div>
+                    <div className="upload-timeline-meta">
+                      <p><strong>Nachricht:</strong> {row.message || "-"}</p>
+                      <p><strong>Session:</strong> {row.sessionId || "-"} | <strong>Request:</strong> {row.requestId || "-"}</p>
+                      <p><strong>Queue-ID:</strong> {row.queueItemId || "-"} | <strong>Versuch:</strong> {row.attempt != null ? row.attempt : "-"}</p>
+                      <code>{row.meta || "-"}</code>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {activeTab === "debug" && (
           <div className="stack">
             <div className="debug-toolbar">
@@ -4215,6 +4414,17 @@ export function App() {
                       </button>
                     ))}
                   </div>
+                </div>
+              </div>
+              <div className="debug-range">
+                <span className="small"><strong>Ansicht</strong></span>
+                <div className="debug-range-buttons">
+                  <button type="button" className={debugViewMode === "events" ? "active" : ""} onClick={() => setDebugViewMode("events")}>
+                    Wichtige Ereignisse
+                  </button>
+                  <button type="button" className={debugViewMode === "summary" ? "active" : ""} onClick={() => setDebugViewMode("summary")}>
+                    Verdichtete Wiederholungen
+                  </button>
                 </div>
               </div>
               <div className="debug-summary-grid">
@@ -4270,8 +4480,8 @@ export function App() {
                 </article>
               </div>
             </div>
-            {debugLogs.length === 0 && <p>Keine Debug-Eintraege vorhanden.</p>}
-            {debugLogs.length > 0 && (
+            {debugViewMode === "events" && debugLogs.length === 0 && <p>Keine Debug-Eintraege vorhanden.</p>}
+            {debugViewMode === "events" && debugLogs.length > 0 && (
               <div className="debug-table-wrap">
                 <table className="table debug-table">
                   <thead>
@@ -4322,6 +4532,44 @@ export function App() {
                         </tr>
                       );
                     })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {debugViewMode === "summary" && debugSummaryItems.length === 0 && <p>Keine verdichteten Wiederholungen vorhanden.</p>}
+            {debugViewMode === "summary" && debugSummaryItems.length > 0 && (
+              <div className="debug-table-wrap">
+                <table className="table debug-table">
+                  <thead>
+                    <tr>
+                      <th>Anzahl</th>
+                      <th>Nutzer</th>
+                      <th>Geraet</th>
+                      <th>Familie</th>
+                      <th>Netz</th>
+                      <th>Erstes Auftreten</th>
+                      <th>Letztes Auftreten</th>
+                      <th>Beispiel</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {debugSummaryItems.map((row) => (
+                      <tr key={row.signature}>
+                        <td>{row.count}</td>
+                        <td>@{row.user?.username || "-"}</td>
+                        <td>{row.deviceName || "-"}</td>
+                        <td><span className={`debug-chip ${debugFailureFamilyClass(row.failureFamily)}`}>{debugFailureFamilyLabel(row.failureFamily)}</span></td>
+                        <td>{row.topTransport || "-"}</td>
+                        <td>{row.firstSeenAt ? formatDateTime(row.firstSeenAt) : "-"}</td>
+                        <td>{row.lastSeenAt ? formatDateTime(row.lastSeenAt) : "-"}</td>
+                        <td>
+                          <div className="debug-meta-cell">
+                            <div className="debug-message-cell">{row.sampleMessage || "-"}</div>
+                            <code>{row.sampleMeta || "-"}</code>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
@@ -4816,6 +5064,135 @@ function truncateText(value: string, maxLen = 80) {
   return `${text.slice(0, maxLen - 1)}â€¦`;
 }
 
+function uploadTimelineStageLabel(value: string) {
+  switch (value) {
+    case "gestartet":
+      return "Gestartet";
+    case "wartend":
+      return "Wartend";
+    case "wartet_auf_verbindung":
+      return "Wartet auf Verbindung";
+    case "wartet_auf_bestaetigung":
+      return "Wartet auf Bestaetigung";
+    case "wiederhergestellt":
+      return "Wiederhergestellt";
+    case "erfolgreich":
+      return "Erfolgreich";
+    case "fehlgeschlagen":
+      return "Fehlgeschlagen";
+    default:
+      return value || "Unbekannt";
+  }
+}
+
+function uploadTimelineStageClass(value: string) {
+  switch (value) {
+    case "erfolgreich":
+      return "ok";
+    case "fehlgeschlagen":
+      return "error";
+    case "wartet_auf_verbindung":
+    case "wartet_auf_bestaetigung":
+    case "wiederhergestellt":
+      return "warn";
+    default:
+      return "neutral";
+  }
+}
+
+function uploadTimelineSourceLabel(source?: string, kind?: string) {
+  const kindLabel = kind === "prompt" ? "Daily-Moment" : kind === "extra" ? "Extra" : "Upload";
+  return source === "queue" ? `${kindLabel} aus Queue` : `${kindLabel} direkt`;
+}
+
+function uploadTimelineNetworkLabel(row: UploadTimelineItem) {
+  const transport = row.network?.transport || "-";
+  const stable = row.network?.stable;
+  if (stable === true) return `${transport} stabil`;
+  if (stable === false) return `${transport} instabil`;
+  return transport;
+}
+
+function uploadTimelineBandwidthLabel(row: UploadTimelineItem) {
+  const down = row.network?.downKbps;
+  const up = row.network?.upKbps;
+  if (down == null && up == null) return "-";
+  const downLabel = down != null ? `Down ${down} Kbps` : "Down -";
+  const upLabel = up != null ? `Up ${up} Kbps` : "Up -";
+  return `${downLabel} | ${upLabel}`;
+}
+
+function buildUploadTimelineCopyText(
+  items: UploadTimelineItem[],
+  filterInfo: { since: string; serverNow: string; sinceHours: number }
+) {
+  const lines: string[] = [];
+  const families = {
+    dns: items.filter((row) => row.failureFamily === "dns").length,
+    no_active_network: items.filter((row) => row.failureFamily === "no_active_network").length,
+    ssl_handshake: items.filter((row) => row.failureFamily === "ssl_handshake").length,
+    cert_path_validator: items.filter((row) => row.failureFamily === "cert_path_validator").length,
+  };
+  lines.push("Daily Upload Timeline");
+  lines.push(`Serverzeit: ${filterInfo.serverNow ? formatDateTime(filterInfo.serverNow) : "-"}`);
+  lines.push(`Zeitraum: ${filterInfo.since ? formatDateTime(filterInfo.since) : `letzte ${filterInfo.sinceHours}h`}`);
+  lines.push("");
+  lines.push(`DNS-Fehler: ${families.dns}x`);
+  lines.push(`Keine aktive Verbindung: ${families.no_active_network}x`);
+  lines.push(`TLS-Handshake: ${families.ssl_handshake}x`);
+  lines.push(`Zertifikatspfad: ${families.cert_path_validator}x`);
+  lines.push("");
+  items.forEach((row) => {
+    lines.push(
+      `[${formatDateTime(row.createdAt)}] @${row.user?.username || "-"} | ${uploadTimelineStageLabel(row.stage)} | ${uploadTimelineSourceLabel(row.source, row.kind)}`
+    );
+    lines.push(
+      `  Upload=${row.uploadClientId || row.timelineId} | Queue=${row.queueItemId || "-"} | Versuch=${row.attempt != null ? row.attempt : "-"} | Geraet=${row.deviceName || "-"} | App=${row.appVersion || "-"}`
+    );
+    lines.push(
+      `  Dauer=${row.durationMs != null ? `${Math.round(row.durationMs / 100) / 10}s` : "-"} | Ping=${row.pingMs != null ? `${row.pingMs} ms` : row.pingFailure || "-"} | Groesse=${row.bytesTotal != null ? formatBytes(row.bytesTotal) : "-"}`
+    );
+    lines.push(
+      `  Netz=${uploadTimelineNetworkLabel(row)} | Bandbreite=${uploadTimelineBandwidthLabel(row)} | HTTP=${row.httpCode != null ? row.httpCode : "-"} | Fehler=${row.failureFamily || row.failureClass || row.networkKind || "-"}`
+    );
+    lines.push(`  Nachricht=${row.message || "-"}`);
+    if (row.meta) lines.push(`  Meta=${row.meta}`);
+    lines.push("");
+  });
+  return lines.join("\n").trim();
+}
+
+function debugFailureFamilyLabel(value?: string) {
+  switch ((value || "").trim()) {
+    case "dns":
+      return "DNS";
+    case "no_active_network":
+      return "Keine aktive Verbindung";
+    case "ssl_handshake":
+      return "TLS";
+    case "cert_path_validator":
+      return "Zertifikat";
+    case "ssl_other":
+      return "SSL";
+    default:
+      return value || "-";
+  }
+}
+
+function debugFailureFamilyClass(value?: string) {
+  switch ((value || "").trim()) {
+    case "dns":
+    case "no_active_network":
+      return "warn";
+    case "ssl_handshake":
+    case "cert_path_validator":
+    case "ssl_other":
+      return "error";
+    default:
+      return "neutral";
+  }
+}
+
 function debugTypeLabel(value: string) {
   switch (value) {
     case "dashboard_load_failed":
@@ -4836,6 +5213,28 @@ function debugTypeLabel(value: string) {
       return "Crash";
     case "profile_open_ok":
       return "Profil OK";
+    case "upload_direct_started":
+      return "Upload direkt gestartet";
+    case "upload_direct_server_ack_pending":
+      return "Direkt wartet auf Bestaetigung";
+    case "upload_direct_succeeded":
+      return "Upload direkt erfolgreich";
+    case "upload_direct_failed":
+      return "Upload direkt fehlgeschlagen";
+    case "upload_queue_enqueued":
+      return "Upload Queue aufgenommen";
+    case "upload_queue_attempt_started":
+      return "Upload Queue gestartet";
+    case "upload_queue_waiting_for_network":
+      return "Queue wartet auf Verbindung";
+    case "upload_queue_server_ack_pending":
+      return "Queue wartet auf Bestaetigung";
+    case "upload_queue_succeeded":
+      return "Upload Queue erfolgreich";
+    case "upload_queue_failed":
+      return "Upload Queue fehlgeschlagen";
+    case "upload_queue_state_recovered":
+      return "Upload Queue wiederhergestellt";
     default:
       return value || "Unbekannt";
   }
@@ -4853,9 +5252,18 @@ function debugTypeClass(value: string) {
       return "warn";
     case "profile_open_failed":
     case "crash_unhandled":
+    case "upload_direct_failed":
+    case "upload_queue_failed":
       return "error";
     case "profile_open_ok":
+    case "upload_direct_succeeded":
+    case "upload_queue_succeeded":
       return "ok";
+    case "upload_direct_server_ack_pending":
+    case "upload_queue_waiting_for_network":
+    case "upload_queue_server_ack_pending":
+    case "upload_queue_state_recovered":
+      return "warn";
     default:
       return "neutral";
   }

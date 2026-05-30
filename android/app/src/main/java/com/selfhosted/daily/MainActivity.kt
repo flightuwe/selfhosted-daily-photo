@@ -219,6 +219,7 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.security.cert.CertPathValidatorException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.time.LocalDate
@@ -229,6 +230,8 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLException
 import kotlin.math.abs
 import kotlin.random.Random
 import kotlin.coroutines.resume
@@ -795,8 +798,107 @@ data class DebugLogEntry(
     val type: String,
     val message: String,
     val meta: String = "",
-    val createdAt: String
+    val createdAt: String,
+    val aggregateCount: Int = 1,
+    val firstSeenAt: String = createdAt,
+    val lastSeenAt: String = createdAt
 )
+
+data class UploadTelemetryProbe(
+    val pingMs: Long? = null,
+    val pingFailure: String = "",
+    val networkSnapshot: String = "",
+    val networkStable: Boolean = false
+)
+
+private fun debugRootCauseShared(throwable: Throwable): Throwable {
+    var current = throwable
+    while (current.cause != null && current.cause !== current) {
+        current = current.cause!!
+    }
+    return current
+}
+
+private fun debugNetworkFailureKindShared(throwable: Throwable): String? {
+    val root = debugRootCauseShared(throwable)
+    return when {
+        root is CertPathValidatorException -> "cert_path_validator"
+        root is SSLHandshakeException -> "ssl_handshake"
+        root is UnknownHostException -> "dns"
+        root is ConnectException -> "connect"
+        root is SocketTimeoutException -> "timeout"
+        root is SSLException -> "ssl_other"
+        root is IOException -> "io"
+        else -> null
+    }
+}
+
+private fun debugMetaSanitizeShared(value: String, maxLen: Int = 160): String {
+    val clean = value
+        .replace(";", ",")
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+    if (clean.isBlank()) return "-"
+    return if (clean.length > maxLen) clean.take(maxLen) else clean
+}
+
+private fun debugThrowableChainShared(throwable: Throwable, maxDepth: Int = 6): String {
+    return generateSequence(throwable) { it.cause }
+        .take(maxDepth)
+        .joinToString(">") { it::class.java.simpleName.ifBlank { "Unknown" } }
+        .ifBlank { "Unknown" }
+}
+
+private fun debugSecurityFailureDetailShared(throwable: Throwable): String {
+    val messages = generateSequence(throwable) { it.cause }
+        .mapNotNull { it.message?.trim() }
+        .map { it.lowercase() }
+        .toList()
+    return when {
+        messages.any { it.contains("trust anchor for certification path not found") } -> "trust_anchor_missing"
+        messages.any { it.contains("certificate pinning") } -> "certificate_pinning"
+        messages.any { it.contains("hostname") && it.contains("not verified") } -> "hostname_not_verified"
+        messages.any { it.contains("unable to find valid certification path") } -> "cert_path_untrusted"
+        messages.any { it.contains("handshake") && it.contains("failure") } -> "handshake_failure"
+        messages.any { it.contains("certificate expired") || it.contains("notafter") } -> "certificate_expired"
+        messages.any { it.contains("certificate revoked") } -> "certificate_revoked"
+        messages.any { it.contains("protocol version") } -> "protocol_version"
+        messages.any { it.contains("remote host terminated the handshake") } -> "remote_handshake_abort"
+        debugNetworkFailureKindShared(throwable) == "cert_path_validator" -> "cert_path_validator"
+        debugNetworkFailureKindShared(throwable) == "ssl_handshake" -> "ssl_handshake"
+        debugNetworkFailureKindShared(throwable) == "ssl_other" -> "ssl_other"
+        else -> "-"
+    }
+}
+
+fun debugThrowableMetaShared(throwable: Throwable): String {
+    val root = debugRootCauseShared(throwable)
+    val rootMessage = debugMetaSanitizeShared(root.message.orEmpty())
+    val topMessage = debugMetaSanitizeShared(throwable.message.orEmpty())
+    return buildString {
+        append("rootClass=").append(root::class.java.simpleName.ifBlank { "Unknown" })
+        append(";rootMessage=").append(rootMessage)
+        append(";topClass=").append(throwable::class.java.simpleName.ifBlank { "Unknown" })
+        append(";topMessage=").append(topMessage)
+        append(";failureChain=").append(debugMetaSanitizeShared(debugThrowableChainShared(throwable), 220))
+        append(";securityDetail=").append(debugSecurityFailureDetailShared(throwable))
+    }
+}
+
+private fun securityAdviceForFailure(failureClass: String): String {
+    return when (failureClass) {
+        "ssl_handshake",
+        "cert_path_validator",
+        "ssl_other" -> "Daily konnte in diesem Netzwerk keine sichere Verbindung aufbauen. Bitte mobile Daten oder ein anderes WLAN versuchen."
+        else -> ""
+    }
+}
+
+private fun parseIsoInstantMs(value: String): Long {
+    return runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrDefault(0L)
+}
 
 interface Api {
     @GET("health")
@@ -1122,12 +1224,14 @@ class AppRepo(
     private val debugLogsPrefKey = "debug_logs_v1"
     private val debugUploadEnabledKey = "debug_upload_enabled"
     private val debugLastUploadAtKey = "debug_last_upload_at"
+    private val diagnosticsSecurityAdviceLastShownAtKey = "diagnostics_security_advice_last_shown_at"
     private val diagnosticsConsentLocalKey = "diagnostics_consent_local"
     private val diagnosticsConsentPendingKey = "diagnostics_consent_pending"
     private val diagnosticsSessionIdKey = "diagnostics_session_id"
     private val promptSeenVersionPrefix = "user_prompt_seen_version_"
     private val debugMaxEntries = 500
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
+    private val debugAggregateWindowMs = 10 * 60 * 1000L
     private val refreshMutex = Mutex()
     @Volatile
     private var lastAuthTransitionReason: String = "startup"
@@ -1188,7 +1292,9 @@ class AppRepo(
         val internet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         val metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
-        return "activeNetwork=true;capabilities=true;internet=$internet;validated=$validated;metered=$metered;transport=$transport"
+        val downKbps = caps.linkDownstreamBandwidthKbps
+        val upKbps = caps.linkUpstreamBandwidthKbps
+        return "activeNetwork=true;capabilities=true;internet=$internet;validated=$validated;metered=$metered;transport=$transport;downKbps=$downKbps;upKbps=$upKbps"
     }
 
     fun saveToken(token: String) {
@@ -1250,7 +1356,6 @@ class AppRepo(
             .remove("refresh_token")
             .remove("session_id")
             .apply()
-        UploadQueueManager.clear(context)
         val afterTokenPresent = accessToken().trim().isNotBlank()
         recordAuthStateTransition(
             reason = reason,
@@ -1314,6 +1419,37 @@ class AppRepo(
         }
     }
 
+    suspend fun uploadDualAuthorized(
+        backPart: MultipartBody.Part,
+        frontPart: MultipartBody.Part,
+        kind: RequestBody,
+        capturedAtPart: RequestBody? = null,
+        uploadClientIdPart: RequestBody? = null,
+        capsuleModePart: RequestBody? = null,
+        capsulePrivatePart: RequestBody? = null,
+        capsuleGroupRemindPart: RequestBody? = null,
+        locationSharedPart: RequestBody? = null,
+        locationLatitudePart: RequestBody? = null,
+        locationLongitudePart: RequestBody? = null
+    ) {
+        authorizedCall("/api/uploads/dual") { token ->
+            api.uploadDual(
+                token,
+                backPart,
+                frontPart,
+                kind,
+                capturedAtPart,
+                uploadClientIdPart,
+                capsuleModePart,
+                capsulePrivatePart,
+                capsuleGroupRemindPart,
+                locationSharedPart,
+                locationLatitudePart,
+                locationLongitudePart
+            )
+        }
+    }
+
     fun diagnosticsUploadEnabled(): Boolean = prefs.getBoolean(debugUploadEnabledKey, false)
 
     fun diagnosticsConsentGrantedLocal(): Boolean = prefs.getBoolean(diagnosticsConsentLocalKey, false)
@@ -1357,6 +1493,52 @@ class AppRepo(
         return generated
     }
 
+    fun lastSecurityAdviceShownAtMs(): Long = prefs.getLong(diagnosticsSecurityAdviceLastShownAtKey, 0L)
+
+    fun setLastSecurityAdviceShownAtMs(value: Long) {
+        prefs.edit().putLong(diagnosticsSecurityAdviceLastShownAtKey, value.coerceAtLeast(0L)).apply()
+    }
+
+    private fun aggregateMetaSignature(type: String, meta: String): String {
+        val pairs = meta.split(";")
+            .mapNotNull {
+                val part = it.trim()
+                if (!part.contains("=")) null else part
+            }
+            .associate {
+                val idx = it.indexOf("=")
+                it.substring(0, idx).trim() to it.substring(idx + 1).trim()
+            }
+        val failureClass = pairs["failureClass"].orEmpty()
+        val endpoint = pairs["endpoint"].orEmpty()
+        val transport = pairs["transport"].orEmpty()
+        val network = pairs["network"].orEmpty()
+        val reason = pairs["reason"].orEmpty()
+        val failedCall = pairs["failedCall"].orEmpty()
+        return listOf(type.trim(), failureClass, endpoint, transport, network, reason, failedCall).joinToString("|")
+    }
+
+    private fun shouldAggregateDebugType(type: String): Boolean {
+        return when (type.trim()) {
+            "feed_refresh_failed",
+            "dashboard_refresh_degraded",
+            "network_snapshot",
+            "partial_day_reload_fallback",
+            "refresh_circuit_open" -> true
+            else -> false
+        }
+    }
+
+    private fun parseIsoInstantMs(value: String): Long {
+        return runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrDefault(0L)
+    }
+
+    private fun appendAggregateFields(meta: String, entry: DebugLogEntry): String {
+        val clean = meta.trim()
+        val aggregatePart = "aggregateCount=${entry.aggregateCount};firstSeenAt=${entry.firstSeenAt};lastSeenAt=${entry.lastSeenAt}"
+        return if (clean.isBlank()) aggregatePart else "$clean;$aggregatePart"
+    }
+
     private fun readDebugLogsInternal(): MutableList<DebugLogEntry> {
         val raw = prefs.getString(debugLogsPrefKey, "") ?: ""
         if (raw.isBlank()) return mutableListOf()
@@ -1371,7 +1553,10 @@ class AppRepo(
                         type = obj.optString("type", "unknown"),
                         message = obj.optString("message", ""),
                         meta = obj.optString("meta", ""),
-                        createdAt = obj.optString("createdAt", "")
+                        createdAt = obj.optString("createdAt", ""),
+                        aggregateCount = obj.optInt("aggregateCount", 1).coerceAtLeast(1),
+                        firstSeenAt = obj.optString("firstSeenAt", obj.optString("createdAt", "")),
+                        lastSeenAt = obj.optString("lastSeenAt", obj.optString("createdAt", ""))
                     )
                 )
             }
@@ -1388,6 +1573,9 @@ class AppRepo(
             obj.put("message", item.message)
             obj.put("meta", item.meta)
             obj.put("createdAt", item.createdAt)
+            obj.put("aggregateCount", item.aggregateCount.coerceAtLeast(1))
+            obj.put("firstSeenAt", item.firstSeenAt.ifBlank { item.createdAt })
+            obj.put("lastSeenAt", item.lastSeenAt.ifBlank { item.createdAt })
             arr.put(obj)
         }
         prefs.edit().putString(debugLogsPrefKey, arr.toString()).apply()
@@ -1402,30 +1590,91 @@ class AppRepo(
         val cleanMeta = meta.trim().take(4000)
         val createdAt = OffsetDateTime.now().toString()
         val current = readDebugLogsInternal()
-        current.add(
-            DebugLogEntry(
-                id = UUID.randomUUID().toString(),
-                type = cleanType,
-                message = cleanMessage,
-                meta = cleanMeta,
-                createdAt = createdAt
-            )
+        val newEntry = DebugLogEntry(
+            id = UUID.randomUUID().toString(),
+            type = cleanType,
+            message = cleanMessage,
+            meta = cleanMeta,
+            createdAt = createdAt,
+            aggregateCount = 1,
+            firstSeenAt = createdAt,
+            lastSeenAt = createdAt
         )
+        if (shouldAggregateDebugType(cleanType)) {
+            val signature = aggregateMetaSignature(cleanType, cleanMeta)
+            val nowMs = parseIsoInstantMs(createdAt)
+            val idx = current.indexOfLast { existing ->
+                existing.type == cleanType &&
+                    aggregateMetaSignature(existing.type, existing.meta) == signature &&
+                    (nowMs - parseIsoInstantMs(existing.lastSeenAt.ifBlank { existing.createdAt })) <= debugAggregateWindowMs
+            }
+            if (idx >= 0) {
+                val existing = current[idx]
+                current[idx] = existing.copy(
+                    message = cleanMessage,
+                    meta = cleanMeta,
+                    aggregateCount = existing.aggregateCount + 1,
+                    lastSeenAt = createdAt
+                )
+                writeDebugLogsInternal(current)
+                return
+            }
+        }
+        current.add(newEntry)
         writeDebugLogsInternal(current)
     }
 
     fun exportDebugLogsForShare(): Uri {
         val exportDir = File(context.cacheDir, "diagnostics").apply { mkdirs() }
         val file = File(exportDir, "daily-diagnose-${System.currentTimeMillis()}.txt")
+        val rows = recentDebugLogs(300).reversed()
+        val families = linkedMapOf(
+            "dns" to 0,
+            "no_active_network" to 0,
+            "ssl_handshake" to 0,
+            "cert_path_validator" to 0
+        )
+        rows.forEach { row ->
+            val lowerMeta = row.meta.lowercase()
+            val family = when {
+                lowerMeta.contains("failureclass=cert_path_validator") || lowerMeta.contains("network=cert_path_validator") -> "cert_path_validator"
+                lowerMeta.contains("failureclass=ssl_handshake") || lowerMeta.contains("network=ssl_handshake") -> "ssl_handshake"
+                lowerMeta.contains("failureclass=no_active_network") || lowerMeta.contains("network=no_active_network") || lowerMeta.contains("reason=no_active_network") -> "no_active_network"
+                lowerMeta.contains("failureclass=dns") || lowerMeta.contains("network=dns") || lowerMeta.contains("unknownhostexception") -> "dns"
+                else -> ""
+            }
+            if (family.isNotBlank()) {
+                families[family] = (families[family] ?: 0) + row.aggregateCount.coerceAtLeast(1)
+            }
+        }
+        val aggregateRows = rows.filter { it.aggregateCount > 1 }
+        val rawRows = rows.filter { it.aggregateCount <= 1 }
         val lines = buildString {
             appendLine("Daily Diagnose Export")
             appendLine("Generated: ${OffsetDateTime.now()}")
             appendLine("App version: ${BuildConfig.VERSION_NAME}")
             appendLine("Device: ${currentDeviceName()}")
             appendLine("")
-            recentDebugLogs(300).reversed().forEach { row ->
+            appendLine("Zusammenfassung")
+            appendLine("- DNS-Fehler: ${families["dns"] ?: 0}x")
+            appendLine("- Keine aktive Verbindung: ${families["no_active_network"] ?: 0}x")
+            appendLine("- TLS-Handshake: ${families["ssl_handshake"] ?: 0}x")
+            appendLine("- Zertifikatspfad: ${families["cert_path_validator"] ?: 0}x")
+            appendLine("")
+            if (aggregateRows.isNotEmpty()) {
+                appendLine("Verdichtete Wiederholungen")
+                aggregateRows.forEach { row ->
+                    appendLine("[${row.firstSeenAt} -> ${row.lastSeenAt}] ${row.type}: ${row.message} (${row.aggregateCount}x)")
+                    if (row.meta.isNotBlank()) {
+                        appendLine("meta: ${appendAggregateFields(row.meta, row)}")
+                    }
+                }
+                appendLine("")
+            }
+            appendLine("Wichtige Einzelereignisse")
+            rawRows.forEach { row ->
                 appendLine("[${row.createdAt}] ${row.type}: ${row.message}")
-                if (row.meta.isNotBlank()) appendLine("meta: ${row.meta}")
+                if (row.meta.isNotBlank()) appendLine("meta: ${appendAggregateFields(row.meta, row)}")
             }
         }
         file.writeText(lines, Charsets.UTF_8)
@@ -1453,7 +1702,7 @@ class AppRepo(
                         ClientDebugLogUploadRequest(
                             type = row.type,
                             message = row.message,
-                            meta = row.meta,
+                            meta = appendAggregateFields(row.meta, row),
                             appVersion = BuildConfig.VERSION_NAME,
                             deviceName = currentDeviceName(),
                             sessionId = sessionId,
@@ -2165,6 +2414,31 @@ class AppRepo(
         return if (version.isNotBlank()) "$name (Android $version)" else name
     }
 
+    suspend fun measureUploadTelemetryProbe(): UploadTelemetryProbe {
+        val snapshot = networkSnapshotMeta()
+        val stable = snapshot.contains("activeNetwork=true") &&
+            snapshot.contains("internet=true") &&
+            snapshot.contains("validated=true")
+        val startedAt = System.currentTimeMillis()
+        return runCatching {
+            api.health()
+            val pingMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+            UploadTelemetryProbe(
+                pingMs = pingMs,
+                pingFailure = "",
+                networkSnapshot = snapshot,
+                networkStable = stable
+            )
+        }.getOrElse {
+            UploadTelemetryProbe(
+                pingMs = null,
+                pingFailure = debugNetworkFailureKindShared(it) ?: it::class.java.simpleName,
+                networkSnapshot = snapshot,
+                networkStable = stable
+            )
+        }
+    }
+
     suspend fun upload(
         uri: Uri,
         isPrompt: Boolean,
@@ -2173,14 +2447,38 @@ class AppRepo(
     ) {
         val capturedAt = readCapturedAtFromUri(uri)
         val file = copyUriToTemp(uri)
+        val bytesTotal = file.length().coerceAtLeast(1L)
+        val uploadClientId = UUID.randomUUID().toString()
+        val probe = measureUploadTelemetryProbe()
+        var awaitingAckLogged = false
         val part = MultipartBody.Part.createFormData(
             "photo",
             file.name,
-            file.asRequestBody("image/*".toMediaTypeOrNull())
+            ProgressRequestBody(file.asRequestBody("image/*".toMediaTypeOrNull())) { sent, total ->
+                if (!awaitingAckLogged && sent >= total) {
+                    awaitingAckLogged = true
+                    logDebug(
+                        type = "upload_direct_server_ack_pending",
+                        message = "Upload gesendet, warte auf Bestaetigung.",
+                        meta = buildString {
+                            append("source=direct")
+                            append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                            append(";uploadClientId=").append(uploadClientId)
+                            append(";bytesTotal=").append(bytesTotal)
+                            append(";bytesSent=").append(sent.coerceAtMost(total))
+                            append(";networkStable=").append(probe.networkStable)
+                            if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                            if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                            if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                            append(";").append(probe.networkSnapshot)
+                        }
+                    )
+                }
+            }
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
         val capturedAtPart = capturedAt?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
-        val uploadClientIdPart = UUID.randomUUID().toString().toRequestBody("text/plain".toMediaTypeOrNull())
+        val uploadClientIdPart = uploadClientId.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
@@ -2191,8 +2489,80 @@ class AppRepo(
         val locationShared = locationPayload?.let { "true".toRequestBody("text/plain".toMediaTypeOrNull()) }
         val latitude = locationPayload?.latitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
         val longitude = locationPayload?.longitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
-        authorizedCall("/api/uploads") { token ->
-            api.upload(token, part, kind, capturedAtPart, uploadClientIdPart, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
+        val startedAt = System.currentTimeMillis()
+        logDebug(
+            type = "upload_direct_started",
+            message = "Direkter Upload gestartet.",
+            meta = buildString {
+                append("source=direct")
+                append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                append(";uploadClientId=").append(uploadClientId)
+                append(";bytesTotal=").append(bytesTotal)
+                append(";networkStable=").append(probe.networkStable)
+                if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                append(";").append(probe.networkSnapshot)
+            }
+        )
+        try {
+            authorizedCall("/api/uploads") { token ->
+                api.upload(token, part, kind, capturedAtPart, uploadClientIdPart, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
+            }
+            logDebug(
+                type = "upload_direct_succeeded",
+                message = "Upload erfolgreich bestaetigt.",
+                meta = buildString {
+                    append("source=direct")
+                    append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                    append(";uploadClientId=").append(uploadClientId)
+                    append(";bytesTotal=").append(bytesTotal)
+                    append(";durationMs=").append((System.currentTimeMillis() - startedAt).coerceAtLeast(0L))
+                    append(";http=200")
+                    append(";networkStable=").append(probe.networkStable)
+                    if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                    if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                    if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                    append(";").append(probe.networkSnapshot)
+                }
+            )
+        } catch (t: Throwable) {
+            val failureClass = debugNetworkFailureKindShared(t) ?: t::class.java.simpleName
+            val advice = securityAdviceForFailure(failureClass)
+            logDebug(
+                type = "upload_direct_failed",
+                message = when (failureClass) {
+                    "dns" -> "Servername konnte nicht aufgeloest werden."
+                    "no_active_network" -> "Keine aktive Internetverbindung verfuegbar."
+                    "connect" -> "Keine stabile Verbindung."
+                    "timeout" -> "Server antwortet zu langsam."
+                    "ssl_handshake" -> "Sichere Verbindung fehlgeschlagen."
+                    "cert_path_validator" -> "Dieses Netzwerk vertraut dem Daily-Zertifikat nicht oder veraendert die Verbindung."
+                    "ssl_other" -> "Sichere Verbindung fehlgeschlagen."
+                    else -> t.message ?: "Upload fehlgeschlagen."
+                },
+                meta = buildString {
+                    append("source=direct")
+                    append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                    append(";uploadClientId=").append(uploadClientId)
+                    append(";bytesTotal=").append(bytesTotal)
+                    append(";durationMs=").append((System.currentTimeMillis() - startedAt).coerceAtLeast(0L))
+                    append(";failureClass=").append(failureClass)
+                    append(";securityFailureClass=").append(failureClass)
+                    append(";networkStateClass=").append(if (probe.networkStable) "stable" else "unstable")
+                    append(";retrySuppressedReason=").append("-")
+                    append(";userAdviceShown=").append(advice.isNotBlank())
+                    val http = (t as? HttpException)?.code() ?: -1
+                    append(";http=").append(http)
+                    append(";networkStable=").append(probe.networkStable)
+                    if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                    if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                    if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                    append(";").append(debugThrowableMetaShared(t))
+                    append(";").append(probe.networkSnapshot)
+                }
+            )
+            throw t
         }
     }
 
@@ -2210,20 +2580,61 @@ class AppRepo(
         val backFile = copyUriToTemp(backUri)
         val frontFile = copyUriToTemp(frontUri)
         val totalBytes = (backFile.length() + frontFile.length()).coerceAtLeast(1L)
+        val uploadClientId = UUID.randomUUID().toString()
+        val probe = measureUploadTelemetryProbe()
         var backSent = 0L
         var frontSent = 0L
+        var awaitingAckLogged = false
         fun emit() = onProgress((backSent + frontSent).coerceAtMost(totalBytes), totalBytes)
 
         val backBody = ProgressRequestBody(
             delegate = backFile.asRequestBody("image/*".toMediaTypeOrNull())
         ) { sent, _ ->
             backSent = sent
+            if (!awaitingAckLogged && (backSent + frontSent) >= totalBytes) {
+                awaitingAckLogged = true
+                logDebug(
+                    type = "upload_direct_server_ack_pending",
+                    message = "Upload gesendet, warte auf Bestaetigung.",
+                    meta = buildString {
+                        append("source=direct")
+                        append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                        append(";uploadClientId=").append(uploadClientId)
+                        append(";bytesTotal=").append(totalBytes)
+                        append(";bytesSent=").append((backSent + frontSent).coerceAtMost(totalBytes))
+                        append(";networkStable=").append(probe.networkStable)
+                        if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                        if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                        if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                        append(";").append(probe.networkSnapshot)
+                    }
+                )
+            }
             emit()
         }
         val frontBody = ProgressRequestBody(
             delegate = frontFile.asRequestBody("image/*".toMediaTypeOrNull())
         ) { sent, _ ->
             frontSent = sent
+            if (!awaitingAckLogged && (backSent + frontSent) >= totalBytes) {
+                awaitingAckLogged = true
+                logDebug(
+                    type = "upload_direct_server_ack_pending",
+                    message = "Upload gesendet, warte auf Bestaetigung.",
+                    meta = buildString {
+                        append("source=direct")
+                        append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                        append(";uploadClientId=").append(uploadClientId)
+                        append(";bytesTotal=").append(totalBytes)
+                        append(";bytesSent=").append((backSent + frontSent).coerceAtMost(totalBytes))
+                        append(";networkStable=").append(probe.networkStable)
+                        if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                        if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                        if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                        append(";").append(probe.networkSnapshot)
+                    }
+                )
+            }
             emit()
         }
         val backPart = MultipartBody.Part.createFormData(
@@ -2238,7 +2649,7 @@ class AppRepo(
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
         val capturedAtPart = capturedAt?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
-        val uploadClientIdPart = UUID.randomUUID().toString().toRequestBody("text/plain".toMediaTypeOrNull())
+        val uploadClientIdPart = uploadClientId.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
         val capsuleGroup = if (capsuleMode != null) capsule.groupRemind.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
@@ -2249,9 +2660,81 @@ class AppRepo(
         val locationShared = locationPayload?.let { "true".toRequestBody("text/plain".toMediaTypeOrNull()) }
         val latitude = locationPayload?.latitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
         val longitude = locationPayload?.longitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val startedAt = System.currentTimeMillis()
+        logDebug(
+            type = "upload_direct_started",
+            message = "Direkter Upload gestartet.",
+            meta = buildString {
+                append("source=direct")
+                append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                append(";uploadClientId=").append(uploadClientId)
+                append(";bytesTotal=").append(totalBytes)
+                append(";networkStable=").append(probe.networkStable)
+                if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                append(";").append(probe.networkSnapshot)
+            }
+        )
         emit()
-        authorizedCall("/api/uploads/dual") { token ->
-            api.uploadDual(token, backPart, frontPart, kind, capturedAtPart, uploadClientIdPart, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
+        try {
+            authorizedCall("/api/uploads/dual") { token ->
+                api.uploadDual(token, backPart, frontPart, kind, capturedAtPart, uploadClientIdPart, capsuleMode, capsulePrivate, capsuleGroup, locationShared, latitude, longitude)
+            }
+            logDebug(
+                type = "upload_direct_succeeded",
+                message = "Upload erfolgreich bestaetigt.",
+                meta = buildString {
+                    append("source=direct")
+                    append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                    append(";uploadClientId=").append(uploadClientId)
+                    append(";bytesTotal=").append(totalBytes)
+                    append(";durationMs=").append((System.currentTimeMillis() - startedAt).coerceAtLeast(0L))
+                    append(";http=200")
+                    append(";networkStable=").append(probe.networkStable)
+                    if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                    if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                    if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                    append(";").append(probe.networkSnapshot)
+                }
+            )
+        } catch (t: Throwable) {
+            val failureClass = debugNetworkFailureKindShared(t) ?: t::class.java.simpleName
+            val advice = securityAdviceForFailure(failureClass)
+            logDebug(
+                type = "upload_direct_failed",
+                message = when (failureClass) {
+                    "dns" -> "Servername konnte nicht aufgeloest werden."
+                    "no_active_network" -> "Keine aktive Internetverbindung verfuegbar."
+                    "connect" -> "Keine stabile Verbindung."
+                    "timeout" -> "Server antwortet zu langsam."
+                    "ssl_handshake" -> "Sichere Verbindung fehlgeschlagen."
+                    "cert_path_validator" -> "Dieses Netzwerk vertraut dem Daily-Zertifikat nicht oder veraendert die Verbindung."
+                    "ssl_other" -> "Sichere Verbindung fehlgeschlagen."
+                    else -> t.message ?: "Upload fehlgeschlagen."
+                },
+                meta = buildString {
+                    append("source=direct")
+                    append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                    append(";uploadClientId=").append(uploadClientId)
+                    append(";bytesTotal=").append(totalBytes)
+                    append(";durationMs=").append((System.currentTimeMillis() - startedAt).coerceAtLeast(0L))
+                    append(";failureClass=").append(failureClass)
+                    append(";securityFailureClass=").append(failureClass)
+                    append(";networkStateClass=").append(if (probe.networkStable) "stable" else "unstable")
+                    append(";retrySuppressedReason=").append("-")
+                    append(";userAdviceShown=").append(advice.isNotBlank())
+                    val http = (t as? HttpException)?.code() ?: -1
+                    append(";http=").append(http)
+                    append(";networkStable=").append(probe.networkStable)
+                    if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
+                    if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
+                    if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                    append(";").append(debugThrowableMetaShared(t))
+                    append(";").append(probe.networkSnapshot)
+                }
+            )
+            throw t
         }
         onProgress(totalBytes, totalBytes)
     }
@@ -2276,7 +2759,7 @@ class AppRepo(
         if (shareLocation && locationPayload == null) {
             logDebug("location_queue_skipped", "no device location available", "endpoint=/api/uploads/dual")
         }
-        return UploadQueueManager.enqueueFromFiles(
+        val queuedItem = UploadQueueManager.enqueueFromFiles(
             context = context,
             backPath = backQueued.absolutePath,
             frontPath = frontQueued.absolutePath,
@@ -2288,9 +2771,24 @@ class AppRepo(
             locationShared = locationPayload != null,
             locationLatitude = locationPayload?.latitude,
             locationLongitude = locationPayload?.longitude,
-            capturedAtMs = capturedAt?.toInstant()?.toEpochMilli() ?: 0L,
-            authToken = token()
+            capturedAtMs = capturedAt?.toInstant()?.toEpochMilli() ?: 0L
         )
+        logDebug(
+            type = "upload_queue_enqueued",
+            message = "Upload in Warteschlange aufgenommen.",
+            meta = buildString {
+                append("source=queue")
+                append(";kind=").append(if (isPrompt) "prompt" else "extra")
+                append(";uploadClientId=").append(uploadClientId)
+                append(";queueItemId=").append(queuedItem.id)
+                append(";bytesTotal=").append((backQueued.length() + frontQueued.length()).coerceAtLeast(1L))
+                append(";queuedAt=").append(OffsetDateTime.ofInstant(Instant.ofEpochMilli(queuedItem.createdAtMs), ZoneId.systemDefault()))
+                append(";networkStable=").append(networkSnapshotMeta().contains("validated=true"))
+                if (capturedAt != null) append(";capturedAt=").append(capturedAt)
+                append(";").append(networkSnapshotMeta())
+            }
+        )
+        return queuedItem
     }
 
     suspend fun checkForUpdate(currentVersion: String): UpdateInfo? =
@@ -2722,6 +3220,7 @@ data class UiState(
     val showDiagnosticsConsentDialog: Boolean = false,
     val diagnosticsConsentPrompt: UserPromptRule? = null,
     val debugLogs: List<DebugLogEntry> = emptyList(),
+    val networkAdvice: String = "",
     val fotomojiTemplates: List<FotomojiTemplateItem> = emptyList(),
     val fotomojiTemplatesLoading: Boolean = false,
     val profileSectionExpanded: Map<String, Boolean> = emptyMap()
@@ -3120,10 +3619,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun networkFailureKind(throwable: Throwable): String? {
-        return when (rootCause(throwable)) {
-            is UnknownHostException -> "dns"
-            is ConnectException -> "connect"
-            is SocketTimeoutException -> "timeout"
+        val root = rootCause(throwable)
+        if (!repo.hasUsableNetwork()) return "no_active_network"
+        return when {
+            root is CertPathValidatorException -> "cert_path_validator"
+            root is SSLHandshakeException -> "ssl_handshake"
+            root is UnknownHostException -> "dns"
+            root is ConnectException -> "connect"
+            root is SocketTimeoutException -> "timeout"
+            root is SSLException -> "ssl_other"
             else -> null
         }
     }
@@ -3131,10 +3635,47 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private fun debugFailureMessage(throwable: Throwable): String {
         return when (networkFailureKind(throwable)) {
             "dns" -> "Servername konnte nicht aufgeloest werden"
+            "no_active_network" -> "Keine aktive Internetverbindung verfuegbar"
+            "ssl_handshake" -> "Sichere Verbindung fehlgeschlagen"
+            "cert_path_validator" -> "Dieses Netzwerk vertraut dem Daily-Zertifikat nicht oder veraendert die Verbindung"
+            "ssl_other" -> "Sichere Verbindung fehlgeschlagen"
             "connect" -> "Verbindung zum Server fehlgeschlagen"
             "timeout" -> "Server antwortet zu langsam"
             else -> throwable.message ?: "request failed"
         }
+    }
+
+    private fun securityAdviceForFailure(failureClass: String): String {
+        return when (failureClass) {
+            "ssl_handshake",
+            "cert_path_validator",
+            "ssl_other" -> "Daily konnte in diesem Netzwerk keine sichere Verbindung aufbauen. Bitte mobile Daten oder ein anderes WLAN versuchen."
+            else -> ""
+        }
+    }
+
+    private fun shouldShowSecurityAdvice(failureClass: String, nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (failureClass != "ssl_handshake" && failureClass != "cert_path_validator" && failureClass != "ssl_other") return false
+        val thresholdMs = 10 * 60 * 1000L
+        val hits = repo.recentDebugLogs(120).count { row ->
+            val family = row.meta.lowercase()
+            val createdMs = parseIsoInstantMs(row.lastSeenAt.ifBlank { row.createdAt })
+            (nowMs - createdMs) <= thresholdMs && (
+                family.contains("failureclass=$failureClass") ||
+                    family.contains("network=$failureClass")
+                )
+        }
+        val lastShownAt = repo.lastSecurityAdviceShownAtMs()
+        if (hits >= 3 && (nowMs - lastShownAt) > thresholdMs) {
+            repo.setLastSecurityAdviceShownAtMs(nowMs)
+            repo.logDebug(
+                type = "network_security_advice_shown",
+                message = securityAdviceForFailure(failureClass),
+                meta = "failureClass=$failureClass;countWindow=10m;threshold=3"
+            )
+            return true
+        }
+        return false
     }
 
     private fun shouldLogDashboardFailure(endpoint: String, throwable: Throwable): Boolean {
@@ -3172,7 +3713,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun isNetworkFailureClass(failureClass: String): Boolean =
-        failureClass == "dns" || failureClass == "connect" || failureClass == "timeout" || failureClass == "offline"
+        failureClass == "dns" ||
+            failureClass == "connect" ||
+            failureClass == "timeout" ||
+            failureClass == "offline" ||
+            failureClass == "no_active_network" ||
+            failureClass == "ssl_handshake" ||
+            failureClass == "cert_path_validator" ||
+            failureClass == "ssl_other"
 
     private fun classifyFailure(throwable: Throwable): String {
         val network = networkFailureKind(throwable)
@@ -3461,9 +4009,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             if (throwable is IllegalStateException && throwable.message == "missing_access_token") {
                 append(";derivedFrom=").append(repo.authStateTransitionReason())
             }
+            append(";").append(debugThrowableMetaShared(throwable))
         }
         val meta = if (extraMeta.isBlank()) base else "$base;$extraMeta"
         repo.logDebug(type = type, message = debugFailureMessage(throwable), meta = meta)
+        val failureClass = network ?: (if (!repo.hasUsableNetwork()) "no_active_network" else throwable::class.java.simpleName)
+        val advice = securityAdviceForFailure(failureClass)
+        if (advice.isNotBlank() && shouldShowSecurityAdvice(failureClass)) {
+            state = state.copy(message = advice, networkAdvice = advice)
+        }
         if (state.diagnosticsUploadEnabled) {
             try {
                 repo.uploadRecentDebugLogs()
@@ -4591,7 +5145,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
             true
         } catch (t: Throwable) {
-            state = state.copy(loading = false, message = apiError(t, "Upload fehlgeschlagen"))
+            val failureClass = classifyFailure(t)
+            val advice = securityAdviceForFailure(failureClass)
+            val message = if (advice.isNotBlank() && shouldShowSecurityAdvice(failureClass)) advice else apiError(t, "Upload fehlgeschlagen")
+            state = state.copy(loading = false, message = message, networkAdvice = advice)
             logPerfEvent(
                 event = "upload_end",
                 durationMs = System.currentTimeMillis() - startedAt,
@@ -5983,20 +6540,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val httpClient = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
-            .callTimeout(25, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .addInterceptor { chain ->
-                val requestId = "req_${UUID.randomUUID()}"
-                val newReq = chain.request().newBuilder()
-                    .header("X-Request-ID", requestId)
-                    .build()
-                chain.proceed(newReq)
-            }
-            .build()
+        val httpClient = buildStandardHttpClient()
         repo = AppRepo(this, httpClient)
         repo.installCrashHandler()
         repo.captureLaunchIntent(intent)
@@ -7794,8 +8338,8 @@ fun CameraTab(
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         val kindLabel = if (item.isPrompt) "Tagesmoment" else "Extra"
                         Text("$kindLabel - ${queueStatusLabel(item.status)}", fontWeight = FontWeight.SemiBold)
-                        if (item.status == UploadQueueStatus.RUNNING) {
-                            val p = item.progressPercent.coerceIn(0, 100)
+                        if (item.status == UploadQueueStatus.RUNNING || item.status == UploadQueueStatus.AWAITING_SERVER_ACK) {
+                            val p = item.transferProgressPercent.coerceIn(0, 100)
                             Text("Fortschritt: $p%")
                             LinearProgressIndicator(
                                 progress = p / 100f,
@@ -7803,10 +8347,23 @@ fun CameraTab(
                             )
                         }
                         Text("Versuche: ${item.attempts}")
+                        item.capturedAtMs.takeIf { it > 0L }?.let {
+                            Text("Aufgenommen: ${formatQueueTimestamp(it)}")
+                        }
+                        Text("In Warteschlange seit: ${formatQueueTimestamp(item.createdAtMs)}")
+                        item.lastAttemptStartedAtMs.takeIf { it > 0L }?.let {
+                            Text("Zuletzt versucht: ${formatQueueTimestamp(it)}")
+                        }
+                        nextRetryLabel(item)?.let { retryLabel ->
+                            Text(retryLabel)
+                        }
+                        if (item.serverAckState == UploadQueueServerAckState.PENDING) {
+                            Text("Warte auf Serverbestaetigung")
+                        }
                         if (item.lastError.isNotBlank()) {
                             Text(item.lastError, color = Color(0xFF8B0000), maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
-                        if (item.status == UploadQueueStatus.FAILED) {
+                        if (queueManualRetryAllowed(item.status)) {
                             Button(onClick = { onRetryQueued(item.id) }, modifier = Modifier.fillMaxWidth()) {
                                 Text("Erneut versuchen")
                             }
@@ -11742,28 +12299,58 @@ private fun momentReasonLine(momentKind: String?, triggerSource: String?, reques
 private fun queueStatusLabel(status: String): String {
     return when (status) {
         UploadQueueStatus.WAITING -> "wartend"
-        UploadQueueStatus.RUNNING -> "laeuft"
-        UploadQueueStatus.FAILED -> "fehlgeschlagen"
-        UploadQueueStatus.SUCCESS -> "erfolgreich"
+        UploadQueueStatus.RUNNING -> "wird hochgeladen"
+        UploadQueueStatus.WAITING_FOR_NETWORK -> "wartet auf Verbindung"
+        UploadQueueStatus.WAITING_FOR_SECURE_NETWORK -> "wartet auf sichere Verbindung"
+        UploadQueueStatus.AWAITING_SERVER_ACK -> "wartet auf Bestaetigung"
+        UploadQueueStatus.FAILED_TRANSIENT -> "wird automatisch erneut versucht"
+        UploadQueueStatus.FAILED_PERMANENT -> "Aktion erforderlich"
+        UploadQueueStatus.SUCCESS -> "erfolgreich hochgeladen"
+        UploadQueueStatus.PAUSED -> "pausiert"
         else -> status
     }
 }
 
 private fun visibleQueueItems(items: List<QueuedUploadItem>, nowMs: Long = System.currentTimeMillis()): List<QueuedUploadItem> {
     val successKeepMs = 90_000L
-    val failedKeepMs = 12 * 60 * 60 * 1000L
+    val retryKeepMs = 12 * 60 * 60 * 1000L
     return items
         .asSequence()
         .filter { item ->
             when (item.status) {
                 UploadQueueStatus.SUCCESS -> (nowMs - item.updatedAtMs) <= successKeepMs
-                UploadQueueStatus.FAILED -> (nowMs - item.updatedAtMs) <= failedKeepMs
+                UploadQueueStatus.FAILED_TRANSIENT -> (nowMs - item.updatedAtMs) <= retryKeepMs
                 else -> true
             }
         }
         .sortedByDescending { it.updatedAtMs }
         .take(6)
         .toList()
+}
+
+private fun queueManualRetryAllowed(status: String): Boolean {
+    return status == UploadQueueStatus.FAILED_TRANSIENT ||
+        status == UploadQueueStatus.FAILED_PERMANENT ||
+        status == UploadQueueStatus.WAITING_FOR_SECURE_NETWORK ||
+        status == UploadQueueStatus.PAUSED
+}
+
+private fun nextRetryLabel(item: QueuedUploadItem, nowMs: Long = System.currentTimeMillis()): String? {
+    if (item.status == UploadQueueStatus.SUCCESS || item.nextRetryAtMs <= 0L) return null
+    if (item.status == UploadQueueStatus.PAUSED || item.status == UploadQueueStatus.FAILED_PERMANENT) return null
+    return if (item.nextRetryAtMs <= nowMs) {
+        "Naechster Versuch: jetzt"
+    } else {
+        "Naechster Versuch: ${formatQueueTimestamp(item.nextRetryAtMs)}"
+    }
+}
+
+private fun formatQueueTimestamp(timestampMs: Long): String {
+    if (timestampMs <= 0L) return "-"
+    return runCatching {
+        val dt = Instant.ofEpochMilli(timestampMs).atZone(ZoneId.systemDefault()).toLocalDateTime()
+        dt.format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
+    }.getOrDefault("-")
 }
 
 private fun rainbowColor(hue: Float): Color {
@@ -11928,6 +12515,9 @@ private fun apiError(t: Throwable, fallback: String): String {
         is UnknownHostException -> "Servername konnte nicht aufgeloest werden."
         is ConnectException -> "Server ist aktuell nicht erreichbar."
         is SocketTimeoutException -> "Server antwortet zu langsam."
+        is CertPathValidatorException -> "Dieses Netzwerk vertraut dem Daily-Zertifikat nicht oder veraendert die Verbindung."
+        is SSLHandshakeException -> "Sichere Verbindung fehlgeschlagen. Bitte anderes Netz oder mobile Daten versuchen."
+        is SSLException -> "Sichere Verbindung fehlgeschlagen."
         else -> t.message ?: fallback
     }
 }
