@@ -7717,6 +7717,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     prompt = state.prompt,
                     viewerId = state.user?.id,
                     days = state.feedDays,
+                    allKnownDays = state.calendarDays,
                     byDay = state.feedByDay,
                     monthRecapByDay = state.monthRecapByDay,
                     promptMetaByDay = state.promptMetaByDay,
@@ -8718,6 +8719,7 @@ fun FeedTab(
     prompt: PromptResponse?,
     viewerId: Long?,
     days: List<String>,
+    allKnownDays: List<String>,
     byDay: Map<String, List<FeedItem>>,
     monthRecapByDay: Map<String, MonthlyRecap>,
     promptMetaByDay: Map<String, PromptMeta>,
@@ -8808,8 +8810,27 @@ fun FeedTab(
     }
     val firstVisibleIndex by remember { derivedStateOf { visibleRange.value.first } }
     val lastVisibleIndex by remember { derivedStateOf { visibleRange.value.second } }
-    val showScrollTop by remember { derivedStateOf { firstVisibleIndex > 2 } }
-    val showScrollBottom by remember { derivedStateOf { rows.isNotEmpty() && lastVisibleIndex in 0 until rows.lastIndex - 1 } }
+    val newestKnownDay = remember(allKnownDays, days, prompt?.day) {
+        allKnownDays.firstOrNull() ?: days.firstOrNull() ?: prompt?.day
+    }
+    val oldestKnownDay = remember(allKnownDays, days) {
+        allKnownDays.lastOrNull() ?: days.lastOrNull()
+    }
+    val loadedNewestDay = remember(days) { days.firstOrNull() }
+    val loadedOldestDay = remember(days) { days.lastOrNull() }
+    val showScrollTop by remember(newestKnownDay, loadedNewestDay) {
+        derivedStateOf {
+            rows.isNotEmpty() && (firstVisibleIndex > 2 || (!newestKnownDay.isNullOrBlank() && newestKnownDay != loadedNewestDay))
+        }
+    }
+    val showScrollBottom by remember(oldestKnownDay, loadedOldestDay) {
+        derivedStateOf {
+            rows.isNotEmpty() && (
+                lastVisibleIndex in 0 until rows.lastIndex - 1 ||
+                    (!oldestKnownDay.isNullOrBlank() && oldestKnownDay != loadedOldestDay)
+                )
+        }
+    }
     val currentAnchorVisible by remember(currentAnchorDay, dayHeaderIndexByDay) {
         derivedStateOf {
             val anchorIndex = currentAnchorDay?.let(dayHeaderIndexByDay::get) ?: return@derivedStateOf true
@@ -9038,14 +9059,20 @@ fun FeedTab(
             anchorLabel = if (currentAnchorDay == prompt?.day) "Heute" else "Zum Tag",
             onTopClick = {
                 scope.launch {
-                    if (rows.isNotEmpty()) {
+                    val targetDay = newestKnownDay
+                    if (!targetDay.isNullOrBlank() && targetDay != loadedNewestDay) {
+                        onJumpToDay(targetDay)
+                    } else if (rows.isNotEmpty()) {
                         listState.animateScrollToItem(0)
                     }
                 }
             },
             onBottomClick = {
                 scope.launch {
-                    if (rows.isNotEmpty()) {
+                    val targetDay = oldestKnownDay
+                    if (!targetDay.isNullOrBlank() && targetDay != loadedOldestDay) {
+                        onJumpToDay(targetDay)
+                    } else if (rows.isNotEmpty()) {
                         listState.animateScrollToItem(rows.lastIndex)
                     }
                 }

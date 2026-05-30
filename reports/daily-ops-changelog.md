@@ -4,6 +4,10 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-05-30
 
+- Prepared Android release `v0.5.12` with `versionName=0.5.12`, `versionCode=141521` for the feed quick-action jump fix.
+- Adjusted feed quick-action buttons so `nach oben` and `nach unten` target the real known feed edges instead of only the currently loaded window.
+- Re-verified Android locally with `gradle :app:compileDebugKotlin` before the patch release.
+
 - Prepared Android release `v0.5.11` with `versionName=0.5.11`, `versionCode=141520` and release notes for anchor-window feed loading.
 - Split feed navigation rollout into two phases: backend on `main` first, Android release second, because the app now depends on the new `/api/feed/window` endpoint.
 - Added anchor-window feed loading for the Android app so calendar jumps fetch the target day plus neighboring days in one request and show an immediate loading state at the landing day.
