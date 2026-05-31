@@ -65,6 +65,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.defaultMinSize
@@ -103,6 +104,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -531,6 +533,11 @@ private data class PaintEditorTarget(
     val requestedByUser: String?,
     val requestedByUserColor: String?
 )
+
+private enum class PaintEditorInteractionMode {
+    Paint,
+    Move
+}
 
 data class PendingLocationPayload(
     val latitude: Double,
@@ -9392,6 +9399,7 @@ private fun FeedPostCard(
 
 @Composable
 private fun PostCanvasCard(
+    modifier: Modifier = Modifier,
     item: FeedItem,
     viewerId: Long?,
     secondaryTextColor: Color,
@@ -9430,7 +9438,7 @@ private fun PostCanvasCard(
         )
     }
 
-    Card {
+    Card(modifier = modifier) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -9841,6 +9849,9 @@ private fun PhotoPaintEditorDialog(
     val previewItem = remember(target.item, viewerId, photo.paints) {
         target.item.copy(photo = target.item.photo.copy(paints = target.item.photo.paints.filter { it.userId != viewerId }))
     }
+    val previewScrollState = rememberScrollState()
+    var interactionMode by rememberSaveable(photo.id) { mutableStateOf(PaintEditorInteractionMode.Paint.name) }
+    val isPaintMode = interactionMode == PaintEditorInteractionMode.Paint.name
     fun composedPaths(): List<PhotoPaintPath> =
         if (currentStroke.size >= 2) (draftPaths + PhotoPaintPath(currentStroke)).takeLast(12) else draftPaths
     val initialPathsSignature = remember(initialPaths) { encodePhotoPaintPaths(initialPaths) }
@@ -9854,127 +9865,181 @@ private fun PhotoPaintEditorDialog(
     }
 
     Dialog(onDismissRequest = ::dismissWithAutosave, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Card(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Post bemalen", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("Du malst direkt ueber dem echten Post. Der Strich bleibt beim Zeichnen live sichtbar und wird beim Schliessen automatisch gespeichert.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 360.dp)
-                ) {
-                    PostCanvasCard(
-                        item = previewItem,
-                        viewerId = viewerId,
-                        secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        primaryTextColor = MaterialTheme.colorScheme.onSurface,
-                        showPublicPostNumbers = true,
-                        isMomentWindowPost = target.isMomentWindowPost,
-                        postMomentKind = target.postMomentKind,
-                        requestedByUser = target.requestedByUser,
-                        requestedByUserColor = target.requestedByUserColor,
-                        onOpenUserProfile = null,
-                        onOpenViewer = null,
-                        onOpenExternalUrl = null,
-                        onOpenHashtagSearch = {},
-                        headerTrailing = {
-                            if (!photo.publicNumber.isNullOrBlank()) {
-                                Text("#${photo.publicNumber}", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                            }
-                        },
-                        overlay = { frameRect ->
-                            PhotoMarkLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
-                            PhotoPaintLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
-                            PhotoPaintPathsLayer(draftPaths, paintColor.copy(alpha = 0.58f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
-                            if (currentStroke.size >= 2) {
-                                PhotoPaintPathsLayer(listOf(PhotoPaintPath(currentStroke)), paintColor.copy(alpha = 0.82f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .onSizeChanged { overlayCanvasSize = it }
-                                    .pointerInteropFilter { event ->
-                                        val width = overlayCanvasSize.width.toFloat().coerceAtLeast(1f)
-                                        val height = overlayCanvasSize.height.toFloat().coerceAtLeast(1f)
-                                        when (event.actionMasked) {
-                                            MotionEvent.ACTION_DOWN -> {
-                                                currentStroke = listOf(
-                                                    normalizeEditorPoint(Offset(event.x, event.y), width, height)
-                                                )
-                                                true
-                                            }
-                                            MotionEvent.ACTION_MOVE -> {
-                                                val historySize = event.historySize
-                                                var updatedStroke = currentStroke
-                                                for (index in 0 until historySize) {
-                                                    val point = normalizeEditorPoint(
-                                                        Offset(event.getHistoricalX(index), event.getHistoricalY(index)),
-                                                        width,
-                                                        height
-                                                    )
-                                                    val last = updatedStroke.lastOrNull()
-                                                    if (last == null || abs(last.x - point.x) > 0.0015f || abs(last.y - point.y) > 0.0015f) {
-                                                        updatedStroke = updatedStroke + point
-                                                    }
-                                                }
-                                                val currentPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
-                                                val currentLast = updatedStroke.lastOrNull()
-                                                if (currentLast == null || abs(currentLast.x - currentPoint.x) > 0.0015f || abs(currentLast.y - currentPoint.y) > 0.0015f) {
-                                                    updatedStroke = updatedStroke + currentPoint
-                                                }
-                                                currentStroke = updatedStroke
-                                                true
-                                            }
-                                            MotionEvent.ACTION_UP -> {
-                                                val finalPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
-                                                val finalizedStroke = if (
-                                                    currentStroke.lastOrNull()?.let { abs(it.x - finalPoint.x) > 0.0015f || abs(it.y - finalPoint.y) > 0.0015f }
-                                                        ?: true
-                                                ) {
-                                                    currentStroke + finalPoint
-                                                } else {
-                                                    currentStroke
-                                                }
-                                                if (finalizedStroke.size >= 2) {
-                                                    draftPaths = (draftPaths + PhotoPaintPath(finalizedStroke)).takeLast(12)
-                                                }
-                                                currentStroke = emptyList()
-                                                true
-                                            }
-                                            MotionEvent.ACTION_CANCEL -> {
-                                                currentStroke = emptyList()
-                                                true
-                                            }
-                                            else -> false
-                                        }
-                                    }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp)
+        ) {
+            Card(modifier = Modifier.fillMaxSize()) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text("Post bemalen", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Du malst direkt ueber dem echten Post. Der Strich bleibt beim Zeichnen live sichtbar und wird beim Schliessen automatisch gespeichert.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            FilterChip(
+                                selected = isPaintMode,
+                                onClick = { interactionMode = PaintEditorInteractionMode.Paint.name },
+                                label = { Text("Malen") }
+                            )
+                            FilterChip(
+                                selected = !isPaintMode,
+                                onClick = { interactionMode = PaintEditorInteractionMode.Move.name },
+                                label = { Text("Bewegen") }
                             )
                         }
-                    )
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            if (currentStroke.isNotEmpty()) currentStroke = emptyList()
-                            else if (draftPaths.isNotEmpty()) draftPaths = draftPaths.dropLast(1)
-                        },
-                        enabled = draftPaths.isNotEmpty() || currentStroke.isNotEmpty(),
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Undo") }
-                    OutlinedButton(onClick = { draftPaths = emptyList(); currentStroke = emptyList() }, modifier = Modifier.weight(1f)) { Text("Leeren") }
-                    if (onDelete != null) {
-                        OutlinedButton(onClick = onDelete, modifier = Modifier.weight(1f)) { Text("Loeschen") }
+                        Text(
+                            if (isPaintMode) "Malen aktiv: Wische direkt ueber den Post. Fuer Kommentare oder lange Posts auf Bewegen wechseln."
+                            else "Bewegen aktiv: Der Post ist scrollbar, die Zeichenflaeche bleibt sichtbar, reagiert aber nicht auf Beruehrungen.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
                     }
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = ::dismissWithAutosave, modifier = Modifier.weight(1f)) { Text("Schliessen") }
-                    Button(
-                        onClick = {
-                            onSave(composedPaths(), strokeWidth)
-                        },
-                        enabled = draftPaths.isNotEmpty() || currentStroke.size >= 2,
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Speichern") }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                    ) {
+                        PostCanvasCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(if (!isPaintMode) Modifier.verticalScroll(previewScrollState) else Modifier),
+                            item = previewItem,
+                            viewerId = viewerId,
+                            secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            primaryTextColor = MaterialTheme.colorScheme.onSurface,
+                            showPublicPostNumbers = true,
+                            isMomentWindowPost = target.isMomentWindowPost,
+                            postMomentKind = target.postMomentKind,
+                            requestedByUser = target.requestedByUser,
+                            requestedByUserColor = target.requestedByUserColor,
+                            onOpenUserProfile = null,
+                            onOpenViewer = null,
+                            onOpenExternalUrl = null,
+                            onOpenHashtagSearch = {},
+                            headerTrailing = {
+                                if (!photo.publicNumber.isNullOrBlank()) {
+                                    Text(
+                                        "#${photo.publicNumber}",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            },
+                            overlay = { frameRect ->
+                                PhotoMarkLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
+                                PhotoPaintLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
+                                PhotoPaintPathsLayer(draftPaths, paintColor.copy(alpha = 0.58f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
+                                if (currentStroke.size >= 2) {
+                                    PhotoPaintPathsLayer(listOf(PhotoPaintPath(currentStroke)), paintColor.copy(alpha = 0.82f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
+                                }
+                                if (isPaintMode) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .onSizeChanged { overlayCanvasSize = it }
+                                            .pointerInteropFilter { event ->
+                                                val width = overlayCanvasSize.width.toFloat().coerceAtLeast(1f)
+                                                val height = overlayCanvasSize.height.toFloat().coerceAtLeast(1f)
+                                                when (event.actionMasked) {
+                                                    MotionEvent.ACTION_DOWN -> {
+                                                        currentStroke = listOf(normalizeEditorPoint(Offset(event.x, event.y), width, height))
+                                                        true
+                                                    }
+                                                    MotionEvent.ACTION_MOVE -> {
+                                                        val historySize = event.historySize
+                                                        var updatedStroke = currentStroke
+                                                        for (index in 0 until historySize) {
+                                                            val point = normalizeEditorPoint(
+                                                                Offset(event.getHistoricalX(index), event.getHistoricalY(index)),
+                                                                width,
+                                                                height
+                                                            )
+                                                            val last = updatedStroke.lastOrNull()
+                                                            if (last == null || abs(last.x - point.x) > 0.0015f || abs(last.y - point.y) > 0.0015f) {
+                                                                updatedStroke = updatedStroke + point
+                                                            }
+                                                        }
+                                                        val currentPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
+                                                        val currentLast = updatedStroke.lastOrNull()
+                                                        if (currentLast == null || abs(currentLast.x - currentPoint.x) > 0.0015f || abs(currentLast.y - currentPoint.y) > 0.0015f) {
+                                                            updatedStroke = updatedStroke + currentPoint
+                                                        }
+                                                        currentStroke = updatedStroke
+                                                        true
+                                                    }
+                                                    MotionEvent.ACTION_UP -> {
+                                                        val finalPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
+                                                        val finalizedStroke = if (
+                                                            currentStroke.lastOrNull()?.let { abs(it.x - finalPoint.x) > 0.0015f || abs(it.y - finalPoint.y) > 0.0015f }
+                                                                ?: true
+                                                        ) {
+                                                            currentStroke + finalPoint
+                                                        } else {
+                                                            currentStroke
+                                                        }
+                                                        if (finalizedStroke.size >= 2) {
+                                                            draftPaths = (draftPaths + PhotoPaintPath(finalizedStroke)).takeLast(12)
+                                                        }
+                                                        currentStroke = emptyList()
+                                                        true
+                                                    }
+                                                    MotionEvent.ACTION_CANCEL -> {
+                                                        currentStroke = emptyList()
+                                                        true
+                                                    }
+                                                    else -> false
+                                                }
+                                            }
+                                    )
+                                }
+                            }
+                        )
+                    }
+                    HorizontalDivider()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface)
+                            .navigationBarsPadding()
+                            .padding(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (currentStroke.isNotEmpty()) currentStroke = emptyList()
+                                    else if (draftPaths.isNotEmpty()) draftPaths = draftPaths.dropLast(1)
+                                },
+                                enabled = draftPaths.isNotEmpty() || currentStroke.isNotEmpty(),
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Undo") }
+                            OutlinedButton(
+                                onClick = { draftPaths = emptyList(); currentStroke = emptyList() },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Leeren") }
+                            if (onDelete != null) {
+                                OutlinedButton(onClick = onDelete, modifier = Modifier.weight(1f)) { Text("Loeschen") }
+                            }
+                        }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = ::dismissWithAutosave, modifier = Modifier.weight(1f)) { Text("Schliessen") }
+                            Button(
+                                onClick = { onSave(composedPaths(), strokeWidth) },
+                                enabled = draftPaths.isNotEmpty() || currentStroke.size >= 2,
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Speichern") }
+                        }
+                    }
                 }
             }
         }
