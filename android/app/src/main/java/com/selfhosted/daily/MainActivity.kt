@@ -5057,6 +5057,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
             applyFeedWindow(window, target, replaceVisibleDays = true, forceReload = forceReload)
         } catch (t: Throwable) {
+            if (isFeedLockedTodayError(t, target)) {
+                applyTodayFeedLockedState(target)
+                return 0
+            }
             state = state.copy(feedJumpLoadingDay = null, feedPaging = false)
             throw t
         }
@@ -5068,6 +5072,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             runCatching { repo.feedWindow(anchorDay = anchorDay, beforeDays = beforeDays, afterDays = afterDays) }
                 .onSuccess { window ->
                     applyFeedWindow(window, anchorDay, replaceVisibleDays = false, forceReload = false, appendOlder = appendOlder)
+                }
+                .onFailure { throwable ->
+                    if (isFeedLockedTodayError(throwable, anchorDay)) {
+                        applyTodayFeedLockedState(anchorDay)
+                    }
                 }
         } finally {
             if (state.feedPaging) {
@@ -5125,17 +5134,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val prunedCache = pruneFeedCaches(cacheMap, promptMap, recapMap, visibleDays, requestedAnchorDay)
         val today = state.prompt?.day ?: LocalDate.now().toString()
         val postedToday = state.prompt?.hasVisiblePostToday == true
-        val hasVisibleTodayFeed = prunedCache.feedByDay[today].orEmpty().isNotEmpty()
+        val hasVisibleTodayFeed = postedToday && prunedCache.feedByDay[today].orEmpty().isNotEmpty()
         val todayLocked = !postedToday && !hasVisibleTodayFeed
+        val finalFeedByDay = if (!postedToday) prunedCache.feedByDay - today else prunedCache.feedByDay
+        val finalPromptMeta = if (!postedToday) prunedCache.promptMetaByDay + (today to PromptMeta(day = today)) else prunedCache.promptMetaByDay
+        val finalRecapMap = if (!postedToday) prunedCache.monthRecapByDay - today else prunedCache.monthRecapByDay
+        val finalVisibleDays = if (!postedToday) visibleDays.filter { it != today } else visibleDays
         state = state.copy(
             calendarDays = mergedKnownDays,
             feedIndexHasOlder = state.feedIndexHasOlder || window.hasOlder,
             feedIndexHasNewer = state.feedIndexHasNewer || window.hasNewer,
-            feedDays = visibleDays,
-            feedByDay = prunedCache.feedByDay,
-            monthRecapByDay = prunedCache.monthRecapByDay,
-            promptMetaByDay = prunedCache.promptMetaByDay,
-            feed = prunedCache.feedByDay[today].orEmpty(),
+            feedDays = finalVisibleDays,
+            feedByDay = finalFeedByDay,
+            monthRecapByDay = finalRecapMap,
+            promptMetaByDay = finalPromptMeta,
+            feed = if (postedToday) finalFeedByDay[today].orEmpty() else emptyList(),
             feedTodayLocked = todayLocked,
             feedFocusDay = window.anchorDay.ifBlank { requestedAnchorDay },
             feedFocusPhotoId = window.resolvedFocusPhotoId ?: state.feedFocusPhotoId,
@@ -5150,6 +5163,32 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
         }
         return windowDays.size
+    }
+
+    private fun isFeedLockedTodayError(t: Throwable, targetDay: String): Boolean {
+        val today = state.prompt?.day ?: LocalDate.now().toString()
+        if (targetDay != today) return false
+        if (t !is HttpException || t.code() != 403) return false
+        val raw = runCatching { t.response()?.errorBody()?.string().orEmpty() }.getOrDefault("").lowercase()
+        return raw.contains("feed_locked") || raw.contains("sichtbaren beitrag")
+    }
+
+    private fun applyTodayFeedLockedState(targetDay: String) {
+        val today = state.prompt?.day ?: LocalDate.now().toString()
+        val cleanedFeedByDay = state.feedByDay - today
+        val cleanedPromptMeta = state.promptMetaByDay + (today to PromptMeta(day = today))
+        val cleanedRecapMap = state.monthRecapByDay - today
+        state = state.copy(
+            feedDays = if (targetDay == today) emptyList() else state.feedDays.filter { it != today },
+            feedByDay = cleanedFeedByDay,
+            promptMetaByDay = cleanedPromptMeta,
+            monthRecapByDay = cleanedRecapMap,
+            feed = emptyList(),
+            feedTodayLocked = true,
+            feedJumpLoadingDay = null,
+            feedPaging = false,
+            feedFocusPhotoId = null
+        )
     }
 
     private data class FeedCacheBundle(
@@ -12951,6 +12990,7 @@ private fun apiError(t: Throwable, fallback: String): String {
                 raw.contains("prompt inactive") -> "Heute ist gerade kein aktiver Daily-Moment."
                 raw.contains("extra unavailable during daily moment window") -> "Waehrend des aktiven Daily-Moments sind Extras gesperrt."
                 raw.contains("upload window closed") -> "Upload-Zeitfenster ist geschlossen."
+                raw.contains("feed_locked") || raw.contains("sichtbaren beitrag") -> "Poste zuerst einen sichtbaren Beitrag, um die Beitraege der anderen zu sehen."
                 raw.contains("poste zuerst dein tagesmoment") -> "Poste zuerst dein Tagesmoment."
                 else -> "Aktion nicht erlaubt"
             }

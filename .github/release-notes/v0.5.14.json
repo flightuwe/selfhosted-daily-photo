@@ -1,0 +1,9 @@
+{
+  "version": "v0.5.14",
+  "title": "Heute-Feed wieder korrekt gesperrt",
+  "items": [
+    "Der heutige Feed ist wieder korrekt gesperrt, bis man selbst einen sichtbaren Beitrag gepostet hat.",
+    "Die neue Anchor-Window-Logik respektiert jetzt denselben Heute-Lock wie der klassische Feed-Endpunkt.",
+    "Falsch gecachte Heute-Posts werden im App-Feed nicht mehr weiterverwendet."
+  ]
+}

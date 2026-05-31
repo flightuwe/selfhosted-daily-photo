@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -427,6 +430,109 @@ func newSearchTestServer(t *testing.T) *Server {
 		DB:       database,
 		Config:   config.Config{PublicBaseURL: "https://daily.example"},
 		Location: time.UTC,
+	}
+}
+
+func TestHandleFeedWindowLocksTodayWithoutOwnVisiblePost(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	author := models.User{Username: "author", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if err := server.DB.Create(&author).Error; err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	today := time.Now().In(time.UTC).Format("2006-01-02")
+	photo := models.Photo{
+		UserID:    author.ID,
+		User:      author,
+		Day:       today,
+		FilePath:  today + "/test.jpg",
+		CreatedAt: time.Now().In(time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodGet, "/api/feed/window?anchor_day="+today, nil)
+	c.Request = req
+	c.Set("user", viewer)
+
+	server.handleFeedWindow(c)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("handleFeedWindow() status = %d, want 403", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got := body["code"]; got != "feed_locked" {
+		t.Fatalf("code = %#v, want feed_locked", got)
+	}
+}
+
+func TestFeedDaysForUserDoesNotReinsertLockedTodayAnchor(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	author := models.User{Username: "author", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if err := server.DB.Create(&author).Error; err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	today := time.Now().In(time.UTC).Format("2006-01-02")
+	oldDay := time.Now().In(time.UTC).AddDate(0, 0, -1).Format("2006-01-02")
+	photos := []models.Photo{
+		{UserID: author.ID, User: author, Day: today, FilePath: today + "/today.jpg", CreatedAt: time.Now().In(time.UTC)},
+		{UserID: author.ID, User: author, Day: oldDay, FilePath: oldDay + "/old.jpg", CreatedAt: time.Now().In(time.UTC).AddDate(0, 0, -1)},
+	}
+	for _, photo := range photos {
+		if err := server.DB.Create(&photo).Error; err != nil {
+			t.Fatalf("create photo %s: %v", photo.Day, err)
+		}
+	}
+
+	days, _, _, err := server.feedDaysForUser(viewer.ID, "", "", "", "", 60, today, time.Now().In(time.UTC))
+	if err != nil {
+		t.Fatalf("feedDaysForUser() error = %v", err)
+	}
+	for _, day := range days {
+		if day == today {
+			t.Fatalf("feedDaysForUser() returned locked today anchor %q in %v", today, days)
+		}
+	}
+}
+
+func TestFeedPayloadForDayAllowsPastDayWithoutTodayPost(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	author := models.User{Username: "author", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if err := server.DB.Create(&author).Error; err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	oldDay := time.Now().In(time.UTC).AddDate(0, 0, -2).Format("2006-01-02")
+	photo := models.Photo{
+		UserID:    author.ID,
+		User:      author,
+		Day:       oldDay,
+		FilePath:  oldDay + "/old.jpg",
+		CreatedAt: time.Now().In(time.UTC).AddDate(0, 0, -2),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	payload, status, err := server.feedPayloadForDay(viewer.ID, oldDay, time.Now().In(time.UTC))
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("feedPayloadForDay() = (%v, %d, %v), want status 200 and no error", payload, status, err)
 	}
 }
 

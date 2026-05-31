@@ -4,6 +4,11 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-05-30
 
+- Prepared combined server/android patch release `v0.5.14` with `versionName=0.5.14`, `versionCode=141523` for the today-feed lock regression.
+- Restored consistent server-side visibility rules so the new `/api/feed/window` path no longer exposes today’s foreign posts before the viewer has posted.
+- Added backend regression coverage for `feed/window` and `feedDaysForUser()` plus Android-side `feed_locked` handling and cache cleanup.
+- Re-verified locally with `go test ./internal/api/...` and `gradle :app:compileDebugKotlin` before release push.
+
 - Prepared Android release `v0.5.13` with `versionName=0.5.13`, `versionCode=141522` for the calendar featured-post jump fix.
 - Adjusted calendar day-level feed actions so `Im Feed oeffnen` targets the day’s highlighted top post whenever `featuredPhoto.photoId` is present.
 - Re-verified Android locally with `gradle :app:compileDebugKotlin` before the patch release.

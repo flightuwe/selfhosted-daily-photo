@@ -2311,16 +2311,9 @@ func (s *Server) handleFeed(c *gin.Context) {
 			return
 		}
 	}
-	payload, status, err := s.feedPayloadForDay(user.ID, day, now, true)
+	payload, status, err := s.feedPayloadForDay(user.ID, day, now)
 	if err != nil {
-		if status == http.StatusForbidden {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error": "Poste zuerst einen sichtbaren Beitrag, um die Beitraege der anderen zu sehen",
-				"code":  "feed_locked",
-			})
-			return
-		}
-		c.JSON(status, gin.H{"error": err.Error()})
+		writeFeedDayAccessError(c, status, err)
 		return
 	}
 	if s.shouldUseFeedCache(day, now) {
@@ -2391,9 +2384,9 @@ func (s *Server) handleFeedWindow(c *gin.Context) {
 	selectedDays = uniqueDays(selectedDays)
 	items := make([]gin.H, 0, len(selectedDays))
 	for _, day := range selectedDays {
-		payload, status, payloadErr := s.feedPayloadForDay(user.ID, day, now, false)
-		if payloadErr != nil && status >= http.StatusInternalServerError {
-			c.JSON(status, gin.H{"error": payloadErr.Error()})
+		payload, status, payloadErr := s.feedPayloadForDay(user.ID, day, now)
+		if payloadErr != nil {
+			writeFeedDayAccessError(c, status, payloadErr)
 			return
 		}
 		items = append(items, payload)
@@ -2409,21 +2402,37 @@ func (s *Server) handleFeedWindow(c *gin.Context) {
 	})
 }
 
-func (s *Server) feedPayloadForDay(userID uint, day string, now time.Time, enforceTodayLock bool) (gin.H, int, error) {
+func writeFeedDayAccessError(c *gin.Context, status int, err error) {
+	if status == http.StatusForbidden && err != nil && err.Error() == "feed locked" {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "Poste zuerst einen sichtbaren Beitrag, um die Beitraege der anderen zu sehen",
+			"code":  "feed_locked",
+		})
+		return
+	}
+	c.JSON(status, gin.H{"error": err.Error()})
+}
+
+func (s *Server) canViewerSeeFeedDay(userID uint, day string, now time.Time) (bool, error) {
 	today := now.Format("2006-01-02")
+	if strings.TrimSpace(day) != today {
+		return true, nil
+	}
+	return s.userHasVisiblePhotoForDay(userID, day, now)
+}
+
+func (s *Server) feedPayloadForDay(userID uint, day string, now time.Time) (gin.H, int, error) {
 	if s.shouldUseFeedCache(day, now) {
 		if cached, ok := s.feedCachedPayload(userID, day, now); ok {
 			return cached, http.StatusOK, nil
 		}
 	}
-	if enforceTodayLock && day == today {
-		hasPosted, err := s.userHasVisiblePhotoForDay(userID, day, now)
-		if err != nil {
-			return nil, http.StatusInternalServerError, errors.New("query failed")
-		}
-		if !hasPosted {
-			return nil, http.StatusForbidden, errors.New("feed locked")
-		}
+	canView, err := s.canViewerSeeFeedDay(userID, day, now)
+	if err != nil {
+		return nil, http.StatusInternalServerError, errors.New("query failed")
+	}
+	if !canView {
+		return nil, http.StatusForbidden, errors.New("feed locked")
 	}
 
 	var prompt models.DailyPrompt
@@ -8019,7 +8028,11 @@ func (s *Server) feedDaysForUser(
 	}
 	if anchorDay != "" {
 		idx := slicesIndex(days, anchorDay)
-		if idx < 0 {
+		canAnchor, err := s.canViewerSeeFeedDay(userID, anchorDay, now)
+		if err != nil {
+			return nil, false, false, err
+		}
+		if idx < 0 && canAnchor {
 			days = append(days, anchorDay)
 			sort.Slice(days, func(i, j int) bool { return days[i] > days[j] })
 		}
