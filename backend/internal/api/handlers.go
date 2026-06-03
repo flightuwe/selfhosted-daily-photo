@@ -840,6 +840,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		PhotoFotomojiPushEnabled      *bool   `json:"photoFotomojiPushEnabled"`
 		PhotoCommentPushEnabled       *bool   `json:"photoCommentPushEnabled"`
 		BookmarkedPhotoPushEnabled    *bool   `json:"bookmarkedPhotoPushEnabled"`
+		OwnPostNumberInPushEnabled    *bool   `json:"ownPostNumberInPushEnabled"`
 		PostNumberInPushEnabled       *bool   `json:"postNumberInPushEnabled"`
 		AllowPhotoDownload            *bool   `json:"allowPhotoDownload"`
 		CreativePostMode              *string `json:"creativePostMode"`
@@ -876,6 +877,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.BookmarkedPhotoPushEnabled != nil {
 		updates["bookmarked_photo_push_enabled"] = *req.BookmarkedPhotoPushEnabled
+	}
+	if req.OwnPostNumberInPushEnabled != nil {
+		updates["own_post_number_in_push_enabled"] = *req.OwnPostNumberInPushEnabled
 	}
 	if req.PostNumberInPushEnabled != nil {
 		updates["post_number_in_push_enabled"] = *req.PostNumberInPushEnabled
@@ -5742,7 +5746,12 @@ func (s *Server) handleCalendarUser(c *gin.Context) {
 func (s *Server) handleCalendarBookmarks(c *gin.Context) {
 	user, _ := userFromContext(c)
 	now := time.Now().In(s.Location)
-	payload, err := s.calendarPayload(user.ID, "bookmarks", 0, now)
+	scope := strings.ToLower(strings.TrimSpace(c.Query("scope")))
+	payloadScope := "bookmarks"
+	if scope == "all" {
+		payloadScope = "bookmarks_all"
+	}
+	payload, err := s.calendarPayload(user.ID, payloadScope, 0, now)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -6220,21 +6229,35 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 
 	var photos []models.Photo
 	query := s.DB.Preload("User").Model(&models.Photo{})
+	orderClause := "photos.day desc, photos.created_at desc, photos.id desc"
 	switch scope {
 	case "bookmarks":
 		query = query.Joins("JOIN photo_bookmarks pb ON pb.photo_id = photos.id AND pb.user_id = ?", viewerID)
+		orderClause = "pb.created_at desc, photos.created_at desc, photos.id desc"
+	case "bookmarks_all":
+		query = query.
+			Joins("JOIN photo_bookmarks pb ON pb.photo_id = photos.id").
+			Group("photos.id").
+			Order("COUNT(pb.id) desc").
+			Order("photos.day desc").
+			Order("photos.created_at desc").
+			Order("photos.id desc")
+		orderClause = ""
 	case "user":
 		query = query.Where("photos.user_id = ?", targetUserID)
 	default:
 		query = query
 	}
-	if err := query.
-		Order("photos.day desc, photos.created_at desc, photos.id desc").
-		Find(&photos).Error; err != nil {
+	if orderClause != "" {
+		query = query.Order(orderClause)
+	}
+	if err := query.Find(&photos).Error; err != nil {
 		return nil, err
 	}
 
-	sortPhotosForFeed(photos)
+	if scope != "bookmarks_all" {
+		sortPhotosForFeed(photos)
+	}
 	visiblePhotos := make([]models.Photo, 0, len(photos))
 	daySeen := make(map[string]struct{}, len(photos))
 	days := make([]string, 0, len(photos))
@@ -6257,7 +6280,13 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		if err != nil {
 			return nil, err
 		}
-		return gin.H{"days": []string{}, "dayStats": []gin.H{}, "users": users}, nil
+		return gin.H{
+			"days":        []string{},
+			"dayStats":    []gin.H{},
+			"photosByDay": gin.H{},
+			"users":       users,
+			"items":       []gin.H{},
+		}, nil
 	}
 	allowedDays := make(map[string]struct{}, len(days))
 	for _, day := range days {
@@ -6276,6 +6305,9 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 	}
 	reactionCounts := make(map[uint]int64, len(photoIDs))
 	commentCounts := make(map[uint]int64, len(photoIDs))
+	reactionPreviewByPhoto := make(map[uint][]gin.H, len(photoIDs))
+	commentPreviewByPhoto := make(map[uint][]gin.H, len(photoIDs))
+	photoMojiPreviewByPhoto := make(map[uint][]gin.H, len(photoIDs))
 	if len(photoIDs) > 0 {
 		var reactionRows []interactionRow
 		if err := s.DB.Model(&models.PhotoReaction{}).
@@ -6310,6 +6342,13 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		for _, row := range commentRows {
 			commentCounts[row.PhotoID] = row.Count
 		}
+		previewReactions, previewComments, previewPhotoMojis, previewErr := s.feedInteractionPreview(photoIDs)
+		if previewErr != nil {
+			return nil, previewErr
+		}
+		reactionPreviewByPhoto = previewReactions
+		commentPreviewByPhoto = previewComments
+		photoMojiPreviewByPhoto = previewPhotoMojis
 	}
 
 	postCountByDay := make(map[string]int64, len(days))
@@ -6364,12 +6403,56 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 
 	outStats := make([]gin.H, 0, len(days))
 	outPhotosByDay := make(map[string][]gin.H, len(days))
+	outItems := make([]gin.H, 0, len(filteredPhotos))
 	for _, photo := range filteredPhotos {
+		photoRow := s.photoJSONForViewer(viewerID, photo, decorations)
+		userRow := s.userPublicJSON(viewerID, photo.User)
 		row := gin.H{
-			"photo": s.photoJSONForViewer(viewerID, photo, decorations),
-			"user":  s.userPublicJSON(viewerID, photo.User),
+			"photo": photoRow,
+			"user":  userRow,
 		}
 		outPhotosByDay[photo.Day] = append(outPhotosByDay[photo.Day], row)
+		item := gin.H{
+			"isEarly":         false,
+			"isLate":          false,
+			"capsuleLocked":   false,
+			"capsuleReleased": false,
+			"photo":           photoRow,
+			"user":            userRow,
+			"reactions":       reactionPreviewByPhoto[photo.ID],
+			"comments":        commentPreviewByPhoto[photo.ID],
+			"photoMojis":      photoMojiPreviewByPhoto[photo.ID],
+		}
+		if item["reactions"] == nil {
+			item["reactions"] = []gin.H{}
+		}
+		if item["comments"] == nil {
+			item["comments"] = []gin.H{}
+		}
+		if item["photoMojis"] == nil {
+			item["photoMojis"] = []gin.H{}
+		}
+		outItems = append(outItems, item)
+	}
+	if scope == "bookmarks_all" {
+		sort.SliceStable(outItems, func(i, j int) bool {
+			leftBookmarks := feedItemBookmarkCount(outItems[i])
+			rightBookmarks := feedItemBookmarkCount(outItems[j])
+			if leftBookmarks != rightBookmarks {
+				return leftBookmarks > rightBookmarks
+			}
+			leftInteractions := feedItemInteractionCount(outItems[i])
+			rightInteractions := feedItemInteractionCount(outItems[j])
+			if leftInteractions != rightInteractions {
+				return leftInteractions > rightInteractions
+			}
+			leftAt := feedItemEffectiveTime(outItems[i])
+			rightAt := feedItemEffectiveTime(outItems[j])
+			if !leftAt.Equal(rightAt) {
+				return leftAt.After(rightAt)
+			}
+			return feedItemPhotoID(outItems[i]) > feedItemPhotoID(outItems[j])
+		})
 	}
 	for _, day := range days {
 		item := gin.H{
@@ -6411,15 +6494,16 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		"dayStats":    outStats,
 		"photosByDay": outPhotosByDay,
 		"users":       users,
+		"items":       outItems,
 	}, nil
 }
 
 func (s *Server) timeCapsulePhotoJSONForViewer(viewerID uint, photo models.Photo, decorations *viewerPhotoDecorations, now time.Time) gin.H {
 	row := s.photoJSONForViewer(viewerID, photo, decorations)
 	locked := photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt)
-	if locked && viewerID != photo.UserID {
-		previewURL, _ := row["capsulePreviewUrl"].(string)
-		row["url"] = strings.TrimSpace(previewURL)
+	if locked {
+		row["url"] = ""
+		row["capsulePreviewUrl"] = ""
 		delete(row, "secondUrl")
 		row["caption"] = ""
 		row["locationShared"] = false
@@ -6598,10 +6682,14 @@ func (s *Server) calendarTimeCapsulesPayload(viewerID uint, now time.Time) (gin.
 			"featuredPhoto":    nil,
 		}
 		if photo, ok := bestByDay[day]; ok {
+			featuredPhoto := s.timeCapsulePhotoJSONForViewer(viewerID, photo, decorations, now)
+			featuredURL, _ := featuredPhoto["url"].(string)
+			featuredSecondURL, _ := featuredPhoto["secondUrl"].(string)
+			featuredLocked := photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt)
 			item["featuredPhoto"] = gin.H{
 				"photoId":          photo.ID,
-				"url":              s.timeCapsulePhotoJSONForViewer(viewerID, photo, decorations, now)["url"],
-				"secondUrl":        "",
+				"url":              featuredURL,
+				"secondUrl":        featuredSecondURL,
 				"user":             s.userPublicJSON(viewerID, photo.User),
 				"reactionCount":    bestReactionByDay[day],
 				"commentCount":     bestCommentByDay[day],
@@ -6609,6 +6697,8 @@ func (s *Server) calendarTimeCapsulesPayload(viewerID uint, now time.Time) (gin.
 				"bookmarkedByMe":   decorations.bookmarkMap[photo.ID],
 				"bookmarkCount":    decorations.bookmarkCounts[photo.ID],
 				"publicNumber":     photoPublicNumberValue(photo),
+				"capsuleLocked":    featuredLocked,
+				"capsuleVisibleAt": photo.CapsuleVisibleAt,
 			}
 		}
 		outStats = append(outStats, item)
@@ -10493,6 +10583,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"photoFotomojiPushEnabled":      u.PhotoFotomojiPushEnabled,
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
 		"bookmarkedPhotoPushEnabled":    u.BookmarkedPhotoPushEnabled,
+		"ownPostNumberInPushEnabled":    u.OwnPostNumberInPushEnabled,
 		"postNumberInPushEnabled":       u.PostNumberInPushEnabled,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
@@ -10532,6 +10623,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"photoFotomojiPushEnabled":      false,
 		"photoCommentPushEnabled":       false,
 		"bookmarkedPhotoPushEnabled":    false,
+		"ownPostNumberInPushEnabled":    false,
 		"postNumberInPushEnabled":       false,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
@@ -11509,7 +11601,7 @@ func (s *Server) reactionNotificationRecipients(ownerID, actorID uint) []notific
 		PostNumberInPushEnabled bool
 	}
 	_ = s.DB.Table("device_tokens").
-		Select("device_tokens.token, users.post_number_in_push_enabled").
+		Select("device_tokens.token, users.own_post_number_in_push_enabled AS post_number_in_push_enabled").
 		Joins("JOIN users ON users.id = device_tokens.user_id").
 		Where("users.id = ? AND users.photo_reaction_push_enabled = ? AND users.id <> ?", ownerID, true, actorID).
 		Find(&rows).Error
@@ -11529,7 +11621,7 @@ func (s *Server) fotomojiNotificationRecipients(ownerID, actorID uint) []notific
 		PostNumberInPushEnabled bool
 	}
 	_ = s.DB.Table("device_tokens").
-		Select("device_tokens.token, users.post_number_in_push_enabled").
+		Select("device_tokens.token, users.own_post_number_in_push_enabled AS post_number_in_push_enabled").
 		Joins("JOIN users ON users.id = device_tokens.user_id").
 		Where("users.id = ? AND users.id <> ? AND (users.photo_fotomoji_push_enabled = ? OR users.photo_reaction_push_enabled = ?)", ownerID, actorID, true, true).
 		Find(&rows).Error
@@ -11549,7 +11641,7 @@ func (s *Server) commentNotificationRecipients(ownerID, actorID uint) []notifica
 		PostNumberInPushEnabled bool
 	}
 	_ = s.DB.Table("device_tokens").
-		Select("device_tokens.token, users.post_number_in_push_enabled").
+		Select("device_tokens.token, users.own_post_number_in_push_enabled AS post_number_in_push_enabled").
 		Joins("JOIN users ON users.id = device_tokens.user_id").
 		Where("users.id = ? AND users.photo_comment_push_enabled = ? AND users.id <> ?", ownerID, true, actorID).
 		Find(&rows).Error

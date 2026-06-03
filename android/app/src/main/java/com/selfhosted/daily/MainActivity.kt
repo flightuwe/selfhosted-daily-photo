@@ -70,6 +70,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -109,6 +110,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -256,6 +258,7 @@ enum class AuthMode { LOGIN, REGISTER }
 enum class CalendarMode { PUBLIC, BOOKMARKS, SEARCH, TIME_CAPSULES }
 enum class FeedOrderMode { CHRONO, TREND, RANDOM }
 enum class TimeCapsuleFilter { ALL, RELEASED, LOCKED }
+enum class BookmarkCalendarFilter { MINE, ALL }
 
 data class PendingLaunch(
     val action: String = "",
@@ -282,6 +285,7 @@ data class User(
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
     val bookmarkedPhotoPushEnabled: Boolean = false,
+    val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
     val allowPhotoDownload: Boolean = false,
     val creativePostMode: String = "none",
@@ -333,6 +337,7 @@ data class PreferencesUpdateRequest(
     val photoReactionPushEnabled: Boolean,
     val photoCommentPushEnabled: Boolean,
     val bookmarkedPhotoPushEnabled: Boolean? = null,
+    val ownPostNumberInPushEnabled: Boolean? = null,
     val postNumberInPushEnabled: Boolean? = null,
     val allowPhotoDownload: Boolean,
     val creativePostMode: String? = null,
@@ -634,7 +639,9 @@ data class CalendarFeaturedPhoto(
     val interactionCount: Long = 0,
     val bookmarkedByMe: Boolean = false,
     val bookmarkCount: Int = 0,
-    val publicNumber: String? = null
+    val publicNumber: String? = null,
+    val capsuleLocked: Boolean = false,
+    val capsuleVisibleAt: String? = null
 )
 data class CalendarPhotoItem(
     val photo: PromptPhoto,
@@ -1063,7 +1070,7 @@ interface Api {
     suspend fun calendarUser(@Header("Authorization") token: String, @Path("id") id: Long): CalendarPayloadResponse
 
     @GET("calendar/bookmarks")
-    suspend fun calendarBookmarks(@Header("Authorization") token: String): CalendarPayloadResponse
+    suspend fun calendarBookmarks(@Header("Authorization") token: String, @Query("scope") scope: String? = null): CalendarPayloadResponse
 
     @GET("calendar/time-capsules")
     suspend fun calendarTimeCapsules(@Header("Authorization") token: String): CalendarPayloadResponse
@@ -1994,6 +2001,12 @@ class AppRepo(
         prefs.edit().putBoolean("bookmarked_photo_push_enabled_local", enabled).apply()
     }
 
+    fun ownPostNumberInPushLocalEnabled(): Boolean = prefs.getBoolean("own_post_number_in_push_enabled_local", false)
+
+    fun setOwnPostNumberInPushLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("own_post_number_in_push_enabled_local", enabled).apply()
+    }
+
     fun postNumberInPushLocalEnabled(): Boolean = prefs.getBoolean("post_number_in_push_enabled_local", false)
 
     fun setPostNumberInPushLocalEnabled(enabled: Boolean) {
@@ -2262,6 +2275,7 @@ class AppRepo(
         allowPhotoDownload: Boolean,
         creativePostMode: String? = null,
         bookmarkedPhotoPushEnabled: Boolean? = null,
+        ownPostNumberInPushEnabled: Boolean? = null,
         postNumberInPushEnabled: Boolean? = null,
         specialMomentPushEnabled: Boolean? = null,
         locationFeatureEnabled: Boolean? = null,
@@ -2278,6 +2292,7 @@ class AppRepo(
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
+                ownPostNumberInPushEnabled = ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = postNumberInPushEnabled,
                 allowPhotoDownload = allowPhotoDownload,
                 creativePostMode = creativePostMode,
@@ -2344,8 +2359,16 @@ class AppRepo(
         authorizedCall("/api/feed/day-stats") { token -> api.feedDayStats(token, from, to).items }
     suspend fun calendarPublic(): CalendarPayloadResponse =
         authorizedCall("/api/calendar/public") { token -> api.calendarPublic(token) }
-    suspend fun calendarBookmarks(): CalendarPayloadResponse =
-        authorizedCall("/api/calendar/bookmarks") { token -> api.calendarBookmarks(token) }
+    suspend fun calendarBookmarks(scope: BookmarkCalendarFilter = BookmarkCalendarFilter.MINE): CalendarPayloadResponse =
+        authorizedCall("/api/calendar/bookmarks") { token ->
+            api.calendarBookmarks(
+                token,
+                when (scope) {
+                    BookmarkCalendarFilter.MINE -> "mine"
+                    BookmarkCalendarFilter.ALL -> "all"
+                }
+            )
+        }
     suspend fun calendarTimeCapsules(): CalendarPayloadResponse =
         authorizedCall("/api/calendar/time-capsules") { token -> api.calendarTimeCapsules(token) }
     suspend fun calendarSearch(query: String): CalendarSearchResponse =
@@ -3263,6 +3286,7 @@ data class UiState(
     val calendarTimeCapsulesData: CalendarDataset = CalendarDataset(),
     val calendarSearchData: CalendarSearchDataset = CalendarSearchDataset(),
     val calendarSearchQuery: String = "",
+    val calendarBookmarksFilter: BookmarkCalendarFilter = BookmarkCalendarFilter.MINE,
     val calendarTimeCapsuleFilter: TimeCapsuleFilter = TimeCapsuleFilter.ALL,
     val calendarLoading: Boolean = false,
     val communityStats: CommunityStatsResponse? = null,
@@ -3335,6 +3359,7 @@ data class UiState(
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
     val bookmarkedPhotoPushEnabled: Boolean = false,
+    val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
@@ -3442,6 +3467,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            ownPostNumberInPushEnabled = repo.ownPostNumberInPushLocalEnabled(),
             postNumberInPushEnabled = repo.postNumberInPushLocalEnabled(),
             feedOrderMode = repo.feedOrderMode(),
             randomFeedSeed = repo.randomFeedSeed(),
@@ -3690,6 +3716,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun removeBookmarkFromBookmarksDataset(photoId: Long) {
+        if (state.calendarBookmarksFilter != BookmarkCalendarFilter.MINE) {
+            return
+        }
         val remainingPhotosByDay = state.calendarBookmarksData.photosByDay.mapValues { (_, items) ->
             items.filterNot { it.photo.id == photoId }
         }.filterValues { it.isNotEmpty() }
@@ -4432,6 +4461,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(calendarTimeCapsuleFilter = filter)
     }
 
+    fun setCalendarBookmarksFilter(filter: BookmarkCalendarFilter) {
+        if (state.calendarBookmarksFilter == filter) return
+        state = state.copy(calendarBookmarksFilter = filter)
+        viewModelScope.launch { ensureCalendarModeLoaded(CalendarMode.BOOKMARKS, force = true) }
+    }
+
     fun setCalendarSearchQuery(query: String) {
         state = state.copy(calendarSearchQuery = query)
     }
@@ -4472,7 +4507,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     if (!force && state.calendarBookmarksData.days.isNotEmpty()) {
                         applyCalendarDataset(state.calendarBookmarksData)
                     } else {
-                        val payload = repo.calendarBookmarks()
+                        val payload = repo.calendarBookmarks(state.calendarBookmarksFilter)
                         val dataset = payload.toDataset()
                         state = state.copy(calendarBookmarksData = dataset)
                         applyCalendarDataset(dataset)
@@ -4886,6 +4921,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setPhotoReactionPushLocalEnabled(me.photoReactionPushEnabled)
             repo.setPhotoCommentPushLocalEnabled(me.photoCommentPushEnabled)
             repo.setBookmarkedPhotoPushLocalEnabled(me.bookmarkedPhotoPushEnabled)
+            repo.setOwnPostNumberInPushLocalEnabled(me.ownPostNumberInPushEnabled)
             repo.setPostNumberInPushLocalEnabled(me.postNumberInPushEnabled)
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
@@ -4895,6 +4931,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photoReactionPushEnabled = repo.photoReactionPushLocalEnabled()
             val photoCommentPushEnabled = repo.photoCommentPushLocalEnabled()
             val bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled()
+            val ownPostNumberInPushEnabled = repo.ownPostNumberInPushLocalEnabled()
             val postNumberInPushEnabled = repo.postNumberInPushLocalEnabled()
             val autoUpdateEnabled = repo.autoUpdateEnabled()
             val profileSectionExpanded = profileSectionIds.associateWith { sectionId ->
@@ -4930,6 +4967,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
+                ownPostNumberInPushEnabled = ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = postNumberInPushEnabled,
                 showPublicPostNumbers = repo.showPublicPostNumbers(),
                 notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled),
@@ -6297,6 +6335,42 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    suspend fun setOwnPostNumberInPushEnabled(enabled: Boolean) {
+        repo.setOwnPostNumberInPushLocalEnabled(enabled)
+        val current = state.user
+        if (current == null) {
+            state = state.copy(ownPostNumberInPushEnabled = repo.ownPostNumberInPushLocalEnabled())
+            return
+        }
+        runCatching {
+            repo.updatePreferences(
+                chatPushEnabled = current.chatPushEnabled,
+                pollPushEnabled = current.pollPushEnabled,
+                inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
+                photoReactionPushEnabled = current.photoReactionPushEnabled,
+                photoCommentPushEnabled = current.photoCommentPushEnabled,
+                allowPhotoDownload = current.allowPhotoDownload,
+                creativePostMode = current.creativePostMode,
+                bookmarkedPhotoPushEnabled = current.bookmarkedPhotoPushEnabled,
+                ownPostNumberInPushEnabled = enabled,
+                postNumberInPushEnabled = current.postNumberInPushEnabled,
+                specialMomentPushEnabled = current.specialMomentPushEnabled,
+                locationFeatureEnabled = current.locationFeatureEnabled,
+                locationShareDefaultEnabled = current.locationShareDefaultEnabled
+            )
+        }.onSuccess { user ->
+            repo.setOwnPostNumberInPushLocalEnabled(user.ownPostNumberInPushEnabled)
+            repo.setPostNumberInPushLocalEnabled(user.postNumberInPushEnabled)
+            state = state.copy(
+                user = user,
+                ownPostNumberInPushEnabled = user.ownPostNumberInPushEnabled,
+                postNumberInPushEnabled = user.postNumberInPushEnabled
+            )
+        }.onFailure {
+            state = state.copy(message = apiError(it, "Push-Postnummer fuer eigene Beitraege konnte nicht gespeichert werden"))
+        }
+    }
+
     suspend fun setPostNumberInPushEnabled(enabled: Boolean) {
         repo.setPostNumberInPushLocalEnabled(enabled)
         val current = state.user
@@ -6314,16 +6388,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 allowPhotoDownload = current.allowPhotoDownload,
                 creativePostMode = current.creativePostMode,
                 bookmarkedPhotoPushEnabled = current.bookmarkedPhotoPushEnabled,
+                ownPostNumberInPushEnabled = current.ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = enabled,
                 specialMomentPushEnabled = current.specialMomentPushEnabled,
                 locationFeatureEnabled = current.locationFeatureEnabled,
                 locationShareDefaultEnabled = current.locationShareDefaultEnabled
             )
         }.onSuccess { user ->
+            repo.setOwnPostNumberInPushLocalEnabled(user.ownPostNumberInPushEnabled)
             repo.setPostNumberInPushLocalEnabled(user.postNumberInPushEnabled)
-            state = state.copy(user = user, postNumberInPushEnabled = user.postNumberInPushEnabled)
+            state = state.copy(
+                user = user,
+                ownPostNumberInPushEnabled = user.ownPostNumberInPushEnabled,
+                postNumberInPushEnabled = user.postNumberInPushEnabled
+            )
         }.onFailure {
-            state = state.copy(message = apiError(it, "Push-Postnummer konnte nicht gespeichert werden"))
+            state = state.copy(message = apiError(it, "Push-Postnummer fuer gemerkte Beitraege konnte nicht gespeichert werden"))
         }
     }
 
@@ -7968,15 +8048,11 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(selected = state.activeTab == AppTab.CAMERA, onClick = { vm.setTab(AppTab.CAMERA) }, label = { Text("Kamera") }, icon = { Text("U") })
-                NavigationBarItem(
+                FeedNavigationItem(
                     selected = state.activeTab == AppTab.FEED,
+                    label = feedTabLabel,
                     onClick = { vm.setTab(AppTab.FEED) },
-                    label = { Text(feedTabLabel) },
-                    icon = { Text("T") },
-                    modifier = Modifier.combinedClickable(
-                        onClick = { vm.setTab(AppTab.FEED) },
-                        onLongClick = { feedModePickerVisible = true }
-                    )
+                    onLongClick = { feedModePickerVisible = true }
                 )
                 NavigationBarItem(selected = state.activeTab == AppTab.CALENDAR, onClick = { vm.setTab(AppTab.CALENDAR) }, label = { Text("Kalender") }, icon = { Text("G") })
                 NavigationBarItem(
@@ -8140,6 +8216,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         CalendarMode.TIME_CAPSULES -> state.calendarTimeCapsulesData.photosByDay
                         CalendarMode.SEARCH -> emptyMap()
                     },
+                    bookmarkItems = state.calendarBookmarksData.feedItems,
+                    bookmarkFilter = state.calendarBookmarksFilter,
                     timeCapsuleItems = state.calendarTimeCapsulesData.feedItems,
                     timeCapsuleFilter = state.calendarTimeCapsuleFilter,
                     timeCapsuleLockedCount = state.calendarTimeCapsulesData.lockedCount,
@@ -8152,6 +8230,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     showPublicPostNumbers = state.showPublicPostNumbers,
                     onPickerExpandedChange = { vm.setCalendarPickerExpanded(it) },
                     onModeChange = { vm.setCalendarMode(it) },
+                    onBookmarkFilterChange = { vm.setCalendarBookmarksFilter(it) },
                     onTimeCapsuleFilterChange = { vm.setCalendarTimeCapsuleFilter(it) },
                     onSearchQueryChange = { vm.setCalendarSearchQuery(it) },
                     onSearchSubmit = { vm.submitCalendarSearch() },
@@ -8229,6 +8308,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     photoReactionPushEnabled = state.user?.photoReactionPushEnabled ?: state.photoReactionPushEnabled,
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
                     bookmarkedPhotoPushEnabled = state.user?.bookmarkedPhotoPushEnabled ?: state.bookmarkedPhotoPushEnabled,
+                    ownPostNumberInPushEnabled = state.user?.ownPostNumberInPushEnabled ?: state.ownPostNumberInPushEnabled,
                     postNumberInPushEnabled = state.user?.postNumberInPushEnabled ?: state.postNumberInPushEnabled,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     creativePostMode = state.user?.creativePostMode ?: "none",
@@ -8271,6 +8351,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onPhotoReactionPushEnabledChange = { scope.launch { vm.setPhotoReactionPushEnabled(it) } },
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
                     onBookmarkedPhotoPushEnabledChange = { scope.launch { vm.setBookmarkedPhotoPushEnabled(it) } },
+                    onOwnPostNumberInPushEnabledChange = { scope.launch { vm.setOwnPostNumberInPushEnabled(it) } },
                     onPostNumberInPushEnabledChange = { scope.launch { vm.setPostNumberInPushEnabled(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onCreativePostModeChange = { scope.launch { vm.setCreativePostMode(it) } },
@@ -9310,7 +9391,7 @@ fun FeedTab(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            item("feed-mode-header") {
+            if (false && false) item("feed-mode-header") {
                 Card {
                     Text(
                         when (feedOrderMode) {
@@ -10011,6 +10092,58 @@ private fun PostCanvasCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RowScope.FeedNavigationItem(
+    selected: Boolean,
+    label: String,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    val colors = NavigationBarItemDefaults.colors()
+    val iconColor = if (selected) colors.selectedIconColor else colors.unselectedIconColor
+    val textColor = if (selected) colors.selectedTextColor else colors.unselectedTextColor
+    val indicatorColor = if (selected) colors.selectedIndicatorColor else Color.Transparent
+
+    Box(
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxHeight()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(indicatorColor)
+                    .padding(horizontal = 20.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "T",
+                    color = iconColor,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Text(
+                label,
+                color = textColor,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1
+            )
+        }
+    }
+}
+
 @Composable
 private fun CompactCommentLine(
     username: String,
@@ -10574,6 +10707,8 @@ fun CalendarTab(
     days: List<String>,
     dayStats: Map<String, DayStatItem>,
     photosByDay: Map<String, List<CalendarPhotoItem>>,
+    bookmarkItems: List<FeedItem>,
+    bookmarkFilter: BookmarkCalendarFilter,
     timeCapsuleItems: List<FeedItem>,
     timeCapsuleFilter: TimeCapsuleFilter,
     timeCapsuleLockedCount: Int,
@@ -10586,6 +10721,7 @@ fun CalendarTab(
     showPublicPostNumbers: Boolean,
     onPickerExpandedChange: (Boolean) -> Unit,
     onModeChange: (CalendarMode) -> Unit,
+    onBookmarkFilterChange: (BookmarkCalendarFilter) -> Unit,
     onTimeCapsuleFilterChange: (TimeCapsuleFilter) -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onSearchSubmit: () -> Unit,
@@ -10607,10 +10743,11 @@ fun CalendarTab(
     }
     var tagJumpExpanded by remember(mode, days) { mutableStateOf(false) }
     val selectedIndex = remember(days, selected) { days.indexOf(selected).coerceAtLeast(0) }
-    val dayListStartIndex = remember(mode, searchQuery, searchResults, days) {
+    val dayListStartIndex = remember(mode, searchQuery, searchResults, days, bookmarkItems) {
         var prefix = 1
         if (mode == CalendarMode.SEARCH && searchQuery.isBlank()) prefix += 1
         if (mode == CalendarMode.SEARCH && searchResults.isNotEmpty()) prefix += 1
+        if (mode == CalendarMode.BOOKMARKS && bookmarkItems.isNotEmpty()) prefix += 1
         if (days.isEmpty()) prefix += 1
         prefix
     }
@@ -10646,10 +10783,14 @@ fun CalendarTab(
     }
     val subtitle = when (mode) {
         CalendarMode.PUBLIC -> "Alle sichtbaren Posts im Kalender"
-        CalendarMode.BOOKMARKS -> "Deine gemerkten Beitraege"
+        CalendarMode.BOOKMARKS -> when (bookmarkFilter) {
+            BookmarkCalendarFilter.MINE -> "Direkte Liste nur mit deinen gemerkten Beitraegen"
+            BookmarkCalendarFilter.ALL -> "Kuratierte Liste aus allen Beitragen, die irgendwer gemerkt hat"
+        }
         CalendarMode.TIME_CAPSULES -> "Globaler Capsule-Feed mit offenen und gesperrten Timecapsules"
         CalendarMode.SEARCH -> if (searchQuery.isBlank()) "Suche nach Caption, Kommentaren und Hashtags" else "Treffer fuer \"$searchQuery\""
     }
+    val filteredBookmarkItems = remember(bookmarkItems) { bookmarkItems }
     val filteredTimeCapsules = remember(timeCapsuleItems, timeCapsuleFilter) {
         timeCapsuleItems.filter { item ->
             when (timeCapsuleFilter) {
@@ -10723,6 +10864,23 @@ fun CalendarTab(
                                         Text("#daily")
                                     }
                                 }
+                            } else if (mode == CalendarMode.BOOKMARKS) {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    item {
+                                        FilterChip(
+                                            selected = bookmarkFilter == BookmarkCalendarFilter.MINE,
+                                            onClick = { onBookmarkFilterChange(BookmarkCalendarFilter.MINE) },
+                                            label = { Text("Von mir gemerkt") }
+                                        )
+                                    }
+                                    item {
+                                        FilterChip(
+                                            selected = bookmarkFilter == BookmarkCalendarFilter.ALL,
+                                            onClick = { onBookmarkFilterChange(BookmarkCalendarFilter.ALL) },
+                                            label = { Text("Von allen gemerkt") }
+                                        )
+                                    }
+                                }
                             } else if (mode == CalendarMode.TIME_CAPSULES) {
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                     item {
@@ -10750,7 +10908,7 @@ fun CalendarTab(
                             }
                         }
                     }
-                    if (mode != CalendarMode.SEARCH || days.isNotEmpty()) {
+                    if (mode != CalendarMode.SEARCH && mode != CalendarMode.BOOKMARKS || (mode == CalendarMode.SEARCH && days.isNotEmpty())) {
                         OutlinedButton(
                             onClick = { tagJumpExpanded = !tagJumpExpanded },
                             modifier = Modifier.fillMaxWidth()
@@ -10838,30 +10996,89 @@ fun CalendarTab(
                 }
             }
         }
+        if (mode == CalendarMode.BOOKMARKS && filteredBookmarkItems.isNotEmpty()) {
+            item("calendar-bookmark-feed") {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            if (bookmarkFilter == BookmarkCalendarFilter.MINE) "Deine gemerkten Beitraege" else "Von allen gemerkte Beitraege",
+                            fontWeight = FontWeight.Bold
+                        )
+                        filteredBookmarkItems.forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenPhotoInFeed(item.photo.day, item.photo.id) },
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                AsyncImage(
+                                    model = item.photo.url,
+                                    contentDescription = "Gemerkter Beitrag",
+                                    modifier = Modifier.size(84.dp),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(
+                                        "@${item.user.username} · ${formatDayLabel(item.photo.day)}",
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = parseUserColor(item.user.favoriteColor)
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "📌 ${item.photo.bookmarkCount}",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.labelMedium
+                                        )
+                                        Text(
+                                            "${item.reactions?.size ?: 0} Reaktionen · ${item.comments?.size ?: 0} Kommentare",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                    if (showPublicPostNumbers && !item.photo.publicNumber.isNullOrBlank()) {
+                                        Text(
+                                            "#${item.photo.publicNumber}",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.labelMedium
+                                        )
+                                    }
+                                    if (!item.photo.caption.isNullOrBlank()) {
+                                        HashtagText(
+                                            text = item.photo.caption,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            onHashtagClick = onOpenHashtagSearch
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (mode == CalendarMode.TIME_CAPSULES && filteredTimeCapsules.isNotEmpty()) {
             item("calendar-timecapsules-results") {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("Globaler Capsule-Feed", fontWeight = FontWeight.Bold)
                         filteredTimeCapsules.take(32).forEach { item ->
-                            val imageUrl = if (item.capsuleLocked) item.photo.capsulePreviewUrl ?: item.photo.url else item.photo.url
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { onOpenPhotoInFeed(item.photo.day, item.photo.id) },
+                                    .then(
+                                        if (item.capsuleLocked) Modifier
+                                        else Modifier.clickable { onOpenPhotoInFeed(item.photo.day, item.photo.id) }
+                                    ),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                AsyncImage(
-                                    model = imageUrl,
-                                    contentDescription = "Timecapsule",
-                                    modifier = Modifier.size(58.dp),
-                                    contentScale = ContentScale.Crop
-                                )
                                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Text("@${item.user.username} · ${formatDayLabel(item.photo.day)}", fontWeight = FontWeight.SemiBold, color = parseUserColor(item.user.favoriteColor))
                                     Text(
-                                        if (item.capsuleLocked) "Gesperrt bis ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}" else "Offen seit ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}",
+                                        if (item.capsuleLocked) "Oeffnet am ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}" else "Offen seit ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}",
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -10883,6 +11100,7 @@ fun CalendarTab(
                         when {
                             loading -> "Kalender wird geladen ..."
                             mode == CalendarMode.SEARCH -> "Keine Treffer gefunden"
+                            mode == CalendarMode.BOOKMARKS -> if (bookmarkFilter == BookmarkCalendarFilter.MINE) "Du hast noch keine Beitraege gemerkt" else "Noch keine global gemerkten Beitraege gefunden"
                             mode == CalendarMode.TIME_CAPSULES -> "Keine Timecapsules gefunden"
                             else -> "Keine Tage mit Bildern vorhanden"
                         }
@@ -10890,6 +11108,7 @@ fun CalendarTab(
                 }
             }
         }
+        if (mode != CalendarMode.BOOKMARKS)
         items(days) { day ->
             val selectedDay = day == selected
             val stats = dayStats[day]
@@ -10914,7 +11133,12 @@ fun CalendarTab(
                     }
                     featured?.let {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (!it.secondUrl.isNullOrBlank()) {
+                            if (mode == CalendarMode.TIME_CAPSULES && it.capsuleLocked) {
+                                Text(
+                                    "Oeffnet am ${formatCapsuleOpenAt(it.capsuleVisibleAt)}",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else if (!it.secondUrl.isNullOrBlank()) {
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -11525,6 +11749,7 @@ fun ProfileTab(
     photoReactionPushEnabled: Boolean,
     photoCommentPushEnabled: Boolean,
     bookmarkedPhotoPushEnabled: Boolean,
+    ownPostNumberInPushEnabled: Boolean,
     postNumberInPushEnabled: Boolean,
     allowPhotoDownload: Boolean,
     creativePostMode: String,
@@ -11567,6 +11792,7 @@ fun ProfileTab(
     onPhotoReactionPushEnabledChange: (Boolean) -> Unit,
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
     onBookmarkedPhotoPushEnabledChange: (Boolean) -> Unit,
+    onOwnPostNumberInPushEnabledChange: (Boolean) -> Unit,
     onPostNumberInPushEnabledChange: (Boolean) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onCreativePostModeChange: (String) -> Unit,
@@ -12420,6 +12646,12 @@ fun ProfileTab(
                         checked = photoCommentPushEnabled,
                         onCheckedChange = onPhotoCommentPushEnabledChange
                     )
+                    SettingsToggleRow(
+                        label = "Post-Nummer in Benachrichtigungen zu meinen Posts",
+                        checked = ownPostNumberInPushEnabled,
+                        onCheckedChange = onOwnPostNumberInPushEnabledChange,
+                        supportingText = "Zeigt bei Reaktionen, Kommentaren und FotoMojis auf deine eigenen Beitraege die konkrete Post-ID wie #260526001."
+                    )
                 }
                 SettingsSubsection("Gemerkt", "Zusaetzliche Hinweise zu fremden Posts, die du gemerkt hast") {
                     SettingsToggleRow(
@@ -12429,10 +12661,10 @@ fun ProfileTab(
                         supportingText = "Kommentare, Reaktionen und FotoMojis auf gemerkten fremden Posts."
                     )
                     SettingsToggleRow(
-                        label = "Post-Nummer in Benachrichtigungen",
+                        label = "Post-Nummer in Benachrichtigungen zu gemerkten Posts",
                         checked = postNumberInPushEnabled,
                         onCheckedChange = onPostNumberInPushEnabledChange,
-                        supportingText = "Ergaenzt Interaktions-Pushes um die stabile Post-ID wie #260526001."
+                        supportingText = "Ergaenzt Pushes zu gemerkten Posts um die stabile Post-ID wie #260526001."
                     )
                 }
                 SettingsSubsection("Ton", "Klingelton und Test fuer deine Push-Benachrichtigungen") {
