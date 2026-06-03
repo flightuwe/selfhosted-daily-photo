@@ -213,6 +213,44 @@ func TestPhotoVisibleToViewer(t *testing.T) {
 	}
 }
 
+func TestDiscoverTargetIndexPrefersFocusedPhoto(t *testing.T) {
+	targetPhotoID := int64(42)
+	payloads := []discoverDayPayload{
+		{
+			Day: "2026-03-12",
+			Payload: gin.H{
+				"items": []gin.H{
+					{"photo": gin.H{"id": uint(7)}},
+				},
+			},
+		},
+		{
+			Day: "2026-03-11",
+			Payload: gin.H{
+				"items": []gin.H{
+					{"photo": gin.H{"id": uint(42)}},
+				},
+			},
+		},
+	}
+
+	if got := discoverTargetIndex(payloads, "2026-03-12", &targetPhotoID); got != 1 {
+		t.Fatalf("discoverTargetIndex() = %d, want 1", got)
+	}
+}
+
+func TestDiscoverOffsetForTargetCentersWhenPossible(t *testing.T) {
+	if got := discoverOffsetForTarget(20, 5, 9); got != 7 {
+		t.Fatalf("discoverOffsetForTarget() = %d, want 7", got)
+	}
+	if got := discoverOffsetForTarget(20, 5, 1); got != 0 {
+		t.Fatalf("discoverOffsetForTarget() near start = %d, want 0", got)
+	}
+	if got := discoverOffsetForTarget(20, 5, 19); got != 15 {
+		t.Fatalf("discoverOffsetForTarget() near end = %d, want 15", got)
+	}
+}
+
 func TestPhotoEffectiveTimeUsesCapturedAt(t *testing.T) {
 	uploadedAt := time.Date(2026, 3, 12, 18, 0, 0, 0, time.UTC)
 	capturedAt := uploadedAt.Add(-12 * time.Minute)

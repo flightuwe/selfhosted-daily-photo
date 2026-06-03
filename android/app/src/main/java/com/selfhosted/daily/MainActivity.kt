@@ -66,6 +66,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.defaultMinSize
@@ -175,6 +176,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -251,7 +253,9 @@ const val EXTRA_LAUNCH_PHOTO_ID = "daily_launch_photo_id"
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 enum class AuthMode { LOGIN, REGISTER }
-enum class CalendarMode { PUBLIC, BOOKMARKS, SEARCH }
+enum class CalendarMode { PUBLIC, BOOKMARKS, SEARCH, TIME_CAPSULES }
+enum class FeedOrderMode { CHRONO, TREND, RANDOM }
+enum class TimeCapsuleFilter { ALL, RELEASED, LOCKED }
 
 data class PendingLaunch(
     val action: String = "",
@@ -278,6 +282,7 @@ data class User(
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
     val bookmarkedPhotoPushEnabled: Boolean = false,
+    val postNumberInPushEnabled: Boolean = false,
     val allowPhotoDownload: Boolean = false,
     val creativePostMode: String = "none",
     val locationFeatureEnabled: Boolean = false,
@@ -328,6 +333,7 @@ data class PreferencesUpdateRequest(
     val photoReactionPushEnabled: Boolean,
     val photoCommentPushEnabled: Boolean,
     val bookmarkedPhotoPushEnabled: Boolean? = null,
+    val postNumberInPushEnabled: Boolean? = null,
     val allowPhotoDownload: Boolean,
     val creativePostMode: String? = null,
     val locationFeatureEnabled: Boolean? = null,
@@ -534,11 +540,6 @@ private data class PaintEditorTarget(
     val requestedByUserColor: String?
 )
 
-private enum class PaintEditorInteractionMode {
-    Paint,
-    Move
-}
-
 data class PendingLocationPayload(
     val latitude: Double,
     val longitude: Double
@@ -612,7 +613,11 @@ data class FeedWindowResponse(
     val hasNewer: Boolean = false,
     val oldestLoadedDay: String? = null,
     val newestLoadedDay: String? = null,
-    val resolvedFocusPhotoId: Long? = null
+    val resolvedFocusPhotoId: Long? = null,
+    val mode: String? = null,
+    val offset: Int = 0,
+    val nextOffset: Int = 0,
+    val randomSeed: Long = 0L
 )
 data class DayListResponse(
     val items: List<String>,
@@ -652,7 +657,10 @@ data class CalendarPayloadResponse(
     val days: List<String> = emptyList(),
     val dayStats: List<DayStatItem> = emptyList(),
     val photosByDay: Map<String, List<CalendarPhotoItem>> = emptyMap(),
-    val users: List<CalendarUserOption> = emptyList()
+    val users: List<CalendarUserOption> = emptyList(),
+    val items: List<FeedItem> = emptyList(),
+    val lockedCount: Int = 0,
+    val releasedCount: Int = 0
 )
 data class CalendarSearchMatchItem(
     val photo: PromptPhoto,
@@ -1019,6 +1027,17 @@ interface Api {
         @Query("focus_photo_id") focusPhotoId: Long? = null
     ): FeedWindowResponse
 
+    @GET("feed/discover")
+    suspend fun feedDiscover(
+        @Header("Authorization") token: String,
+        @Query("mode") mode: String,
+        @Query("offset") offset: Int = 0,
+        @Query("limit_days") limitDays: Int = 7,
+        @Query("random_seed") randomSeed: Long? = null,
+        @Query("anchor_day") anchorDay: String? = null,
+        @Query("focus_photo_id") focusPhotoId: Long? = null
+    ): FeedWindowResponse
+
     @GET("feed/days")
     suspend fun feedDays(
         @Header("Authorization") token: String,
@@ -1045,6 +1064,9 @@ interface Api {
 
     @GET("calendar/bookmarks")
     suspend fun calendarBookmarks(@Header("Authorization") token: String): CalendarPayloadResponse
+
+    @GET("calendar/time-capsules")
+    suspend fun calendarTimeCapsules(@Header("Authorization") token: String): CalendarPayloadResponse
 
     @GET("calendar/search")
     suspend fun calendarSearch(
@@ -1890,6 +1912,20 @@ class AppRepo(
         prefs.edit().putBoolean("feed_post_push_enabled", enabled).apply()
     }
 
+    fun feedOrderMode(): FeedOrderMode =
+        runCatching { FeedOrderMode.valueOf((prefs.getString("feed_order_mode", FeedOrderMode.CHRONO.name) ?: FeedOrderMode.CHRONO.name).uppercase()) }
+            .getOrDefault(FeedOrderMode.CHRONO)
+
+    fun setFeedOrderMode(mode: FeedOrderMode) {
+        prefs.edit().putString("feed_order_mode", mode.name).apply()
+    }
+
+    fun randomFeedSeed(): Long = prefs.getLong("random_feed_seed", 0L)
+
+    fun setRandomFeedSeed(seed: Long) {
+        prefs.edit().putLong("random_feed_seed", seed).apply()
+    }
+
     fun useFotomojiReactions(): Boolean = prefs.getBoolean("use_fotomoji_reactions", false)
 
     fun setUseFotomojiReactions(enabled: Boolean) {
@@ -1956,6 +1992,12 @@ class AppRepo(
 
     fun setBookmarkedPhotoPushLocalEnabled(enabled: Boolean) {
         prefs.edit().putBoolean("bookmarked_photo_push_enabled_local", enabled).apply()
+    }
+
+    fun postNumberInPushLocalEnabled(): Boolean = prefs.getBoolean("post_number_in_push_enabled_local", false)
+
+    fun setPostNumberInPushLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("post_number_in_push_enabled_local", enabled).apply()
     }
 
     fun showPublicPostNumbers(): Boolean = prefs.getBoolean("show_public_post_numbers", false)
@@ -2220,6 +2262,7 @@ class AppRepo(
         allowPhotoDownload: Boolean,
         creativePostMode: String? = null,
         bookmarkedPhotoPushEnabled: Boolean? = null,
+        postNumberInPushEnabled: Boolean? = null,
         specialMomentPushEnabled: Boolean? = null,
         locationFeatureEnabled: Boolean? = null,
         locationShareDefaultEnabled: Boolean? = null,
@@ -2235,6 +2278,7 @@ class AppRepo(
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
+                postNumberInPushEnabled = postNumberInPushEnabled,
                 allowPhotoDownload = allowPhotoDownload,
                 creativePostMode = creativePostMode,
                 specialMomentPushEnabled = specialMomentPushEnabled,
@@ -2275,6 +2319,16 @@ class AppRepo(
     ): FeedWindowResponse = authorizedCall("/api/feed/window") { token ->
         api.feedWindow(token, anchorDay, beforeDays, afterDays, focusPhotoId)
     }
+    suspend fun feedDiscover(
+        mode: FeedOrderMode,
+        offset: Int = 0,
+        limitDays: Int = 7,
+        randomSeed: Long? = null,
+        anchorDay: String? = null,
+        focusPhotoId: Long? = null
+    ): FeedWindowResponse = authorizedCall("/api/feed/discover") { token ->
+        api.feedDiscover(token, mode.name.lowercase(), offset, limitDays, randomSeed, anchorDay, focusPhotoId)
+    }
     suspend fun feedDays(
         from: String? = null,
         to: String? = null,
@@ -2292,6 +2346,8 @@ class AppRepo(
         authorizedCall("/api/calendar/public") { token -> api.calendarPublic(token) }
     suspend fun calendarBookmarks(): CalendarPayloadResponse =
         authorizedCall("/api/calendar/bookmarks") { token -> api.calendarBookmarks(token) }
+    suspend fun calendarTimeCapsules(): CalendarPayloadResponse =
+        authorizedCall("/api/calendar/time-capsules") { token -> api.calendarTimeCapsules(token) }
     suspend fun calendarSearch(query: String): CalendarSearchResponse =
         authorizedCall("/api/calendar/search") { token -> api.calendarSearch(token, query) }
     suspend fun communityStats(): CommunityStatsResponse =
@@ -3164,7 +3220,10 @@ private class ProgressRequestBody(
 data class CalendarDataset(
     val days: List<String> = emptyList(),
     val dayStats: Map<String, DayStatItem> = emptyMap(),
-    val photosByDay: Map<String, List<CalendarPhotoItem>> = emptyMap()
+    val photosByDay: Map<String, List<CalendarPhotoItem>> = emptyMap(),
+    val feedItems: List<FeedItem> = emptyList(),
+    val lockedCount: Int = 0,
+    val releasedCount: Int = 0
 )
 
 data class CalendarSearchDataset(
@@ -3188,6 +3247,10 @@ data class UiState(
     val feedByDay: Map<String, List<FeedItem>> = emptyMap(),
     val monthRecapByDay: Map<String, MonthlyRecap> = emptyMap(),
     val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
+    val feedOrderMode: FeedOrderMode = FeedOrderMode.CHRONO,
+    val randomFeedSeed: Long = 0L,
+    val feedDiscoverOffset: Int = 0,
+    val feedDiscoverNextOffset: Int = 0,
     val calendarDays: List<String> = emptyList(),
     val feedIndexHasOlder: Boolean = true,
     val feedIndexHasNewer: Boolean = false,
@@ -3197,16 +3260,20 @@ data class UiState(
     val calendarSelectedDay: String? = null,
     val calendarPublicData: CalendarDataset = CalendarDataset(),
     val calendarBookmarksData: CalendarDataset = CalendarDataset(),
+    val calendarTimeCapsulesData: CalendarDataset = CalendarDataset(),
     val calendarSearchData: CalendarSearchDataset = CalendarSearchDataset(),
     val calendarSearchQuery: String = "",
+    val calendarTimeCapsuleFilter: TimeCapsuleFilter = TimeCapsuleFilter.ALL,
     val calendarLoading: Boolean = false,
     val communityStats: CommunityStatsResponse? = null,
     val communityStatsLoading: Boolean = false,
     val feedFocusDay: String? = null,
     val feedFocusPhotoId: Long? = null,
+    val feedVisibleAnchorDay: String? = null,
     val feedScrollRequestId: Long = 0L,
     val feedPaging: Boolean = false,
     val feedRefreshing: Boolean = false,
+    val feedWindowReloadInFlight: Boolean = false,
     val feedTodayLocked: Boolean = false,
     val feedJumpLoadingDay: String? = null,
     val chatHasOtherMessages: Boolean = true,
@@ -3268,6 +3335,7 @@ data class UiState(
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
     val bookmarkedPhotoPushEnabled: Boolean = false,
+    val postNumberInPushEnabled: Boolean = false,
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
     val showPublicPostNumbers: Boolean = false,
@@ -3374,6 +3442,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            postNumberInPushEnabled = repo.postNumberInPushLocalEnabled(),
+            feedOrderMode = repo.feedOrderMode(),
+            randomFeedSeed = repo.randomFeedSeed(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
@@ -3397,7 +3468,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun CalendarPayloadResponse.toDataset(): CalendarDataset =
-        CalendarDataset(days = days, dayStats = dayStats.associateBy { it.day }, photosByDay = photosByDay)
+        CalendarDataset(
+            days = days,
+            dayStats = dayStats.associateBy { it.day },
+            photosByDay = photosByDay,
+            feedItems = items,
+            lockedCount = lockedCount,
+            releasedCount = releasedCount
+        )
 
     private fun CalendarSearchResponse.toDataset(): CalendarSearchDataset =
         CalendarSearchDataset(
@@ -3421,6 +3499,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val dataset = when (state.calendarMode) {
             CalendarMode.PUBLIC -> state.calendarPublicData
             CalendarMode.BOOKMARKS -> state.calendarBookmarksData
+            CalendarMode.TIME_CAPSULES -> state.calendarTimeCapsulesData
             CalendarMode.SEARCH -> state.calendarSearchData.dataset
         }
         applyCalendarDataset(dataset)
@@ -3475,7 +3554,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     if (item.photo.id == photoId) item.copy(photo = transform(item.photo)) else item
                 }
             }
-            return dataset.copy(dayStats = updatedStats, photosByDay = updatedPhotosByDay)
+            val updatedFeedItems = dataset.feedItems.map { item ->
+                if (item.photo.id == photoId) item.copy(photo = transform(item.photo)) else item
+            }
+            return dataset.copy(dayStats = updatedStats, photosByDay = updatedPhotosByDay, feedItems = updatedFeedItems)
         }
         val updatedSearchMatches = state.calendarSearchData.matchesByDay.mapValues { (_, matches) ->
             matches.map { match ->
@@ -3489,6 +3571,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             viewedProfile = newViewedProfile,
             calendarPublicData = updateDataset(state.calendarPublicData),
             calendarBookmarksData = updateDataset(state.calendarBookmarksData),
+            calendarTimeCapsulesData = updateDataset(state.calendarTimeCapsulesData),
             calendarSearchData = state.calendarSearchData.copy(
                 dataset = updateDataset(state.calendarSearchData.dataset),
                 matchesByDay = updatedSearchMatches
@@ -3514,6 +3597,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             if (items.any { it.photo.id == photoId }) return day
         }
         state.calendarSearchData.matchesByDay.forEach { (day, items) ->
+            if (items.any { it.photo.id == photoId }) return day
+        }
+        state.calendarTimeCapsulesData.photosByDay.forEach { (day, items) ->
             if (items.any { it.photo.id == photoId }) return day
         }
         return null
@@ -3571,6 +3657,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state.calendarPublicData.photosByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.let { return it.user.id }
         state.calendarBookmarksData.photosByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.let { return it.user.id }
         state.calendarSearchData.matchesByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.let { return it.user.id }
+        state.calendarTimeCapsulesData.photosByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.let { return it.user.id }
         return null
     }
 
@@ -4341,6 +4428,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         viewModelScope.launch { ensureCalendarModeLoaded(mode, force = false) }
     }
 
+    fun setCalendarTimeCapsuleFilter(filter: TimeCapsuleFilter) {
+        state = state.copy(calendarTimeCapsuleFilter = filter)
+    }
+
     fun setCalendarSearchQuery(query: String) {
         state = state.copy(calendarSearchQuery = query)
     }
@@ -4406,6 +4497,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                             )
                             applyCalendarDataset(dataset.dataset)
                         }
+                    }
+                }
+                CalendarMode.TIME_CAPSULES -> {
+                    if (!force && state.calendarTimeCapsulesData.days.isNotEmpty()) {
+                        applyCalendarDataset(state.calendarTimeCapsulesData)
+                    } else {
+                        val payload = repo.calendarTimeCapsules()
+                        val dataset = payload.toDataset()
+                        state = state.copy(calendarTimeCapsulesData = dataset)
+                        applyCalendarDataset(dataset)
                     }
                 }
             }
@@ -4521,6 +4622,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    fun updateFeedVisibleAnchor(day: String?) {
+        val normalized = day?.takeIf { it.isNotBlank() }
+        if (state.feedVisibleAnchorDay != normalized) {
+            state = state.copy(feedVisibleAnchorDay = normalized)
+        }
+    }
+
     suspend fun jumpToDay(day: String) {
         val scrollRequestId = issueFeedScrollRequestId()
         state = state.copy(
@@ -4564,6 +4672,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun refreshAll(
         reason: String = "general",
         forceFeedReload: Boolean = false,
+        refreshFeedWindow: Boolean = true,
         bypassCooldown: Boolean = false,
         showLoading: Boolean = true,
         respectCircuitBreaker: Boolean = true
@@ -4777,6 +4886,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setPhotoReactionPushLocalEnabled(me.photoReactionPushEnabled)
             repo.setPhotoCommentPushLocalEnabled(me.photoCommentPushEnabled)
             repo.setBookmarkedPhotoPushLocalEnabled(me.bookmarkedPhotoPushEnabled)
+            repo.setPostNumberInPushLocalEnabled(me.postNumberInPushEnabled)
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
             val pollPushEnabled = repo.pollPushLocalEnabled()
@@ -4785,6 +4895,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photoReactionPushEnabled = repo.photoReactionPushLocalEnabled()
             val photoCommentPushEnabled = repo.photoCommentPushLocalEnabled()
             val bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled()
+            val postNumberInPushEnabled = repo.postNumberInPushLocalEnabled()
             val autoUpdateEnabled = repo.autoUpdateEnabled()
             val profileSectionExpanded = profileSectionIds.associateWith { sectionId ->
                 repo.getProfileSectionExpanded(me.id, sectionId)
@@ -4819,6 +4930,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
+                postNumberInPushEnabled = postNumberInPushEnabled,
                 showPublicPostNumbers = repo.showPublicPostNumbers(),
                 notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled),
                 diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && me.diagnosticsConsentGranted,
@@ -4848,22 +4960,49 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             evaluateDiagnosticsConsentPrompt()
             applyPendingLaunchNavigation(prompt, calendarDays)
             maybeShowProfileSetupPrompt(me)
-            val focus = state.feedFocusDay
-            val anchor = if (focus != null && calendarDays.contains(focus)) focus else prompt.day
-            if (state.feedDays.isEmpty() || !state.feedDays.contains(anchor)) {
-                refreshedFeedDays = loadFeedWindow(anchor, around = 1, forceReload = forceFeedReload)
-            } else {
-                refreshedFeedDays = if (forceFeedReload || staleFeedDays.isNotEmpty()) {
-                    loadFeedWindow(anchor, around = 1, forceReload = forceFeedReload)
-                } else {
-                    val today = prompt.day
-                    val hasVisibleTodayFeed = state.feedByDay[today].orEmpty().isNotEmpty()
-                    state = state.copy(
-                        feed = state.feedByDay[today].orEmpty(),
-                        feedTodayLocked = !prompt.hasVisiblePostToday && !hasVisibleTodayFeed
-                    )
-                    0
+            if (refreshFeedWindow) {
+                val visibleAnchor = state.feedVisibleAnchorDay
+                val focus = state.feedFocusDay
+                val preferredAnchor = when {
+                    !visibleAnchor.isNullOrBlank() && calendarDays.contains(visibleAnchor) -> visibleAnchor
+                    !focus.isNullOrBlank() && calendarDays.contains(focus) -> focus
+                    else -> prompt.day
                 }
+                val preserveVisibleWindow = state.feedDays.isNotEmpty() && state.feedDays.contains(preferredAnchor)
+                if (state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor)) {
+                    refreshedFeedDays = loadFeedWindow(
+                        anchorDay = preferredAnchor,
+                        around = 1,
+                        forceReload = forceFeedReload,
+                        replaceVisibleDays = true,
+                        showJumpLoading = true
+                    )
+                } else {
+                    refreshedFeedDays = if (forceFeedReload || staleFeedDays.isNotEmpty()) {
+                        loadFeedWindow(
+                            anchorDay = preferredAnchor,
+                            around = 1,
+                            forceReload = forceFeedReload,
+                            replaceVisibleDays = !preserveVisibleWindow,
+                            showJumpLoading = !preserveVisibleWindow
+                        )
+                    } else {
+                        val today = prompt.day
+                        val hasVisibleTodayFeed = state.feedByDay[today].orEmpty().isNotEmpty()
+                        state = state.copy(
+                            feed = state.feedByDay[today].orEmpty(),
+                            feedTodayLocked = !prompt.hasVisiblePostToday && !hasVisibleTodayFeed
+                        )
+                        0
+                    }
+                }
+            } else {
+                val today = prompt.day
+                val hasVisibleTodayFeed = state.feedByDay[today].orEmpty().isNotEmpty()
+                state = state.copy(
+                    feed = state.feedByDay[today].orEmpty(),
+                    feedTodayLocked = !prompt.hasVisiblePostToday && !hasVisibleTodayFeed
+                )
             }
             ensureCalendarStatsPrefix(2)
             success = true
@@ -4873,7 +5012,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.logDebug(
                     type = "feed_refresh",
                     message = "feed refresh ok",
-                    meta = "reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;refreshMode=full"
+                    meta = "reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};windowDays=${state.feedDays.joinToString(",").ifBlank { "-" }}"
                 )
             }
         } catch (t: Throwable) {
@@ -4913,7 +5052,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.logDebug(
                 type = "feed_refresh_failed",
                 message = debugFailureMessage(actual),
-                meta = "reason=$reason;forced=$forceFeedReload;durationMs=$durationMs;failedCall=$failedCall;failureClass=$failureClass;refreshMode=full;backoffStage=$backoffStage;nextDelayMs=$delayMs;root=${rootCause(actual)::class.java.simpleName};derivedFrom=${if (actual is IllegalStateException && actual.message == "missing_access_token") repo.authStateTransitionReason() else "-"}"
+                meta = "reason=$reason;forced=$forceFeedReload;durationMs=$durationMs;failedCall=$failedCall;failureClass=$failureClass;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};backoffStage=$backoffStage;nextDelayMs=$delayMs;visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};root=${rootCause(actual)::class.java.simpleName};derivedFrom=${if (actual is IllegalStateException && actual.message == "missing_access_token") repo.authStateTransitionReason() else "-"}"
             )
         } finally {
             refreshAllMutex.unlock()
@@ -4940,6 +5079,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             ok = refreshAll(
                 reason = reason,
                 forceFeedReload = true,
+                refreshFeedWindow = true,
                 bypassCooldown = true,
                 showLoading = false,
                 respectCircuitBreaker = !isManual
@@ -4997,6 +5137,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun loadOlderFeedDays(count: Int = 3) {
         if (state.feedPaging) return
+        if (state.feedOrderMode != FeedOrderMode.CHRONO) {
+            if (!state.feedIndexHasOlder) return
+            loadDiscoverFeed(offset = state.feedDiscoverNextOffset, limitDays = count, appendOlder = true)
+            return
+        }
         val base = state.feedDays.lastOrNull() ?: return
         var all = state.calendarDays
         var idx = all.indexOf(base)
@@ -5018,6 +5163,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun loadNewerFeedDays(count: Int = 3) {
         if (state.feedPaging) return
+        if (state.feedOrderMode != FeedOrderMode.CHRONO) {
+            if (!state.feedIndexHasNewer) return
+            val offset = (state.feedDiscoverOffset - count).coerceAtLeast(0)
+            loadDiscoverFeed(offset = offset, limitDays = count, appendOlder = false)
+            return
+        }
         val base = state.feedDays.firstOrNull() ?: return
         var all = state.calendarDays
         var idx = all.indexOf(base)
@@ -5038,7 +5189,24 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         loadFeedEdgeWindow(anchorDay = prependDays.last(), beforeDays = prependDays.size - 1, afterDays = 0, appendOlder = false)
     }
 
-    private suspend fun loadFeedWindow(anchorDay: String, around: Int, forceReload: Boolean): Int {
+    private suspend fun loadFeedWindow(
+        anchorDay: String,
+        around: Int,
+        forceReload: Boolean,
+        replaceVisibleDays: Boolean = true,
+        showJumpLoading: Boolean = true
+    ): Int {
+        if (state.feedOrderMode != FeedOrderMode.CHRONO) {
+            return loadDiscoverFeed(
+                offset = 0,
+                limitDays = (around * 2 + 1).coerceAtLeast(5),
+                appendOlder = false,
+                anchorDay = anchorDay,
+                focusPhotoId = state.feedFocusPhotoId,
+                replaceVisibleDays = replaceVisibleDays,
+                showJumpLoading = showJumpLoading
+            )
+        }
         if (state.calendarDays.isEmpty()) {
             runCatching { repo.feedDays(limit = 60) }.getOrNull()?.let { page ->
                 state = state.copy(
@@ -5050,9 +5218,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         val target = anchorDay
         state = state.copy(
-            feedDays = listOf(target),
-            promptMetaByDay = state.promptMetaByDay + (target to PromptMeta(day = target)),
-            feedJumpLoadingDay = target,
+            feedDays = if (showJumpLoading) listOf(target) else state.feedDays,
+            promptMetaByDay = if (showJumpLoading) state.promptMetaByDay + (target to PromptMeta(day = target)) else state.promptMetaByDay,
+            feedJumpLoadingDay = target.takeIf { showJumpLoading },
+            feedWindowReloadInFlight = !showJumpLoading,
             feedPaging = true
         )
         return try {
@@ -5062,19 +5231,28 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 afterDays = around,
                 focusPhotoId = state.feedFocusPhotoId
             )
-            applyFeedWindow(window, target, replaceVisibleDays = true, forceReload = forceReload)
+            applyFeedWindow(window, target, replaceVisibleDays = replaceVisibleDays, forceReload = forceReload)
         } catch (t: Throwable) {
             if (isFeedLockedTodayError(t, target)) {
                 applyTodayFeedLockedState(target)
                 return 0
             }
-            state = state.copy(feedJumpLoadingDay = null, feedPaging = false)
+            state = state.copy(feedJumpLoadingDay = null, feedPaging = false, feedWindowReloadInFlight = false)
             throw t
         }
     }
 
     private suspend fun loadFeedEdgeWindow(anchorDay: String, beforeDays: Int, afterDays: Int, appendOlder: Boolean) {
-        state = state.copy(feedPaging = true)
+        if (state.feedOrderMode != FeedOrderMode.CHRONO) {
+            loadDiscoverFeed(
+                offset = if (appendOlder) state.feedDiscoverNextOffset else (state.feedDiscoverOffset - maxOf(beforeDays, afterDays, 1)).coerceAtLeast(0),
+                limitDays = maxOf(beforeDays, afterDays, 1),
+                appendOlder = appendOlder,
+                replaceVisibleDays = false
+            )
+            return
+        }
+        state = state.copy(feedPaging = true, feedWindowReloadInFlight = true)
         try {
             runCatching { repo.feedWindow(anchorDay = anchorDay, beforeDays = beforeDays, afterDays = afterDays) }
                 .onSuccess { window ->
@@ -5087,8 +5265,58 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 }
         } finally {
             if (state.feedPaging) {
-                state = state.copy(feedPaging = false)
+                state = state.copy(feedPaging = false, feedWindowReloadInFlight = false)
             }
+        }
+    }
+
+    private suspend fun loadDiscoverFeed(
+        offset: Int,
+        limitDays: Int,
+        appendOlder: Boolean,
+        anchorDay: String? = null,
+        focusPhotoId: Long? = null,
+        replaceVisibleDays: Boolean = false,
+        showJumpLoading: Boolean = false
+    ): Int {
+        state = state.copy(
+            feedPaging = true,
+            feedJumpLoadingDay = state.feedFocusDay.takeIf { showJumpLoading },
+            feedWindowReloadInFlight = true
+        )
+        return try {
+            val seed = if (state.feedOrderMode == FeedOrderMode.RANDOM) {
+                if (offset == 0 && state.feedRefreshing) {
+                    val next = System.currentTimeMillis()
+                    repo.setRandomFeedSeed(next)
+                    state = state.copy(randomFeedSeed = next)
+                    next
+                } else {
+                    state.randomFeedSeed.takeIf { it != 0L } ?: System.currentTimeMillis().also { repo.setRandomFeedSeed(it) }
+                }
+            } else null
+            val window = repo.feedDiscover(
+                mode = state.feedOrderMode,
+                offset = offset,
+                limitDays = limitDays.coerceAtLeast(1),
+                randomSeed = seed,
+                anchorDay = anchorDay,
+                focusPhotoId = focusPhotoId
+            )
+            applyFeedWindow(window, window.anchorDay.ifBlank { state.feedFocusDay.orEmpty() }, replaceVisibleDays = replaceVisibleDays, forceReload = false, appendOlder = appendOlder)
+        } finally {
+            if (state.feedPaging) {
+                state = state.copy(feedPaging = false, feedJumpLoadingDay = null, feedWindowReloadInFlight = false)
+            }
+        }
+    }
+
+    private fun mergeVisibleFeedDays(windowDays: List<String>, replaceVisibleDays: Boolean, appendOlder: Boolean): List<String> {
+        return when {
+            replaceVisibleDays -> windowDays
+            state.feedOrderMode == FeedOrderMode.CHRONO -> mergeDayIndex(state.feedDays, windowDays)
+            appendOlder -> (state.feedDays + windowDays).distinct()
+            else -> (windowDays + state.feedDays).distinct()
         }
     }
 
@@ -5133,11 +5361,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             staleFeedDays.remove(day)
         }
         val mergedKnownDays = mergeDayIndex(state.calendarDays, windowDays)
-        val visibleDays = when {
-            replaceVisibleDays -> windowDays
-            appendOlder -> (state.feedDays + windowDays).distinct()
-            else -> (windowDays + state.feedDays).distinct()
-        }
+        val previousVisibleDays = state.feedDays
+        val visibleDays = mergeVisibleFeedDays(windowDays, replaceVisibleDays = replaceVisibleDays, appendOlder = appendOlder)
         val prunedCache = pruneFeedCaches(cacheMap, promptMap, recapMap, visibleDays, requestedAnchorDay)
         val today = state.prompt?.day ?: LocalDate.now().toString()
         val postedToday = state.prompt?.hasVisiblePostToday == true
@@ -5150,23 +5375,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(
             calendarDays = mergedKnownDays,
             feedIndexHasOlder = state.feedIndexHasOlder || window.hasOlder,
-            feedIndexHasNewer = state.feedIndexHasNewer || window.hasNewer,
+            feedIndexHasNewer = window.hasNewer,
             feedDays = finalVisibleDays,
             feedByDay = finalFeedByDay,
             monthRecapByDay = finalRecapMap,
             promptMetaByDay = finalPromptMeta,
             feed = if (postedToday) finalFeedByDay[today].orEmpty() else emptyList(),
             feedTodayLocked = todayLocked,
-            feedFocusDay = window.anchorDay.ifBlank { requestedAnchorDay },
+            feedFocusDay = if (replaceVisibleDays) window.anchorDay.ifBlank { requestedAnchorDay } else state.feedFocusDay,
             feedFocusPhotoId = window.resolvedFocusPhotoId ?: state.feedFocusPhotoId,
+            feedDiscoverOffset = window.offset,
+            feedDiscoverNextOffset = window.nextOffset,
+            randomFeedSeed = if (window.randomSeed != 0L) window.randomSeed else state.randomFeedSeed,
             feedJumpLoadingDay = null,
-            feedPaging = false
+            feedPaging = false,
+            feedWindowReloadInFlight = false
         )
         if (forceReload) {
             repo.logDebug(
                 type = "feed_window_refresh",
                 message = "feed window loaded",
-                meta = "anchor=${window.anchorDay};days=${windowDays.size}"
+                meta = "requestedAnchor=$requestedAnchorDay;resolvedAnchor=${window.anchorDay.ifBlank { requestedAnchorDay }};visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};daysLoaded=${windowDays.size};replaceVisibleDays=$replaceVisibleDays;appendOlder=$appendOlder;visibleBefore=${previousVisibleDays.joinToString(",").ifBlank { "-" }};visibleAfter=${finalVisibleDays.joinToString(",").ifBlank { "-" }}"
             )
         }
         return windowDays.size
@@ -5194,6 +5423,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedTodayLocked = true,
             feedJumpLoadingDay = null,
             feedPaging = false,
+            feedWindowReloadInFlight = false,
             feedFocusPhotoId = null
         )
     }
@@ -6050,6 +6280,53 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(showPublicPostNumbers = repo.showPublicPostNumbers())
     }
 
+    fun setFeedOrderMode(mode: FeedOrderMode) {
+        repo.setFeedOrderMode(mode)
+        val seed = if (mode == FeedOrderMode.RANDOM) {
+            val next = System.currentTimeMillis()
+            repo.setRandomFeedSeed(next)
+            next
+        } else {
+            repo.randomFeedSeed()
+        }
+        state = state.copy(feedOrderMode = repo.feedOrderMode(), randomFeedSeed = seed)
+        viewModelScope.launch {
+            if (state.activeTab == AppTab.FEED || state.feedByDay.isNotEmpty()) {
+                refreshFeed(reason = "feed_mode_switch")
+            }
+        }
+    }
+
+    suspend fun setPostNumberInPushEnabled(enabled: Boolean) {
+        repo.setPostNumberInPushLocalEnabled(enabled)
+        val current = state.user
+        if (current == null) {
+            state = state.copy(postNumberInPushEnabled = repo.postNumberInPushLocalEnabled())
+            return
+        }
+        runCatching {
+            repo.updatePreferences(
+                chatPushEnabled = current.chatPushEnabled,
+                pollPushEnabled = current.pollPushEnabled,
+                inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
+                photoReactionPushEnabled = current.photoReactionPushEnabled,
+                photoCommentPushEnabled = current.photoCommentPushEnabled,
+                allowPhotoDownload = current.allowPhotoDownload,
+                creativePostMode = current.creativePostMode,
+                bookmarkedPhotoPushEnabled = current.bookmarkedPhotoPushEnabled,
+                postNumberInPushEnabled = enabled,
+                specialMomentPushEnabled = current.specialMomentPushEnabled,
+                locationFeatureEnabled = current.locationFeatureEnabled,
+                locationShareDefaultEnabled = current.locationShareDefaultEnabled
+            )
+        }.onSuccess { user ->
+            repo.setPostNumberInPushLocalEnabled(user.postNumberInPushEnabled)
+            state = state.copy(user = user, postNumberInPushEnabled = user.postNumberInPushEnabled)
+        }.onFailure {
+            state = state.copy(message = apiError(it, "Push-Postnummer konnte nicht gespeichert werden"))
+        }
+    }
+
     fun setUploadQuality(value: Int) {
         repo.setUploadQuality(value)
         state = state.copy(uploadQuality = repo.uploadQuality())
@@ -6671,7 +6948,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 setTab(AppTab.CHAT)
             }
 
-            action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" || type == "photo_reaction" || type == "photo_fotomoji" || type == "photo_comment" || targetDay.isNotBlank() || targetPhotoId != null -> {
+            action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" || type == "photo_reaction" || type == "photo_fotomoji" || type == "photo_comment" || type == "bookmarked_photo_reaction" || type == "bookmarked_photo_fotomoji" || type == "bookmarked_photo_comment" || targetDay.isNotBlank() || targetPhotoId != null -> {
                 val targetIsTodayHidden = targetDay == prompt.day && !prompt.hasVisiblePostToday && !availableDays.contains(targetDay)
                 if (targetIsTodayHidden) {
                     openCamera("Der heutige Feed wird sichtbar, sobald du einen sichtbaren Beitrag gepostet hast.")
@@ -6745,7 +7022,7 @@ class MainActivity : ComponentActivity() {
 
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     val state = vm.state
@@ -6954,10 +7231,10 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         return
     }
 
-    LaunchedEffect(state.token) {
+    LaunchedEffect(state.token, state.activeTab) {
         if (state.token.isBlank()) return@LaunchedEffect
         while (true) {
-            vm.refreshAll()
+            vm.refreshAll(refreshFeedWindow = vm.state.activeTab != AppTab.FEED)
             delay(vm.globalRefreshIntervalMs())
         }
     }
@@ -6974,7 +7251,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         if (launchIntentTick <= 0) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         if (!vm.shouldRunLaunchIntentRefresh()) return@LaunchedEffect
-        vm.refreshAll()
+        vm.refreshAll(refreshFeedWindow = vm.state.activeTab != AppTab.FEED)
     }
 
     LaunchedEffect(state.token, state.startupDone, state.activeTab) {
@@ -6982,8 +7259,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         if (state.activeTab != AppTab.FEED) return@LaunchedEffect
         while (true) {
             delay(vm.feedAutoRefreshIntervalMs())
-            if (state.activeTab != AppTab.FEED) break
-            if (!state.feedRefreshing && !state.loading && !vm.shouldPauseFeedAutoRefresh()) {
+            if (vm.state.activeTab != AppTab.FEED) break
+            if (!vm.state.feedRefreshing && !vm.state.loading && !vm.shouldPauseFeedAutoRefresh()) {
                 vm.refreshFeed(reason = "feed_auto")
             }
         }
@@ -7649,11 +7926,58 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         return
     }
 
+    var feedModePickerVisible by remember { mutableStateOf(false) }
+    val feedTabLabel = when (state.feedOrderMode) {
+        FeedOrderMode.CHRONO -> "Feed"
+        FeedOrderMode.TREND -> "Trend"
+        FeedOrderMode.RANDOM -> "Zufall"
+    }
+
+    if (feedModePickerVisible) {
+        AlertDialog(
+            onDismissRequest = { feedModePickerVisible = false },
+            title = { Text("Feed-Modus wechseln") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FeedOrderMode.entries.forEach { mode ->
+                        OutlinedButton(
+                            onClick = {
+                                vm.setFeedOrderMode(mode)
+                                feedModePickerVisible = false
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                when (mode) {
+                                    FeedOrderMode.CHRONO -> "Feed"
+                                    FeedOrderMode.TREND -> "Trend"
+                                    FeedOrderMode.RANDOM -> "Zufall"
+                                }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { feedModePickerVisible = false }) { Text("Schliessen") }
+            }
+        )
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(selected = state.activeTab == AppTab.CAMERA, onClick = { vm.setTab(AppTab.CAMERA) }, label = { Text("Kamera") }, icon = { Text("U") })
-                NavigationBarItem(selected = state.activeTab == AppTab.FEED, onClick = { vm.setTab(AppTab.FEED) }, label = { Text("Feed") }, icon = { Text("T") })
+                NavigationBarItem(
+                    selected = state.activeTab == AppTab.FEED,
+                    onClick = { vm.setTab(AppTab.FEED) },
+                    label = { Text(feedTabLabel) },
+                    icon = { Text("T") },
+                    modifier = Modifier.combinedClickable(
+                        onClick = { vm.setTab(AppTab.FEED) },
+                        onLongClick = { feedModePickerVisible = true }
+                    )
+                )
                 NavigationBarItem(selected = state.activeTab == AppTab.CALENDAR, onClick = { vm.setTab(AppTab.CALENDAR) }, label = { Text("Kalender") }, icon = { Text("G") })
                 NavigationBarItem(
                     selected = state.activeTab == AppTab.CHAT,
@@ -7775,11 +8099,14 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     refreshing = state.feedRefreshing,
                     todayLocked = state.feedTodayLocked,
                     paging = state.feedPaging,
+                    feedWindowReloadInFlight = state.feedWindowReloadInFlight,
+                    feedOrderMode = state.feedOrderMode,
                     showPublicPostNumbers = state.showPublicPostNumbers,
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
                     onRefresh = { scope.launch { vm.refreshFeed() } },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
                     onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
+                    onVisibleAnchorChanged = vm::updateFeedVisibleAnchor,
                     onJumpToDay = { day -> scope.launch { vm.jumpToDay(day) } },
                     onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
                     onFocusPhotoConsumed = { vm.clearFeedPhotoFocus() },
@@ -7810,8 +8137,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     photosByDay = when (state.calendarMode) {
                         CalendarMode.PUBLIC -> state.calendarPublicData.photosByDay
                         CalendarMode.BOOKMARKS -> state.calendarBookmarksData.photosByDay
+                        CalendarMode.TIME_CAPSULES -> state.calendarTimeCapsulesData.photosByDay
                         CalendarMode.SEARCH -> emptyMap()
                     },
+                    timeCapsuleItems = state.calendarTimeCapsulesData.feedItems,
+                    timeCapsuleFilter = state.calendarTimeCapsuleFilter,
+                    timeCapsuleLockedCount = state.calendarTimeCapsulesData.lockedCount,
+                    timeCapsuleReleasedCount = state.calendarTimeCapsulesData.releasedCount,
                     searchQuery = state.calendarSearchQuery,
                     searchResults = state.calendarSearchData.flatMatches,
                     selected = state.calendarSelectedDay ?: state.prompt?.day.orEmpty(),
@@ -7820,6 +8152,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     showPublicPostNumbers = state.showPublicPostNumbers,
                     onPickerExpandedChange = { vm.setCalendarPickerExpanded(it) },
                     onModeChange = { vm.setCalendarMode(it) },
+                    onTimeCapsuleFilterChange = { vm.setCalendarTimeCapsuleFilter(it) },
                     onSearchQueryChange = { vm.setCalendarSearchQuery(it) },
                     onSearchSubmit = { vm.submitCalendarSearch() },
                     onOpenHashtagSearch = { vm.openCalendarSearch(it) },
@@ -7896,6 +8229,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     photoReactionPushEnabled = state.user?.photoReactionPushEnabled ?: state.photoReactionPushEnabled,
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
                     bookmarkedPhotoPushEnabled = state.user?.bookmarkedPhotoPushEnabled ?: state.bookmarkedPhotoPushEnabled,
+                    postNumberInPushEnabled = state.user?.postNumberInPushEnabled ?: state.postNumberInPushEnabled,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     creativePostMode = state.user?.creativePostMode ?: "none",
                     locationFeatureEnabled = state.user?.locationFeatureEnabled ?: false,
@@ -7937,6 +8271,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onPhotoReactionPushEnabledChange = { scope.launch { vm.setPhotoReactionPushEnabled(it) } },
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
                     onBookmarkedPhotoPushEnabledChange = { scope.launch { vm.setBookmarkedPhotoPushEnabled(it) } },
+                    onPostNumberInPushEnabledChange = { scope.launch { vm.setPostNumberInPushEnabled(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onCreativePostModeChange = { scope.launch { vm.setCreativePostMode(it) } },
                     onLocationFeatureEnabledChange = { scope.launch { vm.setLocationFeatureEnabled(it) } },
@@ -8777,11 +9112,14 @@ fun FeedTab(
     refreshing: Boolean,
     todayLocked: Boolean,
     paging: Boolean,
+    feedWindowReloadInFlight: Boolean,
+    feedOrderMode: FeedOrderMode,
     showPublicPostNumbers: Boolean,
     onTakePhoto: () -> Unit,
     onRefresh: () -> Unit,
     onLoadOlder: () -> Unit,
     onLoadNewer: () -> Unit,
+    onVisibleAnchorChanged: (String?) -> Unit,
     onJumpToDay: (String) -> Unit,
     onJumpToCapsule: (day: String, photoId: Long) -> Unit,
     onFocusPhotoConsumed: () -> Unit,
@@ -8816,6 +9154,13 @@ fun FeedTab(
                 }
             }
         }
+    }
+    fun rowDayAt(index: Int): String? = when (val row = rows.getOrNull(index)) {
+        is FeedRow.DayHeader -> row.day
+        is FeedRow.PhotoItem -> row.day
+        is FeedRow.MonthRecapItem -> row.day
+        is FeedRow.LoadingItem -> row.day
+        null -> null
     }
 
     val todayDay = prompt?.day ?: LocalDate.now().toString()
@@ -8856,6 +9201,12 @@ fun FeedTab(
     }
     val firstVisibleIndex by remember { derivedStateOf { visibleRange.value.first } }
     val lastVisibleIndex by remember { derivedStateOf { visibleRange.value.second } }
+    val currentVisibleAnchorDay by remember(rows, firstVisibleIndex) {
+        derivedStateOf {
+            if (firstVisibleIndex < 0) return@derivedStateOf null
+            rowDayAt(firstVisibleIndex)
+        }
+    }
     val newestKnownDay = remember(allKnownDays, days, prompt?.day) {
         allKnownDays.firstOrNull() ?: days.firstOrNull() ?: prompt?.day
     }
@@ -8914,14 +9265,18 @@ fun FeedTab(
         }
     }
 
-    LaunchedEffect(listState, rows.size, paging) {
+    LaunchedEffect(currentVisibleAnchorDay) {
+        onVisibleAnchorChanged(currentVisibleAnchorDay)
+    }
+
+    LaunchedEffect(listState, rows.size, paging, refreshing, feedWindowReloadInFlight) {
         snapshotFlow {
             val info = listState.layoutInfo
             val first = info.visibleItemsInfo.firstOrNull()?.index ?: -1
             val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            first to last
-        }.collect { (first, last) ->
-            if (rows.isEmpty() || paging) return@collect
+            Triple(first, last, pullRefreshState.progress)
+        }.collect { (first, last, pullProgress) ->
+            if (rows.isEmpty() || paging || refreshing || feedWindowReloadInFlight || pullProgress > 0f) return@collect
             if (first in 0..2) onLoadNewer()
             if (last >= rows.lastIndex - 4) onLoadOlder()
         }
@@ -8955,6 +9310,19 @@ fun FeedTab(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            item("feed-mode-header") {
+                Card {
+                    Text(
+                        when (feedOrderMode) {
+                            FeedOrderMode.CHRONO -> "Feed · Chronologisch"
+                            FeedOrderMode.TREND -> "Feed · Trend"
+                            FeedOrderMode.RANDOM -> "Feed · Zufall"
+                        },
+                        modifier = Modifier.padding(10.dp),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
             if (todayLocked && prompt?.hasVisiblePostToday == false) {
                 item("today-locked") {
                     Card {
@@ -9849,12 +10217,15 @@ private fun PhotoPaintEditorDialog(
     val previewItem = remember(target.item, viewerId, photo.paints) {
         target.item.copy(photo = target.item.photo.copy(paints = target.item.photo.paints.filter { it.userId != viewerId }))
     }
-    val previewScrollState = rememberScrollState()
-    var interactionMode by rememberSaveable(photo.id) { mutableStateOf(PaintEditorInteractionMode.Paint.name) }
-    val isPaintMode = interactionMode == PaintEditorInteractionMode.Paint.name
+    var viewportHeightPx by remember(photo.id) { mutableStateOf(0f) }
+    var contentHeightPx by remember(photo.id) { mutableStateOf(0f) }
+    var scrollOffsetPx by remember(photo.id) { mutableStateOf(0f) }
     fun composedPaths(): List<PhotoPaintPath> =
         if (currentStroke.size >= 2) (draftPaths + PhotoPaintPath(currentStroke)).takeLast(12) else draftPaths
     val initialPathsSignature = remember(initialPaths) { encodePhotoPaintPaths(initialPaths) }
+    val maxScrollOffsetPx = remember(viewportHeightPx, contentHeightPx) {
+        (contentHeightPx - viewportHeightPx).coerceAtLeast(0f)
+    }
     fun dismissWithAutosave() {
         val pathsToPersist = composedPaths()
         if (encodePhotoPaintPaths(pathsToPersist) != initialPathsSignature) {
@@ -9862,6 +10233,9 @@ private fun PhotoPaintEditorDialog(
         } else {
             onDismiss()
         }
+    }
+    LaunchedEffect(maxScrollOffsetPx) {
+        scrollOffsetPx = scrollOffsetPx.coerceIn(0f, maxScrollOffsetPx)
     }
 
     Dialog(onDismissRequest = ::dismissWithAutosave, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -9883,21 +10257,8 @@ private fun PhotoPaintEditorDialog(
                             "Du malst direkt ueber dem echten Post. Der Strich bleibt beim Zeichnen live sichtbar und wird beim Schliessen automatisch gespeichert.",
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            FilterChip(
-                                selected = isPaintMode,
-                                onClick = { interactionMode = PaintEditorInteractionMode.Paint.name },
-                                label = { Text("Malen") }
-                            )
-                            FilterChip(
-                                selected = !isPaintMode,
-                                onClick = { interactionMode = PaintEditorInteractionMode.Move.name },
-                                label = { Text("Bewegen") }
-                            )
-                        }
                         Text(
-                            if (isPaintMode) "Malen aktiv: Wische direkt ueber den Post. Fuer Kommentare oder lange Posts auf Bewegen wechseln."
-                            else "Bewegen aktiv: Der Post ist scrollbar, die Zeichenflaeche bleibt sichtbar, reagiert aber nicht auf Beruehrungen.",
+                            "Der Post bleibt immer an seiner echten Feed-Position. Gescrollt wird nur ueber den Balken rechts, damit Zeichnen stabil bleibt.",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -9907,103 +10268,126 @@ private fun PhotoPaintEditorDialog(
                             .weight(1f)
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp)
+                            .onSizeChanged { viewportHeightPx = it.height.toFloat() }
                     ) {
-                        PostCanvasCard(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .then(if (!isPaintMode) Modifier.verticalScroll(previewScrollState) else Modifier),
-                            item = previewItem,
-                            viewerId = viewerId,
-                            secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            primaryTextColor = MaterialTheme.colorScheme.onSurface,
-                            showPublicPostNumbers = true,
-                            isMomentWindowPost = target.isMomentWindowPost,
-                            postMomentKind = target.postMomentKind,
-                            requestedByUser = target.requestedByUser,
-                            requestedByUserColor = target.requestedByUserColor,
-                            onOpenUserProfile = null,
-                            onOpenViewer = null,
-                            onOpenExternalUrl = null,
-                            onOpenHashtagSearch = {},
-                            headerTrailing = {
-                                if (!photo.publicNumber.isNullOrBlank()) {
-                                    Text(
-                                        "#${photo.publicNumber}",
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                            },
-                            overlay = { frameRect ->
-                                PhotoMarkLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
-                                PhotoPaintLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
-                                PhotoPaintPathsLayer(draftPaths, paintColor.copy(alpha = 0.58f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
-                                if (currentStroke.size >= 2) {
-                                    PhotoPaintPathsLayer(listOf(PhotoPaintPath(currentStroke)), paintColor.copy(alpha = 0.82f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
-                                }
-                                if (isPaintMode) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .onSizeChanged { overlayCanvasSize = it }
-                                            .pointerInteropFilter { event ->
-                                                val width = overlayCanvasSize.width.toFloat().coerceAtLeast(1f)
-                                                val height = overlayCanvasSize.height.toFloat().coerceAtLeast(1f)
-                                                when (event.actionMasked) {
-                                                    MotionEvent.ACTION_DOWN -> {
-                                                        currentStroke = listOf(normalizeEditorPoint(Offset(event.x, event.y), width, height))
-                                                        true
-                                                    }
-                                                    MotionEvent.ACTION_MOVE -> {
-                                                        val historySize = event.historySize
-                                                        var updatedStroke = currentStroke
-                                                        for (index in 0 until historySize) {
-                                                            val point = normalizeEditorPoint(
-                                                                Offset(event.getHistoricalX(index), event.getHistoricalY(index)),
-                                                                width,
-                                                                height
-                                                            )
-                                                            val last = updatedStroke.lastOrNull()
-                                                            if (last == null || abs(last.x - point.x) > 0.0015f || abs(last.y - point.y) > 0.0015f) {
-                                                                updatedStroke = updatedStroke + point
-                                                            }
-                                                        }
-                                                        val currentPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
-                                                        val currentLast = updatedStroke.lastOrNull()
-                                                        if (currentLast == null || abs(currentLast.x - currentPoint.x) > 0.0015f || abs(currentLast.y - currentPoint.y) > 0.0015f) {
-                                                            updatedStroke = updatedStroke + currentPoint
-                                                        }
-                                                        currentStroke = updatedStroke
-                                                        true
-                                                    }
-                                                    MotionEvent.ACTION_UP -> {
-                                                        val finalPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
-                                                        val finalizedStroke = if (
-                                                            currentStroke.lastOrNull()?.let { abs(it.x - finalPoint.x) > 0.0015f || abs(it.y - finalPoint.y) > 0.0015f }
-                                                                ?: true
-                                                        ) {
-                                                            currentStroke + finalPoint
-                                                        } else {
-                                                            currentStroke
-                                                        }
-                                                        if (finalizedStroke.size >= 2) {
-                                                            draftPaths = (draftPaths + PhotoPaintPath(finalizedStroke)).takeLast(12)
-                                                        }
-                                                        currentStroke = emptyList()
-                                                        true
-                                                    }
-                                                    MotionEvent.ACTION_CANCEL -> {
-                                                        currentStroke = emptyList()
-                                                        true
-                                                    }
-                                                    else -> false
-                                                }
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer { clip = true }
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(end = 18.dp)
+                                        .offset { IntOffset(0, -scrollOffsetPx.toInt()) }
+                                        .onSizeChanged { contentHeightPx = it.height.toFloat() }
+                                ) {
+                                    PostCanvasCard(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        item = previewItem,
+                                        viewerId = viewerId,
+                                        secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        primaryTextColor = MaterialTheme.colorScheme.onSurface,
+                                        showPublicPostNumbers = true,
+                                        isMomentWindowPost = target.isMomentWindowPost,
+                                        postMomentKind = target.postMomentKind,
+                                        requestedByUser = target.requestedByUser,
+                                        requestedByUserColor = target.requestedByUserColor,
+                                        onOpenUserProfile = null,
+                                        onOpenViewer = null,
+                                        onOpenExternalUrl = null,
+                                        onOpenHashtagSearch = {},
+                                        headerTrailing = {
+                                            if (!photo.publicNumber.isNullOrBlank()) {
+                                                Text(
+                                                    "#${photo.publicNumber}",
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
                                             }
+                                        },
+                                        overlay = { frameRect ->
+                                            PhotoMarkLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
+                                            PhotoPaintLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
+                                            PhotoPaintPathsLayer(draftPaths, paintColor.copy(alpha = 0.58f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
+                                            if (currentStroke.size >= 2) {
+                                                PhotoPaintPathsLayer(listOf(PhotoPaintPath(currentStroke)), paintColor.copy(alpha = 0.82f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
+                                            }
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .onSizeChanged { overlayCanvasSize = it }
+                                                    .pointerInteropFilter { event ->
+                                                        val width = overlayCanvasSize.width.toFloat().coerceAtLeast(1f)
+                                                        val height = overlayCanvasSize.height.toFloat().coerceAtLeast(1f)
+                                                        when (event.actionMasked) {
+                                                            MotionEvent.ACTION_DOWN -> {
+                                                                currentStroke = listOf(normalizeEditorPoint(Offset(event.x, event.y), width, height))
+                                                                true
+                                                            }
+                                                            MotionEvent.ACTION_MOVE -> {
+                                                                val historySize = event.historySize
+                                                                var updatedStroke = currentStroke
+                                                                for (index in 0 until historySize) {
+                                                                    val point = normalizeEditorPoint(
+                                                                        Offset(event.getHistoricalX(index), event.getHistoricalY(index)),
+                                                                        width,
+                                                                        height
+                                                                    )
+                                                                    val last = updatedStroke.lastOrNull()
+                                                                    if (last == null || abs(last.x - point.x) > 0.0015f || abs(last.y - point.y) > 0.0015f) {
+                                                                        updatedStroke = updatedStroke + point
+                                                                    }
+                                                                }
+                                                                val currentPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
+                                                                val currentLast = updatedStroke.lastOrNull()
+                                                                if (currentLast == null || abs(currentLast.x - currentPoint.x) > 0.0015f || abs(currentLast.y - currentPoint.y) > 0.0015f) {
+                                                                    updatedStroke = updatedStroke + currentPoint
+                                                                }
+                                                                currentStroke = updatedStroke
+                                                                true
+                                                            }
+                                                            MotionEvent.ACTION_UP -> {
+                                                                val finalPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
+                                                                val finalizedStroke = if (
+                                                                    currentStroke.lastOrNull()?.let { abs(it.x - finalPoint.x) > 0.0015f || abs(it.y - finalPoint.y) > 0.0015f }
+                                                                        ?: true
+                                                                ) {
+                                                                    currentStroke + finalPoint
+                                                                } else {
+                                                                    currentStroke
+                                                                }
+                                                                if (finalizedStroke.size >= 2) {
+                                                                    draftPaths = (draftPaths + PhotoPaintPath(finalizedStroke)).takeLast(12)
+                                                                }
+                                                                currentStroke = emptyList()
+                                                                true
+                                                            }
+                                                            MotionEvent.ACTION_CANCEL -> {
+                                                                currentStroke = emptyList()
+                                                                true
+                                                            }
+                                                            else -> false
+                                                        }
+                                                    }
+                                            )
+                                        }
                                     )
                                 }
                             }
-                        )
+                            EditorScrollbar(
+                                scrollOffsetPx = scrollOffsetPx,
+                                viewportHeightPx = viewportHeightPx,
+                                contentHeightPx = contentHeightPx,
+                                onScrollOffsetChange = { scrollOffsetPx = it.coerceIn(0f, maxScrollOffsetPx) },
+                                modifier = Modifier
+                                    .align(Alignment.CenterEnd)
+                                    .fillMaxHeight()
+                                    .padding(vertical = 8.dp)
+                            )
+                        }
                     }
                     HorizontalDivider()
                     Column(
@@ -10041,6 +10425,73 @@ private fun PhotoPaintEditorDialog(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EditorScrollbar(
+    scrollOffsetPx: Float,
+    viewportHeightPx: Float,
+    contentHeightPx: Float,
+    onScrollOffsetChange: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val scrollRangePx = (contentHeightPx - viewportHeightPx).coerceAtLeast(0f)
+    val viewportDp = with(LocalDensity.current) { viewportHeightPx.toDp() }
+    Box(
+        modifier = modifier.widthIn(min = 12.dp, max = 12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .align(Alignment.Center)
+                .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.28f), RoundedCornerShape(999.dp))
+        )
+        if (viewportHeightPx > 0f && contentHeightPx > 0f) {
+            val visibleRatio = (viewportHeightPx / contentHeightPx).coerceIn(0f, 1f)
+            val thumbHeightPx = maxOf(viewportHeightPx * visibleRatio, 36f)
+            val thumbTravelPx = (viewportHeightPx - thumbHeightPx).coerceAtLeast(0f)
+            val thumbOffsetPx = if (scrollRangePx > 0f && thumbTravelPx > 0f) {
+                (scrollOffsetPx / scrollRangePx) * thumbTravelPx
+            } else {
+                0f
+            }
+            var thumbGrabOffsetPx by remember(scrollRangePx, viewportHeightPx, contentHeightPx) { mutableStateOf(0f) }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(viewportDp)
+                    .pointerInput(scrollRangePx, viewportHeightPx, contentHeightPx) {
+                        detectTapGestures { offset ->
+                            if (thumbTravelPx <= 0f || scrollRangePx <= 0f) return@detectTapGestures
+                            val desiredThumbTop = (offset.y - thumbHeightPx / 2f).coerceIn(0f, thumbTravelPx)
+                            onScrollOffsetChange((desiredThumbTop / thumbTravelPx) * scrollRangePx)
+                        }
+                    }
+                    .pointerInput(scrollRangePx, viewportHeightPx, contentHeightPx, thumbOffsetPx) {
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                thumbGrabOffsetPx = (offset.y - thumbOffsetPx).coerceIn(0f, thumbHeightPx)
+                            },
+                            onDrag = { change, _ ->
+                                if (thumbTravelPx > 0f && scrollRangePx > 0f) {
+                                    val desiredThumbTop = (change.position.y - thumbGrabOffsetPx).coerceIn(0f, thumbTravelPx)
+                                    onScrollOffsetChange((desiredThumbTop / thumbTravelPx) * scrollRangePx)
+                                }
+                                change.consumePositionChange()
+                            }
+                        )
+                    }
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(with(LocalDensity.current) { thumbHeightPx.toDp() })
+                        .offset { IntOffset(0, thumbOffsetPx.toInt()) }
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.88f), RoundedCornerShape(999.dp))
+                )
             }
         }
     }
@@ -10123,6 +10574,10 @@ fun CalendarTab(
     days: List<String>,
     dayStats: Map<String, DayStatItem>,
     photosByDay: Map<String, List<CalendarPhotoItem>>,
+    timeCapsuleItems: List<FeedItem>,
+    timeCapsuleFilter: TimeCapsuleFilter,
+    timeCapsuleLockedCount: Int,
+    timeCapsuleReleasedCount: Int,
     searchQuery: String,
     searchResults: List<CalendarSearchMatchItem>,
     selected: String,
@@ -10131,6 +10586,7 @@ fun CalendarTab(
     showPublicPostNumbers: Boolean,
     onPickerExpandedChange: (Boolean) -> Unit,
     onModeChange: (CalendarMode) -> Unit,
+    onTimeCapsuleFilterChange: (TimeCapsuleFilter) -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onSearchSubmit: () -> Unit,
     onOpenHashtagSearch: (String) -> Unit,
@@ -10185,12 +10641,23 @@ fun CalendarTab(
     val modeLabel = when (mode) {
         CalendarMode.PUBLIC -> "Oeffentlich"
         CalendarMode.BOOKMARKS -> "Gemerkt"
+        CalendarMode.TIME_CAPSULES -> "Timecapsules"
         CalendarMode.SEARCH -> "Suche"
     }
     val subtitle = when (mode) {
         CalendarMode.PUBLIC -> "Alle sichtbaren Posts im Kalender"
         CalendarMode.BOOKMARKS -> "Deine gemerkten Beitraege"
+        CalendarMode.TIME_CAPSULES -> "Globaler Capsule-Feed mit offenen und gesperrten Timecapsules"
         CalendarMode.SEARCH -> if (searchQuery.isBlank()) "Suche nach Caption, Kommentaren und Hashtags" else "Treffer fuer \"$searchQuery\""
+    }
+    val filteredTimeCapsules = remember(timeCapsuleItems, timeCapsuleFilter) {
+        timeCapsuleItems.filter { item ->
+            when (timeCapsuleFilter) {
+                TimeCapsuleFilter.ALL -> true
+                TimeCapsuleFilter.RELEASED -> item.capsuleReleased
+                TimeCapsuleFilter.LOCKED -> item.capsuleLocked
+            }
+        }
     }
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -10228,6 +10695,7 @@ fun CalendarTab(
                                                 when (entry) {
                                                     CalendarMode.PUBLIC -> "Oeffentlich"
                                                     CalendarMode.BOOKMARKS -> "Gemerkt"
+                                                    CalendarMode.TIME_CAPSULES -> "Timecapsules"
                                                     CalendarMode.SEARCH -> "Suche"
                                                 }
                                             )
@@ -10253,6 +10721,30 @@ fun CalendarTab(
                                         modifier = Modifier.weight(1f)
                                     ) {
                                         Text("#daily")
+                                    }
+                                }
+                            } else if (mode == CalendarMode.TIME_CAPSULES) {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    item {
+                                        FilterChip(
+                                            selected = timeCapsuleFilter == TimeCapsuleFilter.ALL,
+                                            onClick = { onTimeCapsuleFilterChange(TimeCapsuleFilter.ALL) },
+                                            label = { Text("Alle") }
+                                        )
+                                    }
+                                    item {
+                                        FilterChip(
+                                            selected = timeCapsuleFilter == TimeCapsuleFilter.RELEASED,
+                                            onClick = { onTimeCapsuleFilterChange(TimeCapsuleFilter.RELEASED) },
+                                            label = { Text("Offen $timeCapsuleReleasedCount") }
+                                        )
+                                    }
+                                    item {
+                                        FilterChip(
+                                            selected = timeCapsuleFilter == TimeCapsuleFilter.LOCKED,
+                                            onClick = { onTimeCapsuleFilterChange(TimeCapsuleFilter.LOCKED) },
+                                            label = { Text("Gesperrt $timeCapsuleLockedCount") }
+                                        )
                                     }
                                 }
                             }
@@ -10346,6 +10838,44 @@ fun CalendarTab(
                 }
             }
         }
+        if (mode == CalendarMode.TIME_CAPSULES && filteredTimeCapsules.isNotEmpty()) {
+            item("calendar-timecapsules-results") {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Globaler Capsule-Feed", fontWeight = FontWeight.Bold)
+                        filteredTimeCapsules.take(32).forEach { item ->
+                            val imageUrl = if (item.capsuleLocked) item.photo.capsulePreviewUrl ?: item.photo.url else item.photo.url
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenPhotoInFeed(item.photo.day, item.photo.id) },
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AsyncImage(
+                                    model = imageUrl,
+                                    contentDescription = "Timecapsule",
+                                    modifier = Modifier.size(58.dp),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text("@${item.user.username} · ${formatDayLabel(item.photo.day)}", fontWeight = FontWeight.SemiBold, color = parseUserColor(item.user.favoriteColor))
+                                    Text(
+                                        if (item.capsuleLocked) "Gesperrt bis ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}" else "Offen seit ${formatCapsuleOpenAt(item.photo.capsuleVisibleAt)}",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    if (showPublicPostNumbers && !item.photo.publicNumber.isNullOrBlank()) {
+                                        Text("#${item.photo.publicNumber}", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+                                    }
+                                    Text("${item.reactions?.size ?: 0} Reaktionen · ${item.comments?.size ?: 0} Kommentare", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (days.isEmpty()) {
             item("calendar-empty-state") {
                 Box(modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp), contentAlignment = Alignment.Center) {
@@ -10353,6 +10883,7 @@ fun CalendarTab(
                         when {
                             loading -> "Kalender wird geladen ..."
                             mode == CalendarMode.SEARCH -> "Keine Treffer gefunden"
+                            mode == CalendarMode.TIME_CAPSULES -> "Keine Timecapsules gefunden"
                             else -> "Keine Tage mit Bildern vorhanden"
                         }
                     )
@@ -10994,6 +11525,7 @@ fun ProfileTab(
     photoReactionPushEnabled: Boolean,
     photoCommentPushEnabled: Boolean,
     bookmarkedPhotoPushEnabled: Boolean,
+    postNumberInPushEnabled: Boolean,
     allowPhotoDownload: Boolean,
     creativePostMode: String,
     locationFeatureEnabled: Boolean,
@@ -11035,6 +11567,7 @@ fun ProfileTab(
     onPhotoReactionPushEnabledChange: (Boolean) -> Unit,
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
     onBookmarkedPhotoPushEnabledChange: (Boolean) -> Unit,
+    onPostNumberInPushEnabledChange: (Boolean) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onCreativePostModeChange: (String) -> Unit,
     onLocationFeatureEnabledChange: (Boolean) -> Unit,
@@ -11894,6 +12427,12 @@ fun ProfileTab(
                         checked = bookmarkedPhotoPushEnabled,
                         onCheckedChange = onBookmarkedPhotoPushEnabledChange,
                         supportingText = "Kommentare, Reaktionen und FotoMojis auf gemerkten fremden Posts."
+                    )
+                    SettingsToggleRow(
+                        label = "Post-Nummer in Benachrichtigungen",
+                        checked = postNumberInPushEnabled,
+                        onCheckedChange = onPostNumberInPushEnabledChange,
+                        supportingText = "Ergaenzt Interaktions-Pushes um die stabile Post-ID wie #260526001."
                     )
                 }
                 SettingsSubsection("Ton", "Klingelton und Test fuer deine Push-Benachrichtigungen") {

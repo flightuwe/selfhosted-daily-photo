@@ -1,0 +1,9 @@
+{
+  "version": "v0.5.16",
+  "title": "Feed, Kalender und Push-Flows stabilisiert",
+  "items": [
+    "Der Feed reagiert stabiler auf Pull-to-Refresh und auf Spruenge aus Pushes, Kalender und Capsule-Links.",
+    "Feed, Kalender und Benachrichtigungen wurden gemeinsam ueberarbeitet, damit Discover-, Bookmark- und Interaktions-Flows konsistent bleiben.",
+    "Time-Capsule-Ansichten respektieren wieder sauber die Sichtbarkeit, und Benachrichtigungen koennen optional die stabile Post-Nummer enthalten."
+  ]
+}

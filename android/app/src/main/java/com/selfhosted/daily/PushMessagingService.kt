@@ -38,12 +38,14 @@ class PushMessagingService : FirebaseMessagingService() {
         val inviteEnabled = prefs.getBoolean("invite_registration_push_enabled_local", false)
         val reactionEnabled = prefs.getBoolean("photo_reaction_push_enabled_local", false)
         val commentEnabled = prefs.getBoolean("photo_comment_push_enabled_local", false)
+        val bookmarkedEnabled = prefs.getBoolean("bookmarked_photo_push_enabled_local", false)
         if ((type == "chat" || type == "chat_message") && !chatEnabled) return
         if ((type == "feed_post" || type == "post" || type == "extra_post") && !feedEnabled) return
         if ((type == "special_request" || type == "special_moment") && !specialEnabled) return
         if ((type == "invite_registered" || type == "invite_registration") && !inviteEnabled) return
         if ((type == "photo_reaction" || type == "photo_fotomoji") && !reactionEnabled) return
         if (type == "photo_comment" && !commentEnabled) return
+        if ((type == "bookmarked_photo_reaction" || type == "bookmarked_photo_fotomoji" || type == "bookmarked_photo_comment") && !bookmarkedEnabled) return
         if (isBlockedByQuietHours(type, prefs)) return
 
         val tone = toneConfig(prefs)

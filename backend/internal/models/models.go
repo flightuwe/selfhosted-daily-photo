@@ -16,6 +16,7 @@ type User struct {
 	PhotoFotomojiPushEnabled      bool       `gorm:"default:false" json:"photoFotomojiPushEnabled"`
 	PhotoCommentPushEnabled       bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
 	BookmarkedPhotoPushEnabled    bool       `gorm:"default:false" json:"bookmarkedPhotoPushEnabled"`
+	PostNumberInPushEnabled       bool       `gorm:"default:false" json:"postNumberInPushEnabled"`
 	AllowPhotoDownload            bool       `gorm:"default:false" json:"allowPhotoDownload"`
 	CreativePostMode              string     `gorm:"size:16;default:'none'" json:"creativePostMode"`
 	LocationFeatureEnabled        bool       `gorm:"default:false" json:"locationFeatureEnabled"`

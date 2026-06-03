@@ -278,11 +278,13 @@ func (s *Server) Router() *gin.Engine {
 			protected.POST("/uploads/dual", s.handleDualUpload)
 			protected.GET("/feed", s.handleFeed)
 			protected.GET("/feed/window", s.handleFeedWindow)
+			protected.GET("/feed/discover", s.handleFeedDiscover)
 			protected.GET("/feed/days", s.handleFeedDays)
 			protected.GET("/feed/day-stats", s.handleFeedDayStats)
 			protected.GET("/calendar/public", s.handleCalendarPublic)
 			protected.GET("/calendar/user/:id", s.handleCalendarUser)
 			protected.GET("/calendar/bookmarks", s.handleCalendarBookmarks)
+			protected.GET("/calendar/time-capsules", s.handleCalendarTimeCapsules)
 			protected.GET("/calendar/search", s.handleCalendarSearch)
 			protected.GET("/community/stats", s.handleCommunityStats)
 			protected.GET("/chat", s.handleChatList)
@@ -838,6 +840,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		PhotoFotomojiPushEnabled      *bool   `json:"photoFotomojiPushEnabled"`
 		PhotoCommentPushEnabled       *bool   `json:"photoCommentPushEnabled"`
 		BookmarkedPhotoPushEnabled    *bool   `json:"bookmarkedPhotoPushEnabled"`
+		PostNumberInPushEnabled       *bool   `json:"postNumberInPushEnabled"`
 		AllowPhotoDownload            *bool   `json:"allowPhotoDownload"`
 		CreativePostMode              *string `json:"creativePostMode"`
 		LocationFeatureEnabled        *bool   `json:"locationFeatureEnabled"`
@@ -873,6 +876,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.BookmarkedPhotoPushEnabled != nil {
 		updates["bookmarked_photo_push_enabled"] = *req.BookmarkedPhotoPushEnabled
+	}
+	if req.PostNumberInPushEnabled != nil {
+		updates["post_number_in_push_enabled"] = *req.PostNumberInPushEnabled
 	}
 	if req.AllowPhotoDownload != nil {
 		updates["allow_photo_download"] = *req.AllowPhotoDownload
@@ -2400,6 +2406,200 @@ func (s *Server) handleFeedWindow(c *gin.Context) {
 		"newestLoadedDay":      selectedDays[0],
 		"resolvedFocusPhotoId": parseOptionalInt64(focusPhotoID),
 	})
+}
+
+func (s *Server) handleFeedDiscover(c *gin.Context) {
+	user, _ := userFromContext(c)
+	now := time.Now().In(s.Location)
+	if allow, retryAfter := s.allowFeedRead(user.ID, now); !allow {
+		if s.Monitor != nil {
+			s.Monitor.RecordThrottle("feed_spike_poll_guard")
+		}
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		c.Header("X-RateLimit-Policy", "soft")
+		c.Header("X-RateLimit-Reason", "feed_spike_poll_guard")
+		c.Header("X-RateLimit-Scope", "feed")
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":      "Zu viele Feed-Aktualisierungen in kurzer Zeit. Bitte gleich erneut versuchen.",
+			"code":       "feed_rate_limited",
+			"reasonTag":  "feed_spike_poll_guard",
+			"retryAfter": retryAfter,
+		})
+		return
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(c.Query("mode")))
+	if mode != "trend" && mode != "random" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mode"})
+		return
+	}
+	offset, err := parseNonNegativeQueryInt(c, "offset", 0)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	limitDays, err := parseNonNegativeQueryInt(c, "limit_days", 7)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if limitDays <= 0 {
+		limitDays = 7
+	}
+	if limitDays > 21 {
+		limitDays = 21
+	}
+	randomSeed, _ := strconv.ParseInt(strings.TrimSpace(c.Query("random_seed")), 10, 64)
+	if randomSeed == 0 {
+		randomSeed = now.UnixNano()
+	}
+	anchorDay := strings.TrimSpace(c.Query("anchor_day"))
+	if anchorDay != "" {
+		if _, err := time.ParseInLocation("2006-01-02", anchorDay, s.Location); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid anchor_day date"})
+			return
+		}
+	}
+	focusPhotoID := parseOptionalInt64(strings.TrimSpace(c.Query("focus_photo_id")))
+
+	days, _, _, err := s.feedDaysForUser(user.ID, "", "", "", "", 180, "", now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	payloads := make([]discoverDayPayload, 0, len(days))
+	for _, day := range days {
+		payload, status, payloadErr := s.feedPayloadForDay(user.ID, day, now)
+		if payloadErr != nil {
+			writeFeedDayAccessError(c, status, payloadErr)
+			return
+		}
+		items, _ := payload["items"].([]gin.H)
+		sortFeedItemsForDiscover(items, mode, randomSeed, day)
+		payload["items"] = items
+
+		entry := discoverDayPayload{
+			Day:     day,
+			Payload: payload,
+		}
+		for idx, item := range items {
+			interaction := feedItemInteractionCount(item)
+			bookmark := feedItemBookmarkCount(item)
+			entry.InteractionSum += interaction
+			entry.BookmarkSum += bookmark
+			score := interaction*10 + bookmark*3
+			if idx == 0 || score > entry.BestScore {
+				entry.BestScore = score
+				entry.BestAt = feedItemEffectiveTime(item)
+			}
+		}
+		payloads = append(payloads, entry)
+	}
+
+	switch mode {
+	case "trend":
+		sort.SliceStable(payloads, func(i, j int) bool {
+			left := payloads[i]
+			right := payloads[j]
+			leftScore := left.InteractionSum*10 + left.BookmarkSum*3 + left.BestScore
+			rightScore := right.InteractionSum*10 + right.BookmarkSum*3 + right.BestScore
+			if leftScore != rightScore {
+				return leftScore > rightScore
+			}
+			if !left.BestAt.Equal(right.BestAt) {
+				return left.BestAt.After(right.BestAt)
+			}
+			return left.Day > right.Day
+		})
+	case "random":
+		sort.SliceStable(payloads, func(i, j int) bool {
+			left := seededSortWeight(randomSeed, payloads[i].Day, 0)
+			right := seededSortWeight(randomSeed, payloads[j].Day, 0)
+			if left != right {
+				return left < right
+			}
+			return payloads[i].Day > payloads[j].Day
+		})
+	}
+
+	if targetIndex := discoverTargetIndex(payloads, anchorDay, focusPhotoID); targetIndex >= 0 {
+		offset = discoverOffsetForTarget(len(payloads), limitDays, targetIndex)
+	}
+	if offset > len(payloads) {
+		offset = len(payloads)
+	}
+	end := offset + limitDays
+	if end > len(payloads) {
+		end = len(payloads)
+	}
+	selected := payloads[offset:end]
+	daysOut := make([]gin.H, 0, len(selected))
+	for _, entry := range selected {
+		daysOut = append(daysOut, entry.Payload)
+	}
+	resolvedAnchorDay := ""
+	if len(selected) > 0 {
+		resolvedAnchorDay = selected[0].Day
+	}
+	var oldestLoaded string
+	var newestLoaded string
+	if len(selected) > 0 {
+		newestLoaded = selected[0].Day
+		oldestLoaded = selected[len(selected)-1].Day
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"anchorDay":            resolvedAnchorDay,
+		"days":                 daysOut,
+		"hasOlder":             end < len(payloads),
+		"hasNewer":             offset > 0,
+		"oldestLoadedDay":      oldestLoaded,
+		"newestLoadedDay":      newestLoaded,
+		"resolvedFocusPhotoId": focusPhotoID,
+		"mode":                 mode,
+		"offset":               offset,
+		"nextOffset":           end,
+		"randomSeed":           randomSeed,
+	})
+}
+
+func discoverTargetIndex(payloads []discoverDayPayload, anchorDay string, focusPhotoID *int64) int {
+	if focusPhotoID != nil {
+		targetID := uint64(*focusPhotoID)
+		for idx, payload := range payloads {
+			items, _ := payload.Payload["items"].([]gin.H)
+			for _, item := range items {
+				if feedItemPhotoID(item) == targetID {
+					return idx
+				}
+			}
+		}
+	}
+	if anchorDay != "" {
+		for idx, payload := range payloads {
+			if payload.Day == anchorDay {
+				return idx
+			}
+		}
+	}
+	return -1
+}
+
+func discoverOffsetForTarget(total int, limit int, targetIndex int) int {
+	if total <= 0 || limit <= 0 || targetIndex < 0 {
+		return 0
+	}
+	if total <= limit {
+		return 0
+	}
+	offset := targetIndex - limit/2
+	if offset < 0 {
+		offset = 0
+	}
+	maxOffset := total - limit
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	return offset
 }
 
 func writeFeedDayAccessError(c *gin.Context, status int, err error) {
@@ -5550,6 +5750,17 @@ func (s *Server) handleCalendarBookmarks(c *gin.Context) {
 	c.JSON(http.StatusOK, payload)
 }
 
+func (s *Server) handleCalendarTimeCapsules(c *gin.Context) {
+	user, _ := userFromContext(c)
+	now := time.Now().In(s.Location)
+	payload, err := s.calendarTimeCapsulesPayload(user.ID, now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
 func (s *Server) handleCalendarSearch(c *gin.Context) {
 	user, _ := userFromContext(c)
 	now := time.Now().In(s.Location)
@@ -6200,6 +6411,221 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		"dayStats":    outStats,
 		"photosByDay": outPhotosByDay,
 		"users":       users,
+	}, nil
+}
+
+func (s *Server) timeCapsulePhotoJSONForViewer(viewerID uint, photo models.Photo, decorations *viewerPhotoDecorations, now time.Time) gin.H {
+	row := s.photoJSONForViewer(viewerID, photo, decorations)
+	locked := photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt)
+	if locked && viewerID != photo.UserID {
+		previewURL, _ := row["capsulePreviewUrl"].(string)
+		row["url"] = strings.TrimSpace(previewURL)
+		delete(row, "secondUrl")
+		row["caption"] = ""
+		row["locationShared"] = false
+		row["locationDisplay"] = ""
+		row["locationMapsUrl"] = ""
+		row["marks"] = []gin.H{}
+		row["paints"] = []gin.H{}
+		row["canMark"] = false
+		row["canPaint"] = false
+		row["markedByMe"] = false
+		row["paintedByMe"] = false
+	}
+	return row
+}
+
+func (s *Server) calendarTimeCapsulesPayload(viewerID uint, now time.Time) (gin.H, error) {
+	var photos []models.Photo
+	if err := s.DB.Preload("User").
+		Where("TRIM(capsule_mode) <> ''").
+		Order("created_at desc, id desc").
+		Find(&photos).Error; err != nil {
+		return nil, err
+	}
+	if len(photos) == 0 {
+		users, err := s.calendarUsers(viewerID, now)
+		if err != nil {
+			return nil, err
+		}
+		return gin.H{
+			"days":          []string{},
+			"dayStats":      []gin.H{},
+			"photosByDay":   gin.H{},
+			"users":         users,
+			"items":         []gin.H{},
+			"lockedCount":   0,
+			"releasedCount": 0,
+		}, nil
+	}
+
+	photoIDs := make([]uint, 0, len(photos))
+	for _, photo := range photos {
+		photoIDs = append(photoIDs, photo.ID)
+	}
+	decorations, err := s.photoDecorationsForViewer(viewerID, photoIDs)
+	if err != nil {
+		return nil, err
+	}
+	reactionByPhoto, commentByPhoto, photoMojiByPhoto, err := s.feedInteractionPreview(photoIDs)
+	if err != nil {
+		return nil, err
+	}
+	reactionCounts := make(map[uint]int64, len(photoIDs))
+	commentCounts := make(map[uint]int64, len(photoIDs))
+	for photoID, rows := range reactionByPhoto {
+		reactionCounts[photoID] = int64(len(rows))
+	}
+	for photoID, rows := range photoMojiByPhoto {
+		reactionCounts[photoID] += int64(len(rows))
+	}
+	for photoID, rows := range commentByPhoto {
+		commentCounts[photoID] = int64(len(rows))
+	}
+
+	daySeen := make(map[string]struct{}, len(photos))
+	days := make([]string, 0, len(photos))
+	postCountByDay := make(map[string]int64, len(photos))
+	participantsByDay := make(map[string]map[uint]struct{}, len(photos))
+	bestByDay := make(map[string]models.Photo, len(photos))
+	bestReactionByDay := make(map[string]int64, len(photos))
+	bestCommentByDay := make(map[string]int64, len(photos))
+	items := make([]gin.H, 0, len(photos))
+	photosByDay := make(map[string][]gin.H, len(photos))
+	lockedCount := 0
+	releasedCount := 0
+
+	for _, photo := range photos {
+		if !photoVisibleToViewer(viewerID, photo, now) {
+			continue
+		}
+		locked := photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt)
+		released := strings.TrimSpace(photo.CapsuleMode) != "" && !locked
+		if locked {
+			lockedCount++
+		} else {
+			releasedCount++
+		}
+		if _, ok := daySeen[photo.Day]; !ok {
+			daySeen[photo.Day] = struct{}{}
+			days = append(days, photo.Day)
+		}
+		postCountByDay[photo.Day]++
+		participants := participantsByDay[photo.Day]
+		if participants == nil {
+			participants = map[uint]struct{}{}
+			participantsByDay[photo.Day] = participants
+		}
+		participants[photo.UserID] = struct{}{}
+
+		reactionCount := reactionCounts[photo.ID]
+		commentCount := commentCounts[photo.ID]
+		interactionCount := reactionCount + commentCount
+		best, ok := bestByDay[photo.Day]
+		replaceBest := true
+		if ok {
+			bestInteraction := bestReactionByDay[photo.Day] + bestCommentByDay[photo.Day]
+			if interactionCount < bestInteraction {
+				replaceBest = false
+			}
+			if interactionCount == bestInteraction && photoEffectiveTime(photo).Before(photoEffectiveTime(best)) {
+				replaceBest = false
+			}
+		}
+		if replaceBest {
+			bestByDay[photo.Day] = photo
+			bestReactionByDay[photo.Day] = reactionCount
+			bestCommentByDay[photo.Day] = commentCount
+		}
+		row := gin.H{
+			"isEarly":         false,
+			"isLate":          false,
+			"capsuleLocked":   locked,
+			"capsuleReleased": released,
+			"photo":           s.timeCapsulePhotoJSONForViewer(viewerID, photo, decorations, now),
+			"user":            s.userPublicJSON(viewerID, photo.User),
+			"reactions":       reactionByPhoto[photo.ID],
+			"comments":        commentByPhoto[photo.ID],
+			"photoMojis":      photoMojiByPhoto[photo.ID],
+		}
+		if row["reactions"] == nil {
+			row["reactions"] = []gin.H{}
+		}
+		if row["comments"] == nil {
+			row["comments"] = []gin.H{}
+		}
+		if row["photoMojis"] == nil {
+			row["photoMojis"] = []gin.H{}
+		}
+		items = append(items, row)
+		photosByDay[photo.Day] = append(photosByDay[photo.Day], gin.H{
+			"photo": row["photo"],
+			"user":  row["user"],
+		})
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		leftReleased, _ := items[i]["capsuleReleased"].(bool)
+		rightReleased, _ := items[j]["capsuleReleased"].(bool)
+		if leftReleased != rightReleased {
+			return leftReleased
+		}
+		leftPhoto, _ := items[i]["photo"].(gin.H)
+		rightPhoto, _ := items[j]["photo"].(gin.H)
+		leftVisibleAt, _ := leftPhoto["capsuleVisibleAt"].(*time.Time)
+		rightVisibleAt, _ := rightPhoto["capsuleVisibleAt"].(*time.Time)
+		if leftReleased && rightReleased {
+			leftAt := feedItemEffectiveTime(items[i])
+			rightAt := feedItemEffectiveTime(items[j])
+			if !leftAt.Equal(rightAt) {
+				return leftAt.After(rightAt)
+			}
+		} else {
+			if leftVisibleAt != nil && rightVisibleAt != nil && !leftVisibleAt.Equal(*rightVisibleAt) {
+				return leftVisibleAt.Before(*rightVisibleAt)
+			}
+		}
+		return feedItemPhotoID(items[i]) > feedItemPhotoID(items[j])
+	})
+
+	outStats := make([]gin.H, 0, len(days))
+	for _, day := range days {
+		item := gin.H{
+			"day":              day,
+			"count":            postCountByDay[day],
+			"postCount":        postCountByDay[day],
+			"participantCount": int64(len(participantsByDay[day])),
+			"featuredPhoto":    nil,
+		}
+		if photo, ok := bestByDay[day]; ok {
+			item["featuredPhoto"] = gin.H{
+				"photoId":          photo.ID,
+				"url":              s.timeCapsulePhotoJSONForViewer(viewerID, photo, decorations, now)["url"],
+				"secondUrl":        "",
+				"user":             s.userPublicJSON(viewerID, photo.User),
+				"reactionCount":    bestReactionByDay[day],
+				"commentCount":     bestCommentByDay[day],
+				"interactionCount": bestReactionByDay[day] + bestCommentByDay[day],
+				"bookmarkedByMe":   decorations.bookmarkMap[photo.ID],
+				"bookmarkCount":    decorations.bookmarkCounts[photo.ID],
+				"publicNumber":     photoPublicNumberValue(photo),
+			}
+		}
+		outStats = append(outStats, item)
+	}
+
+	users, err := s.calendarUsers(viewerID, now)
+	if err != nil {
+		return nil, err
+	}
+	return gin.H{
+		"days":          days,
+		"dayStats":      outStats,
+		"photosByDay":   photosByDay,
+		"users":         users,
+		"items":         items,
+		"lockedCount":   lockedCount,
+		"releasedCount": releasedCount,
 	}, nil
 }
 
@@ -9292,6 +9718,133 @@ func sortPhotosForFeed(photos []models.Photo) {
 	})
 }
 
+type discoverDayPayload struct {
+	Day            string
+	Payload        gin.H
+	InteractionSum int
+	BookmarkSum    int
+	BestScore      int
+	BestAt         time.Time
+}
+
+func feedItemInteractionCount(item gin.H) int {
+	count := 0
+	if reactions, ok := item["reactions"].([]gin.H); ok {
+		count += len(reactions)
+	}
+	if comments, ok := item["comments"].([]gin.H); ok {
+		count += len(comments)
+	}
+	if photoMojis, ok := item["photoMojis"].([]gin.H); ok {
+		count += len(photoMojis)
+	}
+	return count
+}
+
+func feedItemBookmarkCount(item gin.H) int {
+	photo, ok := item["photo"].(gin.H)
+	if !ok {
+		return 0
+	}
+	switch raw := photo["bookmarkCount"].(type) {
+	case int:
+		return raw
+	case int32:
+		return int(raw)
+	case int64:
+		return int(raw)
+	case float64:
+		return int(raw)
+	default:
+		return 0
+	}
+}
+
+func feedItemEffectiveTime(item gin.H) time.Time {
+	photo, ok := item["photo"].(gin.H)
+	if !ok {
+		return time.Time{}
+	}
+	switch raw := photo["createdAt"].(type) {
+	case time.Time:
+		return raw
+	case *time.Time:
+		if raw != nil {
+			return *raw
+		}
+	case string:
+		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func feedItemPhotoID(item gin.H) uint64 {
+	photo, ok := item["photo"].(gin.H)
+	if !ok {
+		return 0
+	}
+	switch raw := photo["id"].(type) {
+	case uint:
+		return uint64(raw)
+	case uint64:
+		return raw
+	case int:
+		if raw > 0 {
+			return uint64(raw)
+		}
+	case int64:
+		if raw > 0 {
+			return uint64(raw)
+		}
+	case float64:
+		if raw > 0 {
+			return uint64(raw)
+		}
+	}
+	return 0
+}
+
+func seededSortWeight(seed int64, day string, photoID uint64) uint64 {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%d", seed, day, photoID)))
+	return uint64(sum[0])<<56 | uint64(sum[1])<<48 | uint64(sum[2])<<40 | uint64(sum[3])<<32 |
+		uint64(sum[4])<<24 | uint64(sum[5])<<16 | uint64(sum[6])<<8 | uint64(sum[7])
+}
+
+func sortFeedItemsForDiscover(items []gin.H, mode string, seed int64, day string) {
+	switch mode {
+	case "trend":
+		sort.SliceStable(items, func(i, j int) bool {
+			leftInteraction := feedItemInteractionCount(items[i])
+			rightInteraction := feedItemInteractionCount(items[j])
+			if leftInteraction != rightInteraction {
+				return leftInteraction > rightInteraction
+			}
+			leftBookmark := feedItemBookmarkCount(items[i])
+			rightBookmark := feedItemBookmarkCount(items[j])
+			if leftBookmark != rightBookmark {
+				return leftBookmark > rightBookmark
+			}
+			leftTime := feedItemEffectiveTime(items[i])
+			rightTime := feedItemEffectiveTime(items[j])
+			if !leftTime.Equal(rightTime) {
+				return leftTime.After(rightTime)
+			}
+			return feedItemPhotoID(items[i]) > feedItemPhotoID(items[j])
+		})
+	case "random":
+		sort.SliceStable(items, func(i, j int) bool {
+			left := seededSortWeight(seed, day, feedItemPhotoID(items[i]))
+			right := seededSortWeight(seed, day, feedItemPhotoID(items[j]))
+			if left != right {
+				return left < right
+			}
+			return feedItemPhotoID(items[i]) > feedItemPhotoID(items[j])
+		})
+	}
+}
+
 func (s *Server) findPhotoByUploadClientID(userID uint, uploadClientID string) (models.Photo, bool, error) {
 	if strings.TrimSpace(uploadClientID) == "" {
 		return models.Photo{}, false, nil
@@ -9940,6 +10493,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"photoFotomojiPushEnabled":      u.PhotoFotomojiPushEnabled,
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
 		"bookmarkedPhotoPushEnabled":    u.BookmarkedPhotoPushEnabled,
+		"postNumberInPushEnabled":       u.PostNumberInPushEnabled,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":        u.LocationFeatureEnabled,
@@ -9978,6 +10532,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"photoFotomojiPushEnabled":      false,
 		"photoCommentPushEnabled":       false,
 		"bookmarkedPhotoPushEnabled":    false,
+		"postNumberInPushEnabled":       false,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":        false,
@@ -10520,6 +11075,19 @@ func photoVisibleToViewer(userID uint, photo models.Photo, now time.Time) bool {
 	return true
 }
 
+type notificationRecipient struct {
+	Token                   string
+	PostNumberInPushEnabled bool
+}
+
+func formatNotificationPostReference(photo models.Photo) string {
+	number := photoPublicNumberValue(photo)
+	if number == "" {
+		return ""
+	}
+	return " #" + number
+}
+
 func invalidPromptOnlyPhotoIDs(photos []models.Photo, promptByDay map[string]models.DailyPrompt) []uint {
 	ids := make([]uint, 0)
 	for _, photo := range photos {
@@ -10935,61 +11503,123 @@ func (s *Server) notifyPostCreated(author models.User, photo models.Photo) {
 	s.removeInvalidTokens(sendResult.InvalidTokens)
 }
 
-func (s *Server) reactionNotificationTokens(ownerID, actorID uint) []string {
-	var rows []models.DeviceToken
+func (s *Server) reactionNotificationRecipients(ownerID, actorID uint) []notificationRecipient {
+	var rows []struct {
+		Token                   string
+		PostNumberInPushEnabled bool
+	}
 	_ = s.DB.Table("device_tokens").
-		Select("device_tokens.token").
+		Select("device_tokens.token, users.post_number_in_push_enabled").
 		Joins("JOIN users ON users.id = device_tokens.user_id").
 		Where("users.id = ? AND users.photo_reaction_push_enabled = ? AND users.id <> ?", ownerID, true, actorID).
 		Find(&rows).Error
-	tokens := make([]string, 0, len(rows))
-	for _, t := range rows {
-		tokens = append(tokens, t.Token)
+	recipients := make([]notificationRecipient, 0, len(rows))
+	for _, row := range rows {
+		recipients = append(recipients, notificationRecipient{
+			Token:                   row.Token,
+			PostNumberInPushEnabled: row.PostNumberInPushEnabled,
+		})
 	}
-	return tokens
+	return recipients
 }
 
-func (s *Server) fotomojiNotificationTokens(ownerID, actorID uint) []string {
-	var rows []models.DeviceToken
+func (s *Server) fotomojiNotificationRecipients(ownerID, actorID uint) []notificationRecipient {
+	var rows []struct {
+		Token                   string
+		PostNumberInPushEnabled bool
+	}
 	_ = s.DB.Table("device_tokens").
-		Select("device_tokens.token").
+		Select("device_tokens.token, users.post_number_in_push_enabled").
 		Joins("JOIN users ON users.id = device_tokens.user_id").
 		Where("users.id = ? AND users.id <> ? AND (users.photo_fotomoji_push_enabled = ? OR users.photo_reaction_push_enabled = ?)", ownerID, actorID, true, true).
 		Find(&rows).Error
-	tokens := make([]string, 0, len(rows))
-	for _, t := range rows {
-		tokens = append(tokens, t.Token)
+	recipients := make([]notificationRecipient, 0, len(rows))
+	for _, row := range rows {
+		recipients = append(recipients, notificationRecipient{
+			Token:                   row.Token,
+			PostNumberInPushEnabled: row.PostNumberInPushEnabled,
+		})
 	}
-	return tokens
+	return recipients
 }
 
-func (s *Server) commentNotificationTokens(ownerID, actorID uint) []string {
-	var rows []models.DeviceToken
+func (s *Server) commentNotificationRecipients(ownerID, actorID uint) []notificationRecipient {
+	var rows []struct {
+		Token                   string
+		PostNumberInPushEnabled bool
+	}
 	_ = s.DB.Table("device_tokens").
-		Select("device_tokens.token").
+		Select("device_tokens.token, users.post_number_in_push_enabled").
 		Joins("JOIN users ON users.id = device_tokens.user_id").
 		Where("users.id = ? AND users.photo_comment_push_enabled = ? AND users.id <> ?", ownerID, true, actorID).
 		Find(&rows).Error
-	tokens := make([]string, 0, len(rows))
-	for _, t := range rows {
-		tokens = append(tokens, t.Token)
+	recipients := make([]notificationRecipient, 0, len(rows))
+	for _, row := range rows {
+		recipients = append(recipients, notificationRecipient{
+			Token:                   row.Token,
+			PostNumberInPushEnabled: row.PostNumberInPushEnabled,
+		})
 	}
-	return tokens
+	return recipients
 }
 
-func (s *Server) bookmarkedPhotoNotificationTokens(photoID, ownerID, actorID uint) []string {
-	var rows []models.DeviceToken
+func (s *Server) bookmarkedPhotoNotificationRecipients(photoID, ownerID, actorID uint) []notificationRecipient {
+	var rows []struct {
+		Token                   string
+		PostNumberInPushEnabled bool
+	}
 	_ = s.DB.Table("device_tokens").
-		Select("device_tokens.token").
+		Select("device_tokens.token, users.post_number_in_push_enabled").
 		Joins("JOIN users ON users.id = device_tokens.user_id").
 		Joins("JOIN photo_bookmarks ON photo_bookmarks.user_id = users.id").
 		Where("photo_bookmarks.photo_id = ? AND users.bookmarked_photo_push_enabled = ? AND users.id <> ? AND users.id <> ?", photoID, true, ownerID, actorID).
 		Find(&rows).Error
-	tokens := make([]string, 0, len(rows))
-	for _, t := range rows {
-		tokens = append(tokens, t.Token)
+	recipients := make([]notificationRecipient, 0, len(rows))
+	for _, row := range rows {
+		recipients = append(recipients, notificationRecipient{
+			Token:                   row.Token,
+			PostNumberInPushEnabled: row.PostNumberInPushEnabled,
+		})
 	}
-	return tokens
+	return recipients
+}
+
+func (s *Server) sendPhotoNotification(recipients []notificationRecipient, title string, baseBody string, messageType string, photo models.Photo) {
+	if len(recipients) == 0 {
+		return
+	}
+	withPostNumber := make([]string, 0, len(recipients))
+	withoutPostNumber := make([]string, 0, len(recipients))
+	postRef := formatNotificationPostReference(photo)
+	for _, recipient := range recipients {
+		if strings.TrimSpace(recipient.Token) == "" {
+			continue
+		}
+		if recipient.PostNumberInPushEnabled && postRef != "" {
+			withPostNumber = append(withPostNumber, recipient.Token)
+		} else {
+			withoutPostNumber = append(withoutPostNumber, recipient.Token)
+		}
+	}
+	sendGroup := func(tokens []string, body string) {
+		if len(tokens) == 0 {
+			return
+		}
+		sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+			Title:   title,
+			Body:    body,
+			Type:    messageType,
+			Action:  "open_feed",
+			Day:     photo.Day,
+			PhotoID: int64(photo.ID),
+		})
+		s.recordPushResult(sendResult, sendErr)
+		s.removeInvalidTokens(sendResult.InvalidTokens)
+	}
+	sendGroup(withoutPostNumber, baseBody)
+	if len(withPostNumber) > 0 {
+		sendGroup(withPostNumber, baseBody+postRef)
+	}
 }
 
 func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
@@ -10998,36 +11628,13 @@ func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
 		return
 	}
 	if photo.UserID != 0 && photo.UserID != actor.ID {
-		tokens := s.reactionNotificationTokens(photo.UserID, actor.ID)
-		if len(tokens) > 0 {
-			body := fmt.Sprintf("%s hat auf deinen Beitrag reagiert", actor.Username)
-			sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
-				Title:   "Neue Reaktion",
-				Body:    body,
-				Type:    "photo_reaction",
-				Action:  "open_feed",
-				Day:     photo.Day,
-				PhotoID: int64(photo.ID),
-			})
-			s.recordPushResult(sendResult, sendErr)
-			s.removeInvalidTokens(sendResult.InvalidTokens)
-		}
-	}
-	bookmarkTokens := s.bookmarkedPhotoNotificationTokens(photo.ID, photo.UserID, actor.ID)
-	if len(bookmarkTokens) == 0 {
-		return
+		body := fmt.Sprintf("%s hat auf deinen Beitrag reagiert", actor.Username)
+		recipients := s.reactionNotificationRecipients(photo.UserID, actor.ID)
+		s.sendPhotoNotification(recipients, "Neue Reaktion", body, "photo_reaction", photo)
 	}
 	body := fmt.Sprintf("%s hat auf einen gemerkten Beitrag reagiert", actor.Username)
-	sendResult, sendErr := s.Notifier.Send(bookmarkTokens, notify.Message{
-		Title:   "Aktivitaet auf gemerktem Beitrag",
-		Body:    body,
-		Type:    "bookmarked_photo_reaction",
-		Action:  "open_feed",
-		Day:     photo.Day,
-		PhotoID: int64(photo.ID),
-	})
-	s.recordPushResult(sendResult, sendErr)
-	s.removeInvalidTokens(sendResult.InvalidTokens)
+	bookmarkRecipients := s.bookmarkedPhotoNotificationRecipients(photo.ID, photo.UserID, actor.ID)
+	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_reaction", photo)
 }
 
 func (s *Server) notifyPhotoFotomoji(actor models.User, photo models.Photo) {
@@ -11036,36 +11643,13 @@ func (s *Server) notifyPhotoFotomoji(actor models.User, photo models.Photo) {
 		return
 	}
 	if photo.UserID != 0 && photo.UserID != actor.ID {
-		tokens := s.fotomojiNotificationTokens(photo.UserID, actor.ID)
-		if len(tokens) > 0 {
-			body := fmt.Sprintf("%s hat mit einem Foto auf deinen Beitrag reagiert", actor.Username)
-			sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
-				Title:   "Neue FotoMoji",
-				Body:    body,
-				Type:    "photo_fotomoji",
-				Action:  "open_feed",
-				Day:     photo.Day,
-				PhotoID: int64(photo.ID),
-			})
-			s.recordPushResult(sendResult, sendErr)
-			s.removeInvalidTokens(sendResult.InvalidTokens)
-		}
-	}
-	bookmarkTokens := s.bookmarkedPhotoNotificationTokens(photo.ID, photo.UserID, actor.ID)
-	if len(bookmarkTokens) == 0 {
-		return
+		body := fmt.Sprintf("%s hat mit einem Foto auf deinen Beitrag reagiert", actor.Username)
+		recipients := s.fotomojiNotificationRecipients(photo.UserID, actor.ID)
+		s.sendPhotoNotification(recipients, "Neue FotoMoji", body, "photo_fotomoji", photo)
 	}
 	body := fmt.Sprintf("%s hat mit einem Foto auf einen gemerkten Beitrag reagiert", actor.Username)
-	sendResult, sendErr := s.Notifier.Send(bookmarkTokens, notify.Message{
-		Title:   "Aktivitaet auf gemerktem Beitrag",
-		Body:    body,
-		Type:    "bookmarked_photo_fotomoji",
-		Action:  "open_feed",
-		Day:     photo.Day,
-		PhotoID: int64(photo.ID),
-	})
-	s.recordPushResult(sendResult, sendErr)
-	s.removeInvalidTokens(sendResult.InvalidTokens)
+	bookmarkRecipients := s.bookmarkedPhotoNotificationRecipients(photo.ID, photo.UserID, actor.ID)
+	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_fotomoji", photo)
 }
 
 func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo) {
@@ -11074,36 +11658,13 @@ func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo) {
 		return
 	}
 	if photo.UserID != 0 && photo.UserID != actor.ID {
-		tokens := s.commentNotificationTokens(photo.UserID, actor.ID)
-		if len(tokens) > 0 {
-			body := fmt.Sprintf("%s hat deinen Beitrag kommentiert", actor.Username)
-			sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
-				Title:   "Neuer Kommentar",
-				Body:    body,
-				Type:    "photo_comment",
-				Action:  "open_feed",
-				Day:     photo.Day,
-				PhotoID: int64(photo.ID),
-			})
-			s.recordPushResult(sendResult, sendErr)
-			s.removeInvalidTokens(sendResult.InvalidTokens)
-		}
-	}
-	bookmarkTokens := s.bookmarkedPhotoNotificationTokens(photo.ID, photo.UserID, actor.ID)
-	if len(bookmarkTokens) == 0 {
-		return
+		body := fmt.Sprintf("%s hat deinen Beitrag kommentiert", actor.Username)
+		recipients := s.commentNotificationRecipients(photo.UserID, actor.ID)
+		s.sendPhotoNotification(recipients, "Neuer Kommentar", body, "photo_comment", photo)
 	}
 	body := fmt.Sprintf("%s hat einen gemerkten Beitrag kommentiert", actor.Username)
-	sendResult, sendErr := s.Notifier.Send(bookmarkTokens, notify.Message{
-		Title:   "Aktivitaet auf gemerktem Beitrag",
-		Body:    body,
-		Type:    "bookmarked_photo_comment",
-		Action:  "open_feed",
-		Day:     photo.Day,
-		PhotoID: int64(photo.ID),
-	})
-	s.recordPushResult(sendResult, sendErr)
-	s.removeInvalidTokens(sendResult.InvalidTokens)
+	bookmarkRecipients := s.bookmarkedPhotoNotificationRecipients(photo.ID, photo.UserID, actor.ID)
+	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_comment", photo)
 }
 
 func (s *Server) removeInvalidTokens(tokens []string) int64 {
