@@ -10108,7 +10108,6 @@ private fun RowScope.FeedNavigationItem(
     Box(
         modifier = Modifier
             .weight(1f)
-            .fillMaxHeight()
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick

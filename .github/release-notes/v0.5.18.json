@@ -1,0 +1,8 @@
+{
+  "version": "v0.5.18",
+  "title": "Hotfix fuer leeren Bildschirm nach dem letzten Release",
+  "items": [
+    "Hotfix fuer die neue Feed-Tab-Leiste: der `T`-Reiter zieht die untere Navigation nicht mehr ueber den ganzen Bildschirm auf.",
+    "Dadurch ist der eigentliche App-Inhalt wieder normal sichtbar und die App startet nicht mehr mit einer fast leeren Ansicht."
+  ]
+}
