@@ -1,0 +1,9 @@
+{
+  "version": "v0.5.19",
+  "title": "Malen-Editor haelt Striche jetzt stabil am Bild",
+  "items": [
+    "Hotfix fuer den Malen-Editor: Gemalte Striche haengen jetzt stabil am Bildrahmen und werden nicht mehr von Kommentaren nach unten mitgezogen.",
+    "Eigene bestehende Malereien werden beim Bearbeiten sauber auf die stabile Bildflaeche uebernommen.",
+    "Neue Striche starten nur noch direkt auf dem Bildbereich, damit die Ausrichtung belastbar bleibt."
+  ]
+}

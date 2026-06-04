@@ -2430,7 +2430,7 @@ class AppRepo(
         strokeWidth: Float
     ): PromptPhoto? =
         authorizedCall("/api/photos/:id/paint") { token ->
-            api.savePhotoPaint(token, photoId, PhotoPaintRequest(paths = paths, strokeWidth = strokeWidth, surface = "card"))
+            api.savePhotoPaint(token, photoId, PhotoPaintRequest(paths = paths, strokeWidth = strokeWidth, surface = "frame"))
         }.photo
 
     suspend fun deletePhotoPaint(photoId: Long, targetUserId: Long? = null): PromptPhoto? =
@@ -3658,7 +3658,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     userId = viewerId,
                     username = existing?.username?.takeIf { it.isNotBlank() } ?: username,
                     color = existing?.color?.takeIf { it.isNotBlank() } ?: normalizedColor,
-                    surface = "card",
+                    surface = "frame",
                     strokeWidth = strokeWidth,
                     pathsJson = pathsJson
                 )
@@ -10222,6 +10222,50 @@ private fun mapOverlayHeight(value: Float, surface: String, height: Float, frame
     if (normalizeOverlaySurface(surface) == "card" || frameRect == Rect.Zero) height * value.coerceIn(0f, 1f)
     else frameRect.height * value.coerceIn(0f, 1f)
 
+private fun normalizePointForSurface(offset: Offset, surface: String, width: Float, height: Float, frameRect: Rect): PhotoPaintPoint {
+    val safeWidth = width.coerceAtLeast(1f)
+    val safeHeight = height.coerceAtLeast(1f)
+    return if (normalizeOverlaySurface(surface) == "card" || frameRect == Rect.Zero) {
+        PhotoPaintPoint(
+            x = (offset.x / safeWidth).coerceIn(0f, 1f),
+            y = (offset.y / safeHeight).coerceIn(0f, 1f)
+        )
+    } else {
+        val safeFrameWidth = frameRect.width.coerceAtLeast(1f)
+        val safeFrameHeight = frameRect.height.coerceAtLeast(1f)
+        PhotoPaintPoint(
+            x = ((offset.x - frameRect.left) / safeFrameWidth).coerceIn(0f, 1f),
+            y = ((offset.y - frameRect.top) / safeFrameHeight).coerceIn(0f, 1f)
+        )
+    }
+}
+
+private fun denormalizePointForSurface(point: PhotoPaintPoint, surface: String, width: Float, height: Float, frameRect: Rect): Offset =
+    Offset(
+        x = mapOverlayX(point.x, surface, width, frameRect),
+        y = mapOverlayY(point.y, surface, height, frameRect)
+    )
+
+private fun convertPaintPathsSurface(
+    paths: List<PhotoPaintPath>,
+    fromSurface: String,
+    toSurface: String,
+    width: Float,
+    height: Float,
+    frameRect: Rect
+): List<PhotoPaintPath> {
+    if (paths.isEmpty()) return emptyList()
+    if (normalizeOverlaySurface(fromSurface) == normalizeOverlaySurface(toSurface)) return paths
+    return paths.map { pathItem ->
+        PhotoPaintPath(
+            points = pathItem.points.map { point ->
+                val absolutePoint = denormalizePointForSurface(point, fromSurface, width, height, frameRect)
+                normalizePointForSurface(absolutePoint, toSurface, width, height, frameRect)
+            }
+        )
+    }
+}
+
 @Composable
 private fun PhotoMarkLayer(photo: PromptPhoto, frameRect: Rect, modifier: Modifier = Modifier) {
     if (photo.marks.isEmpty()) return
@@ -10330,20 +10374,19 @@ private fun PhotoPaintEditorDialog(
     onDelete: (() -> Unit)?
 ) {
     val photo = target.item.photo
-    fun normalizeEditorPoint(offset: Offset, width: Float, height: Float): PhotoPaintPoint {
-        val safeWidth = width.coerceAtLeast(1f)
-        val safeHeight = height.coerceAtLeast(1f)
-        return PhotoPaintPoint(
-            x = (offset.x / safeWidth).coerceIn(0f, 1f),
-            y = (offset.y / safeHeight).coerceIn(0f, 1f)
-        )
+    val existingPaint = remember(photo.id, viewerId, photo.paints) {
+        photo.paints.firstOrNull { it.userId == viewerId }
     }
     val initialPaths = remember(photo.id, viewerId, photo.paints) {
-        photo.paints.firstOrNull { it.userId == viewerId }?.let { parsePhotoPaintPaths(it.pathsJson) } ?: emptyList()
+        existingPaint?.let { parsePhotoPaintPaths(it.pathsJson) } ?: emptyList()
     }
     var draftPaths by remember(photo.id, viewerId, photo.paints) { mutableStateOf(initialPaths) }
     var currentStroke by remember(photo.id, viewerId) { mutableStateOf<List<PhotoPaintPoint>>(emptyList()) }
     var overlayCanvasSize by remember(photo.id) { mutableStateOf(IntSize.Zero) }
+    var editorFrameRect by remember(photo.id) { mutableStateOf(Rect.Zero) }
+    var draftSurface by remember(photo.id, viewerId, photo.paints) {
+        mutableStateOf(normalizeOverlaySurface(existingPaint?.surface))
+    }
     val paintColor = parseUserColor(photo.paints.firstOrNull { it.userId == viewerId }?.color ?: target.item.user.favoriteColor)
     val strokeWidth = photo.paints.firstOrNull { it.userId == viewerId }?.strokeWidth ?: 0.035f
     val previewItem = remember(target.item, viewerId, photo.paints) {
@@ -10368,6 +10411,24 @@ private fun PhotoPaintEditorDialog(
     }
     LaunchedEffect(maxScrollOffsetPx) {
         scrollOffsetPx = scrollOffsetPx.coerceIn(0f, maxScrollOffsetPx)
+    }
+    LaunchedEffect(draftSurface, overlayCanvasSize, editorFrameRect) {
+        if (
+            draftSurface == "card" &&
+            draftPaths.isNotEmpty() &&
+            overlayCanvasSize != IntSize.Zero &&
+            editorFrameRect != Rect.Zero
+        ) {
+            draftPaths = convertPaintPathsSurface(
+                paths = draftPaths,
+                fromSurface = "card",
+                toSurface = "frame",
+                width = overlayCanvasSize.width.toFloat(),
+                height = overlayCanvasSize.height.toFloat(),
+                frameRect = editorFrameRect
+            )
+            draftSurface = "frame"
+        }
     }
 
     Dialog(onDismissRequest = ::dismissWithAutosave, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -10441,11 +10502,12 @@ private fun PhotoPaintEditorDialog(
                                             }
                                         },
                                         overlay = { frameRect ->
+                                            editorFrameRect = frameRect
                                             PhotoMarkLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
                                             PhotoPaintLayer(previewItem.photo, frameRect, Modifier.fillMaxSize())
-                                            PhotoPaintPathsLayer(draftPaths, paintColor.copy(alpha = 0.58f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
+                                            PhotoPaintPathsLayer(draftPaths, paintColor.copy(alpha = 0.58f), strokeWidth, "frame", frameRect, Modifier.fillMaxSize())
                                             if (currentStroke.size >= 2) {
-                                                PhotoPaintPathsLayer(listOf(PhotoPaintPath(currentStroke)), paintColor.copy(alpha = 0.82f), strokeWidth, "card", frameRect, Modifier.fillMaxSize())
+                                                PhotoPaintPathsLayer(listOf(PhotoPaintPath(currentStroke)), paintColor.copy(alpha = 0.82f), strokeWidth, "frame", frameRect, Modifier.fillMaxSize())
                                             }
                                             Box(
                                                 modifier = Modifier
@@ -10454,40 +10516,67 @@ private fun PhotoPaintEditorDialog(
                                                     .pointerInteropFilter { event ->
                                                         val width = overlayCanvasSize.width.toFloat().coerceAtLeast(1f)
                                                         val height = overlayCanvasSize.height.toFloat().coerceAtLeast(1f)
+                                                        val insideFrame = frameRect != Rect.Zero &&
+                                                            event.x >= frameRect.left &&
+                                                            event.x <= frameRect.right &&
+                                                            event.y >= frameRect.top &&
+                                                            event.y <= frameRect.bottom
                                                         when (event.actionMasked) {
                                                             MotionEvent.ACTION_DOWN -> {
-                                                                currentStroke = listOf(normalizeEditorPoint(Offset(event.x, event.y), width, height))
+                                                                if (!insideFrame) return@pointerInteropFilter false
+                                                                currentStroke = listOf(
+                                                                    normalizePointForSurface(Offset(event.x, event.y), "frame", width, height, frameRect)
+                                                                )
                                                                 true
                                                             }
                                                             MotionEvent.ACTION_MOVE -> {
+                                                                if (currentStroke.isEmpty()) return@pointerInteropFilter false
                                                                 val historySize = event.historySize
                                                                 var updatedStroke = currentStroke
                                                                 for (index in 0 until historySize) {
-                                                                    val point = normalizeEditorPoint(
-                                                                        Offset(event.getHistoricalX(index), event.getHistoricalY(index)),
+                                                                    val historicalPoint = Offset(event.getHistoricalX(index), event.getHistoricalY(index))
+                                                                    if (
+                                                                        historicalPoint.x < frameRect.left ||
+                                                                        historicalPoint.x > frameRect.right ||
+                                                                        historicalPoint.y < frameRect.top ||
+                                                                        historicalPoint.y > frameRect.bottom
+                                                                    ) {
+                                                                        continue
+                                                                    }
+                                                                    val point = normalizePointForSurface(
+                                                                        historicalPoint,
+                                                                        "frame",
                                                                         width,
-                                                                        height
+                                                                        height,
+                                                                        frameRect
                                                                     )
                                                                     val last = updatedStroke.lastOrNull()
                                                                     if (last == null || abs(last.x - point.x) > 0.0015f || abs(last.y - point.y) > 0.0015f) {
                                                                         updatedStroke = updatedStroke + point
                                                                     }
                                                                 }
-                                                                val currentPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
-                                                                val currentLast = updatedStroke.lastOrNull()
-                                                                if (currentLast == null || abs(currentLast.x - currentPoint.x) > 0.0015f || abs(currentLast.y - currentPoint.y) > 0.0015f) {
-                                                                    updatedStroke = updatedStroke + currentPoint
+                                                                if (insideFrame) {
+                                                                    val currentPoint = normalizePointForSurface(Offset(event.x, event.y), "frame", width, height, frameRect)
+                                                                    val currentLast = updatedStroke.lastOrNull()
+                                                                    if (currentLast == null || abs(currentLast.x - currentPoint.x) > 0.0015f || abs(currentLast.y - currentPoint.y) > 0.0015f) {
+                                                                        updatedStroke = updatedStroke + currentPoint
+                                                                    }
                                                                 }
                                                                 currentStroke = updatedStroke
                                                                 true
                                                             }
                                                             MotionEvent.ACTION_UP -> {
-                                                                val finalPoint = normalizeEditorPoint(Offset(event.x, event.y), width, height)
-                                                                val finalizedStroke = if (
-                                                                    currentStroke.lastOrNull()?.let { abs(it.x - finalPoint.x) > 0.0015f || abs(it.y - finalPoint.y) > 0.0015f }
-                                                                        ?: true
-                                                                ) {
-                                                                    currentStroke + finalPoint
+                                                                if (currentStroke.isEmpty()) return@pointerInteropFilter false
+                                                                val finalizedStroke = if (insideFrame) {
+                                                                    val finalPoint = normalizePointForSurface(Offset(event.x, event.y), "frame", width, height, frameRect)
+                                                                    if (
+                                                                        currentStroke.lastOrNull()?.let { abs(it.x - finalPoint.x) > 0.0015f || abs(it.y - finalPoint.y) > 0.0015f }
+                                                                            ?: true
+                                                                    ) {
+                                                                        currentStroke + finalPoint
+                                                                    } else {
+                                                                        currentStroke
+                                                                    }
                                                                 } else {
                                                                     currentStroke
                                                                 }
