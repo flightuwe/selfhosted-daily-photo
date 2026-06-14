@@ -18,6 +18,7 @@ type User struct {
 	BookmarkedPhotoPushEnabled    bool       `gorm:"default:false" json:"bookmarkedPhotoPushEnabled"`
 	OwnPostNumberInPushEnabled    bool       `gorm:"default:false" json:"ownPostNumberInPushEnabled"`
 	PostNumberInPushEnabled       bool       `gorm:"default:false" json:"postNumberInPushEnabled"`
+	YoloModeEnabled               bool       `gorm:"default:false" json:"yoloModeEnabled"`
 	AllowPhotoDownload            bool       `gorm:"default:false" json:"allowPhotoDownload"`
 	CreativePostMode              string     `gorm:"size:16;default:'none'" json:"creativePostMode"`
 	LocationFeatureEnabled        bool       `gorm:"default:false" json:"locationFeatureEnabled"`

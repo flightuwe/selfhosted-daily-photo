@@ -1,0 +1,9 @@
+{
+  "version": "v0.5.20",
+  "title": "Benachrichtigungen und YOLO-Modus im Profil ausgebaut",
+  "items": [
+    "Benachrichtigungen im Profil neu geordnet, damit Postnummern in Pushes an einer klaren Stelle fuer eigene und gemerkte Beitraege steuerbar sind.",
+    "Interaktions-Pushes zu deinen eigenen Beitraegen koennen jetzt dieselbe konkrete Post-ID wie gemerkte Beitrags-Pushes anzeigen.",
+    "Neuer YOLO-Modus im Profil: aktiviert bestehende und kuenftige registrierte Features automatisch, inklusive Warn- und Bestaetigungsdialog."
+  ]
+}

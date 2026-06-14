@@ -287,6 +287,7 @@ data class User(
     val bookmarkedPhotoPushEnabled: Boolean = false,
     val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
+    val yoloModeEnabled: Boolean = false,
     val allowPhotoDownload: Boolean = false,
     val creativePostMode: String = "none",
     val locationFeatureEnabled: Boolean = false,
@@ -339,6 +340,7 @@ data class PreferencesUpdateRequest(
     val bookmarkedPhotoPushEnabled: Boolean? = null,
     val ownPostNumberInPushEnabled: Boolean? = null,
     val postNumberInPushEnabled: Boolean? = null,
+    val yoloModeEnabled: Boolean? = null,
     val allowPhotoDownload: Boolean,
     val creativePostMode: String? = null,
     val locationFeatureEnabled: Boolean? = null,
@@ -2013,6 +2015,27 @@ class AppRepo(
         prefs.edit().putBoolean("post_number_in_push_enabled_local", enabled).apply()
     }
 
+    fun yoloModeLocalEnabled(): Boolean = prefs.getBoolean("yolo_mode_enabled_local", false)
+
+    fun setYoloModeLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("yolo_mode_enabled_local", enabled).apply()
+    }
+
+    fun appliedYoloFeatureIds(): Set<String> {
+        val raw = prefs.getString("yolo_applied_feature_ids", "") ?: ""
+        if (raw.isBlank()) return emptySet()
+        return raw.split(",")
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .toSet()
+    }
+
+    fun markYoloFeatureIdsApplied(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val merged = (appliedYoloFeatureIds() + ids.map { it.trim() }.filter { it.isNotBlank() }).toSortedSet()
+        prefs.edit().putString("yolo_applied_feature_ids", merged.joinToString(",")).apply()
+    }
+
     fun showPublicPostNumbers(): Boolean = prefs.getBoolean("show_public_post_numbers", false)
 
     fun setShowPublicPostNumbers(enabled: Boolean) {
@@ -2277,6 +2300,7 @@ class AppRepo(
         bookmarkedPhotoPushEnabled: Boolean? = null,
         ownPostNumberInPushEnabled: Boolean? = null,
         postNumberInPushEnabled: Boolean? = null,
+        yoloModeEnabled: Boolean? = null,
         specialMomentPushEnabled: Boolean? = null,
         locationFeatureEnabled: Boolean? = null,
         locationShareDefaultEnabled: Boolean? = null,
@@ -2294,6 +2318,7 @@ class AppRepo(
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
                 ownPostNumberInPushEnabled = ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = postNumberInPushEnabled,
+                yoloModeEnabled = yoloModeEnabled,
                 allowPhotoDownload = allowPhotoDownload,
                 creativePostMode = creativePostMode,
                 specialMomentPushEnabled = specialMomentPushEnabled,
@@ -3361,6 +3386,7 @@ data class UiState(
     val bookmarkedPhotoPushEnabled: Boolean = false,
     val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
+    val yoloModeEnabled: Boolean = false,
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
     val showPublicPostNumbers: Boolean = false,
@@ -3392,6 +3418,35 @@ data class DashboardData(
     val chat: List<ChatItem>,
     val feedDays: List<String>,
     val communityStats: CommunityStatsResponse?
+)
+
+private data class YoloPreferenceState(
+    var autoUpdateEnabled: Boolean,
+    var feedPostPushEnabled: Boolean,
+    var useFotomojiReactions: Boolean,
+    var showPublicPostNumbers: Boolean,
+    var chatPushEnabled: Boolean,
+    var pollPushEnabled: Boolean,
+    var specialMomentPushEnabled: Boolean,
+    var inviteRegistrationPushEnabled: Boolean,
+    var photoReactionPushEnabled: Boolean,
+    var photoCommentPushEnabled: Boolean,
+    var bookmarkedPhotoPushEnabled: Boolean,
+    var ownPostNumberInPushEnabled: Boolean,
+    var postNumberInPushEnabled: Boolean,
+    var yoloModeEnabled: Boolean,
+    var allowPhotoDownload: Boolean,
+    var creativePostMode: String,
+    var locationFeatureEnabled: Boolean,
+    var locationShareDefaultEnabled: Boolean
+)
+
+private data class YoloFeatureDefinition(
+    val id: String,
+    val introducedInVersion: String,
+    val title: String,
+    val warningCategory: String,
+    val apply: (YoloPreferenceState) -> Unit
 )
 
 private class RefreshStageException(
@@ -3445,6 +3500,28 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     )
     private var profileSetupPromptShownInSession = false
     private var migrationSessionTokenSnapshot: String = ""
+    private val yoloRegistry = listOf(
+        YoloFeatureDefinition("auto_update_enabled_v1", "0.6.0", "Auto-Update-Suche", "updates") { it.autoUpdateEnabled = true },
+        YoloFeatureDefinition("feed_post_push_enabled_v1", "0.6.0", "Push bei Posts anderer Nutzer", "notifications") { it.feedPostPushEnabled = true },
+        YoloFeatureDefinition("chat_push_enabled_v1", "0.6.0", "Chat Push", "notifications") { it.chatPushEnabled = true },
+        YoloFeatureDefinition("poll_push_enabled_v1", "0.6.0", "Umfrage Push", "notifications") { it.pollPushEnabled = true },
+        YoloFeatureDefinition("special_moment_push_enabled_v1", "0.6.0", "Sondermoment Push", "notifications") { it.specialMomentPushEnabled = true },
+        YoloFeatureDefinition("invite_registration_push_enabled_v1", "0.6.0", "Push bei neuen Mitgliedern", "notifications") { it.inviteRegistrationPushEnabled = true },
+        YoloFeatureDefinition("photo_reaction_push_enabled_v1", "0.6.0", "Push bei Reaktionen", "notifications") { it.photoReactionPushEnabled = true },
+        YoloFeatureDefinition("photo_comment_push_enabled_v1", "0.6.0", "Push bei Kommentaren", "notifications") { it.photoCommentPushEnabled = true },
+        YoloFeatureDefinition("bookmarked_photo_push_enabled_v1", "0.6.0", "Push bei gemerkten Beitraegen", "notifications") { it.bookmarkedPhotoPushEnabled = true },
+        YoloFeatureDefinition("own_post_number_in_push_enabled_v1", "0.6.0", "Postnummern bei eigenen Beitrags-Pushes", "notifications") { it.ownPostNumberInPushEnabled = true },
+        YoloFeatureDefinition("post_number_in_push_enabled_v1", "0.6.0", "Postnummern bei gemerkten Beitrags-Pushes", "notifications") { it.postNumberInPushEnabled = true },
+        YoloFeatureDefinition("allow_photo_download_v1", "0.6.0", "Download-Freigabe", "sharing") { it.allowPhotoDownload = true },
+        YoloFeatureDefinition("creative_post_mode_both_v1", "0.6.0", "Kreativmodus", "posting") { it.creativePostMode = "both" },
+        YoloFeatureDefinition("location_feature_enabled_v1", "0.6.0", "Standort-Feature", "location") { it.locationFeatureEnabled = true },
+        YoloFeatureDefinition("location_share_default_enabled_v1", "0.6.0", "Standort standardmaessig mitsenden", "location") {
+            it.locationFeatureEnabled = true
+            it.locationShareDefaultEnabled = true
+        },
+        YoloFeatureDefinition("use_fotomoji_reactions_v1", "0.6.0", "FotoMoji statt Emoji-Reaktion", "interactions") { it.useFotomojiReactions = true },
+        YoloFeatureDefinition("show_public_post_numbers_v1", "0.6.0", "Postnummern anzeigen", "display") { it.showPublicPostNumbers = true }
+    )
 
     init {
         repo.ensurePollPushDefaultMigration()
@@ -3469,6 +3546,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
             ownPostNumberInPushEnabled = repo.ownPostNumberInPushLocalEnabled(),
             postNumberInPushEnabled = repo.postNumberInPushLocalEnabled(),
+            yoloModeEnabled = repo.yoloModeLocalEnabled(),
             feedOrderMode = repo.feedOrderMode(),
             randomFeedSeed = repo.randomFeedSeed(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
@@ -4027,6 +4105,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
@@ -4144,6 +4223,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             pollPushEnabled = repo.pollPushLocalEnabled(),
             specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
+            yoloModeEnabled = repo.yoloModeLocalEnabled(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -4923,6 +5003,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setBookmarkedPhotoPushLocalEnabled(me.bookmarkedPhotoPushEnabled)
             repo.setOwnPostNumberInPushLocalEnabled(me.ownPostNumberInPushEnabled)
             repo.setPostNumberInPushLocalEnabled(me.postNumberInPushEnabled)
+            repo.setYoloModeLocalEnabled(me.yoloModeEnabled)
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
             val pollPushEnabled = repo.pollPushLocalEnabled()
@@ -4969,6 +5050,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
                 ownPostNumberInPushEnabled = ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = postNumberInPushEnabled,
+                yoloModeEnabled = me.yoloModeEnabled,
                 showPublicPostNumbers = repo.showPublicPostNumbers(),
                 notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled),
                 diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && me.diagnosticsConsentGranted,
@@ -4980,6 +5062,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
             )
+            if (me.yoloModeEnabled) {
+                runCatching { applyYoloFeatures(forceAll = false, reason = "refresh_all") }
+                    .onFailure { state = state.copy(message = apiError(it, "YOLO-Feature-Sync fehlgeschlagen")) }
+            }
             runCatching { repo.calendarPublic() }.getOrNull()?.let { publicCalendar ->
                 val dataset = publicCalendar.toDataset()
                 state = state.copy(
@@ -6073,6 +6159,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
@@ -6149,6 +6236,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
@@ -6471,10 +6559,271 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     private fun syncInteractionPushPrefs(user: User) {
         repo.setChatPushLocalEnabled(user.chatPushEnabled)
+        repo.setPollPushLocalEnabled(user.pollPushEnabled)
+        repo.setSpecialMomentPushLocalEnabled(user.specialMomentPushEnabled)
         repo.setInviteRegistrationPushLocalEnabled(user.inviteRegistrationPushEnabled)
         repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
         repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
         repo.setBookmarkedPhotoPushLocalEnabled(user.bookmarkedPhotoPushEnabled)
+        repo.setOwnPostNumberInPushLocalEnabled(user.ownPostNumberInPushEnabled)
+        repo.setPostNumberInPushLocalEnabled(user.postNumberInPushEnabled)
+        repo.setYoloModeLocalEnabled(user.yoloModeEnabled)
+    }
+
+    private fun currentYoloPreferenceState(): YoloPreferenceState {
+        val current = state.user
+        return YoloPreferenceState(
+            autoUpdateEnabled = repo.autoUpdateEnabled(),
+            feedPostPushEnabled = repo.feedPostPushEnabled(),
+            useFotomojiReactions = repo.useFotomojiReactions(),
+            showPublicPostNumbers = repo.showPublicPostNumbers(),
+            chatPushEnabled = current?.chatPushEnabled ?: repo.chatPushLocalEnabled(),
+            pollPushEnabled = current?.pollPushEnabled ?: repo.pollPushLocalEnabled(),
+            specialMomentPushEnabled = current?.specialMomentPushEnabled ?: repo.specialMomentPushLocalEnabled(),
+            inviteRegistrationPushEnabled = current?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled(),
+            photoReactionPushEnabled = current?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled(),
+            photoCommentPushEnabled = current?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled(),
+            bookmarkedPhotoPushEnabled = current?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled(),
+            ownPostNumberInPushEnabled = current?.ownPostNumberInPushEnabled ?: repo.ownPostNumberInPushLocalEnabled(),
+            postNumberInPushEnabled = current?.postNumberInPushEnabled ?: repo.postNumberInPushLocalEnabled(),
+            yoloModeEnabled = current?.yoloModeEnabled ?: repo.yoloModeLocalEnabled(),
+            allowPhotoDownload = current?.allowPhotoDownload ?: false,
+            creativePostMode = current?.creativePostMode ?: "none",
+            locationFeatureEnabled = current?.locationFeatureEnabled ?: false,
+            locationShareDefaultEnabled = current?.locationShareDefaultEnabled ?: false
+        )
+    }
+
+    private fun syncYoloLocalPrefs(preferences: YoloPreferenceState) {
+        repo.setAutoUpdateEnabled(preferences.autoUpdateEnabled)
+        repo.setFeedPostPushEnabled(preferences.feedPostPushEnabled)
+        repo.setUseFotomojiReactions(preferences.useFotomojiReactions)
+        repo.setShowPublicPostNumbers(preferences.showPublicPostNumbers)
+        repo.setChatPushLocalEnabled(preferences.chatPushEnabled)
+        repo.setPollPushLocalEnabled(preferences.pollPushEnabled)
+        repo.setSpecialMomentPushLocalEnabled(preferences.specialMomentPushEnabled)
+        repo.setInviteRegistrationPushLocalEnabled(preferences.inviteRegistrationPushEnabled)
+        repo.setPhotoReactionPushLocalEnabled(preferences.photoReactionPushEnabled)
+        repo.setPhotoCommentPushLocalEnabled(preferences.photoCommentPushEnabled)
+        repo.setBookmarkedPhotoPushLocalEnabled(preferences.bookmarkedPhotoPushEnabled)
+        repo.setOwnPostNumberInPushLocalEnabled(preferences.ownPostNumberInPushEnabled)
+        repo.setPostNumberInPushLocalEnabled(preferences.postNumberInPushEnabled)
+        repo.setYoloModeLocalEnabled(preferences.yoloModeEnabled)
+    }
+
+    private suspend fun applyYoloFeatures(forceAll: Boolean, reason: String): Boolean {
+        val eligible = yoloRegistry.filter { !isVersionNewer(it.introducedInVersion, BuildConfig.VERSION_NAME) }
+        val pending = if (forceAll) {
+            eligible
+        } else {
+            val applied = repo.appliedYoloFeatureIds()
+            eligible.filterNot { applied.contains(it.id) }
+        }
+        if (pending.isEmpty()) {
+            return false
+        }
+        val preferences = currentYoloPreferenceState()
+        pending.forEach { it.apply(preferences) }
+        preferences.yoloModeEnabled = true
+        val current = state.user
+        val updatedUser = if (current != null) {
+            repo.updatePreferences(
+                chatPushEnabled = preferences.chatPushEnabled,
+                pollPushEnabled = preferences.pollPushEnabled,
+                inviteRegistrationPushEnabled = preferences.inviteRegistrationPushEnabled,
+                photoReactionPushEnabled = preferences.photoReactionPushEnabled,
+                photoCommentPushEnabled = preferences.photoCommentPushEnabled,
+                allowPhotoDownload = preferences.allowPhotoDownload,
+                creativePostMode = preferences.creativePostMode,
+                bookmarkedPhotoPushEnabled = preferences.bookmarkedPhotoPushEnabled,
+                ownPostNumberInPushEnabled = preferences.ownPostNumberInPushEnabled,
+                postNumberInPushEnabled = preferences.postNumberInPushEnabled,
+                yoloModeEnabled = preferences.yoloModeEnabled,
+                specialMomentPushEnabled = preferences.specialMomentPushEnabled,
+                locationFeatureEnabled = preferences.locationFeatureEnabled,
+                locationShareDefaultEnabled = preferences.locationShareDefaultEnabled
+            )
+        } else {
+            null
+        }
+        val syncedPreferences = preferences.copy(
+            chatPushEnabled = updatedUser?.chatPushEnabled ?: preferences.chatPushEnabled,
+            pollPushEnabled = updatedUser?.pollPushEnabled ?: preferences.pollPushEnabled,
+            specialMomentPushEnabled = updatedUser?.specialMomentPushEnabled ?: preferences.specialMomentPushEnabled,
+            inviteRegistrationPushEnabled = updatedUser?.inviteRegistrationPushEnabled ?: preferences.inviteRegistrationPushEnabled,
+            photoReactionPushEnabled = updatedUser?.photoReactionPushEnabled ?: preferences.photoReactionPushEnabled,
+            photoCommentPushEnabled = updatedUser?.photoCommentPushEnabled ?: preferences.photoCommentPushEnabled,
+            bookmarkedPhotoPushEnabled = updatedUser?.bookmarkedPhotoPushEnabled ?: preferences.bookmarkedPhotoPushEnabled,
+            ownPostNumberInPushEnabled = updatedUser?.ownPostNumberInPushEnabled ?: preferences.ownPostNumberInPushEnabled,
+            postNumberInPushEnabled = updatedUser?.postNumberInPushEnabled ?: preferences.postNumberInPushEnabled,
+            yoloModeEnabled = updatedUser?.yoloModeEnabled ?: preferences.yoloModeEnabled,
+            allowPhotoDownload = updatedUser?.allowPhotoDownload ?: preferences.allowPhotoDownload,
+            creativePostMode = updatedUser?.creativePostMode ?: preferences.creativePostMode,
+            locationFeatureEnabled = updatedUser?.locationFeatureEnabled ?: preferences.locationFeatureEnabled,
+            locationShareDefaultEnabled = updatedUser?.locationShareDefaultEnabled ?: preferences.locationShareDefaultEnabled
+        )
+        syncYoloLocalPrefs(syncedPreferences)
+        if (updatedUser != null) {
+            syncInteractionPushPrefs(updatedUser)
+        }
+        repo.markYoloFeatureIdsApplied(pending.map { it.id })
+        val auto = repo.autoUpdateEnabled()
+        val feed = repo.feedPostPushEnabled()
+        val user = updatedUser ?: current
+        val chat = user?.chatPushEnabled ?: repo.chatPushLocalEnabled()
+        val poll = user?.pollPushEnabled ?: repo.pollPushLocalEnabled()
+        val invite = user?.inviteRegistrationPushEnabled ?: repo.inviteRegistrationPushLocalEnabled()
+        val reaction = user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
+        val comment = user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
+        val bookmarked = user?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled()
+        val master = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked)
+        repo.setNotificationMasterEnabled(master)
+        state = state.copy(
+            user = updatedUser ?: state.user?.copy(yoloModeEnabled = true),
+            autoUpdateEnabled = auto,
+            feedPostPushEnabled = feed,
+            useFotomojiReactions = repo.useFotomojiReactions(),
+            pollPushEnabled = poll,
+            specialMomentPushEnabled = user?.specialMomentPushEnabled ?: repo.specialMomentPushLocalEnabled(),
+            inviteRegistrationPushEnabled = invite,
+            photoReactionPushEnabled = reaction,
+            photoCommentPushEnabled = comment,
+            bookmarkedPhotoPushEnabled = bookmarked,
+            ownPostNumberInPushEnabled = user?.ownPostNumberInPushEnabled ?: repo.ownPostNumberInPushLocalEnabled(),
+            postNumberInPushEnabled = user?.postNumberInPushEnabled ?: repo.postNumberInPushLocalEnabled(),
+            yoloModeEnabled = true,
+            locationFeatureEnabled = user?.locationFeatureEnabled ?: false,
+            locationShareDefaultEnabled = user?.locationShareDefaultEnabled ?: false,
+            showPublicPostNumbers = repo.showPublicPostNumbers(),
+            notificationMasterEnabled = master,
+            message = when {
+                pending.isEmpty() -> ""
+                forceAll -> "YOLO-Modus aktiviert: ${pending.size} Features freigeschaltet"
+                else -> "YOLO-Modus hat ${pending.size} neue Features aktiviert ($reason)"
+            }
+        )
+        return true
+    }
+
+    suspend fun setNotificationPostNumbersEnabled(enabled: Boolean) {
+        val current = state.user
+        if (current == null) {
+            repo.setOwnPostNumberInPushLocalEnabled(enabled)
+            repo.setPostNumberInPushLocalEnabled(enabled)
+            state = state.copy(
+                ownPostNumberInPushEnabled = enabled,
+                postNumberInPushEnabled = enabled
+            )
+            return
+        }
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                chatPushEnabled = current.chatPushEnabled,
+                pollPushEnabled = current.pollPushEnabled,
+                inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
+                photoReactionPushEnabled = current.photoReactionPushEnabled,
+                photoCommentPushEnabled = current.photoCommentPushEnabled,
+                allowPhotoDownload = current.allowPhotoDownload,
+                creativePostMode = current.creativePostMode,
+                bookmarkedPhotoPushEnabled = current.bookmarkedPhotoPushEnabled,
+                ownPostNumberInPushEnabled = enabled,
+                postNumberInPushEnabled = enabled,
+                yoloModeEnabled = current.yoloModeEnabled,
+                specialMomentPushEnabled = current.specialMomentPushEnabled,
+                locationFeatureEnabled = current.locationFeatureEnabled,
+                locationShareDefaultEnabled = current.locationShareDefaultEnabled
+            )
+        }.onSuccess { user ->
+            syncInteractionPushPrefs(user)
+            state = state.copy(
+                user = user,
+                ownPostNumberInPushEnabled = user.ownPostNumberInPushEnabled,
+                postNumberInPushEnabled = user.postNumberInPushEnabled,
+                loading = false,
+                message = if (enabled) "Push-Postnummern aktiviert" else "Push-Postnummern deaktiviert"
+            )
+        }.onFailure {
+            state = state.copy(loading = false, message = apiError(it, "Push-Postnummern konnten nicht gespeichert werden"))
+        }
+    }
+
+    suspend fun setYoloModeEnabled(enabled: Boolean) {
+        val current = state.user
+        state = state.copy(loading = true)
+        if (!enabled) {
+            runCatching {
+                if (current != null) {
+                    repo.updatePreferences(
+                        chatPushEnabled = current.chatPushEnabled,
+                        pollPushEnabled = current.pollPushEnabled,
+                        inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
+                        photoReactionPushEnabled = current.photoReactionPushEnabled,
+                        photoCommentPushEnabled = current.photoCommentPushEnabled,
+                        allowPhotoDownload = current.allowPhotoDownload,
+                        creativePostMode = current.creativePostMode,
+                        bookmarkedPhotoPushEnabled = current.bookmarkedPhotoPushEnabled,
+                        ownPostNumberInPushEnabled = current.ownPostNumberInPushEnabled,
+                        postNumberInPushEnabled = current.postNumberInPushEnabled,
+                        yoloModeEnabled = false,
+                        specialMomentPushEnabled = current.specialMomentPushEnabled,
+                        locationFeatureEnabled = current.locationFeatureEnabled,
+                        locationShareDefaultEnabled = current.locationShareDefaultEnabled
+                    )
+                } else {
+                    null
+                }
+            }.onSuccess { user ->
+                repo.setYoloModeLocalEnabled(false)
+                state = state.copy(
+                    user = user ?: state.user?.copy(yoloModeEnabled = false),
+                    yoloModeEnabled = false,
+                    loading = false,
+                    message = "YOLO-Modus deaktiviert"
+                )
+            }.onFailure {
+                state = state.copy(loading = false, message = apiError(it, "YOLO-Modus konnte nicht gespeichert werden"))
+            }
+            return
+        }
+        runCatching {
+            if (current != null) {
+                repo.updatePreferences(
+                    chatPushEnabled = current.chatPushEnabled,
+                    pollPushEnabled = current.pollPushEnabled,
+                    inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
+                    photoReactionPushEnabled = current.photoReactionPushEnabled,
+                    photoCommentPushEnabled = current.photoCommentPushEnabled,
+                    allowPhotoDownload = current.allowPhotoDownload,
+                    creativePostMode = current.creativePostMode,
+                    bookmarkedPhotoPushEnabled = current.bookmarkedPhotoPushEnabled,
+                    ownPostNumberInPushEnabled = current.ownPostNumberInPushEnabled,
+                    postNumberInPushEnabled = current.postNumberInPushEnabled,
+                    yoloModeEnabled = true,
+                    specialMomentPushEnabled = current.specialMomentPushEnabled,
+                    locationFeatureEnabled = current.locationFeatureEnabled,
+                    locationShareDefaultEnabled = current.locationShareDefaultEnabled
+                )
+            } else {
+                null
+            }
+        }.onSuccess { user ->
+            if (user != null) {
+                syncInteractionPushPrefs(user)
+                state = state.copy(user = user, yoloModeEnabled = user.yoloModeEnabled)
+            } else {
+                repo.setYoloModeLocalEnabled(true)
+                state = state.copy(yoloModeEnabled = true)
+            }
+            val applied = applyYoloFeatures(forceAll = true, reason = "manual_enable")
+            if (!applied) {
+                state = state.copy(loading = false, message = "YOLO-Modus aktiviert")
+            } else {
+                state = state.copy(loading = false)
+            }
+        }.onFailure {
+            state = state.copy(loading = false, message = apiError(it, "YOLO-Modus konnte nicht gespeichert werden"))
+        }
     }
 
     suspend fun setPollPushEnabled(enabled: Boolean) {
@@ -8310,6 +8659,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     bookmarkedPhotoPushEnabled = state.user?.bookmarkedPhotoPushEnabled ?: state.bookmarkedPhotoPushEnabled,
                     ownPostNumberInPushEnabled = state.user?.ownPostNumberInPushEnabled ?: state.ownPostNumberInPushEnabled,
                     postNumberInPushEnabled = state.user?.postNumberInPushEnabled ?: state.postNumberInPushEnabled,
+                    yoloModeEnabled = state.user?.yoloModeEnabled ?: state.yoloModeEnabled,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     creativePostMode = state.user?.creativePostMode ?: "none",
                     locationFeatureEnabled = state.user?.locationFeatureEnabled ?: false,
@@ -8351,8 +8701,10 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onPhotoReactionPushEnabledChange = { scope.launch { vm.setPhotoReactionPushEnabled(it) } },
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
                     onBookmarkedPhotoPushEnabledChange = { scope.launch { vm.setBookmarkedPhotoPushEnabled(it) } },
+                    onNotificationPostNumbersEnabledChange = { scope.launch { vm.setNotificationPostNumbersEnabled(it) } },
                     onOwnPostNumberInPushEnabledChange = { scope.launch { vm.setOwnPostNumberInPushEnabled(it) } },
                     onPostNumberInPushEnabledChange = { scope.launch { vm.setPostNumberInPushEnabled(it) } },
+                    onYoloModeEnabledChange = { scope.launch { vm.setYoloModeEnabled(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onCreativePostModeChange = { scope.launch { vm.setCreativePostMode(it) } },
                     onLocationFeatureEnabledChange = { scope.launch { vm.setLocationFeatureEnabled(it) } },
@@ -11839,6 +12191,7 @@ fun ProfileTab(
     bookmarkedPhotoPushEnabled: Boolean,
     ownPostNumberInPushEnabled: Boolean,
     postNumberInPushEnabled: Boolean,
+    yoloModeEnabled: Boolean,
     allowPhotoDownload: Boolean,
     creativePostMode: String,
     locationFeatureEnabled: Boolean,
@@ -11880,8 +12233,10 @@ fun ProfileTab(
     onPhotoReactionPushEnabledChange: (Boolean) -> Unit,
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
     onBookmarkedPhotoPushEnabledChange: (Boolean) -> Unit,
+    onNotificationPostNumbersEnabledChange: (Boolean) -> Unit,
     onOwnPostNumberInPushEnabledChange: (Boolean) -> Unit,
     onPostNumberInPushEnabledChange: (Boolean) -> Unit,
+    onYoloModeEnabledChange: (Boolean) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onCreativePostModeChange: (String) -> Unit,
     onLocationFeatureEnabledChange: (Boolean) -> Unit,
@@ -11953,6 +12308,8 @@ fun ProfileTab(
     var showAllowDownloadWarning by remember { mutableStateOf(false) }
     var showLocationEnableWarning by remember { mutableStateOf(false) }
     var showLocationDisableWarning by remember { mutableStateOf(false) }
+    var showYoloEnableWarning by remember { mutableStateOf(false) }
+    var showYoloDisableWarning by remember { mutableStateOf(false) }
     var showClearBookmarksConfirm by remember { mutableStateOf(false) }
     var updatePulseTick by remember { mutableStateOf(0) }
     var updateChecked by remember { mutableStateOf(false) }
@@ -12734,12 +13091,6 @@ fun ProfileTab(
                         checked = photoCommentPushEnabled,
                         onCheckedChange = onPhotoCommentPushEnabledChange
                     )
-                    SettingsToggleRow(
-                        label = "Post-Nummer in Benachrichtigungen zu meinen Posts",
-                        checked = ownPostNumberInPushEnabled,
-                        onCheckedChange = onOwnPostNumberInPushEnabledChange,
-                        supportingText = "Zeigt bei Reaktionen, Kommentaren und FotoMojis auf deine eigenen Beitraege die konkrete Post-ID wie #260526001."
-                    )
                 }
                 SettingsSubsection("Gemerkt", "Zusaetzliche Hinweise zu fremden Posts, die du gemerkt hast") {
                     SettingsToggleRow(
@@ -12748,11 +13099,43 @@ fun ProfileTab(
                         onCheckedChange = onBookmarkedPhotoPushEnabledChange,
                         supportingText = "Kommentare, Reaktionen und FotoMojis auf gemerkten fremden Posts."
                     )
+                }
+                SettingsSubsection("Postnummern in Pushes", "Sichtbar an einer Stelle fuer eigene und gemerkte Beitraege") {
                     SettingsToggleRow(
-                        label = "Post-Nummer in Benachrichtigungen zu gemerkten Posts",
-                        checked = postNumberInPushEnabled,
-                        onCheckedChange = onPostNumberInPushEnabledChange,
-                        supportingText = "Ergaenzt Pushes zu gemerkten Posts um die stabile Post-ID wie #260526001."
+                        label = "Postnummern in Push-Benachrichtigungen",
+                        checked = ownPostNumberInPushEnabled || postNumberInPushEnabled,
+                        onCheckedChange = onNotificationPostNumbersEnabledChange,
+                        supportingText = "Zeigt bei Reaktionen, Kommentaren und FotoMojis die konkrete Post-ID wie #260526001."
+                    )
+                    if (ownPostNumberInPushEnabled || postNumberInPushEnabled) {
+                        SettingsToggleRow(
+                            label = "Bei meinen Beitraegen",
+                            checked = ownPostNumberInPushEnabled,
+                            onCheckedChange = onOwnPostNumberInPushEnabledChange,
+                            supportingText = "Ergaenzt Interaktions-Pushes zu deinen eigenen Beitraegen um die Post-ID."
+                        )
+                        SettingsToggleRow(
+                            label = "Bei gemerkten Beitraegen",
+                            checked = postNumberInPushEnabled,
+                            onCheckedChange = onPostNumberInPushEnabledChange,
+                            supportingText = "Ergaenzt Pushes zu gemerkten fremden Beitraegen um die Post-ID."
+                        )
+                    }
+                }
+                SettingsSubsection("YOLO-Modus", "Aktiviert bestehende und kuenftige Features automatisch") {
+                    SettingsToggleRow(
+                        label = "YOLO-Modus",
+                        checked = yoloModeEnabled,
+                        onCheckedChange = { checked ->
+                            if (checked != yoloModeEnabled) {
+                                if (checked) {
+                                    showYoloEnableWarning = true
+                                } else {
+                                    showYoloDisableWarning = true
+                                }
+                            }
+                        },
+                        supportingText = "Warnung: Aktiviert jetzt sofort alle registrierten Features und schaltet kuenftige neue Features in spaeteren Updates automatisch frei."
                     )
                 }
                 SettingsSubsection("Ton", "Klingelton und Test fuer deine Push-Benachrichtigungen") {
@@ -13338,6 +13721,46 @@ fun ProfileTab(
             title = { Text("Standort-Feature deaktivieren?") },
             text = {
                 Text("Ab jetzt werden bei neuen Posts keine Standortdaten mehr mitgesendet. Bereits freigegebene alte Posts behalten ihren gespeicherten Standort, bis er entfernt wird.")
+            }
+          )
+      }
+      if (showYoloEnableWarning) {
+          AlertDialog(
+            onDismissRequest = { showYoloEnableWarning = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showYoloEnableWarning = false
+                        onYoloModeEnabledChange(true)
+                    }
+                ) { Text("Aktivieren") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showYoloEnableWarning = false }) { Text("Abbrechen") }
+            },
+            title = { Text("YOLO-Modus aktivieren?") },
+            text = {
+                Text("Warnung: Wenn du das aktivierst, werden bestehende und kuenftige Features automatisch eingeschaltet, auch wenn du sie spaeter nicht manuell in den Einstellungen suchst. Das kann Benachrichtigungen, Anzeigeoptionen, Freigaben und andere App-Verhalten direkt veraendern.")
+            }
+          )
+      }
+      if (showYoloDisableWarning) {
+          AlertDialog(
+            onDismissRequest = { showYoloDisableWarning = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showYoloDisableWarning = false
+                        onYoloModeEnabledChange(false)
+                    }
+                ) { Text("Deaktivieren") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showYoloDisableWarning = false }) { Text("Abbrechen") }
+            },
+            title = { Text("YOLO-Modus deaktivieren?") },
+            text = {
+                Text("Ab jetzt werden in spaeteren Updates keine neuen Features mehr automatisch aktiviert. Bereits durch YOLO eingeschaltete Features bleiben aktiv, bis du sie selbst wieder ausschaltest.")
             }
           )
       }

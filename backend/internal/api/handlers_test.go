@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +13,29 @@ import (
 	"github.com/yosho/selfhosted-bereal/backend/internal/config"
 	"github.com/yosho/selfhosted-bereal/backend/internal/db"
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
+	"github.com/yosho/selfhosted-bereal/backend/internal/notify"
 )
+
+type recordingSender struct {
+	messages []notify.Message
+}
+
+func (s *recordingSender) Send(tokens []string, message notify.Message) (notify.SendResult, error) {
+	s.messages = append(s.messages, message)
+	return notify.SendResult{
+		Requested: len(tokens),
+		Sent:      len(tokens),
+	}, nil
+}
+
+func (s *recordingSender) SendDailyPrompt(tokens []string, body string) (notify.SendResult, error) {
+	return notify.SendResult{
+		Requested: len(tokens),
+		Sent:      len(tokens),
+	}, nil
+}
+
+func (s *recordingSender) Name() string { return "recording" }
 
 func TestIsPromptWindowActive(t *testing.T) {
 	triggeredAt := time.Date(2026, 3, 12, 13, 0, 0, 0, time.UTC)
@@ -466,8 +489,78 @@ func newSearchTestServer(t *testing.T) *Server {
 	}
 	return &Server{
 		DB:       database,
+		Notifier: &recordingSender{},
 		Config:   config.Config{PublicBaseURL: "https://daily.example"},
 		Location: time.UTC,
+	}
+}
+
+func TestHandleUpdatePreferencesPersistsYoloMode(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "tester", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := httptest.NewRequest(http.MethodPut, "/api/me/preferences", strings.NewReader(`{"yoloModeEnabled":true}`))
+	body.Header.Set("Content-Type", "application/json")
+	c.Request = body
+	c.Set("user", user)
+
+	server.handleUpdatePreferences(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handleUpdatePreferences() status = %d, want 200", rec.Code)
+	}
+	var updated models.User
+	if err := server.DB.First(&updated, user.ID).Error; err != nil {
+		t.Fatalf("load updated user: %v", err)
+	}
+	if !updated.YoloModeEnabled {
+		t.Fatal("expected yoloModeEnabled to persist as true")
+	}
+}
+
+func TestSendPhotoNotificationUsesOwnAndBookmarkPostNumberFlagsSeparately(t *testing.T) {
+	server := newSearchTestServer(t)
+	sender, ok := server.Notifier.(*recordingSender)
+	if !ok {
+		t.Fatal("recording sender missing")
+	}
+	number := "260526001"
+	photo := models.Photo{Day: "2026-05-26", PublicNumber: &number}
+
+	server.sendPhotoNotification([]notificationRecipient{
+		{Token: "own-off", PostNumberInPushEnabled: false},
+		{Token: "own-on", PostNumberInPushEnabled: true},
+	}, "Neue Reaktion", "alice hat auf deinen Beitrag reagiert", "photo_reaction", photo)
+
+	if len(sender.messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(sender.messages))
+	}
+	if got := sender.messages[0].Body; got != "alice hat auf deinen Beitrag reagiert" {
+		t.Fatalf("body without post number = %q", got)
+	}
+	if got := sender.messages[1].Body; got != "alice hat auf deinen Beitrag reagiert #260526001" {
+		t.Fatalf("body with post number = %q", got)
+	}
+
+	sender.messages = nil
+	server.sendPhotoNotification([]notificationRecipient{
+		{Token: "bookmark-off", PostNumberInPushEnabled: false},
+		{Token: "bookmark-on", PostNumberInPushEnabled: true},
+	}, "Aktivitaet auf gemerktem Beitrag", "bob hat einen gemerkten Beitrag kommentiert", "bookmarked_photo_comment", photo)
+
+	if len(sender.messages) != 2 {
+		t.Fatalf("bookmark messages = %d, want 2", len(sender.messages))
+	}
+	if got := sender.messages[0].Body; got != "bob hat einen gemerkten Beitrag kommentiert" {
+		t.Fatalf("bookmark body without post number = %q", got)
+	}
+	if got := sender.messages[1].Body; got != "bob hat einen gemerkten Beitrag kommentiert #260526001" {
+		t.Fatalf("bookmark body with post number = %q", got)
 	}
 }
 

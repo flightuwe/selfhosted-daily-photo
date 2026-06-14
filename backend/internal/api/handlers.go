@@ -842,6 +842,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		BookmarkedPhotoPushEnabled    *bool   `json:"bookmarkedPhotoPushEnabled"`
 		OwnPostNumberInPushEnabled    *bool   `json:"ownPostNumberInPushEnabled"`
 		PostNumberInPushEnabled       *bool   `json:"postNumberInPushEnabled"`
+		YoloModeEnabled               *bool   `json:"yoloModeEnabled"`
 		AllowPhotoDownload            *bool   `json:"allowPhotoDownload"`
 		CreativePostMode              *string `json:"creativePostMode"`
 		LocationFeatureEnabled        *bool   `json:"locationFeatureEnabled"`
@@ -883,6 +884,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.PostNumberInPushEnabled != nil {
 		updates["post_number_in_push_enabled"] = *req.PostNumberInPushEnabled
+	}
+	if req.YoloModeEnabled != nil {
+		updates["yolo_mode_enabled"] = *req.YoloModeEnabled
 	}
 	if req.AllowPhotoDownload != nil {
 		updates["allow_photo_download"] = *req.AllowPhotoDownload
@@ -10585,6 +10589,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"bookmarkedPhotoPushEnabled":    u.BookmarkedPhotoPushEnabled,
 		"ownPostNumberInPushEnabled":    u.OwnPostNumberInPushEnabled,
 		"postNumberInPushEnabled":       u.PostNumberInPushEnabled,
+		"yoloModeEnabled":               u.YoloModeEnabled,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":        u.LocationFeatureEnabled,
@@ -10625,6 +10630,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"bookmarkedPhotoPushEnabled":    false,
 		"ownPostNumberInPushEnabled":    false,
 		"postNumberInPushEnabled":       false,
+		"yoloModeEnabled":               false,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
 		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":        false,
