@@ -3485,6 +3485,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val staleFeedDays = mutableSetOf<String>()
     private val profileSectionIds = listOf(
         "display",
+        "yolo_mode",
         "notifications",
         "fotomojis",
         "invite",
@@ -12892,6 +12893,53 @@ fun ProfileTab(
         }
         item {
             CollapsibleSection(
+                title = "YOLO-Modus",
+                subtitle = "Accountweite Feature-Automatik fuer bestehende und kuenftige Releases",
+                expanded = sectionExpanded("yolo_mode"),
+                onExpandedChange = { onProfileSectionExpandedChange("yolo_mode", it) },
+                headerBrush = Brush.horizontalGradient(
+                    listOf(
+                        Color(0xFF8A1C1C),
+                        Color(0xFFB63A14),
+                        Color(0xFFDA7A14)
+                    )
+                )
+            ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E8))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("Automatisch alles Neue aktivieren", fontWeight = FontWeight.Bold)
+                        Text(
+                            "Dieser Modus haengt an deinem Profil. Wenn er aktiv ist, werden bestehende und kuenftige registrierte Features automatisch fuer deinen Account eingeschaltet.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        SettingsToggleRow(
+                            label = "YOLO-Modus",
+                            checked = yoloModeEnabled,
+                            onCheckedChange = { checked ->
+                                if (checked != yoloModeEnabled) {
+                                    if (checked) {
+                                        showYoloEnableWarning = true
+                                    } else {
+                                        showYoloDisableWarning = true
+                                    }
+                                }
+                            },
+                            supportingText = "Warnung: Das kann Benachrichtigungen, Anzeigeoptionen, Freigaben und andere App-Funktionen ohne spaeteres manuelles Einschalten veraendern."
+                        )
+                    }
+                }
+            }
+        }
+        item {
+            CollapsibleSection(
                 title = "FotoMojis",
                 subtitle = "Vorlagen fuer deine Reaktionsfotos verwalten",
                 expanded = sectionExpanded("fotomojis"),
@@ -13121,22 +13169,6 @@ fun ProfileTab(
                             supportingText = "Ergaenzt Pushes zu gemerkten fremden Beitraegen um die Post-ID."
                         )
                     }
-                }
-                SettingsSubsection("YOLO-Modus", "Aktiviert bestehende und kuenftige Features automatisch") {
-                    SettingsToggleRow(
-                        label = "YOLO-Modus",
-                        checked = yoloModeEnabled,
-                        onCheckedChange = { checked ->
-                            if (checked != yoloModeEnabled) {
-                                if (checked) {
-                                    showYoloEnableWarning = true
-                                } else {
-                                    showYoloDisableWarning = true
-                                }
-                            }
-                        },
-                        supportingText = "Warnung: Aktiviert jetzt sofort alle registrierten Features und schaltet kuenftige neue Features in spaeteren Updates automatisch frei."
-                    )
                 }
                 SettingsSubsection("Ton", "Klingelton und Test fuer deine Push-Benachrichtigungen") {
                     SettingsToggleRow(
