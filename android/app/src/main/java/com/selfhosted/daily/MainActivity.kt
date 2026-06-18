@@ -285,6 +285,7 @@ data class User(
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
     val bookmarkedPhotoPushEnabled: Boolean = false,
+    val postChangePushEnabled: Boolean = false,
     val autoSubscribeInteractedPostsEnabled: Boolean = false,
     val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
@@ -341,6 +342,7 @@ data class PreferencesUpdateRequest(
     val photoReactionPushEnabled: Boolean,
     val photoCommentPushEnabled: Boolean,
     val bookmarkedPhotoPushEnabled: Boolean? = null,
+    val postChangePushEnabled: Boolean? = null,
     val autoSubscribeInteractedPostsEnabled: Boolean? = null,
     val ownPostNumberInPushEnabled: Boolean? = null,
     val postNumberInPushEnabled: Boolean? = null,
@@ -433,6 +435,13 @@ data class DeleteChatResponse(
     val ok: Boolean = false,
     val deletedId: Long? = null
 )
+data class PostMediaItem(
+    val id: String = "",
+    val url: String = "",
+    val previewUrl: String? = null,
+    val capturedAt: String? = null,
+    val sourceKind: String = "attachment"
+)
 data class PromptPhoto(
     val id: Long,
     val day: String,
@@ -468,6 +477,8 @@ data class PromptPhoto(
     val canPaint: Boolean = false,
     val markedByMe: Boolean = false,
     val paintedByMe: Boolean = false,
+    val media: List<PostMediaItem> = emptyList(),
+    val mediaCount: Int = 0,
     val marks: List<PhotoMarkOverlay> = emptyList(),
     val paints: List<PhotoPaintOverlay> = emptyList()
 )
@@ -520,6 +531,8 @@ data class PromptResponse(
     val hasVisiblePostToday: Boolean = false,
     val hasAnyPostToday: Boolean = false,
     val ownPhoto: PromptPhoto? = null,
+    val canAppendToOwnLatestPost: Boolean = false,
+    val appendTargetPhotoId: Long? = null,
     val triggerSource: String? = null,
     val requestedByUser: String? = null,
     val momentKind: String? = null
@@ -549,6 +562,16 @@ data class FeedItem(
     val momentKind: String? = null,
     val specialRequestedByUserColor: String? = null
 )
+
+private fun PromptPhoto.mediaItems(): List<PostMediaItem> {
+    if (media.isNotEmpty()) return media.filter { it.url.isNotBlank() }
+    return listOfNotNull(
+        url.takeIf { it.isNotBlank() }?.let { PostMediaItem(id = "${id}-primary", url = it, capturedAt = capturedAt, sourceKind = "primary") },
+        secondUrl?.takeIf { it.isNotBlank() }?.let { PostMediaItem(id = "${id}-secondary", url = it, capturedAt = capturedAt, sourceKind = "secondary") }
+    )
+}
+
+private fun PromptPhoto.mediaUrls(): List<String> = mediaItems().map { it.url }
 
 private data class PaintEditorTarget(
     val item: FeedItem,
@@ -1158,6 +1181,19 @@ interface Api {
         @Part("location_latitude") locationLatitude: RequestBody? = null,
         @Part("location_longitude") locationLongitude: RequestBody? = null
     )
+
+    @Multipart
+    @POST("photos/{id}/attachments")
+    suspend fun appendPhotoAttachment(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long,
+        @Part photo: MultipartBody.Part,
+        @Part("captured_at") capturedAt: RequestBody? = null,
+        @Part("upload_client_id") uploadClientId: RequestBody? = null,
+        @Part("location_shared") locationShared: RequestBody? = null,
+        @Part("location_latitude") locationLatitude: RequestBody? = null,
+        @Part("location_longitude") locationLongitude: RequestBody? = null
+    ): PhotoMutationResponse
 
     @Multipart
     @POST("me/avatar")
@@ -2031,6 +2067,12 @@ class AppRepo(
         prefs.edit().putBoolean("bookmarked_photo_push_enabled_local", enabled).apply()
     }
 
+    fun postChangePushLocalEnabled(): Boolean = prefs.getBoolean("post_change_push_enabled_local", false)
+
+    fun setPostChangePushLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("post_change_push_enabled_local", enabled).apply()
+    }
+
     fun autoSubscribeInteractedPostsLocalEnabled(): Boolean = prefs.getBoolean("auto_subscribe_interacted_posts_enabled_local", false)
 
     fun setAutoSubscribeInteractedPostsLocalEnabled(enabled: Boolean) {
@@ -2334,6 +2376,7 @@ class AppRepo(
         showNsfwByDefault: Boolean? = null,
         creativePostMode: String? = null,
         bookmarkedPhotoPushEnabled: Boolean? = null,
+        postChangePushEnabled: Boolean? = null,
         autoSubscribeInteractedPostsEnabled: Boolean? = null,
         ownPostNumberInPushEnabled: Boolean? = null,
         postNumberInPushEnabled: Boolean? = null,
@@ -2353,6 +2396,7 @@ class AppRepo(
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
+                postChangePushEnabled = postChangePushEnabled,
                 autoSubscribeInteractedPostsEnabled = autoSubscribeInteractedPostsEnabled,
                 ownPostNumberInPushEnabled = ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = postNumberInPushEnabled,
@@ -2945,6 +2989,55 @@ class AppRepo(
         onProgress(totalBytes, totalBytes)
     }
 
+    suspend fun appendPhotoToPost(
+        photoId: Long,
+        uri: Uri,
+        shareLocation: Boolean = false,
+        capturedAtOverride: OffsetDateTime? = null,
+        onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
+    ): PromptPhoto? {
+        val capturedAt = capturedAtOverride ?: readCapturedAtFromUri(uri)
+        val file = copyUriToTemp(uri)
+        val bytesTotal = file.length().coerceAtLeast(1L)
+        val uploadClientId = UUID.randomUUID().toString()
+        val probe = measureUploadTelemetryProbe()
+        var awaitingAckLogged = false
+        val part = MultipartBody.Part.createFormData(
+            "photo",
+            file.name,
+            ProgressRequestBody(file.asRequestBody("image/*".toMediaTypeOrNull())) { sent, total ->
+                onProgress(sent.coerceAtMost(total), total)
+                if (!awaitingAckLogged && sent >= total) {
+                    awaitingAckLogged = true
+                    logDebug(
+                        type = "upload_direct_server_ack_pending",
+                        message = "Anhang gesendet, warte auf Bestaetigung.",
+                        meta = buildString {
+                            append("source=direct")
+                            append(";kind=append")
+                            append(";targetPhotoId=").append(photoId)
+                            append(";uploadClientId=").append(uploadClientId)
+                            append(";bytesTotal=").append(bytesTotal)
+                            append(";networkStable=").append(probe.networkStable)
+                            append(";").append(probe.networkSnapshot)
+                        }
+                    )
+                }
+            }
+        )
+        val capturedAtPart = capturedAt?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val uploadClientIdPart = uploadClientId.toRequestBody("text/plain".toMediaTypeOrNull())
+        val locationPayload = if (shareLocation) lastAvailableLocationPayload() else null
+        val locationShared = locationPayload?.let { "true".toRequestBody("text/plain".toMediaTypeOrNull()) }
+        val latitude = locationPayload?.latitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val longitude = locationPayload?.longitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val response = authorizedCall("/api/photos/:id/attachments") { token ->
+            api.appendPhotoAttachment(token, photoId, part, capturedAtPart, uploadClientIdPart, locationShared, latitude, longitude)
+        }
+        onProgress(bytesTotal, bytesTotal)
+        return response.photo
+    }
+
     suspend fun enqueueDualUpload(
         backUri: Uri,
         frontUri: Uri,
@@ -2995,6 +3088,29 @@ class AppRepo(
             }
         )
         return queuedItem
+    }
+
+    suspend fun enqueuePhotoAttachmentUpload(
+        photoId: Long,
+        uri: Uri,
+        shareLocation: Boolean = false
+    ): QueuedUploadItem {
+        val capturedAt = readCapturedAtFromUri(uri)
+        val file = copyUriToTemp(uri)
+        val queuedDir = File(context.filesDir, "upload-queue").apply { mkdirs() }
+        val queuedFile = moveToQueueFile(file, queuedDir, "attachment")
+        val uploadClientId = UUID.randomUUID().toString()
+        val locationPayload = if (shareLocation) lastAvailableLocationPayload() else null
+        return UploadQueueManager.enqueueAttachmentFromFile(
+            context = context,
+            filePath = queuedFile.absolutePath,
+            uploadClientId = uploadClientId,
+            appendTargetPhotoId = photoId,
+            locationShared = locationPayload != null,
+            locationLatitude = locationPayload?.latitude,
+            locationLongitude = locationPayload?.longitude,
+            capturedAtMs = capturedAt?.toInstant()?.toEpochMilli() ?: 0L
+        )
     }
 
     suspend fun checkForUpdate(currentVersion: String): UpdateInfo? =
@@ -3430,6 +3546,7 @@ data class UiState(
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
     val bookmarkedPhotoPushEnabled: Boolean = false,
+    val postChangePushEnabled: Boolean = false,
     val autoSubscribeInteractedPostsEnabled: Boolean = false,
     val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
@@ -3481,6 +3598,7 @@ private data class YoloPreferenceState(
     var photoReactionPushEnabled: Boolean,
     var photoCommentPushEnabled: Boolean,
     var bookmarkedPhotoPushEnabled: Boolean,
+    var postChangePushEnabled: Boolean,
     var autoSubscribeInteractedPostsEnabled: Boolean,
     var ownPostNumberInPushEnabled: Boolean,
     var postNumberInPushEnabled: Boolean,
@@ -3563,6 +3681,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         YoloFeatureDefinition("photo_reaction_push_enabled_v1", "0.6.0", "Push bei Reaktionen", "notifications") { it.photoReactionPushEnabled = true },
         YoloFeatureDefinition("photo_comment_push_enabled_v1", "0.6.0", "Push bei Kommentaren", "notifications") { it.photoCommentPushEnabled = true },
         YoloFeatureDefinition("bookmarked_photo_push_enabled_v1", "0.6.0", "Push bei gemerkten Beitraegen", "notifications") { it.bookmarkedPhotoPushEnabled = true },
+        YoloFeatureDefinition("post_change_push_enabled_v1", "0.6.0", "Push bei Post-Aenderungen", "notifications") { it.postChangePushEnabled = true },
         YoloFeatureDefinition("auto_subscribe_interacted_posts_enabled_v1", "0.5.21", "Interaktions-Auto-Abo", "interactions") { it.autoSubscribeInteractedPostsEnabled = true },
         YoloFeatureDefinition("own_post_number_in_push_enabled_v1", "0.6.0", "Postnummern bei eigenen Beitrags-Pushes", "notifications") { it.ownPostNumberInPushEnabled = true },
         YoloFeatureDefinition("post_number_in_push_enabled_v1", "0.6.0", "Postnummern bei gemerkten Beitrags-Pushes", "notifications") { it.postNumberInPushEnabled = true },
@@ -3600,6 +3719,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            postChangePushEnabled = repo.postChangePushLocalEnabled(),
             autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             ownPostNumberInPushEnabled = repo.ownPostNumberInPushLocalEnabled(),
             postNumberInPushEnabled = repo.postNumberInPushLocalEnabled(),
@@ -4162,6 +4282,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            postChangePushEnabled = repo.postChangePushLocalEnabled(),
             autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
@@ -5088,6 +5209,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setPhotoReactionPushLocalEnabled(me.photoReactionPushEnabled)
             repo.setPhotoCommentPushLocalEnabled(me.photoCommentPushEnabled)
             repo.setBookmarkedPhotoPushLocalEnabled(me.bookmarkedPhotoPushEnabled)
+            repo.setPostChangePushLocalEnabled(me.postChangePushEnabled)
             repo.setAutoSubscribeInteractedPostsLocalEnabled(me.autoSubscribeInteractedPostsEnabled)
             repo.setOwnPostNumberInPushLocalEnabled(me.ownPostNumberInPushEnabled)
             repo.setPostNumberInPushLocalEnabled(me.postNumberInPushEnabled)
@@ -5100,6 +5222,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photoReactionPushEnabled = repo.photoReactionPushLocalEnabled()
             val photoCommentPushEnabled = repo.photoCommentPushLocalEnabled()
             val bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled()
+            val postChangePushEnabled = repo.postChangePushLocalEnabled()
             val autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled()
             val ownPostNumberInPushEnabled = repo.ownPostNumberInPushLocalEnabled()
             val postNumberInPushEnabled = repo.postNumberInPushLocalEnabled()
@@ -5137,12 +5260,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
+                postChangePushEnabled = postChangePushEnabled,
                 autoSubscribeInteractedPostsEnabled = autoSubscribeInteractedPostsEnabled,
                 ownPostNumberInPushEnabled = ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = postNumberInPushEnabled,
                 yoloModeEnabled = me.yoloModeEnabled,
                 showPublicPostNumbers = repo.showPublicPostNumbers(),
-                notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled),
+                notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled, postChangePushEnabled),
                 diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && me.diagnosticsConsentGranted,
                 diagnosticsConsentGranted = me.diagnosticsConsentGranted,
                 diagnosticsConsentUpdatedAt = me.diagnosticsConsentUpdatedAt,
@@ -5799,6 +5923,26 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }.isSuccess
     }
 
+    suspend fun appendPhotoToLatestPost(
+        photoId: Long,
+        uri: Uri,
+        shareLocation: Boolean
+    ): Boolean {
+        state = state.copy(loading = true)
+        return runCatching {
+            repo.enqueuePhotoAttachmentUpload(photoId, uri, shareLocation)
+        }.onSuccess {
+            repo.syncUploadQueueScheduler()
+            state = state.copy(
+                loading = false,
+                uploadQueue = repo.uploadQueue(),
+                message = "Bild zum letzten Beitrag eingeplant."
+            )
+        }.onFailure {
+            state = state.copy(loading = false, message = apiError(it, "Anhang fehlgeschlagen"))
+        }.isSuccess
+    }
+
     fun retryQueuedUpload(id: String) {
         val ok = repo.retryUploadQueueItem(id)
         if (ok) {
@@ -6249,6 +6393,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            postChangePushEnabled = repo.postChangePushLocalEnabled(),
             autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
@@ -6327,6 +6472,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            postChangePushEnabled = repo.postChangePushLocalEnabled(),
             autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
@@ -6607,7 +6753,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val reaction = state.user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val comment = state.user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
         val bookmarked = state.user?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled()
-        val master = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked)
+        val postChange = state.user?.postChangePushEnabled ?: repo.postChangePushLocalEnabled()
+        val master = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked, postChange)
         repo.setNotificationMasterEnabled(master)
         state = state.copy(
             autoUpdateEnabled = auto,
@@ -6625,7 +6772,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val reaction = state.user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val comment = state.user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
         val bookmarked = state.user?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled()
-        val master = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked)
+        val postChange = state.user?.postChangePushEnabled ?: repo.postChangePushLocalEnabled()
+        val master = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked, postChange)
         repo.setNotificationMasterEnabled(master)
         state = state.copy(
             feedPostPushEnabled = feed,
@@ -6646,8 +6794,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         invite: Boolean,
         reaction: Boolean,
         comment: Boolean,
-        bookmarked: Boolean
-    ): Boolean = auto && chat && feed && poll && invite && reaction && comment && bookmarked
+        bookmarked: Boolean,
+        postChange: Boolean
+    ): Boolean = auto && chat && feed && poll && invite && reaction && comment && bookmarked && postChange
 
     private fun syncInteractionPushPrefs(user: User) {
         repo.setChatPushLocalEnabled(user.chatPushEnabled)
@@ -6657,6 +6806,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
         repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
         repo.setBookmarkedPhotoPushLocalEnabled(user.bookmarkedPhotoPushEnabled)
+        repo.setPostChangePushLocalEnabled(user.postChangePushEnabled)
         repo.setAutoSubscribeInteractedPostsLocalEnabled(user.autoSubscribeInteractedPostsEnabled)
         repo.setOwnPostNumberInPushLocalEnabled(user.ownPostNumberInPushEnabled)
         repo.setPostNumberInPushLocalEnabled(user.postNumberInPushEnabled)
@@ -6677,6 +6827,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = current?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = current?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = current?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled(),
+            postChangePushEnabled = current?.postChangePushEnabled ?: repo.postChangePushLocalEnabled(),
             autoSubscribeInteractedPostsEnabled = current?.autoSubscribeInteractedPostsEnabled ?: repo.autoSubscribeInteractedPostsLocalEnabled(),
             ownPostNumberInPushEnabled = current?.ownPostNumberInPushEnabled ?: repo.ownPostNumberInPushLocalEnabled(),
             postNumberInPushEnabled = current?.postNumberInPushEnabled ?: repo.postNumberInPushLocalEnabled(),
@@ -6702,6 +6853,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setPhotoReactionPushLocalEnabled(preferences.photoReactionPushEnabled)
         repo.setPhotoCommentPushLocalEnabled(preferences.photoCommentPushEnabled)
         repo.setBookmarkedPhotoPushLocalEnabled(preferences.bookmarkedPhotoPushEnabled)
+        repo.setPostChangePushLocalEnabled(preferences.postChangePushEnabled)
         repo.setAutoSubscribeInteractedPostsLocalEnabled(preferences.autoSubscribeInteractedPostsEnabled)
         repo.setOwnPostNumberInPushLocalEnabled(preferences.ownPostNumberInPushEnabled)
         repo.setPostNumberInPushLocalEnabled(preferences.postNumberInPushEnabled)
@@ -6735,6 +6887,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 showNsfwByDefault = preferences.showNsfwByDefault,
                 creativePostMode = preferences.creativePostMode,
                 bookmarkedPhotoPushEnabled = preferences.bookmarkedPhotoPushEnabled,
+                postChangePushEnabled = preferences.postChangePushEnabled,
                 autoSubscribeInteractedPostsEnabled = preferences.autoSubscribeInteractedPostsEnabled,
                 ownPostNumberInPushEnabled = preferences.ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = preferences.postNumberInPushEnabled,
@@ -6754,6 +6907,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = updatedUser?.photoReactionPushEnabled ?: preferences.photoReactionPushEnabled,
             photoCommentPushEnabled = updatedUser?.photoCommentPushEnabled ?: preferences.photoCommentPushEnabled,
             bookmarkedPhotoPushEnabled = updatedUser?.bookmarkedPhotoPushEnabled ?: preferences.bookmarkedPhotoPushEnabled,
+            postChangePushEnabled = updatedUser?.postChangePushEnabled ?: preferences.postChangePushEnabled,
             autoSubscribeInteractedPostsEnabled = updatedUser?.autoSubscribeInteractedPostsEnabled ?: preferences.autoSubscribeInteractedPostsEnabled,
             ownPostNumberInPushEnabled = updatedUser?.ownPostNumberInPushEnabled ?: preferences.ownPostNumberInPushEnabled,
             postNumberInPushEnabled = updatedUser?.postNumberInPushEnabled ?: preferences.postNumberInPushEnabled,
@@ -6779,7 +6933,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val reaction = user?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val comment = user?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
         val bookmarked = user?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled()
-        val master = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked)
+        val postChange = user?.postChangePushEnabled ?: repo.postChangePushLocalEnabled()
+        val master = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked, postChange)
         repo.setNotificationMasterEnabled(master)
         state = state.copy(
             user = updatedUser ?: state.user?.copy(yoloModeEnabled = true),
@@ -6949,7 +7104,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.setPollPushLocalEnabled(user.pollPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled, user.postChangePushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
@@ -7095,7 +7250,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.setPollPushLocalEnabled(user.pollPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled, user.postChangePushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
@@ -7122,10 +7277,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setPhotoReactionPushLocalEnabled(enabled)
         repo.setPhotoCommentPushLocalEnabled(enabled)
         repo.setBookmarkedPhotoPushLocalEnabled(enabled)
+        repo.setPostChangePushLocalEnabled(enabled)
         var nextUser = state.user
         if (state.user != null) {
             val allowDownload = state.user?.allowPhotoDownload ?: false
-            runCatching { repo.updatePreferences(enabled, enabled, enabled, enabled, enabled, allowDownload, bookmarkedPhotoPushEnabled = enabled) }
+            runCatching { repo.updatePreferences(enabled, enabled, enabled, enabled, enabled, allowDownload, bookmarkedPhotoPushEnabled = enabled, postChangePushEnabled = enabled) }
                 .onSuccess {
                     nextUser = it
                     repo.setChatPushLocalEnabled(it.chatPushEnabled)
@@ -7134,6 +7290,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     repo.setPhotoReactionPushLocalEnabled(it.photoReactionPushEnabled)
                     repo.setPhotoCommentPushLocalEnabled(it.photoCommentPushEnabled)
                     repo.setBookmarkedPhotoPushLocalEnabled(it.bookmarkedPhotoPushEnabled)
+                    repo.setPostChangePushLocalEnabled(it.postChangePushEnabled)
                 }
                 .onFailure {
                     state = state.copy(message = apiError(it, "Master-Benachrichtigung teilweise fehlgeschlagen"))
@@ -7145,6 +7302,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setPhotoReactionPushLocalEnabled(enabled)
             repo.setPhotoCommentPushLocalEnabled(enabled)
             repo.setBookmarkedPhotoPushLocalEnabled(enabled)
+            repo.setPostChangePushLocalEnabled(enabled)
         }
         val auto = repo.autoUpdateEnabled()
         val feed = repo.feedPostPushEnabled()
@@ -7154,7 +7312,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val reaction = nextUser?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled()
         val comment = nextUser?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled()
         val bookmarked = nextUser?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled()
-        val masterEffective = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked)
+        val postChange = nextUser?.postChangePushEnabled ?: repo.postChangePushLocalEnabled()
+        val masterEffective = computeNotificationMaster(auto, chat, feed, poll, invite, reaction, comment, bookmarked, postChange)
         repo.setNotificationMasterEnabled(masterEffective)
         state = state.copy(
             user = nextUser,
@@ -7165,6 +7324,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = reaction,
             photoCommentPushEnabled = comment,
             bookmarkedPhotoPushEnabled = bookmarked,
+            postChangePushEnabled = postChange,
             notificationMasterEnabled = masterEffective,
             loading = false,
             message = if (masterEffective == enabled) {
@@ -7356,7 +7516,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 syncInteractionPushPrefs(user)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled, user.postChangePushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
@@ -7392,7 +7552,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 syncInteractionPushPrefs(user)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled, user.postChangePushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
@@ -7426,7 +7586,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 syncInteractionPushPrefs(user)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled, user.postChangePushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
@@ -7462,7 +7622,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.setPollPushLocalEnabled(user.pollPushEnabled)
                 val auto = repo.autoUpdateEnabled()
                 val feed = repo.feedPostPushEnabled()
-                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled)
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled, user.postChangePushEnabled)
                 repo.setNotificationMasterEnabled(master)
                 state = state.copy(
                     user = user,
@@ -7471,6 +7631,41 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     notificationMasterEnabled = master,
                     loading = false,
                     message = "Push bei gemerkten Beitraegen aktualisiert"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Push-Einstellung speichern fehlgeschlagen"))
+            }
+    }
+
+    suspend fun setPostChangePushEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                current.pollPushEnabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload,
+                postChangePushEnabled = enabled
+            )
+        }
+            .onSuccess { user ->
+                syncInteractionPushPrefs(user)
+                repo.setPollPushLocalEnabled(user.pollPushEnabled)
+                val auto = repo.autoUpdateEnabled()
+                val feed = repo.feedPostPushEnabled()
+                val master = computeNotificationMaster(auto, user.chatPushEnabled, feed, user.pollPushEnabled, user.inviteRegistrationPushEnabled, user.photoReactionPushEnabled, user.photoCommentPushEnabled, user.bookmarkedPhotoPushEnabled, user.postChangePushEnabled)
+                repo.setNotificationMasterEnabled(master)
+                state = state.copy(
+                    user = user,
+                    pollPushEnabled = user.pollPushEnabled,
+                    postChangePushEnabled = user.postChangePushEnabled,
+                    notificationMasterEnabled = master,
+                    loading = false,
+                    message = "Push bei Post-Aenderungen aktualisiert"
                 )
             }
             .onFailure {
@@ -7568,7 +7763,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 setTab(AppTab.CHAT)
             }
 
-            action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" || type == "photo_reaction" || type == "photo_fotomoji" || type == "photo_comment" || type == "bookmarked_photo_reaction" || type == "bookmarked_photo_fotomoji" || type == "bookmarked_photo_comment" || targetDay.isNotBlank() || targetPhotoId != null -> {
+            action == "open_feed" || type == "feed_post" || type == "post" || type == "extra_post" || type == "photo_reaction" || type == "photo_fotomoji" || type == "photo_comment" || type == "photo_nsfw_marked" || type == "photo_nsfw_unmarked" || type == "bookmarked_photo_reaction" || type == "bookmarked_photo_fotomoji" || type == "bookmarked_photo_comment" || type == "bookmarked_photo_media_appended" || type == "bookmarked_photo_nsfw_marked" || type == "bookmarked_photo_nsfw_unmarked" || targetDay.isNotBlank() || targetPhotoId != null -> {
                 val targetIsTodayHidden = targetDay == prompt.day && !prompt.hasVisiblePostToday && !availableDays.contains(targetDay)
                 if (targetIsTodayHidden) {
                     openCamera("Der heutige Feed wird sichtbar, sobald du einen sichtbaren Beitrag gepostet hast.")
@@ -7657,6 +7852,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
 
     var captureUri by remember { mutableStateOf<Uri?>(null) }
     var captureTarget by remember { mutableStateOf<String?>(null) }
+    var appendCapturePhotoId by remember { mutableStateOf<Long?>(null) }
     var pendingFotomojiCapture by remember { mutableStateOf<PendingFotomojiCapture?>(null) }
     var pendingProfileFotomojiTemplateEmoji by remember { mutableStateOf<String?>(null) }
     var captureAsPrompt by remember { mutableStateOf(true) }
@@ -7739,6 +7935,21 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         }
                     }
                 }
+                "append" -> {
+                    if (shotUri != null) {
+                        val targetPhotoId = appendCapturePhotoId
+                        if (targetPhotoId != null) {
+                            val shareLocation = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true) && locationPermissionGranted
+                            scope.launch {
+                                val ok = vm.appendPhotoToLatestPost(targetPhotoId, shotUri, shareLocation)
+                                if (ok) {
+                                    vm.refreshAll(refreshFeedWindow = true)
+                                    vm.setTab(AppTab.FEED)
+                                }
+                            }
+                        }
+                    }
+                }
                 "fotomoji" -> {
                     val pending = pendingFotomojiCapture
                     if (pending != null && shotUri != null) {
@@ -7768,6 +7979,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         }
         captureUri = null
         captureTarget = null
+        appendCapturePhotoId = null
     }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -7791,6 +8003,14 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         captureTarget = target
         captureUri = uri
         cameraLauncher.launch(uri)
+    }
+
+    fun startAppendCapture(photoId: Long) {
+        appendCapturePhotoId = photoId
+        cameraUploadPercent = 0
+        cameraUploadError = ""
+        cameraUploadDone = false
+        openCameraFor("append")
     }
 
     fun requestLocationPermission() {
@@ -8640,6 +8860,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onCapturePrompt = { startDualCapture(true) },
                     onCaptureExtra = { capsule -> startDualCapture(false, capsule) },
                     onRequestSpecialMoment = { showSpecialMomentConfirm = true },
+                    onAppendToLatestPost = { photoId -> startAppendCapture(photoId) },
                     onReset = {
                         backPreviewUri = null
                         frontPreviewUri = null
@@ -8850,6 +9071,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     photoReactionPushEnabled = state.user?.photoReactionPushEnabled ?: state.photoReactionPushEnabled,
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
                     bookmarkedPhotoPushEnabled = state.user?.bookmarkedPhotoPushEnabled ?: state.bookmarkedPhotoPushEnabled,
+                    postChangePushEnabled = state.user?.postChangePushEnabled ?: state.postChangePushEnabled,
                     autoSubscribeInteractedPostsEnabled = state.user?.autoSubscribeInteractedPostsEnabled ?: state.autoSubscribeInteractedPostsEnabled,
                     ownPostNumberInPushEnabled = state.user?.ownPostNumberInPushEnabled ?: state.ownPostNumberInPushEnabled,
                     postNumberInPushEnabled = state.user?.postNumberInPushEnabled ?: state.postNumberInPushEnabled,
@@ -8897,6 +9119,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onPhotoReactionPushEnabledChange = { scope.launch { vm.setPhotoReactionPushEnabled(it) } },
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
                     onBookmarkedPhotoPushEnabledChange = { scope.launch { vm.setBookmarkedPhotoPushEnabled(it) } },
+                    onPostChangePushEnabledChange = { scope.launch { vm.setPostChangePushEnabled(it) } },
                     onAutoSubscribeInteractedPostsEnabledChange = { scope.launch { vm.setAutoSubscribeInteractedPostsEnabled(it) } },
                     onNotificationPostNumbersEnabledChange = { scope.launch { vm.setNotificationPostNumbersEnabled(it) } },
                     onOwnPostNumberInPushEnabledChange = { scope.launch { vm.setOwnPostNumberInPushEnabled(it) } },
@@ -9171,6 +9394,7 @@ fun CameraTab(
     onCapturePrompt: () -> Unit,
     onCaptureExtra: (CapsuleUploadOptions) -> Unit,
     onRequestSpecialMoment: () -> Unit,
+    onAppendToLatestPost: (Long) -> Unit,
     onReset: () -> Unit,
     onRetryUpload: () -> Unit,
     uploading: Boolean,
@@ -9200,6 +9424,7 @@ fun CameraTab(
         "special" -> if (!activeSpecialRequester.isNullOrBlank()) "Sondermoment von $activeSpecialRequester gerade aktiv." else "Sondermoment gerade aktiv."
         else -> "Daily-Moment gerade aktiv."
     }
+    val ownMedia = prompt?.ownPhoto?.mediaItems().orEmpty()
     var showCapsuleDialog by remember { mutableStateOf(false) }
     var pendingCapsule by remember { mutableStateOf<CapsuleUploadOptions?>(null) }
     val dayLabel = formatDayLabel(prompt?.day ?: LocalDate.now().toString())
@@ -9350,19 +9575,33 @@ fun CameraTab(
             } else {
                 Text("Du hast heute schon einen sichtbaren Beitrag gepostet.", fontWeight = FontWeight.Bold)
             }
-            val ownUrls = if (hasPromptPosted) listOfNotNull(prompt?.ownPhoto?.url, prompt?.ownPhoto?.secondUrl) else emptyList()
+            val ownUrls = if (hasPromptPosted) ownMedia.map { it.url } else emptyList()
             if (ownUrls.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    ownUrls.forEach { url ->
-                        AsyncImage(
-                            model = url,
-                            contentDescription = "Mein heutiges Foto",
+                    ownMedia.take(3).forEachIndexed { index, mediaItem ->
+                        Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .height(220.dp)
-                                .clickable { onOpenViewer(ownUrls, prompt?.ownPhoto?.id) },
+                                .clickable { onOpenViewer(ownUrls, prompt?.ownPhoto?.id) }
+                        ) {
+                            AsyncImage(
+                                model = mediaItem.url,
+                                contentDescription = "Mein heutiges Foto",
+                                modifier = Modifier.fillMaxSize(),
                                 contentScale = ContentScale.Crop
                             )
+                            if (index == 2 && ownMedia.size > 3) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color.Black.copy(alpha = 0.45f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("+${ownMedia.size - 2}", color = Color.White, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -9391,6 +9630,17 @@ fun CameraTab(
                         onClick = onRequestSpecialMoment,
                         enabled = canSpecial,
                         modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                if (prompt?.canAppendToOwnLatestPost == true && prompt.appendTargetPhotoId != null) {
+                    OutlinedButton(
+                        onClick = { onAppendToLatestPost(prompt.appendTargetPhotoId) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Dem eigenen letzten Beitrag Bild hinzufuegen") }
+                } else if (hasVisiblePosted) {
+                    Text(
+                        "Weitere Bilder lassen sich nur am letzten sichtbaren Beitrag von heute anhaengen.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             } else {
@@ -10429,6 +10679,7 @@ private fun FeedPostCard(
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PostCanvasCard(
     modifier: Modifier = Modifier,
@@ -10451,7 +10702,8 @@ private fun PostCanvasCard(
     headerTrailing: @Composable (() -> Unit)? = null,
     overlay: @Composable (Rect) -> Unit = {}
 ) {
-    val urls = remember(item.photo.url, item.photo.secondUrl) { listOfNotNull(item.photo.url, item.photo.secondUrl) }
+    val mediaItems = remember(item.photo) { item.photo.mediaItems() }
+    val urls = remember(mediaItems) { mediaItems.map { it.url } }
     val reactions = remember(item.reactions) { item.reactions.orEmpty() }
     val photoMojis = remember(item.photoMojis) {
         item.photoMojis.orEmpty().sortedWith(compareBy<PhotoMojiItem>({ parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN }, { it.id }))
@@ -10588,10 +10840,11 @@ private fun PostCanvasCard(
                 } else if (urls.isNotEmpty()) {
                     val frameShape = RoundedCornerShape(22.dp)
                     val imageShape = RoundedCornerShape(16.dp)
+                    val pagerState = rememberPagerState(pageCount = { urls.size })
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(if (urls.size > 1) 278.dp else 306.dp)
+                            .height(306.dp)
                             .clip(frameShape)
                             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.82f))
                             .onGloballyPositioned {
@@ -10599,25 +10852,37 @@ private fun PostCanvasCard(
                                 frameSize = Size(it.size.width.toFloat(), it.size.height.toFloat())
                             }
                     ) {
-                        Row(
+                        HorizontalPager(
+                            state = pagerState,
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                .padding(10.dp)
                         ) {
-                            urls.forEach { url ->
-                                AsyncImage(
-                                    model = url,
-                                    contentDescription = "${item.user.username} Foto",
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxHeight()
-                                        .then(obscuredModifier)
-                                        .clip(imageShape)
-                                        .then(
-                                            if (onOpenViewer != null) Modifier.clickable { onOpenViewer(urls, item.photo.id) } else Modifier
-                                        ),
-                                    contentScale = ContentScale.Crop
+                            AsyncImage(
+                                model = urls[it],
+                                contentDescription = "${item.user.username} Foto",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .then(obscuredModifier)
+                                    .clip(imageShape)
+                                    .then(
+                                        if (onOpenViewer != null) Modifier.clickable { onOpenViewer(urls, item.photo.id) } else Modifier
+                                    ),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+                        if (urls.size > 1) {
+                            Card(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.55f))
+                            ) {
+                                Text(
+                                    "${pagerState.currentPage + 1}/${urls.size}",
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold
                                 )
                             }
                         }
@@ -12460,6 +12725,7 @@ fun ProfileTab(
     photoReactionPushEnabled: Boolean,
     photoCommentPushEnabled: Boolean,
     bookmarkedPhotoPushEnabled: Boolean,
+    postChangePushEnabled: Boolean,
     autoSubscribeInteractedPostsEnabled: Boolean,
     ownPostNumberInPushEnabled: Boolean,
     postNumberInPushEnabled: Boolean,
@@ -12507,6 +12773,7 @@ fun ProfileTab(
     onPhotoReactionPushEnabledChange: (Boolean) -> Unit,
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
     onBookmarkedPhotoPushEnabledChange: (Boolean) -> Unit,
+    onPostChangePushEnabledChange: (Boolean) -> Unit,
     onAutoSubscribeInteractedPostsEnabledChange: (Boolean) -> Unit,
     onNotificationPostNumbersEnabledChange: (Boolean) -> Unit,
     onOwnPostNumberInPushEnabledChange: (Boolean) -> Unit,
@@ -13436,10 +13703,16 @@ fun ProfileTab(
                         supportingText = "Kommentare, Reaktionen und FotoMojis auf gemerkten fremden Posts."
                     )
                     SettingsToggleRow(
+                        label = "Push bei Post-Aenderungen",
+                        checked = postChangePushEnabled,
+                        onCheckedChange = onPostChangePushEnabledChange,
+                        supportingText = "Zusaetzliche Bilder und NSFW-Hinweise auf gemerkten Posts sowie NSFW-Markierungen auf deinen eigenen Posts."
+                    )
+                    SettingsToggleRow(
                         label = "Interaktions-Auto-Abo",
                         checked = autoSubscribeInteractedPostsEnabled,
                         onCheckedChange = onAutoSubscribeInteractedPostsEnabledChange,
-                        supportingText = "Wenn du auf fremden Posts kommentierst, reagierst, FotoMojis nutzt, markierst oder malst, werden sie automatisch gemerkt und nach 48h ohne neue Aktivitaet wieder entfernt."
+                        supportingText = "Wenn du auf fremden Posts kommentierst, reagierst, FotoMojis nutzt, markierst, malst oder NSFW setzt, werden sie automatisch gemerkt und nach 48h ohne neue Aktivitaet wieder entfernt."
                     )
                 }
                 SettingsSubsection("Postnummern in Pushes", "Sichtbar an einer Stelle fuer eigene und gemerkte Beitraege") {

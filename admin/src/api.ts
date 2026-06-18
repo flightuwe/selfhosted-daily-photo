@@ -230,6 +230,14 @@ export type AdminReportItem = {
   photoUser?: { id: number; username: string; favoriteColor?: string };
 };
 
+export type FeedPhotoMediaItem = {
+  id?: string;
+  url: string;
+  previewUrl?: string;
+  sourceKind?: string;
+  capturedAt?: string;
+};
+
 export type FeedPhoto = {
   id: number;
   day: string;
@@ -237,6 +245,11 @@ export type FeedPhoto = {
   caption?: string;
   url: string;
   secondUrl?: string;
+  media?: FeedPhotoMediaItem[];
+  mediaCount?: number;
+  nsfw?: boolean;
+  nsfwMarkedByUserId?: number | null;
+  nsfwMarkedAt?: string | null;
   createdAt: string;
   publicNumber?: string;
   locationShared?: boolean;

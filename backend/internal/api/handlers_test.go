@@ -1,8 +1,12 @@
 package api
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -15,6 +19,7 @@ import (
 	"github.com/yosho/selfhosted-bereal/backend/internal/db"
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 	"github.com/yosho/selfhosted-bereal/backend/internal/notify"
+	"github.com/yosho/selfhosted-bereal/backend/internal/storage"
 )
 
 type recordingSender struct {
@@ -484,14 +489,21 @@ func TestUserReportJSONIncludesReportedPhoto(t *testing.T) {
 
 func newSearchTestServer(t *testing.T) *Server {
 	t.Helper()
-	database, err := db.Connect(filepath.Join(t.TempDir(), "app.db"))
+	root := t.TempDir()
+	database, err := db.Connect(filepath.Join(root, "app.db"))
 	if err != nil {
 		t.Skipf("sqlite runtime unavailable: %v", err)
 	}
+	uploadDir := filepath.Join(root, "uploads")
+	store, err := storage.NewLocalStore(uploadDir)
+	if err != nil {
+		t.Fatalf("create local store: %v", err)
+	}
 	return &Server{
 		DB:       database,
+		Store:    store,
 		Notifier: &recordingSender{},
-		Config:   config.Config{PublicBaseURL: "https://daily.example"},
+		Config:   config.Config{PublicBaseURL: "https://daily.example", UploadDir: uploadDir},
 		Location: time.UTC,
 	}
 }
@@ -549,6 +561,34 @@ func TestHandleUpdatePreferencesPersistsAutoSubscribeInteractedPostsEnabled(t *t
 	}
 	if !updated.AutoSubscribeInteractedPostsEnabled {
 		t.Fatal("expected autoSubscribeInteractedPostsEnabled to persist as true")
+	}
+}
+
+func TestHandleUpdatePreferencesPersistsPostChangePushEnabled(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "tester", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := httptest.NewRequest(http.MethodPut, "/api/me/preferences", strings.NewReader(`{"postChangePushEnabled":true}`))
+	body.Header.Set("Content-Type", "application/json")
+	c.Request = body
+	c.Set("user", user)
+
+	server.handleUpdatePreferences(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handleUpdatePreferences() status = %d, want 200", rec.Code)
+	}
+	var updated models.User
+	if err := server.DB.First(&updated, user.ID).Error; err != nil {
+		t.Fatalf("load updated user: %v", err)
+	}
+	if !updated.PostChangePushEnabled {
+		t.Fatal("expected postChangePushEnabled to persist as true")
 	}
 }
 
@@ -711,6 +751,48 @@ func TestRemovePhotoBookmarkBlocksAutoUntilNextOwnInteraction(t *testing.T) {
 	}
 	if !bookmark.Active || bookmark.AutoResubscribeBlocked {
 		t.Fatalf("bookmark after next interaction = %+v, want active unblocked row", bookmark)
+	}
+}
+
+func TestHandlePhotoBookmarkDeleteDoesNotRecreateAutoBookmark(t *testing.T) {
+	server := newSearchTestServer(t)
+	author := models.User{Username: "author", PasswordHash: "x"}
+	actor := models.User{Username: "actor", PasswordHash: "x", AutoSubscribeInteractedPostsEnabled: true}
+	for _, user := range []*models.User{&author, &actor} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+	photo := models.Photo{
+		UserID:    author.ID,
+		User:      author,
+		Day:       "2026-06-18",
+		FilePath:  "2026-06-18/test.jpg",
+		CreatedAt: time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.handlePhotoInteractionSubscription(photo, actor.ID, "comment", time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("initial subscription: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/photos/%d/bookmark", photo.ID), nil)
+	ctx.Set("user", actor)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoBookmarkDelete(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handlePhotoBookmarkDelete() status = %d, want 200", rec.Code)
+	}
+	var bookmark models.PhotoBookmark
+	if err := server.DB.Where("user_id = ? AND photo_id = ?", actor.ID, photo.ID).First(&bookmark).Error; err != nil {
+		t.Fatalf("load bookmark: %v", err)
+	}
+	if bookmark.Active || !bookmark.AutoResubscribeBlocked {
+		t.Fatalf("bookmark after delete = %+v, want inactive blocked row", bookmark)
 	}
 }
 
@@ -906,6 +988,45 @@ func TestPhotoNsfwFlowRespectsPermissions(t *testing.T) {
 	}
 }
 
+func TestPhotoNsfwMarkAutoSubscribesForeignMarker(t *testing.T) {
+	server := newSearchTestServer(t)
+	poster := models.User{Username: "poster", PasswordHash: "x", AllowCommunityNsfwMarking: true}
+	other := models.User{Username: "other", PasswordHash: "x", AutoSubscribeInteractedPostsEnabled: true}
+	for _, user := range []*models.User{&poster, &other} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+	photo := models.Photo{
+		UserID:    poster.ID,
+		User:      poster,
+		Day:       "2026-06-18",
+		FilePath:  "2026-06-18/test.jpg",
+		CreatedAt: time.Date(2026, 6, 18, 18, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/photos/%d/nsfw", photo.ID), nil)
+	ctx.Set("user", other)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoNsfwCreate(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handlePhotoNsfwCreate() status = %d, want 200", rec.Code)
+	}
+	var bookmark models.PhotoBookmark
+	if err := server.DB.Where("user_id = ? AND photo_id = ?", other.ID, photo.ID).First(&bookmark).Error; err != nil {
+		t.Fatalf("load bookmark: %v", err)
+	}
+	if !bookmark.Active || bookmark.SubscriptionSource != photoBookmarkSourceAutoInteraction {
+		t.Fatalf("bookmark after nsfw mark = %+v, want active auto bookmark", bookmark)
+	}
+}
+
 func TestPhotoJSONForViewerIncludesNsfwFlags(t *testing.T) {
 	server := newSearchTestServer(t)
 	poster := models.User{Username: "poster", PasswordHash: "x"}
@@ -948,6 +1069,128 @@ func TestPhotoJSONForViewerIncludesNsfwFlags(t *testing.T) {
 	ownerRow := server.photoJSONForViewer(poster.ID, photo, ownerDecorations)
 	if ownerRow["nsfwMarkAllowed"] != true || ownerRow["nsfwUnmarkAllowed"] != true {
 		t.Fatalf("owner row nsfw flags = %#v", ownerRow)
+	}
+}
+
+func TestNotifyPhotoNsfwMarkedSendsOwnerAndBookmarkNotifications(t *testing.T) {
+	server := newSearchTestServer(t)
+	sender, ok := server.Notifier.(*recordingSender)
+	if !ok {
+		t.Fatal("recording sender missing")
+	}
+	owner := models.User{Username: "owner", PasswordHash: "x", PostChangePushEnabled: true, OwnPostNumberInPushEnabled: true}
+	actor := models.User{Username: "actor", PasswordHash: "x"}
+	bookmarker := models.User{Username: "bookmarker", PasswordHash: "x", PostChangePushEnabled: true, PostNumberInPushEnabled: true}
+	for _, user := range []*models.User{&owner, &actor, &bookmarker} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+	if err := server.DB.Create(&models.DeviceToken{UserID: owner.ID, Token: "owner-token"}).Error; err != nil {
+		t.Fatalf("create owner token: %v", err)
+	}
+	if err := server.DB.Create(&models.DeviceToken{UserID: bookmarker.ID, Token: "bookmarker-token"}).Error; err != nil {
+		t.Fatalf("create bookmarker token: %v", err)
+	}
+	number := "260618001"
+	photo := models.Photo{ID: 42, UserID: owner.ID, Day: "2026-06-18", PublicNumber: &number}
+	if err := server.DB.Create(&models.PhotoBookmark{
+		UserID:             bookmarker.ID,
+		PhotoID:            photo.ID,
+		Active:             true,
+		SubscriptionSource: photoBookmarkSourceManual,
+		CreatedAt:          time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("create bookmark: %v", err)
+	}
+
+	server.notifyPhotoNsfwMarked(actor, photo)
+
+	if len(sender.messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(sender.messages))
+	}
+	if sender.messages[0].Type != "photo_nsfw_marked" {
+		t.Fatalf("owner message type = %q, want photo_nsfw_marked", sender.messages[0].Type)
+	}
+	if sender.messages[1].Type != "bookmarked_photo_nsfw_marked" {
+		t.Fatalf("bookmark message type = %q, want bookmarked_photo_nsfw_marked", sender.messages[1].Type)
+	}
+}
+
+func TestHandlePhotoAttachmentCreateReturnsUpdatedMediaAndRejectsPrimaryDuplicate(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "owner", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Now().UTC()
+	photo := models.Photo{
+		UserID:    user.ID,
+		User:      user,
+		Day:       now.Format("2006-01-02"),
+		FilePath:  "2026-06-18/test.jpg",
+		CreatedAt: now.Add(-time.Minute),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	makeRequest := func(filename string, payload []byte) *http.Request {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("photo", filename)
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := part.Write(payload); err != nil {
+			t.Fatalf("write payload: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close writer: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/photos/%d/attachments", photo.ID), &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		return req
+	}
+
+	firstPayload := []byte("first-attachment")
+	firstRec := httptest.NewRecorder()
+	firstCtx, _ := gin.CreateTestContext(firstRec)
+	firstCtx.Request = makeRequest("extra-one.jpg", firstPayload)
+	firstCtx.Set("user", user)
+	firstCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoAttachmentCreate(firstCtx)
+
+	if firstRec.Code != http.StatusCreated {
+		t.Fatalf("first attachment status = %d, want 201", firstRec.Code)
+	}
+	var firstBody struct {
+		Photo map[string]any `json:"photo"`
+	}
+	if err := json.Unmarshal(firstRec.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	media, ok := firstBody.Photo["media"].([]any)
+	if !ok || len(media) != 2 {
+		t.Fatalf("photo.media = %#v, want 2 items", firstBody.Photo["media"])
+	}
+	if got, ok := firstBody.Photo["mediaCount"].(float64); !ok || int(got) != 2 {
+		t.Fatalf("photo.mediaCount = %#v, want 2", firstBody.Photo["mediaCount"])
+	}
+
+	sum := sha256.Sum256(firstPayload)
+	if err := server.DB.Model(&models.Photo{}).Where("id = ?", photo.ID).Update("primary_digest", hex.EncodeToString(sum[:])).Error; err != nil {
+		t.Fatalf("update primary digest: %v", err)
+	}
+	dupRec := httptest.NewRecorder()
+	dupCtx, _ := gin.CreateTestContext(dupRec)
+	dupCtx.Request = makeRequest("extra-dup.jpg", firstPayload)
+	dupCtx.Set("user", user)
+	dupCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoAttachmentCreate(dupCtx)
+
+	if dupRec.Code != http.StatusConflict {
+		t.Fatalf("duplicate attachment status = %d, want 409", dupRec.Code)
 	}
 }
 

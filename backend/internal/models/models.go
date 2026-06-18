@@ -16,6 +16,7 @@ type User struct {
 	PhotoFotomojiPushEnabled            bool       `gorm:"default:false" json:"photoFotomojiPushEnabled"`
 	PhotoCommentPushEnabled             bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
 	BookmarkedPhotoPushEnabled          bool       `gorm:"default:false" json:"bookmarkedPhotoPushEnabled"`
+	PostChangePushEnabled               bool       `gorm:"default:false" json:"postChangePushEnabled"`
 	AutoSubscribeInteractedPostsEnabled bool       `gorm:"default:false" json:"autoSubscribeInteractedPostsEnabled"`
 	OwnPostNumberInPushEnabled          bool       `gorm:"default:false" json:"ownPostNumberInPushEnabled"`
 	PostNumberInPushEnabled             bool       `gorm:"default:false" json:"postNumberInPushEnabled"`
@@ -307,6 +308,17 @@ type Photo struct {
 	PublicNumber             *string    `gorm:"size:9;uniqueIndex" json:"publicNumber"`
 	CapturedAt               *time.Time `gorm:"index" json:"capturedAt"`
 	CreatedAt                time.Time  `json:"createdAt"`
+}
+
+type PhotoAttachment struct {
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	PhotoID     uint       `gorm:"not null;index;index:idx_photo_attachment_photo_sort,priority:1" json:"photoId"`
+	FilePath    string     `gorm:"size:255;not null" json:"filePath"`
+	PreviewPath string     `gorm:"size:255" json:"previewPath"`
+	Digest      string     `gorm:"size:64;index" json:"digest"`
+	SortOrder   int        `gorm:"not null;index:idx_photo_attachment_photo_sort,priority:2" json:"sortOrder"`
+	CapturedAt  *time.Time `gorm:"index" json:"capturedAt"`
+	CreatedAt   time.Time  `json:"createdAt"`
 }
 
 type PhotoBookmark struct {

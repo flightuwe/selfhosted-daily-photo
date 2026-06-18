@@ -1,0 +1,11 @@
+{
+  "version": "v0.6.0",
+  "title": "NSFW, Mehrbild-Posts und Post-Aenderungs-Pushes",
+  "items": [
+    "NSFW ist jetzt als Sensibilitaetshinweis pro Post verfuegbar, inklusive Profil-Freigabe, Post-Menue-Aktion und geblurrter Darstellung fuer Bild, Text und Kommentarvorschau.",
+    "Mehrbild-Posts wurden fuer den Feed und die Upload-Warteschlange erweitert, sodass du deinem neuesten eigenen Tagesbeitrag weitere Bilder anhaengen kannst.",
+    "Interaktions-Auto-Abo, Bookmark-Logik und die neuen Post-Aenderungs-Pushes greifen jetzt sauber zusammen, auch fuer NSFW-Markierungen und zusaetzliche Bilder.",
+    "Neue Benachrichtigungsoption `Push bei Post-Aenderungen` informiert ueber NSFW-Statusaenderungen und weitere Bilder auf gemerkten Posts; im YOLO-Modus wird sie automatisch aktiviert.",
+    "Mehrere Integrationsfehler wurden bereinigt: manuelles Entmerken erzeugt kein sofortiges Auto-Abo mehr, Attachment-Responses liefern die neue Medienliste korrekt zurueck und Duplikate gegen bereits vorhandene Hauptbilder werden serverseitig blockiert."
+  ]
+}

@@ -320,6 +320,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.POST("/photos/:id/fotomojis", s.handlePhotoFotomojiFromTemplate)
 			protected.POST("/photos/:id/fotomojis/upload", s.handlePhotoFotomojiUpload)
 			protected.POST("/photos/:id/comments", s.handlePhotoComment)
+			protected.POST("/photos/:id/attachments", s.handlePhotoAttachmentCreate)
 		}
 
 		admin := api.Group("/admin")
@@ -854,6 +855,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		PhotoFotomojiPushEnabled            *bool   `json:"photoFotomojiPushEnabled"`
 		PhotoCommentPushEnabled             *bool   `json:"photoCommentPushEnabled"`
 		BookmarkedPhotoPushEnabled          *bool   `json:"bookmarkedPhotoPushEnabled"`
+		PostChangePushEnabled               *bool   `json:"postChangePushEnabled"`
 		AutoSubscribeInteractedPostsEnabled *bool   `json:"autoSubscribeInteractedPostsEnabled"`
 		OwnPostNumberInPushEnabled          *bool   `json:"ownPostNumberInPushEnabled"`
 		PostNumberInPushEnabled             *bool   `json:"postNumberInPushEnabled"`
@@ -895,6 +897,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.BookmarkedPhotoPushEnabled != nil {
 		updates["bookmarked_photo_push_enabled"] = *req.BookmarkedPhotoPushEnabled
+	}
+	if req.PostChangePushEnabled != nil {
+		updates["post_change_push_enabled"] = *req.PostChangePushEnabled
 	}
 	if req.AutoSubscribeInteractedPostsEnabled != nil {
 		updates["auto_subscribe_interacted_posts_enabled"] = *req.AutoSubscribeInteractedPostsEnabled
@@ -1411,6 +1416,8 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	hasVisiblePost := stats.VisibleCount > 0
 	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/prompt/current")
 	var ownPhoto gin.H
+	canAppendToOwnLatestPost := false
+	var appendTargetPhotoID any = nil
 	if hasPromptPosted {
 		var p models.Photo
 		ownPhotoQueryStart := time.Now()
@@ -1420,6 +1427,10 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		if s.Monitor != nil {
 			s.Monitor.RecordDBQuery("/api/prompt/current", "prompt_current_own_photo_query", time.Since(ownPhotoQueryStart))
 		}
+	}
+	if latestPhoto, ok, err := s.latestAppendablePhotoForDay(user.ID, day, now); err == nil && ok {
+		appendTargetPhotoID = latestPhoto.ID
+		canAppendToOwnLatestPost = s.photoMediaCount(latestPhoto) < 6
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1440,6 +1451,8 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		"specialTriggeredAt":          triggerStatus.SpecialTriggeredAt,
 		"specialRequestedByUser":      triggerStatus.SpecialRequestedByUser,
 		"specialRequestedByUserColor": triggerStatus.SpecialRequestedByUserColor,
+		"canAppendToOwnLatestPost":    canAppendToOwnLatestPost,
+		"appendTargetPhotoId":         appendTargetPhotoID,
 	})
 }
 
@@ -1483,11 +1496,17 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/dashboard/bootstrap")
 
 	var ownPhoto gin.H
+	canAppendToOwnLatestPost := false
+	var appendTargetPhotoID any = nil
 	if hasPromptPosted {
 		var p models.Photo
 		if err := s.DB.Where("user_id = ? AND day = ? AND prompt_only = ?", user.ID, day, true).Order("created_at desc").First(&p).Error; err == nil {
 			ownPhoto = s.photoJSON(p)
 		}
+	}
+	if latestPhoto, ok, err := s.latestAppendablePhotoForDay(user.ID, day, now); err == nil && ok {
+		appendTargetPhotoID = latestPhoto.ID
+		canAppendToOwnLatestPost = s.photoMediaCount(latestPhoto) < 6
 	}
 
 	var settings models.AppSettings
@@ -1546,6 +1565,8 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 			"specialTriggeredAt":          triggerStatus.SpecialTriggeredAt,
 			"specialRequestedByUser":      triggerStatus.SpecialRequestedByUser,
 			"specialRequestedByUserColor": triggerStatus.SpecialRequestedByUserColor,
+			"canAppendToOwnLatestPost":    canAppendToOwnLatestPost,
+			"appendTargetPhotoId":         appendTargetPhotoID,
 		},
 		"promptRules": gin.H{
 			"promptWindowStartHour": settings.PromptWindowStartHour,
@@ -2693,6 +2714,7 @@ func (s *Server) feedPayloadForDay(userID uint, day string, now time.Time) (gin.
 	if err != nil {
 		return nil, http.StatusInternalServerError, errors.New("photo decorations query failed")
 	}
+	attachmentByPhoto := s.photoAttachmentsByPhotoIDs(photoIDs)
 	reactionByPhoto, commentByPhoto, photoMojiByPhoto, err := s.feedInteractionPreview(photoIDs)
 	if err != nil {
 		return nil, http.StatusInternalServerError, errors.New("interaction query failed")
@@ -2731,7 +2753,7 @@ func (s *Server) feedPayloadForDay(userID uint, day string, now time.Time) (gin.
 			"isLate":                      isLate,
 			"capsuleLocked":               capsuleLocked,
 			"capsuleReleased":             capsuleReleased,
-			"photo":                       s.photoJSONForViewer(userID, p, decorations),
+			"photo":                       s.photoJSONForViewerWithAttachments(userID, p, decorations, attachmentByPhoto[p.ID]),
 			"user":                        s.userPublicJSON(userID, p.User),
 			"reactions":                   reactions,
 			"comments":                    comments,
@@ -5831,10 +5853,6 @@ func (s *Server) handlePhotoBookmarkCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark failed"})
 		return
 	}
-	if err := s.handlePhotoInteractionSubscription(photo, user.ID, "mark", time.Now().UTC()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
-		return
-	}
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
@@ -5861,10 +5879,6 @@ func (s *Server) handlePhotoBookmarkDelete(c *gin.Context) {
 	}
 	if err := s.removePhotoBookmark(user.ID, photo.ID, time.Now().UTC()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark delete failed"})
-		return
-	}
-	if err := s.handlePhotoInteractionSubscription(photo, user.ID, "paint", time.Now().UTC()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
 		return
 	}
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
@@ -5932,6 +5946,11 @@ func (s *Server) handlePhotoNsfwCreate(c *gin.Context) {
 	photo.Nsfw = true
 	photo.NsfwMarkedByUserID = &user.ID
 	photo.NsfwMarkedAt = &now
+	if err := s.handlePhotoInteractionSubscription(photo, user.ID, "nsfw", now); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
+		return
+	}
+	s.notifyPhotoNsfwMarked(user, photo)
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
@@ -5972,6 +5991,7 @@ func (s *Server) handlePhotoNsfwDelete(c *gin.Context) {
 	photo.Nsfw = false
 	photo.NsfwMarkedByUserID = nil
 	photo.NsfwMarkedAt = nil
+	s.notifyPhotoNsfwUnmarked(user, photo)
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
@@ -8477,6 +8497,154 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo), "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 }
 
+func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photoID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+	fileHeader, err := c.FormFile("photo")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing photo"})
+		return
+	}
+	capturedAt, err := s.parseCapturedAtValue(c.PostForm("captured_at"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid captured_at"})
+		return
+	}
+
+	now := time.Now().In(s.Location)
+	day := now.Format("2006-01-02")
+	var photo models.Photo
+	if err := s.DB.Where("id = ? AND user_id = ?", photoID, user.ID).First(&photo).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if photo.Day != day {
+		c.JSON(http.StatusForbidden, gin.H{"error": "append not allowed for this post"})
+		return
+	}
+	if !photoVisibleToViewer(user.ID, photo, now) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "append not allowed for hidden post"})
+		return
+	}
+	latestPhoto, ok, err := s.latestAppendablePhotoForDay(user.ID, day, now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if !ok || latestPhoto.ID != photo.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "append only allowed on latest visible post"})
+		return
+	}
+	if s.photoMediaCount(photo) >= 6 {
+		c.JSON(http.StatusConflict, gin.H{"error": "attachment limit reached"})
+		return
+	}
+
+	locationShared, latitude, longitude, locationErr := parseLocationForm(c)
+	if locationErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": locationErr.Error()})
+		return
+	}
+	if locationShared || latitude != nil || longitude != nil {
+		// Appends do not alter the post-level location state.
+		locationShared = false
+	}
+
+	savedPath, err := s.saveUploadedFile(photo.Day, user.ID, fileHeader)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+		return
+	}
+	previewPath := ""
+	if photo.CapsuleVisibleAt != nil {
+		previewPath, err = s.ensureCapsulePreview(savedPath)
+		if err != nil {
+			_ = s.removePhotoFile(savedPath)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "capsule preview failed"})
+			return
+		}
+	}
+	digest, err := s.fileDigest(savedPath)
+	if err != nil {
+		_ = s.removePhotoFile(savedPath)
+		_ = s.removePhotoFile(previewPath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "digest failed"})
+		return
+	}
+	var duplicateCount int64
+	if err := s.DB.Model(&models.Photo{}).
+		Where("id = ? AND (primary_digest = ? OR secondary_digest = ?)", photo.ID, digest, digest).
+		Count(&duplicateCount).Error; err != nil {
+		_ = s.removePhotoFile(savedPath)
+		_ = s.removePhotoFile(previewPath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if duplicateCount == 0 {
+		if err := s.DB.Model(&models.PhotoAttachment{}).Where("photo_id = ? AND digest = ?", photo.ID, digest).Count(&duplicateCount).Error; err != nil {
+			_ = s.removePhotoFile(savedPath)
+			_ = s.removePhotoFile(previewPath)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+	}
+	if duplicateCount > 0 {
+		_ = s.removePhotoFile(savedPath)
+		_ = s.removePhotoFile(previewPath)
+		c.JSON(http.StatusConflict, gin.H{"error": "attachment duplicate"})
+		return
+	}
+	var attachmentCount int64
+	if err := s.DB.Model(&models.PhotoAttachment{}).Where("photo_id = ?", photo.ID).Count(&attachmentCount).Error; err != nil {
+		_ = s.removePhotoFile(savedPath)
+		_ = s.removePhotoFile(previewPath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	attachment := models.PhotoAttachment{
+		PhotoID:     photo.ID,
+		FilePath:    savedPath,
+		PreviewPath: previewPath,
+		Digest:      digest,
+		SortOrder:   int(attachmentCount) + 2,
+		CapturedAt:  capturedAt,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := s.DB.Create(&attachment).Error; err != nil {
+		_ = s.removePhotoFile(savedPath)
+		_ = s.removePhotoFile(previewPath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db write failed"})
+		return
+	}
+	if err := s.refreshPhotoSearchDocument(photo.ID); err != nil {
+		_ = s.DB.Delete(&attachment).Error
+		_ = s.removePhotoFile(savedPath)
+		_ = s.removePhotoFile(previewPath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "search index failed"})
+		return
+	}
+	s.invalidateFeedDayCache(photo.Day)
+	s.notifyPhotoAttachmentAppended(user, photo)
+	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+		return
+	}
+	attachmentByPhoto := s.photoAttachmentsByPhotoIDs([]uint{photo.ID})
+	c.JSON(http.StatusCreated, gin.H{
+		"ok":    true,
+		"photo": s.photoJSONForViewerWithAttachments(user.ID, photo, decorations, attachmentByPhoto[photo.ID]),
+	})
+}
+
 func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"ok":       true,
@@ -8542,13 +8710,14 @@ func (s *Server) myPhotosPayload(userID uint, now time.Time) ([]gin.H, error) {
 	if err != nil {
 		return nil, err
 	}
+	attachmentByPhoto := s.photoAttachmentsByPhotoIDs(photoIDs)
 
 	out := make([]gin.H, 0, len(photos))
 	for _, p := range photos {
 		if p.CapsuleVisibleAt != nil && now.Before(*p.CapsuleVisibleAt) {
 			continue
 		}
-		row := s.photoJSONForViewer(userID, p, decorations)
+		row := s.photoJSONForViewerWithAttachments(userID, p, decorations, attachmentByPhoto[p.ID])
 		dailyMoment := false
 		if prompt, ok := promptByDay[p.Day]; ok && prompt.TriggeredAt != nil && prompt.UploadUntil != nil {
 			effectiveAt := photoEffectiveTime(p)
@@ -8735,6 +8904,15 @@ func (s *Server) handleDeleteMyPhoto(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete comments failed"})
 		return
 	}
+	var attachments []models.PhotoAttachment
+	if err := s.DB.Where("photo_id = ?", photo.ID).Find(&attachments).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete attachments failed"})
+		return
+	}
+	if err := s.DB.Where("photo_id = ?", photo.ID).Delete(&models.PhotoAttachment{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete attachments failed"})
+		return
+	}
 	if err := s.DB.Delete(&photo).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
@@ -8758,6 +8936,16 @@ func (s *Server) handleDeleteMyPhoto(c *gin.Context) {
 	if err := s.removePhotoFile(photo.CapsuleSecondPreviewPath); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete second preview file failed"})
 		return
+	}
+	for _, attachment := range attachments {
+		if err := s.removePhotoFile(attachment.FilePath); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete attachment file failed"})
+			return
+		}
+		if err := s.removePhotoFile(attachment.PreviewPath); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete attachment preview file failed"})
+			return
+		}
 	}
 
 	s.invalidateFeedDayCache(photo.Day)
@@ -10149,6 +10337,18 @@ func (s *Server) removePhotoFiles(photo models.Photo) {
 		}
 		_ = os.Remove(filepath.Join(s.Config.UploadDir, cleanRel))
 	}
+	var attachments []models.PhotoAttachment
+	if err := s.DB.Where("photo_id = ?", photo.ID).Find(&attachments).Error; err == nil {
+		for _, attachment := range attachments {
+			for _, rel := range []string{attachment.FilePath, attachment.PreviewPath} {
+				cleanRel := filepath.ToSlash(strings.TrimSpace(rel))
+				if cleanRel == "" {
+					continue
+				}
+				_ = os.Remove(filepath.Join(s.Config.UploadDir, cleanRel))
+			}
+		}
+	}
 }
 
 func (s *Server) saveUploadedFile(day string, userID uint, header *multipart.FileHeader) (string, error) {
@@ -10501,7 +10701,68 @@ func (s *Server) photoPaintJSON(item models.PhotoPaint) gin.H {
 	}
 }
 
+func (s *Server) photoAttachmentsByPhotoIDs(photoIDs []uint) map[uint][]models.PhotoAttachment {
+	if s == nil || s.DB == nil || len(photoIDs) == 0 {
+		return map[uint][]models.PhotoAttachment{}
+	}
+	var attachments []models.PhotoAttachment
+	if err := s.DB.Where("photo_id IN ?", photoIDs).Order("photo_id asc, sort_order asc, id asc").Find(&attachments).Error; err != nil {
+		return map[uint][]models.PhotoAttachment{}
+	}
+	out := make(map[uint][]models.PhotoAttachment, len(photoIDs))
+	for _, item := range attachments {
+		out[item.PhotoID] = append(out[item.PhotoID], item)
+	}
+	return out
+}
+
+func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttachment) []gin.H {
+	media := make([]gin.H, 0, 2+len(attachments))
+	if strings.TrimSpace(p.FilePath) != "" {
+		item := gin.H{
+			"id":         fmt.Sprintf("photo-%d-primary", p.ID),
+			"url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
+			"capturedAt": p.CapturedAt,
+			"sourceKind": "primary",
+		}
+		if strings.TrimSpace(p.CapsulePreviewPath) != "" {
+			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsulePreviewPath)
+		}
+		media = append(media, item)
+	}
+	if strings.TrimSpace(p.SecondPath) != "" {
+		item := gin.H{
+			"id":         fmt.Sprintf("photo-%d-secondary", p.ID),
+			"url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath),
+			"capturedAt": p.CapturedAt,
+			"sourceKind": "secondary",
+		}
+		if strings.TrimSpace(p.CapsuleSecondPreviewPath) != "" {
+			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsuleSecondPreviewPath)
+		}
+		media = append(media, item)
+	}
+	for _, attachment := range attachments {
+		item := gin.H{
+			"id":         fmt.Sprintf("attachment-%d", attachment.ID),
+			"url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, attachment.FilePath),
+			"capturedAt": attachment.CapturedAt,
+			"sourceKind": "attachment",
+		}
+		if strings.TrimSpace(attachment.PreviewPath) != "" {
+			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, attachment.PreviewPath)
+		}
+		media = append(media, item)
+	}
+	return media
+}
+
 func (s *Server) photoJSON(p models.Photo) gin.H {
+	attachmentMap := s.photoAttachmentsByPhotoIDs([]uint{p.ID})
+	return s.photoJSONWithAttachments(p, attachmentMap[p.ID])
+}
+
+func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.PhotoAttachment) gin.H {
 	effectiveAt := photoEffectiveTime(p)
 	publicNumber := ""
 	if p.PublicNumber != nil {
@@ -10533,6 +10794,8 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 		"deduplicated":       false,
 		"bookmarkedByMe":     false,
 		"bookmarkCount":      0,
+		"media":              []gin.H{},
+		"mediaCount":         0,
 		"nsfw":               p.Nsfw,
 		"nsfwMarkedByUserId": p.NsfwMarkedByUserID,
 		"nsfwMarkedAt":       p.NsfwMarkedAt,
@@ -10550,6 +10813,9 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 	if p.SecondPath != "" {
 		out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
 	}
+	media := s.photoMediaJSON(p, attachments)
+	out["media"] = media
+	out["mediaCount"] = len(media)
 	if strings.TrimSpace(p.CapsulePreviewPath) != "" {
 		out["capsulePreviewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsulePreviewPath)
 	}
@@ -10562,7 +10828,12 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 }
 
 func (s *Server) photoJSONForViewer(viewerID uint, p models.Photo, decorations *viewerPhotoDecorations) gin.H {
-	row := s.photoJSON(p)
+	attachmentMap := s.photoAttachmentsByPhotoIDs([]uint{p.ID})
+	return s.photoJSONForViewerWithAttachments(viewerID, p, decorations, attachmentMap[p.ID])
+}
+
+func (s *Server) photoJSONForViewerWithAttachments(viewerID uint, p models.Photo, decorations *viewerPhotoDecorations, attachments []models.PhotoAttachment) gin.H {
+	row := s.photoJSONWithAttachments(p, attachments)
 	creativeMode := normalizeCreativePostMode(strings.TrimSpace(p.User.CreativePostMode))
 	if decorations != nil {
 		if decorations.bookmarkMap != nil {
@@ -10752,6 +11023,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"photoFotomojiPushEnabled":      u.PhotoFotomojiPushEnabled,
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
 		"bookmarkedPhotoPushEnabled":    u.BookmarkedPhotoPushEnabled,
+		"postChangePushEnabled":         u.PostChangePushEnabled,
 		"ownPostNumberInPushEnabled":    u.OwnPostNumberInPushEnabled,
 		"postNumberInPushEnabled":       u.PostNumberInPushEnabled,
 		"yoloModeEnabled":               u.YoloModeEnabled,
@@ -10795,6 +11067,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"photoFotomojiPushEnabled":      false,
 		"photoCommentPushEnabled":       false,
 		"bookmarkedPhotoPushEnabled":    false,
+		"postChangePushEnabled":         false,
 		"ownPostNumberInPushEnabled":    false,
 		"postNumberInPushEnabled":       false,
 		"yoloModeEnabled":               false,
@@ -10999,6 +11272,35 @@ func (s *Server) userHasVisiblePhotoForDay(userID uint, day string, now time.Tim
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (s *Server) latestAppendablePhotoForDay(userID uint, day string, now time.Time) (models.Photo, bool, error) {
+	var photos []models.Photo
+	if err := s.DB.Where("user_id = ? AND day = ?", userID, day).Order("created_at desc").Find(&photos).Error; err != nil {
+		return models.Photo{}, false, err
+	}
+	sortPhotosForFeed(photos)
+	for _, photo := range photos {
+		if photoVisibleToViewer(userID, photo, now) {
+			return photo, true, nil
+		}
+	}
+	return models.Photo{}, false, nil
+}
+
+func (s *Server) photoMediaCount(photo models.Photo) int {
+	count := 0
+	if strings.TrimSpace(photo.FilePath) != "" {
+		count++
+	}
+	if strings.TrimSpace(photo.SecondPath) != "" {
+		count++
+	}
+	var attachmentCount int64
+	if err := s.DB.Model(&models.PhotoAttachment{}).Where("photo_id = ?", photo.ID).Count(&attachmentCount).Error; err == nil {
+		count += int(attachmentCount)
+	}
+	return count
 }
 
 type photoReactionCountRow struct {
@@ -11851,6 +12153,47 @@ func (s *Server) bookmarkedPhotoNotificationRecipients(photoID, ownerID, actorID
 	return recipients
 }
 
+func (s *Server) ownPostChangeNotificationRecipients(ownerID, actorID uint) []notificationRecipient {
+	var rows []struct {
+		Token                   string
+		PostNumberInPushEnabled bool
+	}
+	_ = s.DB.Table("device_tokens").
+		Select("device_tokens.token, users.own_post_number_in_push_enabled AS post_number_in_push_enabled").
+		Joins("JOIN users ON users.id = device_tokens.user_id").
+		Where("users.id = ? AND users.post_change_push_enabled = ? AND users.id <> ?", ownerID, true, actorID).
+		Find(&rows).Error
+	recipients := make([]notificationRecipient, 0, len(rows))
+	for _, row := range rows {
+		recipients = append(recipients, notificationRecipient{
+			Token:                   row.Token,
+			PostNumberInPushEnabled: row.PostNumberInPushEnabled,
+		})
+	}
+	return recipients
+}
+
+func (s *Server) bookmarkedPostChangeNotificationRecipients(photoID, ownerID, actorID uint) []notificationRecipient {
+	var rows []struct {
+		Token                   string
+		PostNumberInPushEnabled bool
+	}
+	_ = s.DB.Table("device_tokens").
+		Select("device_tokens.token, users.post_number_in_push_enabled").
+		Joins("JOIN users ON users.id = device_tokens.user_id").
+		Joins("JOIN photo_bookmarks ON photo_bookmarks.user_id = users.id").
+		Where("photo_bookmarks.photo_id = ? AND photo_bookmarks.active = ? AND users.post_change_push_enabled = ? AND users.id <> ? AND users.id <> ?", photoID, true, true, ownerID, actorID).
+		Find(&rows).Error
+	recipients := make([]notificationRecipient, 0, len(rows))
+	for _, row := range rows {
+		recipients = append(recipients, notificationRecipient{
+			Token:                   row.Token,
+			PostNumberInPushEnabled: row.PostNumberInPushEnabled,
+		})
+	}
+	return recipients
+}
+
 func (s *Server) sendPhotoNotification(recipients []notificationRecipient, title string, baseBody string, messageType string, photo models.Photo) {
 	if len(recipients) == 0 {
 		return
@@ -11932,6 +12275,34 @@ func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo) {
 	body := fmt.Sprintf("%s hat einen gemerkten Beitrag kommentiert", actor.Username)
 	bookmarkRecipients := s.bookmarkedPhotoNotificationRecipients(photo.ID, photo.UserID, actor.ID)
 	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_comment", photo)
+}
+
+func (s *Server) notifyPhotoAttachmentAppended(actor models.User, photo models.Photo) {
+	body := fmt.Sprintf("%s hat einem gemerkten Beitrag ein weiteres Bild hinzugefuegt", actor.Username)
+	recipients := s.bookmarkedPostChangeNotificationRecipients(photo.ID, photo.UserID, actor.ID)
+	s.sendPhotoNotification(recipients, "Aenderung an gemerktem Beitrag", body, "bookmarked_photo_media_appended", photo)
+}
+
+func (s *Server) notifyPhotoNsfwMarked(actor models.User, photo models.Photo) {
+	if photo.UserID != 0 && photo.UserID != actor.ID {
+		body := fmt.Sprintf("%s hat deinen Beitrag als NSFW markiert", actor.Username)
+		recipients := s.ownPostChangeNotificationRecipients(photo.UserID, actor.ID)
+		s.sendPhotoNotification(recipients, "NSFW-Hinweis gesetzt", body, "photo_nsfw_marked", photo)
+	}
+	body := fmt.Sprintf("%s hat einen gemerkten Beitrag als NSFW markiert", actor.Username)
+	recipients := s.bookmarkedPostChangeNotificationRecipients(photo.ID, photo.UserID, actor.ID)
+	s.sendPhotoNotification(recipients, "Aenderung an gemerktem Beitrag", body, "bookmarked_photo_nsfw_marked", photo)
+}
+
+func (s *Server) notifyPhotoNsfwUnmarked(actor models.User, photo models.Photo) {
+	if photo.UserID != 0 && photo.UserID != actor.ID {
+		body := fmt.Sprintf("%s hat den NSFW-Hinweis von deinem Beitrag entfernt", actor.Username)
+		recipients := s.ownPostChangeNotificationRecipients(photo.UserID, actor.ID)
+		s.sendPhotoNotification(recipients, "NSFW-Hinweis entfernt", body, "photo_nsfw_unmarked", photo)
+	}
+	body := fmt.Sprintf("%s hat den NSFW-Hinweis von einem gemerkten Beitrag entfernt", actor.Username)
+	recipients := s.bookmarkedPostChangeNotificationRecipients(photo.ID, photo.UserID, actor.ID)
+	s.sendPhotoNotification(recipients, "Aenderung an gemerktem Beitrag", body, "bookmarked_photo_nsfw_unmarked", photo)
 }
 
 func (s *Server) removeInvalidTokens(tokens []string) int64 {

@@ -118,6 +118,7 @@ import {
   type AdminFotomojiItem,
   type AdminFotomojiTemplateHistoryUser,
   type FeedItem,
+  type FeedPhoto,
   type DebugLogItem,
   type DebugLogsResponse,
   type DebugLogSummaryItem,
@@ -410,6 +411,43 @@ function readSavedViews(): SavedView[] {
   } catch {
     return [];
   }
+}
+
+function photoMediaItems(photo: FeedPhoto) {
+  if (Array.isArray(photo.media) && photo.media.length > 0) {
+    return photo.media.filter((item) => item?.url);
+  }
+  const fallback = [{ id: `${photo.id}-primary`, url: photo.url, sourceKind: "primary" }];
+  if (photo.secondUrl) {
+    fallback.push({ id: `${photo.id}-secondary`, url: photo.secondUrl, sourceKind: "secondary" });
+  }
+  return fallback;
+}
+
+function PhotoMediaCard({ photo, username, compact = false }: { photo: FeedPhoto; username: string; compact?: boolean }) {
+  const media = photoMediaItems(photo);
+  const mediaCount = Math.max(photo.mediaCount || 0, media.length);
+  return (
+    <div className={`photo-stack${compact ? " compact" : ""}${photo.nsfw ? " nsfw" : ""}`}>
+      <div className="photo-grid">
+        {media.map((item, index) => (
+          <a key={item.id || `${photo.id}-${index}`} href={item.url} target="_blank" rel="noreferrer">
+            <img src={item.url} alt={`${username} ${item.sourceKind || "photo"} ${index + 1}`} />
+          </a>
+        ))}
+      </div>
+      <div className="photo-meta-row">
+        <div className="photo-badges">
+          {photo.nsfw && <span className="photo-badge nsfw">NSFW</span>}
+          {mediaCount > 1 && <span className="photo-badge">{mediaCount} Medien</span>}
+          {photo.publicNumber && <span className="photo-badge">#{photo.publicNumber}</span>}
+        </div>
+        {photo.nsfwMarkedAt && (
+          <span className="small">markiert {formatDateTime(photo.nsfwMarkedAt)}</span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function App() {
@@ -2749,16 +2787,7 @@ export function App() {
                       {item.requestedByUser ? `von ${item.requestedByUser} angefordert` : "angefordert"}
                     </p>
                   )}
-                  <div className="photo-grid">
-                    <a href={item.photo.url} target="_blank" rel="noreferrer">
-                      <img src={item.photo.url} alt={`${item.user.username} back`} />
-                    </a>
-                    {item.photo.secondUrl && (
-                      <a href={item.photo.secondUrl} target="_blank" rel="noreferrer">
-                        <img src={item.photo.secondUrl} alt={`${item.user.username} front`} />
-                      </a>
-                    )}
-                  </div>
+                  <PhotoMediaCard photo={item.photo} username={item.user.username} />
                   {item.photo.locationShared && item.photo.locationMapsUrl && (
                     <p className="small">
                       <a href={item.photo.locationMapsUrl} target="_blank" rel="noreferrer">📍 Standort</a>
@@ -2805,16 +2834,7 @@ export function App() {
                   <p className="small"><strong>Tag:</strong> {item.day}</p>
                   <p className="small"><strong>Koordinaten:</strong> {item.locationDisplay}</p>
                   <p className="small"><a href={item.locationMapsUrl} target="_blank" rel="noreferrer">Google Maps oeffnen</a></p>
-                  <div className="photo-grid">
-                    <a href={item.photo.url} target="_blank" rel="noreferrer">
-                      <img src={item.photo.url} alt={`${item.user.username} back`} />
-                    </a>
-                    {item.photo.secondUrl && (
-                      <a href={item.photo.secondUrl} target="_blank" rel="noreferrer">
-                        <img src={item.photo.secondUrl} alt={`${item.user.username} front`} />
-                      </a>
-                    )}
-                  </div>
+                  <PhotoMediaCard photo={item.photo} username={item.user.username} />
                   <button className="danger" onClick={() => void onDeleteLocation(item.photoId)}>Standortdaten loeschen</button>
                 </article>
               ))}
@@ -4630,13 +4650,10 @@ export function App() {
                     <td>
                       {row.type === "post" && row.photo ? (
                         <div className="report-photo-card">
-                          <a href={row.photo.url} target="_blank" rel="noreferrer">
-                            <img src={row.photo.url} alt={`Post ${row.photo.id}`} />
-                          </a>
+                          <PhotoMediaCard photo={row.photo} username={row.photoUser?.username || "post"} compact />
                           <div className="stack">
                             <strong>
                               {row.photoUser ? `@${row.photoUser.username}` : "Post"}
-                              {row.photo.publicNumber ? ` · #${row.photo.publicNumber}` : ""}
                             </strong>
                             <span className="small">{row.photo.day}</span>
                             {row.photo.caption ? <span>{row.photo.caption}</span> : null}

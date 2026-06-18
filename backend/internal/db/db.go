@@ -43,6 +43,7 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.DailySpikeEvent{},
 		&models.DailyTriggerAuditEvent{},
 		&models.Photo{},
+		&models.PhotoAttachment{},
 		&models.PhotoBookmark{},
 		&models.PhotoMark{},
 		&models.PhotoPaint{},

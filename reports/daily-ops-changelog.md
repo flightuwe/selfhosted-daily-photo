@@ -2,6 +2,14 @@
 
 This file is append-only operational history for Forge-side Daily continuity.
 
+## 2026-06-18
+
+- Prepared the combined feature release `v0.6.0` with `versionName=0.6.0`, `versionCode=141531`, Android release notes and integrated backend/android test coverage.
+- Merged the NSFW post flow with profile opt-in, feed obscuring, YOLO defaults, bookmark-aware push events and auto-subscribe support for foreign NSFW markings.
+- Integrated the multi-image append flow into feed rendering, upload queue handling and bookmarked post change notifications, including duplicate protection against existing primary/secondary media.
+- Fixed the bookmark/auto-subscribe edge case so manual unbookmarking no longer recreates an interaction subscription immediately via the bookmark delete handler.
+- Re-verified locally with `go test ./internal/api/...` and `gradle :app:compileDebugKotlin`; Android still reports only pre-existing warnings outside this release scope.
+
 ## 2026-05-30
 
 - Prepared combined server/android patch release `v0.5.14` with `versionName=0.5.14`, `versionCode=141523` for the today-feed lock regression.

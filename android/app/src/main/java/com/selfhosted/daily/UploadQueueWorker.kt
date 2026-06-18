@@ -3,6 +3,7 @@ package com.selfhosted.daily
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import androidx.core.net.toUri
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -43,6 +44,8 @@ data class QueuedUploadItem(
     val backPath: String,
     val frontPath: String,
     val uploadClientId: String,
+    val uploadMode: String,
+    val appendTargetPhotoId: Long?,
     val isPrompt: Boolean,
     val capsuleMode: String,
     val capsulePrivate: Boolean,
@@ -66,6 +69,11 @@ data class QueuedUploadItem(
     val retentionUntilMs: Long,
     val leaseExpiresAtMs: Long
 )
+
+object UploadQueueMode {
+    const val DUAL = "dual"
+    const val ATTACHMENT = "attachment"
+}
 
 object UploadQueueStatus {
     const val WAITING = "waiting"
@@ -134,10 +142,61 @@ object UploadQueueManager {
             backPath = backPath,
             frontPath = frontPath,
             uploadClientId = uploadClientId,
+            uploadMode = UploadQueueMode.DUAL,
+            appendTargetPhotoId = null,
             isPrompt = isPrompt,
             capsuleMode = capsuleMode.trim(),
             capsulePrivate = capsulePrivate,
             capsuleGroupRemind = capsuleGroupRemind,
+            locationShared = locationShared && locationLatitude != null && locationLongitude != null,
+            locationLatitude = locationLatitude,
+            locationLongitude = locationLongitude,
+            status = UploadQueueStatus.WAITING,
+            attempts = 0,
+            lastError = "",
+            transferProgressPercent = 0,
+            serverAckState = UploadQueueServerAckState.NONE,
+            nextRetryAtMs = 0L,
+            capturedAtMs = capturedAtMs,
+            createdAtMs = now,
+            updatedAtMs = now,
+            lastAttemptStartedAtMs = 0L,
+            lastAttemptFinishedAtMs = 0L,
+            lastFailureClass = "",
+            lastHttpCode = null,
+            retentionUntilMs = now + queueRetryRetentionMs,
+            leaseExpiresAtMs = 0L
+        )
+        val all = read(context).toMutableList()
+        all.add(item)
+        write(context, prune(all))
+        UploadQueueScheduler.enqueueNow(context)
+        return item
+    }
+
+    @Synchronized
+    fun enqueueAttachmentFromFile(
+        context: Context,
+        filePath: String,
+        uploadClientId: String,
+        appendTargetPhotoId: Long,
+        locationShared: Boolean = false,
+        locationLatitude: Double? = null,
+        locationLongitude: Double? = null,
+        capturedAtMs: Long = 0L
+    ): QueuedUploadItem {
+        val now = System.currentTimeMillis()
+        val item = QueuedUploadItem(
+            id = UUID.randomUUID().toString(),
+            backPath = filePath,
+            frontPath = "",
+            uploadClientId = uploadClientId,
+            uploadMode = UploadQueueMode.ATTACHMENT,
+            appendTargetPhotoId = appendTargetPhotoId,
+            isPrompt = false,
+            capsuleMode = "",
+            capsulePrivate = false,
+            capsuleGroupRemind = false,
             locationShared = locationShared && locationLatitude != null && locationLongitude != null,
             locationLatitude = locationLatitude,
             locationLongitude = locationLongitude,
@@ -514,6 +573,8 @@ object UploadQueueManager {
                     backPath = o.optString("backPath"),
                     frontPath = o.optString("frontPath"),
                     uploadClientId = o.optString("uploadClientId"),
+                    uploadMode = o.optString("uploadMode", UploadQueueMode.DUAL).ifBlank { UploadQueueMode.DUAL },
+                    appendTargetPhotoId = if (o.has("appendTargetPhotoId") && !o.isNull("appendTargetPhotoId")) o.optLong("appendTargetPhotoId") else null,
                     isPrompt = o.optBoolean("isPrompt", true),
                     capsuleMode = o.optString("capsuleMode"),
                     capsulePrivate = o.optBoolean("capsulePrivate", false),
@@ -551,6 +612,8 @@ object UploadQueueManager {
                     put("backPath", item.backPath)
                     put("frontPath", item.frontPath)
                     put("uploadClientId", item.uploadClientId)
+                    put("uploadMode", item.uploadMode)
+                    put("appendTargetPhotoId", item.appendTargetPhotoId)
                     put("isPrompt", item.isPrompt)
                     put("capsuleMode", item.capsuleMode)
                     put("capsulePrivate", item.capsulePrivate)
@@ -589,7 +652,9 @@ object UploadQueueManager {
 
     private fun deleteFilesForItem(item: QueuedUploadItem) {
         runCatching { File(item.backPath).delete() }
-        runCatching { File(item.frontPath).delete() }
+        if (item.frontPath.isNotBlank()) {
+            runCatching { File(item.frontPath).delete() }
+        }
     }
 }
 
@@ -727,6 +792,23 @@ class UploadQueueWorker(
     }
 
     private suspend fun upload(item: QueuedUploadItem, repo: AppRepo, probe: UploadTelemetryProbe) {
+        if (item.uploadMode == UploadQueueMode.ATTACHMENT) {
+            val file = File(item.backPath)
+            if (!file.exists()) throw IOException("attachment file missing")
+            val totalBytes = file.length().coerceAtLeast(1L)
+            repo.appendPhotoToPost(
+                photoId = item.appendTargetPhotoId ?: throw IllegalStateException("append_target_missing"),
+                uri = file.toUri(),
+                shareLocation = item.locationShared,
+                capturedAtOverride = item.capturedAtMs.takeIf { it > 0L }?.let {
+                    OffsetDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault())
+                }
+            ) { sent, _ ->
+                val percent = ((sent.coerceAtMost(totalBytes) * 100L) / totalBytes).toInt().coerceIn(0, 100)
+                UploadQueueManager.markProgress(applicationContext, item.id, percent)
+            }
+            return
+        }
         val backFile = File(item.backPath)
         val frontFile = File(item.frontPath)
         if (!backFile.exists() || !frontFile.exists()) {
