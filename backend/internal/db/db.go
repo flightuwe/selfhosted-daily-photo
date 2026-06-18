@@ -172,7 +172,11 @@ func ensurePhotoSearchIndex(database *gorm.DB) error {
 		}
 	}
 	// Best effort: some sqlite builds ship without FTS5. The app search falls back to the token table either way.
-	_ = database.Exec(`
+	sqlDB, err := database.DB()
+	if err != nil {
+		return err
+	}
+	_, _ = sqlDB.Exec(`
 CREATE VIRTUAL TABLE IF NOT EXISTS photo_search USING fts5(
     photo_id UNINDEXED,
     day UNINDEXED,
@@ -182,7 +186,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS photo_search USING fts5(
     hashtags,
     body,
     tokenize = "unicode61 remove_diacritics 2 tokenchars '#_'"
-);`).Error
+);`)
 	return nil
 }
 

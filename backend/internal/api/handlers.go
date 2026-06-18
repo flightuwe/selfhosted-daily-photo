@@ -5981,8 +5981,8 @@ func (s *Server) handlePhotoNsfwDelete(c *gin.Context) {
 	}
 	updates := map[string]any{
 		"nsfw":                   false,
-		"nsfw_marked_by_user_id": nil,
-		"nsfw_marked_at":         nil,
+		"nsfw_marked_by_user_id": gorm.Expr("NULL"),
+		"nsfw_marked_at":         gorm.Expr("NULL"),
 	}
 	if err := s.DB.Model(&models.Photo{}).Where("id = ?", photo.ID).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "nsfw_delete_failed"})
@@ -6909,6 +6909,14 @@ func (s *Server) ensurePhotoSearchReady() error {
 	return nil
 }
 
+func (s *Server) optionalPhotoSearchExec(query string, args ...any) {
+	sqlDB, err := s.DB.DB()
+	if err != nil {
+		return
+	}
+	_, _ = sqlDB.Exec(query, args...)
+}
+
 func (s *Server) refreshPhotoSearchDocument(photoID uint) error {
 	var photo models.Photo
 	if err := s.DB.Select("id, day, user_id, caption").First(&photo, photoID).Error; err != nil {
@@ -6957,7 +6965,7 @@ func (s *Server) refreshPhotoSearchDocument(photoID uint) error {
 	if err := s.DB.Exec("DELETE FROM photo_search_docs WHERE photo_id = ?", photoID).Error; err != nil {
 		return err
 	}
-	_ = s.DB.Exec("DELETE FROM photo_search WHERE CAST(photo_id AS INTEGER) = ?", photoID).Error
+	s.optionalPhotoSearchExec("DELETE FROM photo_search WHERE CAST(photo_id AS INTEGER) = ?", photoID)
 	if err := s.DB.Exec(
 		"INSERT INTO photo_search_docs (photo_id, day, user_id, caption, comments, hashtags, body) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		photo.ID,
@@ -6975,7 +6983,7 @@ func (s *Server) refreshPhotoSearchDocument(photoID uint) error {
 			return err
 		}
 	}
-	_ = s.DB.Exec(
+	s.optionalPhotoSearchExec(
 		"INSERT INTO photo_search (photo_id, day, user_id, caption, comments, hashtags, body) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		photo.ID,
 		photo.Day,
@@ -6984,7 +6992,7 @@ func (s *Server) refreshPhotoSearchDocument(photoID uint) error {
 		commentText,
 		strings.Join(hashtags, " "),
 		body,
-	).Error
+	)
 	return nil
 }
 
@@ -6995,7 +7003,7 @@ func (s *Server) deletePhotoSearchDocument(photoID uint) error {
 	if err := s.DB.Exec("DELETE FROM photo_search_docs WHERE photo_id = ?", photoID).Error; err != nil {
 		return err
 	}
-	_ = s.DB.Exec("DELETE FROM photo_search WHERE CAST(photo_id AS INTEGER) = ?", photoID).Error
+	s.optionalPhotoSearchExec("DELETE FROM photo_search WHERE CAST(photo_id AS INTEGER) = ?", photoID)
 	return nil
 }
 
