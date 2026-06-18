@@ -962,6 +962,7 @@ func TestPhotoNsfwFlowRespectsPermissions(t *testing.T) {
 		t.Fatalf("poster unmark status = %d, want 200", posterUnmarkRec.Code)
 	}
 
+	updated = models.Photo{}
 	if err := server.DB.First(&updated, photo.ID).Error; err != nil {
 		t.Fatalf("load photo after poster unmark: %v", err)
 	}
