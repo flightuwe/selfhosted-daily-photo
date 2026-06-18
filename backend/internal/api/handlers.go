@@ -5979,12 +5979,11 @@ func (s *Server) handlePhotoNsfwDelete(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "nsfw_unmarking_not_allowed"})
 		return
 	}
-	updates := map[string]any{
-		"nsfw":                   false,
-		"nsfw_marked_by_user_id": nil,
-		"nsfw_marked_at":         nil,
-	}
-	if err := s.DB.Model(&models.Photo{}).Where("id = ?", photo.ID).UpdateColumns(updates).Error; err != nil {
+	if err := s.DB.Exec(
+		"UPDATE photos SET nsfw = ?, nsfw_marked_by_user_id = NULL, nsfw_marked_at = NULL WHERE id = ?",
+		false,
+		photo.ID,
+	).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "nsfw_delete_failed"})
 		return
 	}
