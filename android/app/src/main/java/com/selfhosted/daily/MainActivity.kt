@@ -285,6 +285,7 @@ data class User(
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
     val bookmarkedPhotoPushEnabled: Boolean = false,
+    val autoSubscribeInteractedPostsEnabled: Boolean = false,
     val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
     val yoloModeEnabled: Boolean = false,
@@ -340,6 +341,7 @@ data class PreferencesUpdateRequest(
     val photoReactionPushEnabled: Boolean,
     val photoCommentPushEnabled: Boolean,
     val bookmarkedPhotoPushEnabled: Boolean? = null,
+    val autoSubscribeInteractedPostsEnabled: Boolean? = null,
     val ownPostNumberInPushEnabled: Boolean? = null,
     val postNumberInPushEnabled: Boolean? = null,
     val yoloModeEnabled: Boolean? = null,
@@ -2029,6 +2031,12 @@ class AppRepo(
         prefs.edit().putBoolean("bookmarked_photo_push_enabled_local", enabled).apply()
     }
 
+    fun autoSubscribeInteractedPostsLocalEnabled(): Boolean = prefs.getBoolean("auto_subscribe_interacted_posts_enabled_local", false)
+
+    fun setAutoSubscribeInteractedPostsLocalEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("auto_subscribe_interacted_posts_enabled_local", enabled).apply()
+    }
+
     fun ownPostNumberInPushLocalEnabled(): Boolean = prefs.getBoolean("own_post_number_in_push_enabled_local", false)
 
     fun setOwnPostNumberInPushLocalEnabled(enabled: Boolean) {
@@ -2326,6 +2334,7 @@ class AppRepo(
         showNsfwByDefault: Boolean? = null,
         creativePostMode: String? = null,
         bookmarkedPhotoPushEnabled: Boolean? = null,
+        autoSubscribeInteractedPostsEnabled: Boolean? = null,
         ownPostNumberInPushEnabled: Boolean? = null,
         postNumberInPushEnabled: Boolean? = null,
         yoloModeEnabled: Boolean? = null,
@@ -2344,6 +2353,7 @@ class AppRepo(
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
+                autoSubscribeInteractedPostsEnabled = autoSubscribeInteractedPostsEnabled,
                 ownPostNumberInPushEnabled = ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = postNumberInPushEnabled,
                 yoloModeEnabled = yoloModeEnabled,
@@ -3420,6 +3430,7 @@ data class UiState(
     val photoReactionPushEnabled: Boolean = false,
     val photoCommentPushEnabled: Boolean = false,
     val bookmarkedPhotoPushEnabled: Boolean = false,
+    val autoSubscribeInteractedPostsEnabled: Boolean = false,
     val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
     val yoloModeEnabled: Boolean = false,
@@ -3470,6 +3481,7 @@ private data class YoloPreferenceState(
     var photoReactionPushEnabled: Boolean,
     var photoCommentPushEnabled: Boolean,
     var bookmarkedPhotoPushEnabled: Boolean,
+    var autoSubscribeInteractedPostsEnabled: Boolean,
     var ownPostNumberInPushEnabled: Boolean,
     var postNumberInPushEnabled: Boolean,
     var yoloModeEnabled: Boolean,
@@ -3551,6 +3563,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         YoloFeatureDefinition("photo_reaction_push_enabled_v1", "0.6.0", "Push bei Reaktionen", "notifications") { it.photoReactionPushEnabled = true },
         YoloFeatureDefinition("photo_comment_push_enabled_v1", "0.6.0", "Push bei Kommentaren", "notifications") { it.photoCommentPushEnabled = true },
         YoloFeatureDefinition("bookmarked_photo_push_enabled_v1", "0.6.0", "Push bei gemerkten Beitraegen", "notifications") { it.bookmarkedPhotoPushEnabled = true },
+        YoloFeatureDefinition("auto_subscribe_interacted_posts_enabled_v1", "0.5.21", "Interaktions-Auto-Abo", "interactions") { it.autoSubscribeInteractedPostsEnabled = true },
         YoloFeatureDefinition("own_post_number_in_push_enabled_v1", "0.6.0", "Postnummern bei eigenen Beitrags-Pushes", "notifications") { it.ownPostNumberInPushEnabled = true },
         YoloFeatureDefinition("post_number_in_push_enabled_v1", "0.6.0", "Postnummern bei gemerkten Beitrags-Pushes", "notifications") { it.postNumberInPushEnabled = true },
         YoloFeatureDefinition("allow_photo_download_v1", "0.6.0", "Download-Freigabe", "sharing") { it.allowPhotoDownload = true },
@@ -3587,6 +3600,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             ownPostNumberInPushEnabled = repo.ownPostNumberInPushLocalEnabled(),
             postNumberInPushEnabled = repo.postNumberInPushLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
@@ -4148,6 +4162,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
@@ -5073,6 +5088,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setPhotoReactionPushLocalEnabled(me.photoReactionPushEnabled)
             repo.setPhotoCommentPushLocalEnabled(me.photoCommentPushEnabled)
             repo.setBookmarkedPhotoPushLocalEnabled(me.bookmarkedPhotoPushEnabled)
+            repo.setAutoSubscribeInteractedPostsLocalEnabled(me.autoSubscribeInteractedPostsEnabled)
             repo.setOwnPostNumberInPushLocalEnabled(me.ownPostNumberInPushEnabled)
             repo.setPostNumberInPushLocalEnabled(me.postNumberInPushEnabled)
             repo.setYoloModeLocalEnabled(me.yoloModeEnabled)
@@ -5084,6 +5100,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val photoReactionPushEnabled = repo.photoReactionPushLocalEnabled()
             val photoCommentPushEnabled = repo.photoCommentPushLocalEnabled()
             val bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled()
+            val autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled()
             val ownPostNumberInPushEnabled = repo.ownPostNumberInPushLocalEnabled()
             val postNumberInPushEnabled = repo.postNumberInPushLocalEnabled()
             val autoUpdateEnabled = repo.autoUpdateEnabled()
@@ -5120,6 +5137,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photoReactionPushEnabled = photoReactionPushEnabled,
                 photoCommentPushEnabled = photoCommentPushEnabled,
                 bookmarkedPhotoPushEnabled = bookmarkedPhotoPushEnabled,
+                autoSubscribeInteractedPostsEnabled = autoSubscribeInteractedPostsEnabled,
                 ownPostNumberInPushEnabled = ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = postNumberInPushEnabled,
                 yoloModeEnabled = me.yoloModeEnabled,
@@ -6231,6 +6249,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
@@ -6308,6 +6327,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = repo.bookmarkedPhotoPushLocalEnabled(),
+            autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
@@ -6637,6 +6657,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setPhotoReactionPushLocalEnabled(user.photoReactionPushEnabled)
         repo.setPhotoCommentPushLocalEnabled(user.photoCommentPushEnabled)
         repo.setBookmarkedPhotoPushLocalEnabled(user.bookmarkedPhotoPushEnabled)
+        repo.setAutoSubscribeInteractedPostsLocalEnabled(user.autoSubscribeInteractedPostsEnabled)
         repo.setOwnPostNumberInPushLocalEnabled(user.ownPostNumberInPushEnabled)
         repo.setPostNumberInPushLocalEnabled(user.postNumberInPushEnabled)
         repo.setYoloModeLocalEnabled(user.yoloModeEnabled)
@@ -6656,6 +6677,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = current?.photoReactionPushEnabled ?: repo.photoReactionPushLocalEnabled(),
             photoCommentPushEnabled = current?.photoCommentPushEnabled ?: repo.photoCommentPushLocalEnabled(),
             bookmarkedPhotoPushEnabled = current?.bookmarkedPhotoPushEnabled ?: repo.bookmarkedPhotoPushLocalEnabled(),
+            autoSubscribeInteractedPostsEnabled = current?.autoSubscribeInteractedPostsEnabled ?: repo.autoSubscribeInteractedPostsLocalEnabled(),
             ownPostNumberInPushEnabled = current?.ownPostNumberInPushEnabled ?: repo.ownPostNumberInPushLocalEnabled(),
             postNumberInPushEnabled = current?.postNumberInPushEnabled ?: repo.postNumberInPushLocalEnabled(),
             yoloModeEnabled = current?.yoloModeEnabled ?: repo.yoloModeLocalEnabled(),
@@ -6680,6 +6702,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setPhotoReactionPushLocalEnabled(preferences.photoReactionPushEnabled)
         repo.setPhotoCommentPushLocalEnabled(preferences.photoCommentPushEnabled)
         repo.setBookmarkedPhotoPushLocalEnabled(preferences.bookmarkedPhotoPushEnabled)
+        repo.setAutoSubscribeInteractedPostsLocalEnabled(preferences.autoSubscribeInteractedPostsEnabled)
         repo.setOwnPostNumberInPushLocalEnabled(preferences.ownPostNumberInPushEnabled)
         repo.setPostNumberInPushLocalEnabled(preferences.postNumberInPushEnabled)
         repo.setYoloModeLocalEnabled(preferences.yoloModeEnabled)
@@ -6712,6 +6735,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 showNsfwByDefault = preferences.showNsfwByDefault,
                 creativePostMode = preferences.creativePostMode,
                 bookmarkedPhotoPushEnabled = preferences.bookmarkedPhotoPushEnabled,
+                autoSubscribeInteractedPostsEnabled = preferences.autoSubscribeInteractedPostsEnabled,
                 ownPostNumberInPushEnabled = preferences.ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = preferences.postNumberInPushEnabled,
                 yoloModeEnabled = preferences.yoloModeEnabled,
@@ -6730,6 +6754,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             photoReactionPushEnabled = updatedUser?.photoReactionPushEnabled ?: preferences.photoReactionPushEnabled,
             photoCommentPushEnabled = updatedUser?.photoCommentPushEnabled ?: preferences.photoCommentPushEnabled,
             bookmarkedPhotoPushEnabled = updatedUser?.bookmarkedPhotoPushEnabled ?: preferences.bookmarkedPhotoPushEnabled,
+            autoSubscribeInteractedPostsEnabled = updatedUser?.autoSubscribeInteractedPostsEnabled ?: preferences.autoSubscribeInteractedPostsEnabled,
             ownPostNumberInPushEnabled = updatedUser?.ownPostNumberInPushEnabled ?: preferences.ownPostNumberInPushEnabled,
             postNumberInPushEnabled = updatedUser?.postNumberInPushEnabled ?: preferences.postNumberInPushEnabled,
             yoloModeEnabled = updatedUser?.yoloModeEnabled ?: preferences.yoloModeEnabled,
@@ -7450,6 +7475,38 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             .onFailure {
                 state = state.copy(loading = false, message = apiError(it, "Push-Einstellung speichern fehlgeschlagen"))
+            }
+    }
+
+    suspend fun setAutoSubscribeInteractedPostsEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                current.pollPushEnabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload,
+                autoSubscribeInteractedPostsEnabled = enabled
+            )
+        }
+            .onSuccess { user ->
+                syncInteractionPushPrefs(user)
+                state = state.copy(
+                    user = user,
+                    autoSubscribeInteractedPostsEnabled = user.autoSubscribeInteractedPostsEnabled,
+                    loading = false,
+                    message = if (enabled) {
+                        "Interaktions-Auto-Abo aktiviert"
+                    } else {
+                        "Interaktions-Auto-Abo deaktiviert"
+                    }
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "Auto-Abo speichern fehlgeschlagen"))
             }
     }
 
@@ -8793,6 +8850,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     photoReactionPushEnabled = state.user?.photoReactionPushEnabled ?: state.photoReactionPushEnabled,
                     photoCommentPushEnabled = state.user?.photoCommentPushEnabled ?: state.photoCommentPushEnabled,
                     bookmarkedPhotoPushEnabled = state.user?.bookmarkedPhotoPushEnabled ?: state.bookmarkedPhotoPushEnabled,
+                    autoSubscribeInteractedPostsEnabled = state.user?.autoSubscribeInteractedPostsEnabled ?: state.autoSubscribeInteractedPostsEnabled,
                     ownPostNumberInPushEnabled = state.user?.ownPostNumberInPushEnabled ?: state.ownPostNumberInPushEnabled,
                     postNumberInPushEnabled = state.user?.postNumberInPushEnabled ?: state.postNumberInPushEnabled,
                     yoloModeEnabled = state.user?.yoloModeEnabled ?: state.yoloModeEnabled,
@@ -8839,6 +8897,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onPhotoReactionPushEnabledChange = { scope.launch { vm.setPhotoReactionPushEnabled(it) } },
                     onPhotoCommentPushEnabledChange = { scope.launch { vm.setPhotoCommentPushEnabled(it) } },
                     onBookmarkedPhotoPushEnabledChange = { scope.launch { vm.setBookmarkedPhotoPushEnabled(it) } },
+                    onAutoSubscribeInteractedPostsEnabledChange = { scope.launch { vm.setAutoSubscribeInteractedPostsEnabled(it) } },
                     onNotificationPostNumbersEnabledChange = { scope.launch { vm.setNotificationPostNumbersEnabled(it) } },
                     onOwnPostNumberInPushEnabledChange = { scope.launch { vm.setOwnPostNumberInPushEnabled(it) } },
                     onPostNumberInPushEnabledChange = { scope.launch { vm.setPostNumberInPushEnabled(it) } },
@@ -12401,6 +12460,7 @@ fun ProfileTab(
     photoReactionPushEnabled: Boolean,
     photoCommentPushEnabled: Boolean,
     bookmarkedPhotoPushEnabled: Boolean,
+    autoSubscribeInteractedPostsEnabled: Boolean,
     ownPostNumberInPushEnabled: Boolean,
     postNumberInPushEnabled: Boolean,
     yoloModeEnabled: Boolean,
@@ -12447,6 +12507,7 @@ fun ProfileTab(
     onPhotoReactionPushEnabledChange: (Boolean) -> Unit,
     onPhotoCommentPushEnabledChange: (Boolean) -> Unit,
     onBookmarkedPhotoPushEnabledChange: (Boolean) -> Unit,
+    onAutoSubscribeInteractedPostsEnabledChange: (Boolean) -> Unit,
     onNotificationPostNumbersEnabledChange: (Boolean) -> Unit,
     onOwnPostNumberInPushEnabledChange: (Boolean) -> Unit,
     onPostNumberInPushEnabledChange: (Boolean) -> Unit,
@@ -13373,6 +13434,12 @@ fun ProfileTab(
                         checked = bookmarkedPhotoPushEnabled,
                         onCheckedChange = onBookmarkedPhotoPushEnabledChange,
                         supportingText = "Kommentare, Reaktionen und FotoMojis auf gemerkten fremden Posts."
+                    )
+                    SettingsToggleRow(
+                        label = "Interaktions-Auto-Abo",
+                        checked = autoSubscribeInteractedPostsEnabled,
+                        onCheckedChange = onAutoSubscribeInteractedPostsEnabledChange,
+                        supportingText = "Wenn du auf fremden Posts kommentierst, reagierst, FotoMojis nutzt, markierst oder malst, werden sie automatisch gemerkt und nach 48h ohne neue Aktivitaet wieder entfernt."
                     )
                 }
                 SettingsSubsection("Postnummern in Pushes", "Sichtbar an einer Stelle fuer eigene und gemerkte Beitraege") {

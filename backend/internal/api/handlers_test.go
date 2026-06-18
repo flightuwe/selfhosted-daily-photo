@@ -524,6 +524,261 @@ func TestHandleUpdatePreferencesPersistsYoloMode(t *testing.T) {
 	}
 }
 
+func TestHandleUpdatePreferencesPersistsAutoSubscribeInteractedPostsEnabled(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "tester", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := httptest.NewRequest(http.MethodPut, "/api/me/preferences", strings.NewReader(`{"autoSubscribeInteractedPostsEnabled":true}`))
+	body.Header.Set("Content-Type", "application/json")
+	c.Request = body
+	c.Set("user", user)
+
+	server.handleUpdatePreferences(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handleUpdatePreferences() status = %d, want 200", rec.Code)
+	}
+	var updated models.User
+	if err := server.DB.First(&updated, user.ID).Error; err != nil {
+		t.Fatalf("load updated user: %v", err)
+	}
+	if !updated.AutoSubscribeInteractedPostsEnabled {
+		t.Fatal("expected autoSubscribeInteractedPostsEnabled to persist as true")
+	}
+}
+
+func TestHandlePhotoInteractionSubscriptionAutoSubscribesForeignPost(t *testing.T) {
+	server := newSearchTestServer(t)
+	author := models.User{Username: "author", PasswordHash: "x"}
+	actor := models.User{Username: "actor", PasswordHash: "x", AutoSubscribeInteractedPostsEnabled: true}
+	for _, user := range []*models.User{&author, &actor} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+	photo := models.Photo{
+		UserID:    author.ID,
+		User:      author,
+		Day:       "2026-06-18",
+		FilePath:  "2026-06-18/test.jpg",
+		CreatedAt: time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	if err := server.handlePhotoInteractionSubscription(photo, actor.ID, "comment", now); err != nil {
+		t.Fatalf("handlePhotoInteractionSubscription() error = %v", err)
+	}
+
+	var bookmark models.PhotoBookmark
+	if err := server.DB.Where("user_id = ? AND photo_id = ?", actor.ID, photo.ID).First(&bookmark).Error; err != nil {
+		t.Fatalf("load bookmark: %v", err)
+	}
+	if !bookmark.Active || bookmark.SubscriptionSource != photoBookmarkSourceAutoInteraction {
+		t.Fatalf("bookmark = %+v, want active auto interaction bookmark", bookmark)
+	}
+	if bookmark.LastActivityAt == nil || !bookmark.LastActivityAt.Equal(now) {
+		t.Fatalf("lastActivityAt = %v, want %v", bookmark.LastActivityAt, now)
+	}
+	wantExpiry := now.Add(autoInteractionBookmarkTTL)
+	if bookmark.AutoExpiresAt == nil || !bookmark.AutoExpiresAt.Equal(wantExpiry) {
+		t.Fatalf("autoExpiresAt = %v, want %v", bookmark.AutoExpiresAt, wantExpiry)
+	}
+}
+
+func TestHandlePhotoInteractionSubscriptionSkipsOwnPost(t *testing.T) {
+	server := newSearchTestServer(t)
+	owner := models.User{Username: "owner", PasswordHash: "x", AutoSubscribeInteractedPostsEnabled: true}
+	if err := server.DB.Create(&owner).Error; err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	photo := models.Photo{
+		UserID:    owner.ID,
+		User:      owner,
+		Day:       "2026-06-18",
+		FilePath:  "2026-06-18/test.jpg",
+		CreatedAt: time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.handlePhotoInteractionSubscription(photo, owner.ID, "comment", time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("handlePhotoInteractionSubscription() error = %v", err)
+	}
+	var count int64
+	if err := server.DB.Model(&models.PhotoBookmark{}).Where("user_id = ? AND photo_id = ?", owner.ID, photo.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count bookmarks: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("bookmark count = %d, want 0", count)
+	}
+}
+
+func TestHandlePhotoInteractionSubscriptionRefreshesExistingAutoBookmarks(t *testing.T) {
+	server := newSearchTestServer(t)
+	author := models.User{Username: "author", PasswordHash: "x"}
+	actor := models.User{Username: "actor", PasswordHash: "x"}
+	subscriber := models.User{Username: "subscriber", PasswordHash: "x"}
+	for _, user := range []*models.User{&author, &actor, &subscriber} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+	photo := models.Photo{
+		UserID:    author.ID,
+		User:      author,
+		Day:       "2026-06-18",
+		FilePath:  "2026-06-18/test.jpg",
+		CreatedAt: time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	oldActivity := time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC)
+	oldExpiry := oldActivity.Add(autoInteractionBookmarkTTL)
+	bookmark := models.PhotoBookmark{
+		UserID:             subscriber.ID,
+		PhotoID:            photo.ID,
+		Active:             true,
+		SubscriptionSource: photoBookmarkSourceAutoInteraction,
+		LastActivityAt:     &oldActivity,
+		AutoExpiresAt:      &oldExpiry,
+		CreatedAt:          oldActivity,
+	}
+	if err := server.DB.Create(&bookmark).Error; err != nil {
+		t.Fatalf("create bookmark: %v", err)
+	}
+	now := time.Date(2026, 6, 18, 13, 0, 0, 0, time.UTC)
+	if err := server.handlePhotoInteractionSubscription(photo, actor.ID, "reaction", now); err != nil {
+		t.Fatalf("handlePhotoInteractionSubscription() error = %v", err)
+	}
+	if err := server.DB.First(&bookmark, bookmark.ID).Error; err != nil {
+		t.Fatalf("reload bookmark: %v", err)
+	}
+	if bookmark.LastActivityAt == nil || !bookmark.LastActivityAt.Equal(now) {
+		t.Fatalf("lastActivityAt = %v, want %v", bookmark.LastActivityAt, now)
+	}
+	if bookmark.AutoExpiresAt == nil || !bookmark.AutoExpiresAt.Equal(now.Add(autoInteractionBookmarkTTL)) {
+		t.Fatalf("autoExpiresAt = %v, want %v", bookmark.AutoExpiresAt, now.Add(autoInteractionBookmarkTTL))
+	}
+}
+
+func TestRemovePhotoBookmarkBlocksAutoUntilNextOwnInteraction(t *testing.T) {
+	server := newSearchTestServer(t)
+	author := models.User{Username: "author", PasswordHash: "x"}
+	actor := models.User{Username: "actor", PasswordHash: "x", AutoSubscribeInteractedPostsEnabled: true}
+	for _, user := range []*models.User{&author, &actor} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+	photo := models.Photo{
+		UserID:    author.ID,
+		User:      author,
+		Day:       "2026-06-18",
+		FilePath:  "2026-06-18/test.jpg",
+		CreatedAt: time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	firstInteraction := time.Date(2026, 6, 18, 11, 0, 0, 0, time.UTC)
+	if err := server.handlePhotoInteractionSubscription(photo, actor.ID, "comment", firstInteraction); err != nil {
+		t.Fatalf("initial subscription: %v", err)
+	}
+	if err := server.removePhotoBookmark(actor.ID, photo.ID, firstInteraction.Add(5*time.Minute)); err != nil {
+		t.Fatalf("removePhotoBookmark() error = %v", err)
+	}
+	var bookmark models.PhotoBookmark
+	if err := server.DB.Where("user_id = ? AND photo_id = ?", actor.ID, photo.ID).First(&bookmark).Error; err != nil {
+		t.Fatalf("load blocked bookmark: %v", err)
+	}
+	if bookmark.Active || !bookmark.AutoResubscribeBlocked {
+		t.Fatalf("bookmark after manual opt-out = %+v, want inactive blocked row", bookmark)
+	}
+	secondInteraction := time.Date(2026, 6, 18, 14, 0, 0, 0, time.UTC)
+	if err := server.handlePhotoInteractionSubscription(photo, actor.ID, "reaction", secondInteraction); err != nil {
+		t.Fatalf("reactivate subscription: %v", err)
+	}
+	if err := server.DB.First(&bookmark, bookmark.ID).Error; err != nil {
+		t.Fatalf("reload bookmark: %v", err)
+	}
+	if !bookmark.Active || bookmark.AutoResubscribeBlocked {
+		t.Fatalf("bookmark after next interaction = %+v, want active unblocked row", bookmark)
+	}
+}
+
+func TestPruneExpiredAutoInteractionBookmarksRemovesOnlyExpiredAutoRows(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "user", PasswordHash: "x"}
+	other := models.User{Username: "other", PasswordHash: "x"}
+	for _, candidate := range []*models.User{&user, &other} {
+		if err := server.DB.Create(candidate).Error; err != nil {
+			t.Fatalf("create user %s: %v", candidate.Username, err)
+		}
+	}
+	expiredAt := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	futureAt := expiredAt.Add(2 * time.Hour)
+	rows := []models.PhotoBookmark{
+		{
+			UserID:             user.ID,
+			PhotoID:            1,
+			Active:             true,
+			SubscriptionSource: photoBookmarkSourceAutoInteraction,
+			AutoExpiresAt:      &expiredAt,
+			CreatedAt:          expiredAt.Add(-time.Hour),
+		},
+		{
+			UserID:             user.ID,
+			PhotoID:            2,
+			Active:             true,
+			SubscriptionSource: photoBookmarkSourceManual,
+			CreatedAt:          expiredAt.Add(-time.Hour),
+		},
+		{
+			UserID:                 other.ID,
+			PhotoID:                3,
+			Active:                 false,
+			SubscriptionSource:     photoBookmarkSourceAutoInteraction,
+			AutoResubscribeBlocked: true,
+			CreatedAt:              expiredAt.Add(-time.Hour),
+		},
+		{
+			UserID:             other.ID,
+			PhotoID:            4,
+			Active:             true,
+			SubscriptionSource: photoBookmarkSourceAutoInteraction,
+			AutoExpiresAt:      &futureAt,
+			CreatedAt:          expiredAt.Add(-time.Hour),
+		},
+	}
+	for _, row := range rows {
+		if err := server.DB.Create(&row).Error; err != nil {
+			t.Fatalf("create bookmark row: %v", err)
+		}
+	}
+	removed, err := server.pruneExpiredAutoInteractionBookmarks(expiredAt)
+	if err != nil {
+		t.Fatalf("pruneExpiredAutoInteractionBookmarks() error = %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	var remaining int64
+	if err := server.DB.Model(&models.PhotoBookmark{}).Count(&remaining).Error; err != nil {
+		t.Fatalf("count remaining bookmarks: %v", err)
+	}
+	if remaining != 3 {
+		t.Fatalf("remaining bookmarks = %d, want 3", remaining)
+	}
+}
+
 func TestHandleUpdatePreferencesPersistsNsfwPreferences(t *testing.T) {
 	server := newSearchTestServer(t)
 	user := models.User{Username: "tester", PasswordHash: "x"}

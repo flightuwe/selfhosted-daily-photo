@@ -688,13 +688,13 @@ func (s *Server) computeUserMomentStats(userID uint) (int64, int64, error) {
 
 func (s *Server) computeUserBookmarkStats(userID uint) (int64, int64, error) {
 	bookmarksGivenCount := int64(0)
-	if err := s.DB.Model(&models.PhotoBookmark{}).Where("user_id = ?", userID).Count(&bookmarksGivenCount).Error; err != nil {
+	if err := s.DB.Model(&models.PhotoBookmark{}).Where("user_id = ? AND active = ?", userID, true).Count(&bookmarksGivenCount).Error; err != nil {
 		return 0, 0, err
 	}
 	bookmarksReceivedCount := int64(0)
 	if err := s.DB.Table("photo_bookmarks").
 		Joins("JOIN photos ON photos.id = photo_bookmarks.photo_id").
-		Where("photos.user_id = ?", userID).
+		Where("photos.user_id = ? AND photo_bookmarks.active = ?", userID, true).
 		Count(&bookmarksReceivedCount).Error; err != nil {
 		return 0, 0, err
 	}
@@ -846,25 +846,26 @@ func (s *Server) handleUpdateProfile(c *gin.Context) {
 func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	user, _ := userFromContext(c)
 	var req struct {
-		ChatPushEnabled               *bool   `json:"chatPushEnabled"`
-		PollPushEnabled               *bool   `json:"pollPushEnabled"`
-		SpecialMomentPushEnabled      *bool   `json:"specialMomentPushEnabled"`
-		InviteRegistrationPushEnabled *bool   `json:"inviteRegistrationPushEnabled"`
-		PhotoReactionPushEnabled      *bool   `json:"photoReactionPushEnabled"`
-		PhotoFotomojiPushEnabled      *bool   `json:"photoFotomojiPushEnabled"`
-		PhotoCommentPushEnabled       *bool   `json:"photoCommentPushEnabled"`
-		BookmarkedPhotoPushEnabled    *bool   `json:"bookmarkedPhotoPushEnabled"`
-		OwnPostNumberInPushEnabled    *bool   `json:"ownPostNumberInPushEnabled"`
-		PostNumberInPushEnabled       *bool   `json:"postNumberInPushEnabled"`
-		YoloModeEnabled               *bool   `json:"yoloModeEnabled"`
-		AllowPhotoDownload            *bool   `json:"allowPhotoDownload"`
-		AllowCommunityNsfwMarking     *bool   `json:"allowCommunityNsfwMarking"`
-		ShowNsfwByDefault             *bool   `json:"showNsfwByDefault"`
-		CreativePostMode              *string `json:"creativePostMode"`
-		LocationFeatureEnabled        *bool   `json:"locationFeatureEnabled"`
-		LocationShareDefaultEnabled   *bool   `json:"locationShareDefaultEnabled"`
-		DiagnosticsConsentGranted     *bool   `json:"diagnosticsConsentGranted"`
-		DiagnosticsConsentSource      string  `json:"diagnosticsConsentSource"`
+		ChatPushEnabled                     *bool   `json:"chatPushEnabled"`
+		PollPushEnabled                     *bool   `json:"pollPushEnabled"`
+		SpecialMomentPushEnabled            *bool   `json:"specialMomentPushEnabled"`
+		InviteRegistrationPushEnabled       *bool   `json:"inviteRegistrationPushEnabled"`
+		PhotoReactionPushEnabled            *bool   `json:"photoReactionPushEnabled"`
+		PhotoFotomojiPushEnabled            *bool   `json:"photoFotomojiPushEnabled"`
+		PhotoCommentPushEnabled             *bool   `json:"photoCommentPushEnabled"`
+		BookmarkedPhotoPushEnabled          *bool   `json:"bookmarkedPhotoPushEnabled"`
+		AutoSubscribeInteractedPostsEnabled *bool   `json:"autoSubscribeInteractedPostsEnabled"`
+		OwnPostNumberInPushEnabled          *bool   `json:"ownPostNumberInPushEnabled"`
+		PostNumberInPushEnabled             *bool   `json:"postNumberInPushEnabled"`
+		YoloModeEnabled                     *bool   `json:"yoloModeEnabled"`
+		AllowPhotoDownload                  *bool   `json:"allowPhotoDownload"`
+		AllowCommunityNsfwMarking           *bool   `json:"allowCommunityNsfwMarking"`
+		ShowNsfwByDefault                   *bool   `json:"showNsfwByDefault"`
+		CreativePostMode                    *string `json:"creativePostMode"`
+		LocationFeatureEnabled              *bool   `json:"locationFeatureEnabled"`
+		LocationShareDefaultEnabled         *bool   `json:"locationShareDefaultEnabled"`
+		DiagnosticsConsentGranted           *bool   `json:"diagnosticsConsentGranted"`
+		DiagnosticsConsentSource            string  `json:"diagnosticsConsentSource"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
@@ -894,6 +895,9 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.BookmarkedPhotoPushEnabled != nil {
 		updates["bookmarked_photo_push_enabled"] = *req.BookmarkedPhotoPushEnabled
+	}
+	if req.AutoSubscribeInteractedPostsEnabled != nil {
+		updates["auto_subscribe_interacted_posts_enabled"] = *req.AutoSubscribeInteractedPostsEnabled
 	}
 	if req.OwnPostNumberInPushEnabled != nil {
 		updates["own_post_number_in_push_enabled"] = *req.OwnPostNumberInPushEnabled
@@ -5823,9 +5827,12 @@ func (s *Server) handlePhotoBookmarkCreate(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-	bookmark := models.PhotoBookmark{UserID: user.ID, PhotoID: photo.ID}
-	if err := s.DB.Where("user_id = ? AND photo_id = ?", user.ID, photo.ID).FirstOrCreate(&bookmark).Error; err != nil {
+	if err := s.setManualPhotoBookmark(user.ID, photo.ID, time.Now().UTC()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark failed"})
+		return
+	}
+	if err := s.handlePhotoInteractionSubscription(photo, user.ID, "mark", time.Now().UTC()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
 		return
 	}
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
@@ -5852,8 +5859,12 @@ func (s *Server) handlePhotoBookmarkDelete(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-	if err := s.DB.Where("user_id = ? AND photo_id = ?", user.ID, photo.ID).Delete(&models.PhotoBookmark{}).Error; err != nil {
+	if err := s.removePhotoBookmark(user.ID, photo.ID, time.Now().UTC()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark delete failed"})
+		return
+	}
+	if err := s.handlePhotoInteractionSubscription(photo, user.ID, "paint", time.Now().UTC()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
 		return
 	}
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
@@ -6077,7 +6088,10 @@ func (s *Server) handlePhotoMarkCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "mark_query_failed"})
 		return
 	}
-
+	if err := s.handlePhotoInteractionSubscription(photo, user.ID, "mark", time.Now().UTC()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
+		return
+	}
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
@@ -6203,6 +6217,10 @@ func (s *Server) handlePhotoPaintUpsert(c *gin.Context) {
 		}
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "paint_query_failed"})
+		return
+	}
+	if err := s.handlePhotoInteractionSubscription(photo, user.ID, "paint", time.Now().UTC()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
 		return
 	}
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
@@ -6339,11 +6357,11 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 	orderClause := "photos.day desc, photos.created_at desc, photos.id desc"
 	switch scope {
 	case "bookmarks":
-		query = query.Joins("JOIN photo_bookmarks pb ON pb.photo_id = photos.id AND pb.user_id = ?", viewerID)
+		query = query.Joins("JOIN photo_bookmarks pb ON pb.photo_id = photos.id AND pb.user_id = ? AND pb.active = ?", viewerID, true)
 		orderClause = "pb.created_at desc, photos.created_at desc, photos.id desc"
 	case "bookmarks_all":
 		query = query.
-			Joins("JOIN photo_bookmarks pb ON pb.photo_id = photos.id").
+			Joins("JOIN photo_bookmarks pb ON pb.photo_id = photos.id AND pb.active = ?", true).
 			Group("photos.id").
 			Order("COUNT(pb.id) desc").
 			Order("photos.day desc").
@@ -8834,6 +8852,12 @@ func (s *Server) handlePhotoReaction(c *gin.Context) {
 		return
 	}
 
+	if shouldNotify {
+		if err := s.handlePhotoInteractionSubscription(photo, user.ID, "reaction", time.Now().UTC()); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
+			return
+		}
+	}
 	out, err := s.photoInteractionsPayload(photo, user.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -8890,6 +8914,12 @@ func (s *Server) handlePhotoFotomojiFromTemplate(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "fotomoji save failed"})
 		return
+	}
+	if shouldNotify {
+		if err := s.handlePhotoInteractionSubscription(photo, user.ID, "fotomoji", time.Now().UTC()); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
+			return
+		}
 	}
 	out, err := s.photoInteractionsPayload(photo, user.ID)
 	if err != nil {
@@ -8956,6 +8986,12 @@ func (s *Server) handlePhotoFotomojiUpload(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "fotomoji save failed"})
 		return
+	}
+	if shouldNotify {
+		if err := s.handlePhotoInteractionSubscription(photo, user.ID, "fotomoji", time.Now().UTC()); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
+			return
+		}
 	}
 	out, err := s.photoInteractionsPayload(photo, user.ID)
 	if err != nil {
@@ -9634,6 +9670,11 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 	}
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/photos/:id/comments", "photo_comment_insert", time.Since(createStart))
+	}
+	if err := s.handlePhotoInteractionSubscription(photo, user.ID, "comment", time.Now().UTC()); err != nil {
+		_ = s.DB.Delete(&comment).Error
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
+		return
 	}
 	fullResponse := parseQueryBool(c.Query("full"), false)
 	var (
@@ -10570,7 +10611,7 @@ func (s *Server) bookmarkMapForViewer(viewerID uint, photoIDs []uint) (map[uint]
 	}
 	var rows []models.PhotoBookmark
 	if err := s.DB.
-		Where("user_id = ? AND photo_id IN ?", viewerID, photoIDs).
+		Where("user_id = ? AND active = ? AND photo_id IN ?", viewerID, true, photoIDs).
 		Find(&rows).Error; err != nil {
 		return nil, err
 	}
@@ -10591,7 +10632,7 @@ func (s *Server) bookmarkCountsForPhotos(photoIDs []uint) (map[uint]int64, error
 	}
 	if err := s.DB.Model(&models.PhotoBookmark{}).
 		Select("photo_id, COUNT(*) AS count").
-		Where("photo_id IN ?", photoIDs).
+		Where("active = ? AND photo_id IN ?", true, photoIDs).
 		Group("photo_id").
 		Find(&rows).Error; err != nil {
 		return nil, err
@@ -11798,7 +11839,7 @@ func (s *Server) bookmarkedPhotoNotificationRecipients(photoID, ownerID, actorID
 		Select("device_tokens.token, users.post_number_in_push_enabled").
 		Joins("JOIN users ON users.id = device_tokens.user_id").
 		Joins("JOIN photo_bookmarks ON photo_bookmarks.user_id = users.id").
-		Where("photo_bookmarks.photo_id = ? AND users.bookmarked_photo_push_enabled = ? AND users.id <> ? AND users.id <> ?", photoID, true, ownerID, actorID).
+		Where("photo_bookmarks.photo_id = ? AND photo_bookmarks.active = ? AND users.bookmarked_photo_push_enabled = ? AND users.id <> ? AND users.id <> ?", photoID, true, true, ownerID, actorID).
 		Find(&rows).Error
 	recipients := make([]notificationRecipient, 0, len(rows))
 	for _, row := range rows {

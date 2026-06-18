@@ -81,6 +81,9 @@ func main() {
 		FeedCache:   api.NewFeedDayCache(12 * time.Second),
 		FeedLimiter: api.NewFeedPollLimiter(28, 30*time.Second),
 	}
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+	defer runtimeCancel()
+	go server.RunAutoBookmarkCleanupLoop(runtimeCtx, 30*time.Minute)
 	if fixed, cleanupErr := server.CleanupInvalidPromptOnlyPhotosRecent(14); cleanupErr != nil {
 		log.Printf("prompt cleanup failed: %v", cleanupErr)
 	} else if fixed > 0 {
@@ -155,6 +158,7 @@ func main() {
 		}
 		return
 	}
+	runtimeCancel()
 
 	if err := promptService.ReleaseLease(); err != nil {
 		log.Printf("scheduler lease release on shutdown failed: %v", err)

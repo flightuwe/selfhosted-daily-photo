@@ -3,44 +3,45 @@ package models
 import "time"
 
 type User struct {
-	ID                            uint       `gorm:"primaryKey" json:"id"`
-	Username                      string     `gorm:"uniqueIndex;size:64;not null" json:"username"`
-	PasswordHash                  string     `gorm:"not null" json:"-"`
-	IsAdmin                       bool       `gorm:"default:false" json:"isAdmin"`
-	FavoriteColor                 string     `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
-	ChatPushEnabled               bool       `gorm:"default:false" json:"chatPushEnabled"`
-	PollPushEnabled               bool       `gorm:"default:false" json:"pollPushEnabled"`
-	SpecialMomentPushEnabled      bool       `gorm:"default:false" json:"specialMomentPushEnabled"`
-	InviteRegistrationPushEnabled bool       `gorm:"default:false" json:"inviteRegistrationPushEnabled"`
-	PhotoReactionPushEnabled      bool       `gorm:"default:false" json:"photoReactionPushEnabled"`
-	PhotoFotomojiPushEnabled      bool       `gorm:"default:false" json:"photoFotomojiPushEnabled"`
-	PhotoCommentPushEnabled       bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
-	BookmarkedPhotoPushEnabled    bool       `gorm:"default:false" json:"bookmarkedPhotoPushEnabled"`
-	OwnPostNumberInPushEnabled    bool       `gorm:"default:false" json:"ownPostNumberInPushEnabled"`
-	PostNumberInPushEnabled       bool       `gorm:"default:false" json:"postNumberInPushEnabled"`
-	YoloModeEnabled               bool       `gorm:"default:false" json:"yoloModeEnabled"`
-	AllowPhotoDownload            bool       `gorm:"default:false" json:"allowPhotoDownload"`
-	AllowCommunityNsfwMarking     bool       `gorm:"default:false" json:"allowCommunityNsfwMarking"`
-	ShowNsfwByDefault             bool       `gorm:"default:false" json:"showNsfwByDefault"`
-	CreativePostMode              string     `gorm:"size:16;default:'none'" json:"creativePostMode"`
-	LocationFeatureEnabled        bool       `gorm:"default:false" json:"locationFeatureEnabled"`
-	LocationShareDefaultEnabled   bool       `gorm:"default:false" json:"locationShareDefaultEnabled"`
-	AvatarPath                    string     `gorm:"size:255" json:"avatarUrl"`
-	Bio                           string     `gorm:"size:280" json:"bio"`
-	StatusText                    string     `gorm:"size:120" json:"statusText"`
-	StatusEmoji                   string     `gorm:"size:16" json:"statusEmoji"`
-	StatusExpiresAt               *time.Time `json:"statusExpiresAt"`
-	ProfileVisible                bool       `gorm:"default:false" json:"profileVisible"`
-	AvatarVisible                 bool       `gorm:"default:false" json:"avatarVisible"`
-	BioVisible                    bool       `gorm:"default:false" json:"bioVisible"`
-	StatusVisible                 bool       `gorm:"default:false" json:"statusVisible"`
-	QuietHoursEnabled             bool       `gorm:"default:false" json:"quietHoursEnabled"`
-	QuietHoursStart               string     `gorm:"size:5;default:'22:00'" json:"quietHoursStart"`
-	QuietHoursEnd                 string     `gorm:"size:5;default:'07:00'" json:"quietHoursEnd"`
-	DiagnosticsConsentGranted     bool       `gorm:"default:false" json:"diagnosticsConsentGranted"`
-	DiagnosticsConsentUpdatedAt   *time.Time `json:"diagnosticsConsentUpdatedAt"`
-	DiagnosticsConsentSource      string     `gorm:"size:32" json:"diagnosticsConsentSource"`
-	CreatedAt                     time.Time  `json:"createdAt"`
+	ID                                  uint       `gorm:"primaryKey" json:"id"`
+	Username                            string     `gorm:"uniqueIndex;size:64;not null" json:"username"`
+	PasswordHash                        string     `gorm:"not null" json:"-"`
+	IsAdmin                             bool       `gorm:"default:false" json:"isAdmin"`
+	FavoriteColor                       string     `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
+	ChatPushEnabled                     bool       `gorm:"default:false" json:"chatPushEnabled"`
+	PollPushEnabled                     bool       `gorm:"default:false" json:"pollPushEnabled"`
+	SpecialMomentPushEnabled            bool       `gorm:"default:false" json:"specialMomentPushEnabled"`
+	InviteRegistrationPushEnabled       bool       `gorm:"default:false" json:"inviteRegistrationPushEnabled"`
+	PhotoReactionPushEnabled            bool       `gorm:"default:false" json:"photoReactionPushEnabled"`
+	PhotoFotomojiPushEnabled            bool       `gorm:"default:false" json:"photoFotomojiPushEnabled"`
+	PhotoCommentPushEnabled             bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
+	BookmarkedPhotoPushEnabled          bool       `gorm:"default:false" json:"bookmarkedPhotoPushEnabled"`
+	AutoSubscribeInteractedPostsEnabled bool       `gorm:"default:false" json:"autoSubscribeInteractedPostsEnabled"`
+	OwnPostNumberInPushEnabled          bool       `gorm:"default:false" json:"ownPostNumberInPushEnabled"`
+	PostNumberInPushEnabled             bool       `gorm:"default:false" json:"postNumberInPushEnabled"`
+	YoloModeEnabled                     bool       `gorm:"default:false" json:"yoloModeEnabled"`
+	AllowPhotoDownload                  bool       `gorm:"default:false" json:"allowPhotoDownload"`
+	AllowCommunityNsfwMarking           bool       `gorm:"default:false" json:"allowCommunityNsfwMarking"`
+	ShowNsfwByDefault                   bool       `gorm:"default:false" json:"showNsfwByDefault"`
+	CreativePostMode                    string     `gorm:"size:16;default:'none'" json:"creativePostMode"`
+	LocationFeatureEnabled              bool       `gorm:"default:false" json:"locationFeatureEnabled"`
+	LocationShareDefaultEnabled         bool       `gorm:"default:false" json:"locationShareDefaultEnabled"`
+	AvatarPath                          string     `gorm:"size:255" json:"avatarUrl"`
+	Bio                                 string     `gorm:"size:280" json:"bio"`
+	StatusText                          string     `gorm:"size:120" json:"statusText"`
+	StatusEmoji                         string     `gorm:"size:16" json:"statusEmoji"`
+	StatusExpiresAt                     *time.Time `json:"statusExpiresAt"`
+	ProfileVisible                      bool       `gorm:"default:false" json:"profileVisible"`
+	AvatarVisible                       bool       `gorm:"default:false" json:"avatarVisible"`
+	BioVisible                          bool       `gorm:"default:false" json:"bioVisible"`
+	StatusVisible                       bool       `gorm:"default:false" json:"statusVisible"`
+	QuietHoursEnabled                   bool       `gorm:"default:false" json:"quietHoursEnabled"`
+	QuietHoursStart                     string     `gorm:"size:5;default:'22:00'" json:"quietHoursStart"`
+	QuietHoursEnd                       string     `gorm:"size:5;default:'07:00'" json:"quietHoursEnd"`
+	DiagnosticsConsentGranted           bool       `gorm:"default:false" json:"diagnosticsConsentGranted"`
+	DiagnosticsConsentUpdatedAt         *time.Time `json:"diagnosticsConsentUpdatedAt"`
+	DiagnosticsConsentSource            string     `gorm:"size:32" json:"diagnosticsConsentSource"`
+	CreatedAt                           time.Time  `json:"createdAt"`
 }
 
 type InviteCode struct {
@@ -309,10 +310,15 @@ type Photo struct {
 }
 
 type PhotoBookmark struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	UserID    uint      `gorm:"not null;index:idx_photo_bookmark_user_photo,unique" json:"userId"`
-	PhotoID   uint      `gorm:"not null;index:idx_photo_bookmark_user_photo,unique;index" json:"photoId"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID                     uint       `gorm:"primaryKey" json:"id"`
+	UserID                 uint       `gorm:"not null;index:idx_photo_bookmark_user_photo,unique" json:"userId"`
+	PhotoID                uint       `gorm:"not null;index:idx_photo_bookmark_user_photo,unique;index" json:"photoId"`
+	Active                 bool       `gorm:"default:true;index" json:"active"`
+	SubscriptionSource     string     `gorm:"size:24;default:'manual';index" json:"subscriptionSource"`
+	LastActivityAt         *time.Time `gorm:"index" json:"lastActivityAt"`
+	AutoExpiresAt          *time.Time `gorm:"index" json:"autoExpiresAt"`
+	AutoResubscribeBlocked bool       `gorm:"default:false" json:"autoResubscribeBlocked"`
+	CreatedAt              time.Time  `json:"createdAt"`
 }
 
 type PhotoMark struct {
