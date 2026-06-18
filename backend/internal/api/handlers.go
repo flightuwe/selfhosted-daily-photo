@@ -5981,10 +5981,10 @@ func (s *Server) handlePhotoNsfwDelete(c *gin.Context) {
 	}
 	updates := map[string]any{
 		"nsfw":                   false,
-		"nsfw_marked_by_user_id": gorm.Expr("NULL"),
-		"nsfw_marked_at":         gorm.Expr("NULL"),
+		"nsfw_marked_by_user_id": nil,
+		"nsfw_marked_at":         nil,
 	}
-	if err := s.DB.Model(&models.Photo{}).Where("id = ?", photo.ID).Updates(updates).Error; err != nil {
+	if err := s.DB.Model(&models.Photo{}).Where("id = ?", photo.ID).UpdateColumns(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "nsfw_delete_failed"})
 		return
 	}
