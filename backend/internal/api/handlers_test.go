@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -520,6 +521,178 @@ func TestHandleUpdatePreferencesPersistsYoloMode(t *testing.T) {
 	}
 	if !updated.YoloModeEnabled {
 		t.Fatal("expected yoloModeEnabled to persist as true")
+	}
+}
+
+func TestHandleUpdatePreferencesPersistsNsfwPreferences(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "tester", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := httptest.NewRequest(http.MethodPut, "/api/me/preferences", strings.NewReader(`{"allowCommunityNsfwMarking":true,"showNsfwByDefault":true}`))
+	body.Header.Set("Content-Type", "application/json")
+	c.Request = body
+	c.Set("user", user)
+
+	server.handleUpdatePreferences(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handleUpdatePreferences() status = %d, want 200", rec.Code)
+	}
+	var updated models.User
+	if err := server.DB.First(&updated, user.ID).Error; err != nil {
+		t.Fatalf("load updated user: %v", err)
+	}
+	if !updated.AllowCommunityNsfwMarking || !updated.ShowNsfwByDefault {
+		t.Fatalf("expected NSFW preferences to persist, got %+v", updated)
+	}
+}
+
+func TestPhotoNsfwFlowRespectsPermissions(t *testing.T) {
+	server := newSearchTestServer(t)
+	poster := models.User{Username: "poster", PasswordHash: "x"}
+	other := models.User{Username: "other", PasswordHash: "x"}
+	admin := models.User{Username: "admin", PasswordHash: "x", IsAdmin: true}
+	for _, user := range []*models.User{&poster, &other, &admin} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+	photo := models.Photo{
+		UserID:    poster.ID,
+		User:      poster,
+		Day:       "2026-05-26",
+		FilePath:  "2026-05-26/test.jpg",
+		CreatedAt: time.Date(2026, 5, 26, 18, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	forbiddenRec := httptest.NewRecorder()
+	forbiddenCtx, _ := gin.CreateTestContext(forbiddenRec)
+	forbiddenCtx.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/photos/%d/nsfw", photo.ID), nil)
+	forbiddenCtx.Set("user", other)
+	forbiddenCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoNsfwCreate(forbiddenCtx)
+	if forbiddenRec.Code != http.StatusForbidden {
+		t.Fatalf("mark without poster opt-in status = %d, want 403", forbiddenRec.Code)
+	}
+
+	if err := server.DB.Model(&models.User{}).Where("id = ?", poster.ID).Update("allow_community_nsfw_marking", true).Error; err != nil {
+		t.Fatalf("enable poster nsfw opt-in: %v", err)
+	}
+
+	markRec := httptest.NewRecorder()
+	markCtx, _ := gin.CreateTestContext(markRec)
+	markCtx.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/photos/%d/nsfw", photo.ID), nil)
+	markCtx.Set("user", other)
+	markCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoNsfwCreate(markCtx)
+	if markRec.Code != http.StatusOK {
+		t.Fatalf("mark with poster opt-in status = %d, want 200", markRec.Code)
+	}
+
+	var updated models.Photo
+	if err := server.DB.First(&updated, photo.ID).Error; err != nil {
+		t.Fatalf("load photo after mark: %v", err)
+	}
+	if !updated.Nsfw || updated.NsfwMarkedByUserID == nil || *updated.NsfwMarkedByUserID != other.ID {
+		t.Fatalf("photo NSFW metadata after mark = %+v, want marked by other", updated)
+	}
+
+	unmarkForbiddenRec := httptest.NewRecorder()
+	unmarkForbiddenCtx, _ := gin.CreateTestContext(unmarkForbiddenRec)
+	unmarkForbiddenCtx.Request = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/photos/%d/nsfw", photo.ID), nil)
+	unmarkForbiddenCtx.Set("user", other)
+	unmarkForbiddenCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoNsfwDelete(unmarkForbiddenCtx)
+	if unmarkForbiddenRec.Code != http.StatusForbidden {
+		t.Fatalf("non-poster unmark status = %d, want 403", unmarkForbiddenRec.Code)
+	}
+
+	posterUnmarkRec := httptest.NewRecorder()
+	posterUnmarkCtx, _ := gin.CreateTestContext(posterUnmarkRec)
+	posterUnmarkCtx.Request = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/photos/%d/nsfw", photo.ID), nil)
+	posterUnmarkCtx.Set("user", poster)
+	posterUnmarkCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoNsfwDelete(posterUnmarkCtx)
+	if posterUnmarkRec.Code != http.StatusOK {
+		t.Fatalf("poster unmark status = %d, want 200", posterUnmarkRec.Code)
+	}
+
+	if err := server.DB.First(&updated, photo.ID).Error; err != nil {
+		t.Fatalf("load photo after poster unmark: %v", err)
+	}
+	if updated.Nsfw || updated.NsfwMarkedByUserID != nil || updated.NsfwMarkedAt != nil {
+		t.Fatalf("photo NSFW metadata after poster unmark = %+v, want cleared", updated)
+	}
+
+	if err := server.DB.Model(&models.Photo{}).Where("id = ?", photo.ID).Updates(map[string]any{
+		"nsfw":                   true,
+		"nsfw_marked_by_user_id": other.ID,
+		"nsfw_marked_at":         time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("re-mark photo: %v", err)
+	}
+
+	adminUnmarkRec := httptest.NewRecorder()
+	adminUnmarkCtx, _ := gin.CreateTestContext(adminUnmarkRec)
+	adminUnmarkCtx.Request = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/photos/%d/nsfw", photo.ID), nil)
+	adminUnmarkCtx.Set("user", admin)
+	adminUnmarkCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoNsfwDelete(adminUnmarkCtx)
+	if adminUnmarkRec.Code != http.StatusOK {
+		t.Fatalf("admin unmark status = %d, want 200", adminUnmarkRec.Code)
+	}
+}
+
+func TestPhotoJSONForViewerIncludesNsfwFlags(t *testing.T) {
+	server := newSearchTestServer(t)
+	poster := models.User{Username: "poster", PasswordHash: "x"}
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	if err := server.DB.Create(&poster).Error; err != nil {
+		t.Fatalf("create poster: %v", err)
+	}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	photo := models.Photo{
+		UserID:             poster.ID,
+		User:               poster,
+		Day:                "2026-05-26",
+		FilePath:           "2026-05-26/test.jpg",
+		Nsfw:               true,
+		NsfwMarkedByUserID: &viewer.ID,
+		CreatedAt:          time.Date(2026, 5, 26, 18, 0, 0, 0, time.UTC),
+	}
+	now := time.Now().UTC()
+	photo.NsfwMarkedAt = &now
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	photo.User.AllowCommunityNsfwMarking = true
+	viewerDecorations, err := server.photoDecorationsForViewer(viewer.ID, []uint{photo.ID})
+	if err != nil {
+		t.Fatalf("photoDecorationsForViewer(viewer) error = %v", err)
+	}
+	row := server.photoJSONForViewer(viewer.ID, photo, viewerDecorations)
+	if row["nsfw"] != true || row["nsfwMarkAllowed"] != true || row["nsfwUnmarkAllowed"] != false {
+		t.Fatalf("viewer row nsfw flags = %#v", row)
+	}
+
+	ownerDecorations, err := server.photoDecorationsForViewer(poster.ID, []uint{photo.ID})
+	if err != nil {
+		t.Fatalf("photoDecorationsForViewer(owner) error = %v", err)
+	}
+	ownerRow := server.photoJSONForViewer(poster.ID, photo, ownerDecorations)
+	if ownerRow["nsfwMarkAllowed"] != true || ownerRow["nsfwUnmarkAllowed"] != true {
+		t.Fatalf("owner row nsfw flags = %#v", ownerRow)
 	}
 }
 

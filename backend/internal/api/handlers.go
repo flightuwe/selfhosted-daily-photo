@@ -101,6 +101,7 @@ type viewerPhotoDecorations struct {
 	paintsByPhoto  map[uint][]gin.H
 	myMarked       map[uint]bool
 	myPainted      map[uint]bool
+	viewer         *models.User
 }
 
 func normalizePhotoSearchTokens(raw string) []string {
@@ -218,6 +219,17 @@ func creativeModeAllowsPaint(v string) bool {
 	return mode == "paint" || mode == "both"
 }
 
+func canViewerMarkNsfwPhoto(viewer models.User, photo models.Photo) bool {
+	if viewer.ID == photo.UserID {
+		return true
+	}
+	return photo.User.AllowCommunityNsfwMarking
+}
+
+func canViewerUnmarkNsfwPhoto(viewer models.User, photo models.Photo) bool {
+	return viewer.ID == photo.UserID || viewer.IsAdmin
+}
+
 func (s *Server) Router() *gin.Engine {
 	r := gin.Default()
 	r.Use(s.requestIDMiddleware(), s.responseMetaMiddleware(), s.metricsMiddleware())
@@ -302,6 +314,8 @@ func (s *Server) Router() *gin.Engine {
 			protected.PUT("/photos/:id/paint", s.handlePhotoPaintUpsert)
 			protected.DELETE("/photos/:id/paint", s.handlePhotoPaintDelete)
 			protected.POST("/photos/:id/report", s.handlePhotoReportCreate)
+			protected.POST("/photos/:id/nsfw", s.handlePhotoNsfwCreate)
+			protected.DELETE("/photos/:id/nsfw", s.handlePhotoNsfwDelete)
 			protected.POST("/photos/:id/reaction", s.handlePhotoReaction)
 			protected.POST("/photos/:id/fotomojis", s.handlePhotoFotomojiFromTemplate)
 			protected.POST("/photos/:id/fotomojis/upload", s.handlePhotoFotomojiUpload)
@@ -844,6 +858,8 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		PostNumberInPushEnabled       *bool   `json:"postNumberInPushEnabled"`
 		YoloModeEnabled               *bool   `json:"yoloModeEnabled"`
 		AllowPhotoDownload            *bool   `json:"allowPhotoDownload"`
+		AllowCommunityNsfwMarking     *bool   `json:"allowCommunityNsfwMarking"`
+		ShowNsfwByDefault             *bool   `json:"showNsfwByDefault"`
 		CreativePostMode              *string `json:"creativePostMode"`
 		LocationFeatureEnabled        *bool   `json:"locationFeatureEnabled"`
 		LocationShareDefaultEnabled   *bool   `json:"locationShareDefaultEnabled"`
@@ -890,6 +906,12 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.AllowPhotoDownload != nil {
 		updates["allow_photo_download"] = *req.AllowPhotoDownload
+	}
+	if req.AllowCommunityNsfwMarking != nil {
+		updates["allow_community_nsfw_marking"] = *req.AllowCommunityNsfwMarking
+	}
+	if req.ShowNsfwByDefault != nil {
+		updates["show_nsfw_by_default"] = *req.ShowNsfwByDefault
 	}
 	if req.CreativePostMode != nil {
 		updates["creative_post_mode"] = normalizeCreativePostMode(*req.CreativePostMode)
@@ -5866,6 +5888,87 @@ func canViewerPaintPhoto(viewerID uint, photo models.Photo) bool {
 	return creativeModeAllowsPaint(photo.User.CreativePostMode)
 }
 
+func (s *Server) handlePhotoNsfwCreate(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photo, err := s.loadVisiblePhotoForViewer(user.ID, c.Param("id"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			status = http.StatusNotFound
+		case err.Error() == "invalid_photo_id":
+			status = http.StatusBadRequest
+		case err.Error() == "not_visible":
+			status = http.StatusForbidden
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	if !canViewerMarkNsfwPhoto(user, photo) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "nsfw_marking_not_allowed"})
+		return
+	}
+	now := time.Now().UTC()
+	updates := map[string]any{
+		"nsfw":                   true,
+		"nsfw_marked_by_user_id": user.ID,
+		"nsfw_marked_at":         &now,
+	}
+	if err := s.DB.Model(&models.Photo{}).Where("id = ?", photo.ID).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "nsfw_save_failed"})
+		return
+	}
+	photo.Nsfw = true
+	photo.NsfwMarkedByUserID = &user.ID
+	photo.NsfwMarkedAt = &now
+	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
+}
+
+func (s *Server) handlePhotoNsfwDelete(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photo, err := s.loadVisiblePhotoForViewer(user.ID, c.Param("id"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			status = http.StatusNotFound
+		case err.Error() == "invalid_photo_id":
+			status = http.StatusBadRequest
+		case err.Error() == "not_visible":
+			status = http.StatusForbidden
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	if !canViewerUnmarkNsfwPhoto(user, photo) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "nsfw_unmarking_not_allowed"})
+		return
+	}
+	updates := map[string]any{
+		"nsfw":                   false,
+		"nsfw_marked_by_user_id": nil,
+		"nsfw_marked_at":         nil,
+	}
+	if err := s.DB.Model(&models.Photo{}).Where("id = ?", photo.ID).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "nsfw_delete_failed"})
+		return
+	}
+	photo.Nsfw = false
+	photo.NsfwMarkedByUserID = nil
+	photo.NsfwMarkedAt = nil
+	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
+}
+
 func generatePhotoMark(user models.User, photo models.Photo) models.PhotoMark {
 	seed := time.Now().UTC().UnixNano() ^ (int64(user.ID) << 16) ^ (int64(photo.ID) << 32)
 	rng := mrand.New(mrand.NewSource(seed))
@@ -10389,6 +10492,11 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 		"deduplicated":       false,
 		"bookmarkedByMe":     false,
 		"bookmarkCount":      0,
+		"nsfw":               p.Nsfw,
+		"nsfwMarkedByUserId": p.NsfwMarkedByUserID,
+		"nsfwMarkedAt":       p.NsfwMarkedAt,
+		"nsfwMarkAllowed":    false,
+		"nsfwUnmarkAllowed":  false,
 		"publicNumber":       publicNumber,
 		"creativePostMode":   creativeMode,
 		"canMark":            false,
@@ -10442,6 +10550,16 @@ func (s *Server) photoJSONForViewer(viewerID uint, p models.Photo, decorations *
 	row["creativePostMode"] = creativeMode
 	row["canMark"] = viewerID == p.UserID || creativeModeAllowsMark(creativeMode)
 	row["canPaint"] = viewerID == p.UserID || creativeModeAllowsPaint(creativeMode)
+	row["nsfw"] = p.Nsfw
+	row["nsfwMarkedByUserId"] = p.NsfwMarkedByUserID
+	row["nsfwMarkedAt"] = p.NsfwMarkedAt
+	row["nsfwMarkAllowed"] = canViewerMarkNsfwPhoto(models.User{ID: viewerID}, p)
+	if decorations != nil && decorations.viewer != nil {
+		row["nsfwMarkAllowed"] = canViewerMarkNsfwPhoto(*decorations.viewer, p)
+		row["nsfwUnmarkAllowed"] = canViewerUnmarkNsfwPhoto(*decorations.viewer, p)
+	} else {
+		row["nsfwUnmarkAllowed"] = viewerID == p.UserID
+	}
 	return row
 }
 
@@ -10495,6 +10613,12 @@ func (s *Server) photoDecorationsForViewer(viewerID uint, photoIDs []uint) (*vie
 	}
 	if len(photoIDs) == 0 {
 		return decorations, nil
+	}
+	if viewerID != 0 {
+		var viewer models.User
+		if err := s.DB.Select("id", "is_admin").First(&viewer, viewerID).Error; err == nil {
+			decorations.viewer = &viewer
+		}
 	}
 	bookmarkMap, err := s.bookmarkMapForViewer(viewerID, photoIDs)
 	if err != nil {
@@ -10591,6 +10715,8 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"postNumberInPushEnabled":       u.PostNumberInPushEnabled,
 		"yoloModeEnabled":               u.YoloModeEnabled,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
+		"allowCommunityNsfwMarking":     u.AllowCommunityNsfwMarking,
+		"showNsfwByDefault":             u.ShowNsfwByDefault,
 		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":        u.LocationFeatureEnabled,
 		"locationShareDefaultEnabled":   u.LocationShareDefaultEnabled,
@@ -10632,6 +10758,8 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"postNumberInPushEnabled":       false,
 		"yoloModeEnabled":               false,
 		"allowPhotoDownload":            u.AllowPhotoDownload,
+		"allowCommunityNsfwMarking":     false,
+		"showNsfwByDefault":             false,
 		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":        false,
 		"locationShareDefaultEnabled":   false,

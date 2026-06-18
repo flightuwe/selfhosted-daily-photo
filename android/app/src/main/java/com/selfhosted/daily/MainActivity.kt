@@ -289,6 +289,8 @@ data class User(
     val postNumberInPushEnabled: Boolean = false,
     val yoloModeEnabled: Boolean = false,
     val allowPhotoDownload: Boolean = false,
+    val allowCommunityNsfwMarking: Boolean = false,
+    val showNsfwByDefault: Boolean = false,
     val creativePostMode: String = "none",
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
@@ -342,6 +344,8 @@ data class PreferencesUpdateRequest(
     val postNumberInPushEnabled: Boolean? = null,
     val yoloModeEnabled: Boolean? = null,
     val allowPhotoDownload: Boolean,
+    val allowCommunityNsfwMarking: Boolean? = null,
+    val showNsfwByDefault: Boolean? = null,
     val creativePostMode: String? = null,
     val locationFeatureEnabled: Boolean? = null,
     val locationShareDefaultEnabled: Boolean? = null,
@@ -451,6 +455,11 @@ data class PromptPhoto(
     val locationMapsUrl: String? = null,
     val bookmarkedByMe: Boolean = false,
     val bookmarkCount: Int = 0,
+    val nsfw: Boolean = false,
+    val nsfwMarkedByUserId: Long? = null,
+    val nsfwMarkedAt: String? = null,
+    val nsfwMarkAllowed: Boolean = false,
+    val nsfwUnmarkAllowed: Boolean = false,
     val publicNumber: String? = null,
     val creativePostMode: String = "none",
     val canMark: Boolean = false,
@@ -641,6 +650,11 @@ data class CalendarFeaturedPhoto(
     val interactionCount: Long = 0,
     val bookmarkedByMe: Boolean = false,
     val bookmarkCount: Int = 0,
+    val nsfw: Boolean = false,
+    val nsfwMarkedByUserId: Long? = null,
+    val nsfwMarkedAt: String? = null,
+    val nsfwMarkAllowed: Boolean = false,
+    val nsfwUnmarkAllowed: Boolean = false,
     val publicNumber: String? = null,
     val capsuleLocked: Boolean = false,
     val capsuleVisibleAt: String? = null
@@ -1231,6 +1245,18 @@ interface Api {
         @Header("Authorization") token: String,
         @Path("id") id: Long
     ): PhotoReportResponse
+
+    @POST("photos/{id}/nsfw")
+    suspend fun markPhotoNsfw(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): PhotoMutationResponse
+
+    @DELETE("photos/{id}/nsfw")
+    suspend fun unmarkPhotoNsfw(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): PhotoMutationResponse
 
     @POST("photos/{id}/reaction")
     suspend fun reactPhoto(
@@ -2296,6 +2322,8 @@ class AppRepo(
         photoReactionPushEnabled: Boolean,
         photoCommentPushEnabled: Boolean,
         allowPhotoDownload: Boolean,
+        allowCommunityNsfwMarking: Boolean? = null,
+        showNsfwByDefault: Boolean? = null,
         creativePostMode: String? = null,
         bookmarkedPhotoPushEnabled: Boolean? = null,
         ownPostNumberInPushEnabled: Boolean? = null,
@@ -2320,6 +2348,8 @@ class AppRepo(
                 postNumberInPushEnabled = postNumberInPushEnabled,
                 yoloModeEnabled = yoloModeEnabled,
                 allowPhotoDownload = allowPhotoDownload,
+                allowCommunityNsfwMarking = allowCommunityNsfwMarking,
+                showNsfwByDefault = showNsfwByDefault,
                 creativePostMode = creativePostMode,
                 specialMomentPushEnabled = specialMomentPushEnabled,
                 locationFeatureEnabled = locationFeatureEnabled,
@@ -2466,6 +2496,12 @@ class AppRepo(
 
     suspend fun reportPhoto(photoId: Long): PhotoReportResponse =
         authorizedCall("/api/photos/:id/report") { token -> api.reportPhoto(token, photoId) }
+
+    suspend fun markPhotoNsfw(photoId: Long): PromptPhoto? =
+        authorizedCall("/api/photos/:id/nsfw") { token -> api.markPhotoNsfw(token, photoId) }.photo
+
+    suspend fun unmarkPhotoNsfw(photoId: Long): PromptPhoto? =
+        authorizedCall("/api/photos/:id/nsfw") { token -> api.unmarkPhotoNsfw(token, photoId) }.photo
 
     suspend fun reactPhoto(photoId: Long, emoji: String): PhotoInteractionsResponse =
         authorizedCall("/api/photos/:id/reaction") { token -> api.reactPhoto(token, photoId, PhotoReactionRequest(emoji)) }
@@ -3387,6 +3423,8 @@ data class UiState(
     val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
     val yoloModeEnabled: Boolean = false,
+    val allowCommunityNsfwMarking: Boolean = false,
+    val showNsfwByDefault: Boolean = false,
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
     val showPublicPostNumbers: Boolean = false,
@@ -3436,6 +3474,8 @@ private data class YoloPreferenceState(
     var postNumberInPushEnabled: Boolean,
     var yoloModeEnabled: Boolean,
     var allowPhotoDownload: Boolean,
+    var allowCommunityNsfwMarking: Boolean,
+    var showNsfwByDefault: Boolean,
     var creativePostMode: String,
     var locationFeatureEnabled: Boolean,
     var locationShareDefaultEnabled: Boolean
@@ -3514,6 +3554,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         YoloFeatureDefinition("own_post_number_in_push_enabled_v1", "0.6.0", "Postnummern bei eigenen Beitrags-Pushes", "notifications") { it.ownPostNumberInPushEnabled = true },
         YoloFeatureDefinition("post_number_in_push_enabled_v1", "0.6.0", "Postnummern bei gemerkten Beitrags-Pushes", "notifications") { it.postNumberInPushEnabled = true },
         YoloFeatureDefinition("allow_photo_download_v1", "0.6.0", "Download-Freigabe", "sharing") { it.allowPhotoDownload = true },
+        YoloFeatureDefinition("allow_community_nsfw_marking_v1", "0.6.0", "NSFW-Markierung durch andere erlauben", "posting") { it.allowCommunityNsfwMarking = true },
+        YoloFeatureDefinition("show_nsfw_by_default_v1", "0.6.0", "NSFW standardmaessig anzeigen", "display") { it.showNsfwByDefault = true },
         YoloFeatureDefinition("creative_post_mode_both_v1", "0.6.0", "Kreativmodus", "posting") { it.creativePostMode = "both" },
         YoloFeatureDefinition("location_feature_enabled_v1", "0.6.0", "Standort-Feature", "location") { it.locationFeatureEnabled = true },
         YoloFeatureDefinition("location_share_default_enabled_v1", "0.6.0", "Standort standardmaessig mitsenden", "location") {
@@ -4715,6 +4757,35 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure {
                 state = state.copy(message = apiError(it, "Melden fehlgeschlagen"))
             }
+    }
+
+    suspend fun togglePhotoNsfw(photoId: Long, nsfw: Boolean) {
+        patchPhotoState(photoId) { photo ->
+            photo.copy(
+                nsfw = nsfw,
+                nsfwMarkedByUserId = if (nsfw) state.user?.id else null,
+                nsfwMarkedAt = if (nsfw) Instant.now().toString() else null
+            )
+        }
+        try {
+            val serverPhoto = if (nsfw) {
+                repo.markPhotoNsfw(photoId)
+            } else {
+                repo.unmarkPhotoNsfw(photoId)
+            }
+            serverPhoto?.let(::applyServerPhoto)
+            refreshVisibleFeedAfterCreativeMutation(photoId, reason = if (nsfw) "photo_nsfw_mark" else "photo_nsfw_unmark")
+            state = state.copy(message = if (nsfw) "Beitrag als NSFW markiert" else "NSFW-Markierung entfernt")
+        } catch (t: Throwable) {
+            patchPhotoState(photoId) { photo ->
+                photo.copy(
+                    nsfw = !nsfw,
+                    nsfwMarkedByUserId = if (!nsfw) state.user?.id else null,
+                    nsfwMarkedAt = if (!nsfw) Instant.now().toString() else null
+                )
+            }
+            state = state.copy(message = apiError(t, "NSFW-Aktion fehlgeschlagen"))
+        }
     }
 
     suspend fun clearAllBookmarks() {
@@ -6589,6 +6660,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             postNumberInPushEnabled = current?.postNumberInPushEnabled ?: repo.postNumberInPushLocalEnabled(),
             yoloModeEnabled = current?.yoloModeEnabled ?: repo.yoloModeLocalEnabled(),
             allowPhotoDownload = current?.allowPhotoDownload ?: false,
+            allowCommunityNsfwMarking = current?.allowCommunityNsfwMarking ?: false,
+            showNsfwByDefault = current?.showNsfwByDefault ?: false,
             creativePostMode = current?.creativePostMode ?: "none",
             locationFeatureEnabled = current?.locationFeatureEnabled ?: false,
             locationShareDefaultEnabled = current?.locationShareDefaultEnabled ?: false
@@ -6635,6 +6708,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photoReactionPushEnabled = preferences.photoReactionPushEnabled,
                 photoCommentPushEnabled = preferences.photoCommentPushEnabled,
                 allowPhotoDownload = preferences.allowPhotoDownload,
+                allowCommunityNsfwMarking = preferences.allowCommunityNsfwMarking,
+                showNsfwByDefault = preferences.showNsfwByDefault,
                 creativePostMode = preferences.creativePostMode,
                 bookmarkedPhotoPushEnabled = preferences.bookmarkedPhotoPushEnabled,
                 ownPostNumberInPushEnabled = preferences.ownPostNumberInPushEnabled,
@@ -6659,6 +6734,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             postNumberInPushEnabled = updatedUser?.postNumberInPushEnabled ?: preferences.postNumberInPushEnabled,
             yoloModeEnabled = updatedUser?.yoloModeEnabled ?: preferences.yoloModeEnabled,
             allowPhotoDownload = updatedUser?.allowPhotoDownload ?: preferences.allowPhotoDownload,
+            allowCommunityNsfwMarking = updatedUser?.allowCommunityNsfwMarking ?: preferences.allowCommunityNsfwMarking,
+            showNsfwByDefault = updatedUser?.showNsfwByDefault ?: preferences.showNsfwByDefault,
             creativePostMode = updatedUser?.creativePostMode ?: preferences.creativePostMode,
             locationFeatureEnabled = updatedUser?.locationFeatureEnabled ?: preferences.locationFeatureEnabled,
             locationShareDefaultEnabled = updatedUser?.locationShareDefaultEnabled ?: preferences.locationShareDefaultEnabled
@@ -6693,6 +6770,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             ownPostNumberInPushEnabled = user?.ownPostNumberInPushEnabled ?: repo.ownPostNumberInPushLocalEnabled(),
             postNumberInPushEnabled = user?.postNumberInPushEnabled ?: repo.postNumberInPushLocalEnabled(),
             yoloModeEnabled = true,
+            allowCommunityNsfwMarking = user?.allowCommunityNsfwMarking ?: false,
+            showNsfwByDefault = user?.showNsfwByDefault ?: false,
             locationFeatureEnabled = user?.locationFeatureEnabled ?: false,
             locationShareDefaultEnabled = user?.locationShareDefaultEnabled ?: false,
             showPublicPostNumbers = repo.showPublicPostNumbers(),
@@ -7093,6 +7172,60 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             .onFailure {
                 state = state.copy(loading = false, message = apiError(it, "Download-Freigabe speichern fehlgeschlagen"))
+            }
+    }
+
+    suspend fun setAllowCommunityNsfwMarkingEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                current.pollPushEnabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload,
+                allowCommunityNsfwMarking = enabled,
+                showNsfwByDefault = current.showNsfwByDefault
+            )
+        }
+            .onSuccess { user ->
+                state = state.copy(
+                    user = user,
+                    loading = false,
+                    message = if (enabled) "NSFW-Freigabe fuer andere aktiviert" else "NSFW-Freigabe fuer andere deaktiviert"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "NSFW-Freigabe speichern fehlgeschlagen"))
+            }
+    }
+
+    suspend fun setShowNsfwByDefaultEnabled(enabled: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                current.chatPushEnabled,
+                current.pollPushEnabled,
+                current.inviteRegistrationPushEnabled,
+                current.photoReactionPushEnabled,
+                current.photoCommentPushEnabled,
+                current.allowPhotoDownload,
+                allowCommunityNsfwMarking = current.allowCommunityNsfwMarking,
+                showNsfwByDefault = enabled
+            )
+        }
+            .onSuccess { user ->
+                state = state.copy(
+                    user = user,
+                    loading = false,
+                    message = if (enabled) "NSFW wird standardmaessig angezeigt" else "NSFW bleibt standardmaessig verdeckt"
+                )
+            }
+            .onFailure {
+                state = state.copy(loading = false, message = apiError(it, "NSFW-Anzeige speichern fehlgeschlagen"))
             }
     }
 
@@ -8528,6 +8661,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     feedWindowReloadInFlight = state.feedWindowReloadInFlight,
                     feedOrderMode = state.feedOrderMode,
                     showPublicPostNumbers = state.showPublicPostNumbers,
+                    showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
                     onRefresh = { scope.launch { vm.refreshFeed() } },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
@@ -8546,6 +8680,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onSavePaint = { photoId, paths, strokeWidth -> scope.launch { vm.savePhotoPaint(photoId, paths, strokeWidth) } },
                     onDeletePaint = { photoId, targetUserId -> scope.launch { vm.deletePhotoPaint(photoId, targetUserId) } },
                     onReportPhoto = { photoId -> scope.launch { vm.reportPhoto(photoId) } },
+                    onToggleNsfw = { photoId, nsfw -> scope.launch { vm.togglePhotoNsfw(photoId, nsfw) } },
                     onOpenHashtagSearch = { vm.openCalendarSearch(it) },
                     onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
@@ -8662,6 +8797,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     postNumberInPushEnabled = state.user?.postNumberInPushEnabled ?: state.postNumberInPushEnabled,
                     yoloModeEnabled = state.user?.yoloModeEnabled ?: state.yoloModeEnabled,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
+                    allowCommunityNsfwMarking = state.user?.allowCommunityNsfwMarking ?: false,
+                    showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
                     creativePostMode = state.user?.creativePostMode ?: "none",
                     locationFeatureEnabled = state.user?.locationFeatureEnabled ?: false,
                     locationShareDefaultEnabled = state.user?.locationShareDefaultEnabled ?: false,
@@ -8707,6 +8844,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onPostNumberInPushEnabledChange = { scope.launch { vm.setPostNumberInPushEnabled(it) } },
                     onYoloModeEnabledChange = { scope.launch { vm.setYoloModeEnabled(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
+                    onAllowCommunityNsfwMarkingChange = { scope.launch { vm.setAllowCommunityNsfwMarkingEnabled(it) } },
+                    onShowNsfwByDefaultChange = { scope.launch { vm.setShowNsfwByDefaultEnabled(it) } },
                     onCreativePostModeChange = { scope.launch { vm.setCreativePostMode(it) } },
                     onLocationFeatureEnabledChange = { scope.launch { vm.setLocationFeatureEnabled(it) } },
                     onLocationShareDefaultEnabledChange = { scope.launch { vm.setLocationShareDefaultEnabled(it) } },
@@ -9549,6 +9688,7 @@ fun FeedTab(
     feedWindowReloadInFlight: Boolean,
     feedOrderMode: FeedOrderMode,
     showPublicPostNumbers: Boolean,
+    showNsfwByDefault: Boolean,
     onTakePhoto: () -> Unit,
     onRefresh: () -> Unit,
     onLoadOlder: () -> Unit,
@@ -9565,6 +9705,7 @@ fun FeedTab(
     onSavePaint: (photoId: Long, paths: List<PhotoPaintPath>, strokeWidth: Float) -> Unit,
     onDeletePaint: (photoId: Long, targetUserId: Long?) -> Unit,
     onReportPhoto: (photoId: Long) -> Unit,
+    onToggleNsfw: (photoId: Long, nsfw: Boolean) -> Unit,
     onOpenHashtagSearch: (String) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
@@ -9576,6 +9717,7 @@ fun FeedTab(
     var paintEditorPhoto by remember { mutableStateOf<PaintEditorTarget?>(null) }
     var paintModerationPhoto by remember { mutableStateOf<FeedItem?>(null) }
     var markModerationPhoto by remember { mutableStateOf<FeedItem?>(null) }
+    var revealedNsfwPhotoIds by remember { mutableStateOf(setOf<Long>()) }
 
     val rows = remember(days, byDay, monthRecapByDay, promptMetaByDay, jumpLoadingDay) {
         buildList {
@@ -9837,6 +9979,8 @@ fun FeedTab(
                         secondaryTextColor = secondaryTextColor,
                         primaryTextColor = primaryTextColor,
                         showPublicPostNumbers = showPublicPostNumbers,
+                        showNsfwByDefault = showNsfwByDefault,
+                        nsfwRevealed = revealedNsfwPhotoIds.contains(item.photo.id),
                         isMomentWindowPost = isMomentWindowPost,
                         postMomentKind = postMomentKind,
                         requestedByUser = requestedByUser,
@@ -9851,6 +9995,8 @@ fun FeedTab(
                         onToggleMark = onToggleMark,
                         onDeletePaint = onDeletePaint,
                         onReportPhoto = onReportPhoto,
+                        onToggleNsfw = onToggleNsfw,
+                        onRevealNsfw = { revealedNsfwPhotoIds = revealedNsfwPhotoIds + item.photo.id },
                         onOpenPaintEditor = {
                             paintEditorPhoto = PaintEditorTarget(
                                 item = item,
@@ -10079,6 +10225,8 @@ private fun FeedPostCard(
     secondaryTextColor: Color,
     primaryTextColor: Color,
     showPublicPostNumbers: Boolean,
+    showNsfwByDefault: Boolean,
+    nsfwRevealed: Boolean,
     isMomentWindowPost: Boolean,
     postMomentKind: String?,
     requestedByUser: String?,
@@ -10093,6 +10241,8 @@ private fun FeedPostCard(
     onToggleMark: (Long, Boolean) -> Unit,
     onDeletePaint: (Long, Long?) -> Unit,
     onReportPhoto: (Long) -> Unit,
+    onToggleNsfw: (Long, Boolean) -> Unit,
+    onRevealNsfw: () -> Unit,
     onOpenPaintEditor: () -> Unit,
     onOpenPaintModeration: () -> Unit,
     onOpenMarkModeration: () -> Unit
@@ -10103,6 +10253,8 @@ private fun FeedPostCard(
         secondaryTextColor = secondaryTextColor,
         primaryTextColor = primaryTextColor,
         showPublicPostNumbers = showPublicPostNumbers,
+        showNsfwByDefault = showNsfwByDefault,
+        nsfwRevealed = nsfwRevealed,
         isMomentWindowPost = isMomentWindowPost,
         postMomentKind = postMomentKind,
         requestedByUser = requestedByUser,
@@ -10111,6 +10263,7 @@ private fun FeedPostCard(
         onOpenViewer = onOpenViewer,
         onOpenExternalUrl = onOpenExternalUrl,
         onOpenHashtagSearch = onOpenHashtagSearch,
+        onRevealNsfw = onRevealNsfw,
         headerTrailing = {
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 if (showPublicPostNumbers && !item.photo.publicNumber.isNullOrBlank()) {
@@ -10181,6 +10334,24 @@ private fun FeedPostCard(
                                 }
                             )
                         }
+                        if (item.photo.nsfwMarkAllowed) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("Als NSFW markieren") },
+                                onClick = {
+                                    onMenuExpandedChange(false)
+                                    onToggleNsfw(item.photo.id, true)
+                                }
+                            )
+                        }
+                        if (item.photo.nsfwUnmarkAllowed && item.photo.nsfw) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("NSFW entfernen") },
+                                onClick = {
+                                    onMenuExpandedChange(false)
+                                    onToggleNsfw(item.photo.id, false)
+                                }
+                            )
+                        }
                         androidx.compose.material3.DropdownMenuItem(
                             text = { Text("Melden") },
                             onClick = {
@@ -10207,6 +10378,8 @@ private fun PostCanvasCard(
     secondaryTextColor: Color,
     primaryTextColor: Color,
     showPublicPostNumbers: Boolean,
+    showNsfwByDefault: Boolean,
+    nsfwRevealed: Boolean,
     isMomentWindowPost: Boolean,
     postMomentKind: String?,
     requestedByUser: String?,
@@ -10215,6 +10388,7 @@ private fun PostCanvasCard(
     onOpenViewer: ((List<String>, Long?) -> Unit)?,
     onOpenExternalUrl: ((String) -> Unit)?,
     onOpenHashtagSearch: (String) -> Unit,
+    onRevealNsfw: () -> Unit,
     headerTrailing: @Composable (() -> Unit)? = null,
     overlay: @Composable (Rect) -> Unit = {}
 ) {
@@ -10225,6 +10399,14 @@ private fun PostCanvasCard(
     }
     val comments = remember(item.comments) {
         item.comments.orEmpty().sortedWith(compareBy<PhotoCommentItem>({ parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN }, { it.id }))
+    }
+    val nsfwHidden = item.photo.nsfw && !showNsfwByDefault && !nsfwRevealed
+    val obscuredModifier = if (nsfwHidden) {
+        Modifier
+            .graphicsLayer(alpha = 0.88f)
+            .blur(12.dp)
+    } else {
+        Modifier
     }
     val density = LocalDensity.current
     var rootOrigin by remember(item.photo.id) { mutableStateOf(Offset.Zero) }
@@ -10371,6 +10553,7 @@ private fun PostCanvasCard(
                                     modifier = Modifier
                                         .weight(1f)
                                         .fillMaxHeight()
+                                        .then(obscuredModifier)
                                         .clip(imageShape)
                                         .then(
                                             if (onOpenViewer != null) Modifier.clickable { onOpenViewer(urls, item.photo.id) } else Modifier
@@ -10379,14 +10562,39 @@ private fun PostCanvasCard(
                                 )
                             }
                         }
+                        if (nsfwHidden) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .background(Color.Black.copy(alpha = 0.22f))
+                                    .clickable { onRevealNsfw() }
+                                    .padding(18.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Card(colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.62f))) {
+                                    Column(
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text("NSFW-Inhalt", color = Color.White, fontWeight = FontWeight.Bold)
+                                        Text("Sensibilitaetshinweis · Tippen zum Anzeigen", color = Color.White.copy(alpha = 0.88f), style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
                 if (reactions.isNotEmpty()) {
-                    Text(reactions.joinToString("  ") { "${it.emoji} ${it.count}" }, color = primaryTextColor)
+                    Text(
+                        reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
+                        color = primaryTextColor,
+                        modifier = obscuredModifier
+                    )
                 }
                 if (photoMojis.isNotEmpty()) {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().then(obscuredModifier)) {
                         items(photoMojis) { foto ->
                             Row(
                                 modifier = Modifier
@@ -10410,7 +10618,7 @@ private fun PostCanvasCard(
 
                 val hasCaption = !item.photo.caption.isNullOrBlank()
                 if (hasCaption || comments.isNotEmpty()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().then(obscuredModifier)) {
                         if (hasCaption) {
                             CompactCommentLine(
                                 username = item.user.username,
@@ -10836,6 +11044,8 @@ private fun PhotoPaintEditorDialog(
                                         secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                         primaryTextColor = MaterialTheme.colorScheme.onSurface,
                                         showPublicPostNumbers = true,
+                                        showNsfwByDefault = true,
+                                        nsfwRevealed = true,
                                         isMomentWindowPost = target.isMomentWindowPost,
                                         postMomentKind = target.postMomentKind,
                                         requestedByUser = target.requestedByUser,
@@ -10844,6 +11054,7 @@ private fun PhotoPaintEditorDialog(
                                         onOpenViewer = null,
                                         onOpenExternalUrl = null,
                                         onOpenHashtagSearch = {},
+                                        onRevealNsfw = {},
                                         headerTrailing = {
                                             if (!photo.publicNumber.isNullOrBlank()) {
                                                 Text(
@@ -12194,6 +12405,8 @@ fun ProfileTab(
     postNumberInPushEnabled: Boolean,
     yoloModeEnabled: Boolean,
     allowPhotoDownload: Boolean,
+    allowCommunityNsfwMarking: Boolean,
+    showNsfwByDefault: Boolean,
     creativePostMode: String,
     locationFeatureEnabled: Boolean,
     locationShareDefaultEnabled: Boolean,
@@ -12239,6 +12452,8 @@ fun ProfileTab(
     onPostNumberInPushEnabledChange: (Boolean) -> Unit,
     onYoloModeEnabledChange: (Boolean) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
+    onAllowCommunityNsfwMarkingChange: (Boolean) -> Unit,
+    onShowNsfwByDefaultChange: (Boolean) -> Unit,
     onCreativePostModeChange: (String) -> Unit,
     onLocationFeatureEnabledChange: (Boolean) -> Unit,
     onLocationShareDefaultEnabledChange: (Boolean) -> Unit,
@@ -12702,6 +12917,18 @@ fun ProfileTab(
                                     }
                                 },
                                 supportingText = "Nur wenn du das aktiv einschaltest, erscheint im Bildbetrachter ein Download-Button."
+                            )
+                            SettingsToggleRow(
+                                label = "Andere duerfen meine Posts als NSFW markieren",
+                                checked = allowCommunityNsfwMarking,
+                                onCheckedChange = onAllowCommunityNsfwMarkingChange,
+                                supportingText = "Wenn aktiv, erscheint bei deinen Posts fuer andere im Menue die NSFW-Markierung."
+                            )
+                            SettingsToggleRow(
+                                label = "NSFW standardmaessig anzeigen",
+                                checked = showNsfwByDefault,
+                                onCheckedChange = onShowNsfwByDefaultChange,
+                                supportingText = "Wenn aus, bleiben NSFW-Posts zuerst geblurrt und koennen pro Beitrag sichtbar gemacht werden."
                             )
                             Text(
                                 "Kreativspuren auf meinen Posts",

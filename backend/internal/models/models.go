@@ -20,6 +20,8 @@ type User struct {
 	PostNumberInPushEnabled       bool       `gorm:"default:false" json:"postNumberInPushEnabled"`
 	YoloModeEnabled               bool       `gorm:"default:false" json:"yoloModeEnabled"`
 	AllowPhotoDownload            bool       `gorm:"default:false" json:"allowPhotoDownload"`
+	AllowCommunityNsfwMarking     bool       `gorm:"default:false" json:"allowCommunityNsfwMarking"`
+	ShowNsfwByDefault             bool       `gorm:"default:false" json:"showNsfwByDefault"`
 	CreativePostMode              string     `gorm:"size:16;default:'none'" json:"creativePostMode"`
 	LocationFeatureEnabled        bool       `gorm:"default:false" json:"locationFeatureEnabled"`
 	LocationShareDefaultEnabled   bool       `gorm:"default:false" json:"locationShareDefaultEnabled"`
@@ -298,6 +300,9 @@ type Photo struct {
 	LocationShared           bool       `gorm:"default:false;index" json:"locationShared"`
 	LocationLatitude         *float64   `json:"locationLatitude"`
 	LocationLongitude        *float64   `json:"locationLongitude"`
+	Nsfw                     bool       `gorm:"default:false;index" json:"nsfw"`
+	NsfwMarkedByUserID       *uint      `gorm:"index" json:"nsfwMarkedByUserId"`
+	NsfwMarkedAt             *time.Time `json:"nsfwMarkedAt"`
 	PublicNumber             *string    `gorm:"size:9;uniqueIndex" json:"publicNumber"`
 	CapturedAt               *time.Time `gorm:"index" json:"capturedAt"`
 	CreatedAt                time.Time  `json:"createdAt"`
