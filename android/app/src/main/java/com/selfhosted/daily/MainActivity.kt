@@ -2436,8 +2436,8 @@ class AppRepo(
         locationShareDefaultEnabled: Boolean? = null,
         diagnosticsConsentGranted: Boolean? = null,
         diagnosticsConsentSource: String? = null
-    ): User =
-        authorizedCall("/api/me/preferences") { token -> api.updatePreferences(
+    ): User {
+        val response = authorizedCall("/api/me/preferences") { token -> api.updatePreferences(
             token,
             PreferencesUpdateRequest(
                 chatPushEnabled = chatPushEnabled,
@@ -2461,7 +2461,48 @@ class AppRepo(
                 diagnosticsConsentGranted = diagnosticsConsentGranted,
                 diagnosticsConsentSource = diagnosticsConsentSource
             )
-        ) }.user
+        ) }
+        val user = response.user
+        val mismatches = buildList {
+            fun check(name: String, expected: Boolean?, actual: Boolean) {
+                if (expected != null && expected != actual) {
+                    add("$name:$expected->$actual")
+                }
+            }
+            fun checkText(name: String, expected: String?, actual: String?) {
+                if (expected != null && expected != actual) {
+                    add("$name:${expected.ifBlank { "-" }}->${actual.orEmpty().ifBlank { "-" }}")
+                }
+            }
+            check("chatPushEnabled", chatPushEnabled, user.chatPushEnabled)
+            check("pollPushEnabled", pollPushEnabled, user.pollPushEnabled)
+            check("inviteRegistrationPushEnabled", inviteRegistrationPushEnabled, user.inviteRegistrationPushEnabled)
+            check("photoReactionPushEnabled", photoReactionPushEnabled, user.photoReactionPushEnabled)
+            check("photoCommentPushEnabled", photoCommentPushEnabled, user.photoCommentPushEnabled)
+            check("allowPhotoDownload", allowPhotoDownload, user.allowPhotoDownload)
+            check("allowCommunityNsfwMarking", allowCommunityNsfwMarking, user.allowCommunityNsfwMarking)
+            check("showNsfwByDefault", showNsfwByDefault, user.showNsfwByDefault)
+            checkText("creativePostMode", creativePostMode, user.creativePostMode)
+            check("bookmarkedPhotoPushEnabled", bookmarkedPhotoPushEnabled, user.bookmarkedPhotoPushEnabled)
+            check("postChangePushEnabled", postChangePushEnabled, user.postChangePushEnabled)
+            check("autoSubscribeInteractedPostsEnabled", autoSubscribeInteractedPostsEnabled, user.autoSubscribeInteractedPostsEnabled)
+            check("ownPostNumberInPushEnabled", ownPostNumberInPushEnabled, user.ownPostNumberInPushEnabled)
+            check("postNumberInPushEnabled", postNumberInPushEnabled, user.postNumberInPushEnabled)
+            check("yoloModeEnabled", yoloModeEnabled, user.yoloModeEnabled)
+            check("specialMomentPushEnabled", specialMomentPushEnabled, user.specialMomentPushEnabled)
+            check("locationFeatureEnabled", locationFeatureEnabled, user.locationFeatureEnabled)
+            check("locationShareDefaultEnabled", locationShareDefaultEnabled, user.locationShareDefaultEnabled)
+            check("diagnosticsConsentGranted", diagnosticsConsentGranted, user.diagnosticsConsentGranted)
+        }
+        if (mismatches.isNotEmpty()) {
+            logDebug(
+                type = "preference_sync_conflict",
+                message = "server returned different preference values",
+                meta = "mismatches=${mismatches.joinToString(",")};consentSource=${diagnosticsConsentSource ?: "-"}"
+            )
+        }
+        return user
+    }
 
     suspend fun prompt(): PromptResponse = authorizedCall("/api/prompt/current") { token -> api.prompt(token) }
     suspend fun promptRules(): PromptRulesResponse =
@@ -2688,16 +2729,68 @@ class AppRepo(
     }
 
     suspend fun syncDeviceTokenIfNeeded(force: Boolean = false) {
-        if (token().isBlank()) return
+        if (token().isBlank()) {
+            logDebug(
+                type = "push_token_sync_skipped",
+                message = "push token sync skipped without auth token",
+                meta = "force=$force"
+            )
+            return
+        }
         val pending = prefs.getString("pending_fcm_token", "") ?: ""
-        val fromFirebase = runCatching { FirebaseMessaging.getInstance().token.await() }.getOrNull().orEmpty()
+        val firebaseAttempt = runCatching { FirebaseMessaging.getInstance().token.await() }
+        firebaseAttempt.exceptionOrNull()?.let {
+            val failureKind = debugNetworkFailureKindShared(it) ?: it::class.java.simpleName
+            logDebug(
+                type = "push_token_fetch_failed",
+                message = failureKind,
+                meta = "force=$force;failureClass=${it::class.java.simpleName};root=${debugRootCauseShared(it)::class.java.simpleName}"
+            )
+        }
+        val fromFirebase = firebaseAttempt.getOrNull().orEmpty()
         val deviceToken = if (pending.isNotBlank()) pending else fromFirebase
-        if (deviceToken.isBlank()) return
+        val source = when {
+            pending.isNotBlank() -> "pending"
+            fromFirebase.isNotBlank() -> "firebase"
+            else -> "none"
+        }
+        if (deviceToken.isBlank()) {
+            logDebug(
+                type = "push_token_sync_skipped",
+                message = "push token sync skipped without device token",
+                meta = "force=$force;source=$source;pendingPresent=${pending.isNotBlank()}"
+            )
+            return
+        }
         val sameToken = deviceToken == lastSyncedDeviceToken()
         val recentSync = (System.currentTimeMillis() - lastSyncedDeviceTokenAt()) < 6 * 60 * 60 * 1000L
-        if (!force && sameToken && recentSync) return
+        val tokenFingerprint = "${deviceToken.length}:${deviceToken.hashCode().toUInt().toString(16)}"
+        if (!force && sameToken && recentSync) {
+            logDebug(
+                type = "push_token_sync_skipped",
+                message = "push token already synced recently",
+                meta = "force=$force;source=$source;token=$tokenFingerprint"
+            )
+            return
+        }
 
-        authorizedCall("/api/devices") { token -> api.registerDevice(token, DeviceTokenRequest(deviceToken, currentDeviceName())) }
+        runCatching {
+            authorizedCall("/api/devices") { token -> api.registerDevice(token, DeviceTokenRequest(deviceToken, currentDeviceName())) }
+        }.onSuccess {
+            logDebug(
+                type = "push_token_synced",
+                message = "push device token synced",
+                meta = "force=$force;source=$source;token=$tokenFingerprint;pendingCleared=${pending.isNotBlank()}"
+            )
+        }.onFailure {
+            val failureKind = debugNetworkFailureKindShared(it) ?: it::class.java.simpleName
+            logDebug(
+                type = "push_token_sync_failed",
+                message = failureKind,
+                meta = "force=$force;source=$source;token=$tokenFingerprint;failureClass=${it::class.java.simpleName};root=${debugRootCauseShared(it)::class.java.simpleName}"
+            )
+            throw it
+        }
         setLastSyncedDeviceToken(deviceToken)
         prefs.edit().remove("pending_fcm_token").apply()
     }
@@ -3681,6 +3774,25 @@ private class RefreshStageException(
 ) : RuntimeException("refresh stage failed: $failedCall", cause)
 
 class MainVm(private val repo: AppRepo) : ViewModel() {
+    private enum class PerfEventResult(val wireValue: String) {
+        OK("ok"),
+        ERROR("error"),
+        SKIPPED("skipped"),
+        DEFERRED("deferred"),
+        CANCELLED("cancelled")
+    }
+
+    private enum class RefreshExecutionDisposition {
+        IDLE,
+        SUCCESS,
+        FAILURE,
+        QUEUED,
+        SKIPPED_CIRCUIT,
+        SKIPPED_COOLDOWN,
+        NO_TOKEN,
+        CANCELLED
+    }
+
     private val chatSendMutex = Mutex()
     private val profileSaveMutex = Mutex()
     private val refreshAllMutex = Mutex()
@@ -3705,6 +3817,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var consecutiveNetworkRefreshFailures = 0
     private var lastRefreshFailureClass: String = ""
     private var refreshCircuitOpenUntilMs = 0L
+    private var lastRefreshExecutionDisposition = RefreshExecutionDisposition.IDLE
     private var nextFeedScrollRequestId = 1L
     private val pendingFeedMutations = mutableMapOf<Long, PendingFeedMutation>()
     private var queuedRefreshRequest: QueuedRefreshRequest? = null
@@ -3900,6 +4013,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         pendingFeedMutations.remove(photoId)
     }
 
+    private fun pendingFeedMutationParts(mutation: PendingFeedMutation): List<String> = buildList {
+        if (mutation.photoOverride != null) add("photo")
+        if (mutation.commentsOverride != null) add("comments")
+        if (mutation.reactionsOverride != null) add("reactions")
+        if (mutation.photoMojisOverride != null) add("photoMojis")
+    }
+
     private fun applyPendingFeedMutation(item: FeedItem): FeedItem {
         val pending = pendingFeedMutations[item.photo.id] ?: return item
         return item.copy(
@@ -3912,12 +4032,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     private fun reconcilePendingFeedMutation(item: FeedItem) {
         val pending = pendingFeedMutations[item.photo.id] ?: return
+        val beforeParts = pendingFeedMutationParts(pending)
         val next = pending.copy(
             photoOverride = pending.photoOverride?.takeUnless { it == item.photo },
             commentsOverride = pending.commentsOverride?.takeUnless { it == item.comments.orEmpty() },
             reactionsOverride = pending.reactionsOverride?.takeUnless { it == item.reactions.orEmpty() },
             photoMojisOverride = pending.photoMojisOverride?.takeUnless { it == item.photoMojis.orEmpty() }
         )
+        val afterParts = pendingFeedMutationParts(next)
+        if (beforeParts != afterParts) {
+            repo.logDebug(
+                type = "feed_mutation_reconciled",
+                message = if (afterParts.isEmpty()) "pending feed mutation fully reconciled" else "pending feed mutation partially reconciled",
+                meta = "photoId=${item.photo.id};resolved=${beforeParts.filterNot(afterParts::contains).joinToString(",").ifBlank { "-" }};remaining=${afterParts.joinToString(",").ifBlank { "-" }}"
+            )
+        }
         if (next.photoOverride == null && next.commentsOverride == null && next.reactionsOverride == null && next.photoMojisOverride == null) {
             pendingFeedMutations.remove(item.photo.id)
         } else {
@@ -4423,11 +4552,20 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun logPerfEvent(event: String, durationMs: Long, success: Boolean, extra: String = "") {
-        if (!shouldSamplePerf(success)) return
+        logPerfEvent(
+            event = event,
+            durationMs = durationMs,
+            result = if (success) PerfEventResult.OK else PerfEventResult.ERROR,
+            extra = extra
+        )
+    }
+
+    private fun logPerfEvent(event: String, durationMs: Long, result: PerfEventResult, extra: String = "") {
+        if (!shouldSamplePerf(result == PerfEventResult.OK)) return
         val meta = buildString {
             append("event=").append(event)
             append(";durationMs=").append(durationMs.coerceAtLeast(0L))
-            append(";result=").append(if (success) "ok" else "error")
+            append(";result=").append(result.wireValue)
             append(";appVersion=").append(BuildConfig.VERSION_NAME)
             if (extra.isNotBlank()) {
                 append(";").append(extra)
@@ -5274,12 +5412,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         showLoading: Boolean = true,
         respectCircuitBreaker: Boolean = true
     ): Boolean {
-        if (repo.token().isBlank()) return false
+        if (repo.token().isBlank()) {
+            lastRefreshExecutionDisposition = RefreshExecutionDisposition.NO_TOKEN
+            return false
+        }
         val priority = refreshPriorityFor(reason, forceFeedReload)
         val now = System.currentTimeMillis()
         if (respectCircuitBreaker) {
             val remaining = refreshCircuitOpenRemainingMs(now)
             if (remaining > 0L) {
+                lastRefreshExecutionDisposition = RefreshExecutionDisposition.SKIPPED_CIRCUIT
                 repo.logDebug(
                     type = "refresh_skipped",
                     message = "refresh circuit breaker open",
@@ -5289,6 +5431,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
         }
         if (!refreshAllMutex.tryLock()) {
+            lastRefreshExecutionDisposition = RefreshExecutionDisposition.QUEUED
             queueRefreshRequest(
                 QueuedRefreshRequest(
                     reason = reason,
@@ -5300,10 +5443,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     priority = priority
                 )
             )
+            repo.logDebug(
+                type = "refresh_deferred",
+                message = "refresh queued behind active refresh",
+                meta = "reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload;refreshFeedWindow=$refreshFeedWindow;showLoading=$showLoading"
+            )
             return false
         }
         if (!bypassCooldown && now - lastRefreshAllStartedAt < refreshAllCooldownMs) {
+            lastRefreshExecutionDisposition = RefreshExecutionDisposition.SKIPPED_COOLDOWN
             refreshAllMutex.unlock()
+            repo.logDebug(
+                type = "refresh_skipped",
+                message = "refresh cooldown active",
+                meta = "reason=$reason;cooldownMs=$refreshAllCooldownMs;elapsedSinceLastStartMs=${now - lastRefreshAllStartedAt}"
+            )
             return false
         }
         lastRefreshAllStartedAt = now
@@ -5353,12 +5507,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     if (cachedUser == null) {
                         throw RefreshStageException("me", meErr)
                     }
-                    val failureClass = classifyFailure(meErr)
-                    repo.logDebug(
-                        type = "dashboard_refresh_degraded",
-                        message = debugFailureMessage(meErr),
-                        meta = "failedCall=me;fallback=cached_user;failureClass=$failureClass"
-                    )
+                    if (!isBenignCancellation(meErr)) {
+                        val failureClass = classifyFailure(meErr)
+                        repo.logDebug(
+                            type = "dashboard_refresh_degraded",
+                            message = debugFailureMessage(meErr),
+                            meta = "failedCall=me;fallback=cached_user;failureClass=$failureClass"
+                        )
+                    }
                     MeResponse(
                         user = cachedUser,
                         dailyMomentCount = state.dailyMomentCount,
@@ -5640,6 +5796,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             ensureCalendarStatsPrefix(2)
             success = true
+            lastRefreshExecutionDisposition = RefreshExecutionDisposition.SUCCESS
             markRefreshSuccess()
             if (reason == "feed_pull" || reason == "feed_auto" || forceFeedReload) {
                 val durationMs = System.currentTimeMillis() - now
@@ -5659,10 +5816,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 return false
             }
             if (isBenignCancellation(t)) {
+                lastRefreshExecutionDisposition = RefreshExecutionDisposition.CANCELLED
                 state = state.copy(loading = if (showLoading) false else state.loading, communityStatsLoading = false)
                 return false
             }
             val failureClass = classifyFailure(actual)
+            lastRefreshExecutionDisposition = RefreshExecutionDisposition.FAILURE
             val (backoffStage, delayMs) = markRefreshFailure(failureClass, System.currentTimeMillis())
             if (isNetworkFailureClass(failureClass)) {
                 repo.logDebug(
@@ -5705,12 +5864,24 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun refreshFeed(reason: String = "feed_pull") {
-        if (state.feedRefreshing) return
+        if (state.feedRefreshing) {
+            repo.logDebug(
+                type = "refresh_deferred",
+                message = "feed refresh ignored because one is already running",
+                meta = "reason=$reason"
+            )
+            return
+        }
         val now = System.currentTimeMillis()
         val isManual = reason == "feed_pull"
         val requiresHardReload = isManual || reason.startsWith("photo_") || reason == "comment_submit"
         if (isManual && isNetworkFailureClass(lastRefreshFailureClass) && now - lastManualRefreshAtMs < manualRefreshDuringNetworkFailureMinIntervalMs) {
             val waitMs = manualRefreshDuringNetworkFailureMinIntervalMs - (now - lastManualRefreshAtMs)
+            repo.logDebug(
+                type = "refresh_skipped",
+                message = "manual refresh throttled during network failure window",
+                meta = "reason=$reason;waitMs=$waitMs;lastFailureClass=$lastRefreshFailureClass"
+            )
             state = state.copy(message = "Bitte kurz warten (${(waitMs / 1000L).coerceAtLeast(1L)}s), dann erneut aktualisieren.")
             return
         }
@@ -5718,6 +5889,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             lastManualRefreshAtMs = now
         }
         state = state.copy(feedRefreshing = true)
+        lastRefreshExecutionDisposition = RefreshExecutionDisposition.IDLE
         val started = System.currentTimeMillis()
         var ok = false
         try {
@@ -5731,11 +5903,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
         } finally {
             val elapsed = System.currentTimeMillis() - started
+            val result = when (lastRefreshExecutionDisposition) {
+                RefreshExecutionDisposition.SUCCESS -> PerfEventResult.OK
+                RefreshExecutionDisposition.FAILURE -> PerfEventResult.ERROR
+                RefreshExecutionDisposition.QUEUED -> PerfEventResult.DEFERRED
+                RefreshExecutionDisposition.SKIPPED_CIRCUIT,
+                RefreshExecutionDisposition.SKIPPED_COOLDOWN,
+                RefreshExecutionDisposition.NO_TOKEN -> PerfEventResult.SKIPPED
+                RefreshExecutionDisposition.CANCELLED -> PerfEventResult.CANCELLED
+                RefreshExecutionDisposition.IDLE -> if (ok) PerfEventResult.OK else PerfEventResult.SKIPPED
+            }
             logPerfEvent(
                 event = "refresh_feed",
                 durationMs = elapsed,
-                success = ok,
-                extra = "reason=$reason"
+                result = result,
+                extra = "reason=$reason;disposition=${lastRefreshExecutionDisposition.name.lowercase()}"
             )
             if (elapsed < 700) delay(700 - elapsed)
             state = state.copy(feedRefreshing = false)
@@ -6240,7 +6422,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(loading = true)
         val freshPrompt = runCatching { repo.prompt() }.getOrNull()
         val targetPhotoId = freshPrompt?.appendTargetPhotoId ?: photoId
+        repo.logDebug(
+            type = "append_target_resolved",
+            message = "append target resolved",
+            meta = "requestedPhotoId=$photoId;resolvedPhotoId=$targetPhotoId;promptAvailable=${freshPrompt != null};canAppend=${freshPrompt?.canAppendToOwnLatestPost ?: false};promptDay=${freshPrompt?.day ?: "-"}"
+        )
         if (freshPrompt != null && (!freshPrompt.canAppendToOwnLatestPost || freshPrompt.appendTargetPhotoId == null)) {
+            repo.logDebug(
+                type = "append_target_rejected",
+                message = "append target rejected",
+                meta = "requestedPhotoId=$photoId;resolvedPhotoId=$targetPhotoId;canAppend=${freshPrompt.canAppendToOwnLatestPost};appendTargetPhotoId=${freshPrompt.appendTargetPhotoId ?: -1};promptDay=${freshPrompt.day}"
+            )
             state = state.copy(
                 loading = false,
                 prompt = freshPrompt,
@@ -6252,6 +6444,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.enqueuePhotoAttachmentUpload(targetPhotoId, uri, shareLocation)
         }.onSuccess {
             repo.syncUploadQueueScheduler()
+            repo.logDebug(
+                type = "append_upload_enqueued",
+                message = "append upload queued",
+                meta = "targetPhotoId=$targetPhotoId;promptDay=${freshPrompt?.day ?: state.prompt?.day ?: "-"};shareLocation=$shareLocation"
+            )
             state = state.copy(
                 loading = false,
                 prompt = freshPrompt ?: state.prompt,
