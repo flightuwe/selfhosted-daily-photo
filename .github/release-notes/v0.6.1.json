@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.1",
+  "title": "Append-, Feed- und Preference-Fixes fuer 0.6",
+  "items": [
+    "Weitere Bilder fuer den neuesten eigenen Tagesbeitrag lassen sich jetzt wieder zuverlaessig anhaengen, auch wenn die App den Zielpost kurz vorher neu aufloesen muss.",
+    "Genau 2-Bild-Posts koennen unter Profil -> Anzeige wieder zwischen alter geteilter Ansicht und neuer Wischansicht umgeschaltet werden; ab 3 Bildern bleibt die Wischansicht aktiv.",
+    "Frische Feed-Aktionen wie Markieren und NSFW werden jetzt sofort sichtbar und nicht erst nach App-Neustart oder hartem Refresh.",
+    "Der Profil-Toggle `Interaktions-Auto-Abo` speichert jetzt korrekt und bleibt nach dem Server-Sync sichtbar aktiv."
+  ]
+}
