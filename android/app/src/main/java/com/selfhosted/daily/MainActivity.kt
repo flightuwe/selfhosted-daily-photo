@@ -660,6 +660,50 @@ data class FeedWindowResponse(
     val nextOffset: Int = 0,
     val randomSeed: Long = 0L
 )
+enum class FeedViewportAnchorKind {
+    PHOTO,
+    DAY_HEADER,
+    RECAP,
+    LOADING
+}
+
+enum class FeedJumpBoundary {
+    START,
+    END
+}
+
+data class FeedViewportAnchor(
+    val day: String? = null,
+    val photoId: Long? = null,
+    val rowOffsetPx: Int = 0,
+    val kind: FeedViewportAnchorKind = FeedViewportAnchorKind.DAY_HEADER
+)
+
+data class PendingFeedMutation(
+    val photoOverride: PromptPhoto? = null,
+    val commentsOverride: List<PhotoCommentItem>? = null,
+    val reactionsOverride: List<ReactionCount>? = null,
+    val photoMojisOverride: List<PhotoMojiItem>? = null
+)
+
+private enum class RefreshPriority(val weight: Int) {
+    GLOBAL(0),
+    AUTO(1),
+    MANUAL(2),
+    MUTATION(3),
+    NAVIGATION(4)
+}
+
+private data class QueuedRefreshRequest(
+    val reason: String,
+    val forceFeedReload: Boolean,
+    val refreshFeedWindow: Boolean,
+    val bypassCooldown: Boolean,
+    val showLoading: Boolean,
+    val respectCircuitBreaker: Boolean,
+    val priority: RefreshPriority
+)
+
 data class DayListResponse(
     val items: List<String>,
     val hasOlder: Boolean = false,
@@ -3480,8 +3524,12 @@ data class UiState(
     val communityStatsLoading: Boolean = false,
     val feedFocusDay: String? = null,
     val feedFocusPhotoId: Long? = null,
+    val feedFocusBoundary: FeedJumpBoundary? = null,
     val feedVisibleAnchorDay: String? = null,
+    val feedViewportAnchor: FeedViewportAnchor = FeedViewportAnchor(),
     val feedScrollRequestId: Long = 0L,
+    val feedViewportRestoreAnchor: FeedViewportAnchor = FeedViewportAnchor(),
+    val feedViewportRestoreRequestId: Long = 0L,
     val feedPaging: Boolean = false,
     val feedRefreshing: Boolean = false,
     val feedWindowReloadInFlight: Boolean = false,
@@ -3650,6 +3698,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var lastRefreshFailureClass: String = ""
     private var refreshCircuitOpenUntilMs = 0L
     private var nextFeedScrollRequestId = 1L
+    private val pendingFeedMutations = mutableMapOf<Long, PendingFeedMutation>()
+    private var queuedRefreshRequest: QueuedRefreshRequest? = null
     private var calendarStatsLoadedPrefix = 0
     private var calendarStatsLoading = false
     private val staleFeedDays = mutableSetOf<String>()
@@ -3746,6 +3796,123 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val id = nextFeedScrollRequestId
         nextFeedScrollRequestId += 1L
         return id
+    }
+
+    private fun refreshPriorityFor(reason: String, forceFeedReload: Boolean): RefreshPriority = when {
+        reason == "feed_auto" -> RefreshPriority.AUTO
+        reason == "feed_pull" -> RefreshPriority.MANUAL
+        reason.startsWith("photo_") || reason == "comment_submit" -> RefreshPriority.MUTATION
+        forceFeedReload && (reason.contains("jump") || reason.contains("capsule") || reason.contains("launch")) -> RefreshPriority.NAVIGATION
+        else -> RefreshPriority.GLOBAL
+    }
+
+    @Synchronized
+    private fun queueRefreshRequest(request: QueuedRefreshRequest) {
+        val current = queuedRefreshRequest
+        queuedRefreshRequest = if (current == null || request.priority.weight >= current.priority.weight) {
+            request.copy(
+                forceFeedReload = request.forceFeedReload || (current?.forceFeedReload ?: false),
+                refreshFeedWindow = request.refreshFeedWindow || (current?.refreshFeedWindow ?: false),
+                bypassCooldown = request.bypassCooldown || (current?.bypassCooldown ?: false),
+                showLoading = request.showLoading || (current?.showLoading ?: false),
+                respectCircuitBreaker = request.respectCircuitBreaker && (current?.respectCircuitBreaker ?: true)
+            )
+        } else {
+            current.copy(
+                forceFeedReload = current.forceFeedReload || request.forceFeedReload,
+                refreshFeedWindow = current.refreshFeedWindow || request.refreshFeedWindow,
+                bypassCooldown = current.bypassCooldown || request.bypassCooldown,
+                showLoading = current.showLoading || request.showLoading,
+                respectCircuitBreaker = current.respectCircuitBreaker && request.respectCircuitBreaker
+            )
+        }
+    }
+
+    @Synchronized
+    private fun consumeQueuedRefreshRequest(): QueuedRefreshRequest? {
+        val next = queuedRefreshRequest
+        queuedRefreshRequest = null
+        return next
+    }
+
+    private fun hasPendingFeedNavigation(): Boolean =
+        !state.feedFocusDay.isNullOrBlank() || state.feedFocusPhotoId != null || state.feedFocusBoundary != null
+
+    private fun currentRefreshViewportAnchor(): FeedViewportAnchor? =
+        state.feedViewportAnchor.takeIf { anchor ->
+            !anchor.day.isNullOrBlank() && state.feedDays.isNotEmpty() && !hasPendingFeedNavigation()
+        }
+
+    fun updateFeedViewportAnchor(anchor: FeedViewportAnchor) {
+        val normalizedDay = anchor.day?.takeIf { it.isNotBlank() }
+        val normalized = anchor.copy(day = normalizedDay, rowOffsetPx = anchor.rowOffsetPx.coerceAtLeast(0))
+        if (state.feedViewportAnchor != normalized || state.feedVisibleAnchorDay != normalized.day) {
+            state = state.copy(
+                feedViewportAnchor = normalized,
+                feedVisibleAnchorDay = normalized.day
+            )
+        }
+    }
+
+    private fun requestFeedViewportRestore(anchor: FeedViewportAnchor) {
+        if (anchor.day.isNullOrBlank() && anchor.photoId == null) return
+        state = state.copy(
+            feedViewportRestoreAnchor = anchor,
+            feedViewportRestoreRequestId = issueFeedScrollRequestId()
+        )
+    }
+
+    fun consumeFeedViewportRestore() {
+        if (state.feedViewportRestoreRequestId != 0L) {
+            state = state.copy(feedViewportRestoreRequestId = 0L)
+        }
+    }
+
+    fun consumeFeedScrollRequest() {
+        if (!hasPendingFeedNavigation()) return
+        state = state.copy(
+            feedFocusDay = null,
+            feedFocusPhotoId = null,
+            feedFocusBoundary = null
+        )
+    }
+
+    private fun upsertPendingFeedMutation(photoId: Long, transform: (PendingFeedMutation) -> PendingFeedMutation) {
+        val next = transform(pendingFeedMutations[photoId] ?: PendingFeedMutation())
+        if (next.photoOverride == null && next.commentsOverride == null && next.reactionsOverride == null && next.photoMojisOverride == null) {
+            pendingFeedMutations.remove(photoId)
+        } else {
+            pendingFeedMutations[photoId] = next
+        }
+    }
+
+    private fun clearPendingFeedMutation(photoId: Long) {
+        pendingFeedMutations.remove(photoId)
+    }
+
+    private fun applyPendingFeedMutation(item: FeedItem): FeedItem {
+        val pending = pendingFeedMutations[item.photo.id] ?: return item
+        return item.copy(
+            photo = pending.photoOverride ?: item.photo,
+            reactions = pending.reactionsOverride ?: item.reactions,
+            photoMojis = pending.photoMojisOverride ?: item.photoMojis,
+            comments = pending.commentsOverride ?: item.comments
+        )
+    }
+
+    private fun reconcilePendingFeedMutation(item: FeedItem) {
+        val pending = pendingFeedMutations[item.photo.id] ?: return
+        val next = pending.copy(
+            photoOverride = pending.photoOverride?.takeUnless { it == item.photo },
+            commentsOverride = pending.commentsOverride?.takeUnless { it == item.comments.orEmpty() },
+            reactionsOverride = pending.reactionsOverride?.takeUnless { it == item.reactions.orEmpty() },
+            photoMojisOverride = pending.photoMojisOverride?.takeUnless { it == item.photoMojis.orEmpty() }
+        )
+        if (next.photoOverride == null && next.commentsOverride == null && next.reactionsOverride == null && next.photoMojisOverride == null) {
+            pendingFeedMutations.remove(item.photo.id)
+        } else {
+            pendingFeedMutations[item.photo.id] = next
+        }
     }
 
     private fun CalendarPayloadResponse.toDataset(): CalendarDataset =
@@ -3861,8 +4028,52 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         applyCalendarModeDataset()
     }
 
+    private fun patchFeedItemState(
+        photoId: Long,
+        transform: (FeedItem) -> FeedItem
+    ) {
+        val newFeedByDay = state.feedByDay.mapValues { (_, items) ->
+            items.map { item ->
+                if (item.photo.id == photoId) transform(item) else item
+            }
+        }
+        fun updateDataset(dataset: CalendarDataset): CalendarDataset =
+            dataset.copy(
+                feedItems = dataset.feedItems.map { item ->
+                    if (item.photo.id == photoId) transform(item) else item
+                }
+            )
+        state = state.copy(
+            feedByDay = newFeedByDay,
+            feed = newFeedByDay[state.prompt?.day].orEmpty(),
+            calendarPublicData = updateDataset(state.calendarPublicData),
+            calendarBookmarksData = updateDataset(state.calendarBookmarksData),
+            calendarTimeCapsulesData = updateDataset(state.calendarTimeCapsulesData),
+            calendarSearchData = state.calendarSearchData.copy(
+                dataset = updateDataset(state.calendarSearchData.dataset)
+            )
+        )
+        applyCalendarModeDataset()
+    }
+
+    private fun applyPhotoInteractionsToFeedState(photoId: Long, interactions: PhotoInteractionsResponse) {
+        patchFeedItemState(photoId) { item ->
+            item.copy(
+                reactions = interactions.reactions,
+                photoMojis = interactions.photoMojis,
+                comments = interactions.comments
+            )
+        }
+    }
+
     private fun applyServerPhoto(photo: PromptPhoto) {
-        patchPhotoState(photo.id) { photo }
+        val pendingPhoto = pendingFeedMutations[photo.id]?.photoOverride
+        patchPhotoState(photo.id) { pendingPhoto ?: photo }
+        pendingFeedMutations[photo.id]?.let { pending ->
+            upsertPendingFeedMutation(photo.id) {
+                it.copy(photoOverride = pending.photoOverride?.takeUnless { override -> override == photo })
+            }
+        }
     }
 
     private fun findPhotoDay(photoId: Long): String? {
@@ -3922,6 +4133,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 paints = nextPaints,
                 paintedByMe = nextPaints.any { it.userId == viewerId }
             )
+        }
+        val patchedPhoto = state.feedByDay.values
+            .asSequence()
+            .flatten()
+            .firstOrNull { it.photo.id == photoId }
+            ?.photo
+            ?: state.photos.firstOrNull { it.id == photoId }
+        if (patchedPhoto != null) {
+            upsertPendingFeedMutation(photoId) { it.copy(photoOverride = patchedPhoto) }
         }
     }
 
@@ -4814,6 +5034,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun toggleBookmark(photoId: Long, bookmarked: Boolean) {
         updateBookmarkStateLocally(photoId, bookmarked)
         adjustBookmarkCounters(photoId, if (bookmarked) 1 else -1)
+        state.feedByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.photo?.let { photo ->
+            upsertPendingFeedMutation(photoId) { it.copy(photoOverride = photo) }
+        }
         try {
             val serverPhoto = if (bookmarked) {
                 repo.bookmarkPhoto(photoId)
@@ -4829,12 +5052,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         } catch (t: Throwable) {
             updateBookmarkStateLocally(photoId, !bookmarked)
             adjustBookmarkCounters(photoId, if (bookmarked) -1 else 1)
+            clearPendingFeedMutation(photoId)
             state = state.copy(message = apiError(t, "Merken fehlgeschlagen"))
         }
     }
 
     suspend fun toggleMark(photoId: Long, marked: Boolean) {
         patchPhotoState(photoId) { photo -> photo.copy(markedByMe = marked) }
+        state.feedByDay.values.asSequence().flatten().firstOrNull { it.photo.id == photoId }?.photo?.let { photo ->
+            upsertPendingFeedMutation(photoId) { it.copy(photoOverride = photo) }
+        }
         try {
             val serverPhoto = if (marked) {
                 repo.markPhoto(photoId)
@@ -4845,6 +5072,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             refreshVisibleFeedAfterCreativeMutation(photoId, reason = "photo_mark")
         } catch (t: Throwable) {
             patchPhotoState(photoId) { photo -> photo.copy(markedByMe = !marked) }
+            clearPendingFeedMutation(photoId)
             state = state.copy(message = apiError(t, "Markieren fehlgeschlagen"))
         }
     }
@@ -4857,6 +5085,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state = state.copy(message = "Markierung entfernt")
             }
             .onFailure {
+                clearPendingFeedMutation(photoId)
                 state = state.copy(message = apiError(it, "Markierung entfernen fehlgeschlagen"))
             }
     }
@@ -4869,6 +5098,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state = state.copy(message = "Malerei gespeichert")
             }
             .onFailure {
+                clearPendingFeedMutation(photoId)
                 state = state.copy(message = apiError(it, "Malerei speichern fehlgeschlagen"))
             }
     }
@@ -4881,6 +5111,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state = state.copy(message = "Malerei entfernt")
             }
             .onFailure {
+                clearPendingFeedMutation(photoId)
                 state = state.copy(message = apiError(it, "Malerei entfernen fehlgeschlagen"))
             }
     }
@@ -4940,16 +5171,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun clearFeedPhotoFocus() {
-        if (state.feedFocusPhotoId != null) {
-            state = state.copy(feedFocusPhotoId = null)
+        if (state.feedFocusPhotoId != null || state.feedFocusDay != null || state.feedFocusBoundary != null) {
+            state = state.copy(
+                feedFocusPhotoId = null,
+                feedFocusDay = null,
+                feedFocusBoundary = null
+            )
         }
     }
 
     fun updateFeedVisibleAnchor(day: String?) {
-        val normalized = day?.takeIf { it.isNotBlank() }
-        if (state.feedVisibleAnchorDay != normalized) {
-            state = state.copy(feedVisibleAnchorDay = normalized)
-        }
+        updateFeedViewportAnchor(FeedViewportAnchor(day = day))
     }
 
     suspend fun jumpToDay(day: String) {
@@ -4958,6 +5190,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = null,
+            feedFocusBoundary = FeedJumpBoundary.START,
             feedScrollRequestId = scrollRequestId
         )
         runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
@@ -4968,6 +5201,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = null,
+            feedFocusBoundary = FeedJumpBoundary.START,
             feedScrollRequestId = scrollRequestId
         )
     }
@@ -4978,6 +5212,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = photoId,
+            feedFocusBoundary = null,
             feedScrollRequestId = scrollRequestId
         )
         runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
@@ -4988,6 +5223,29 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = photoId,
+            feedFocusBoundary = null,
+            feedScrollRequestId = scrollRequestId
+        )
+    }
+
+    suspend fun jumpToDayBoundary(day: String, boundary: FeedJumpBoundary) {
+        val scrollRequestId = issueFeedScrollRequestId()
+        state = state.copy(
+            activeTab = AppTab.FEED,
+            feedFocusDay = day,
+            feedFocusPhotoId = null,
+            feedFocusBoundary = boundary,
+            feedScrollRequestId = scrollRequestId
+        )
+        runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
+            .onFailure {
+                state = state.copy(message = apiError(it, "Feed-Sprung fehlgeschlagen"))
+            }
+        state = state.copy(
+            activeTab = AppTab.FEED,
+            feedFocusDay = day,
+            feedFocusPhotoId = null,
+            feedFocusBoundary = boundary,
             feedScrollRequestId = scrollRequestId
         )
     }
@@ -5001,6 +5259,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         respectCircuitBreaker: Boolean = true
     ): Boolean {
         if (repo.token().isBlank()) return false
+        val priority = refreshPriorityFor(reason, forceFeedReload)
         val now = System.currentTimeMillis()
         if (respectCircuitBreaker) {
             val remaining = refreshCircuitOpenRemainingMs(now)
@@ -5013,12 +5272,26 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 return false
             }
         }
-        if (!refreshAllMutex.tryLock()) return false
+        if (!refreshAllMutex.tryLock()) {
+            queueRefreshRequest(
+                QueuedRefreshRequest(
+                    reason = reason,
+                    forceFeedReload = forceFeedReload,
+                    refreshFeedWindow = refreshFeedWindow,
+                    bypassCooldown = bypassCooldown,
+                    showLoading = showLoading,
+                    respectCircuitBreaker = respectCircuitBreaker,
+                    priority = priority
+                )
+            )
+            return false
+        }
         if (!bypassCooldown && now - lastRefreshAllStartedAt < refreshAllCooldownMs) {
             refreshAllMutex.unlock()
             return false
         }
         lastRefreshAllStartedAt = now
+        val viewportAnchorBeforeRefresh = currentRefreshViewportAnchor()
         if (showLoading) {
             state = state.copy(loading = true, communityStatsLoading = true)
         } else {
@@ -5299,14 +5572,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             applyPendingLaunchNavigation(prompt, calendarDays)
             maybeShowProfileSetupPrompt(me)
             if (refreshFeedWindow) {
-                val visibleAnchor = state.feedVisibleAnchorDay
-                val focus = state.feedFocusDay
+                val viewportAnchor = state.feedViewportAnchor
+                val focus = state.feedFocusDay.takeIf { hasPendingFeedNavigation() }
                 val preferredAnchor = when {
-                    !visibleAnchor.isNullOrBlank() && calendarDays.contains(visibleAnchor) -> visibleAnchor
+                    !viewportAnchor.day.isNullOrBlank() && calendarDays.contains(viewportAnchor.day) -> viewportAnchor.day
                     !focus.isNullOrBlank() && calendarDays.contains(focus) -> focus
                     else -> prompt.day
                 }
-                val preserveVisibleWindow = state.feedDays.isNotEmpty() && state.feedDays.contains(preferredAnchor)
+                val preserveVisibleWindow = viewportAnchorBeforeRefresh != null &&
+                    state.feedDays.isNotEmpty() &&
+                    state.feedDays.contains(preferredAnchor) &&
+                    !hasPendingFeedNavigation()
                 if (state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor)) {
                     refreshedFeedDays = loadFeedWindow(
                         anchorDay = preferredAnchor,
@@ -5333,6 +5609,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         )
                         0
                     }
+                }
+                if (viewportAnchorBeforeRefresh != null && refreshedFeedDays > 0 && !hasPendingFeedNavigation()) {
+                    requestFeedViewportRestore(viewportAnchorBeforeRefresh)
                 }
             } else {
                 val today = prompt.day
@@ -5395,6 +5674,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         } finally {
             refreshAllMutex.unlock()
         }
+        consumeQueuedRefreshRequest()?.let { queued ->
+            return refreshAll(
+                reason = queued.reason,
+                forceFeedReload = queued.forceFeedReload,
+                refreshFeedWindow = queued.refreshFeedWindow,
+                bypassCooldown = true,
+                showLoading = queued.showLoading,
+                respectCircuitBreaker = queued.respectCircuitBreaker
+            ) || success
+        }
         return success
     }
 
@@ -5402,6 +5691,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (state.feedRefreshing) return
         val now = System.currentTimeMillis()
         val isManual = reason == "feed_pull"
+        val requiresHardReload = isManual || reason.startsWith("photo_") || reason == "comment_submit"
         if (isManual && isNetworkFailureClass(lastRefreshFailureClass) && now - lastManualRefreshAtMs < manualRefreshDuringNetworkFailureMinIntervalMs) {
             val waitMs = manualRefreshDuringNetworkFailureMinIntervalMs - (now - lastManualRefreshAtMs)
             state = state.copy(message = "Bitte kurz warten (${(waitMs / 1000L).coerceAtLeast(1L)}s), dann erneut aktualisieren.")
@@ -5416,7 +5706,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         try {
             ok = refreshAll(
                 reason = reason,
-                forceFeedReload = true,
+                forceFeedReload = requiresHardReload,
                 refreshFeedWindow = true,
                 bypassCooldown = true,
                 showLoading = false,
@@ -5682,7 +5972,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val recapMap = state.monthRecapByDay.toMutableMap()
         window.days.forEach { dayPayload ->
             val day = dayPayload.day ?: return@forEach
-            cacheMap[day] = dayPayload.items
+            dayPayload.items.forEach(::reconcilePendingFeedMutation)
+            cacheMap[day] = dayPayload.items.map(::applyPendingFeedMutation)
             promptMap[day] = PromptMeta(
                 day = day,
                 triggeredAt = dayPayload.triggeredAt,
@@ -5720,7 +6011,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             promptMetaByDay = finalPromptMeta,
             feed = if (postedToday) finalFeedByDay[today].orEmpty() else emptyList(),
             feedTodayLocked = todayLocked,
-            feedFocusDay = if (replaceVisibleDays) window.anchorDay.ifBlank { requestedAnchorDay } else state.feedFocusDay,
             feedFocusPhotoId = window.resolvedFocusPhotoId ?: state.feedFocusPhotoId,
             feedDiscoverOffset = window.offset,
             feedDiscoverNextOffset = window.nextOffset,
@@ -5762,7 +6052,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedJumpLoadingDay = null,
             feedPaging = false,
             feedWindowReloadInFlight = false,
-            feedFocusPhotoId = null
+            feedFocusDay = null,
+            feedFocusPhotoId = null,
+            feedFocusBoundary = null
         )
     }
 
@@ -6101,7 +6393,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (photoId <= 0) return
         state = state.copy(interactionsLoading = true)
         runCatching { repo.photoInteractions(photoId) }
-            .onSuccess { state = state.copy(interactionsLoading = false, photoInteractions = it) }
+            .onSuccess {
+                applyPhotoInteractionsToFeedState(photoId, it)
+                upsertPendingFeedMutation(photoId) { pending ->
+                    pending.copy(
+                        commentsOverride = it.comments,
+                        reactionsOverride = it.reactions,
+                        photoMojisOverride = it.photoMojis
+                    )
+                }
+                state = state.copy(interactionsLoading = false, photoInteractions = it)
+            }
             .onFailure { state = state.copy(interactionsLoading = false, message = apiError(it, "Interaktionen laden fehlgeschlagen")) }
     }
 
@@ -6109,7 +6411,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (photoId <= 0 || emoji.isBlank()) return
         state = state.copy(interactionsLoading = true)
         runCatching { repo.reactPhoto(photoId, emoji) }
-            .onSuccess { state = state.copy(interactionsLoading = false, photoInteractions = it) }
+            .onSuccess {
+                applyPhotoInteractionsToFeedState(photoId, it)
+                upsertPendingFeedMutation(photoId) { pending ->
+                    pending.copy(
+                        commentsOverride = it.comments,
+                        reactionsOverride = it.reactions,
+                        photoMojisOverride = it.photoMojis
+                    )
+                }
+                state = state.copy(interactionsLoading = false, photoInteractions = it)
+            }
             .onFailure { state = state.copy(interactionsLoading = false, message = apiError(it, "Reaktion fehlgeschlagen")) }
     }
 
@@ -6118,6 +6430,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(interactionsLoading = true)
         return try {
             val response = repo.reactPhotoFotomojiFromTemplate(photoId, emoji)
+            applyPhotoInteractionsToFeedState(photoId, response)
+            upsertPendingFeedMutation(photoId) { pending ->
+                pending.copy(
+                    commentsOverride = response.comments,
+                    reactionsOverride = response.reactions,
+                    photoMojisOverride = response.photoMojis
+                )
+            }
             state = state.copy(interactionsLoading = false, photoInteractions = response)
             true
         } catch (t: Throwable) {
@@ -6137,6 +6457,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(interactionsLoading = true)
         return runCatching { repo.uploadPhotoFotomoji(photoId, emoji, uri, saveTemplate) }
             .map {
+                applyPhotoInteractionsToFeedState(photoId, it)
+                upsertPendingFeedMutation(photoId) { pending ->
+                    pending.copy(
+                        commentsOverride = it.comments,
+                        reactionsOverride = it.reactions,
+                        photoMojisOverride = it.photoMojis
+                    )
+                }
                 state = state.copy(
                     interactionsLoading = false,
                     photoInteractions = it,
@@ -6227,6 +6555,30 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 staleFeedDays.add(touchedDay)
             }
             val needsFullReload = response.comments.isEmpty()
+            val commentPatch = if (response.comments.isNotEmpty()) {
+                response.comments
+            } else {
+                (state.photoInteractions?.takeIf { it.photoId == photoId }?.comments.orEmpty() + PhotoCommentItem(
+                    id = -System.currentTimeMillis(),
+                    body = trimmed,
+                    createdAt = OffsetDateTime.now().toString(),
+                    user = state.user ?: User(id = -1, username = "du", isAdmin = false)
+                )).takeLast(40)
+            }
+            patchFeedItemState(photoId) { item ->
+                item.copy(
+                    reactions = response.reactions.ifEmpty { item.reactions.orEmpty() },
+                    photoMojis = response.photoMojis.ifEmpty { item.photoMojis.orEmpty() },
+                    comments = commentPatch
+                )
+            }
+            upsertPendingFeedMutation(photoId) {
+                it.copy(
+                    commentsOverride = commentPatch,
+                    reactionsOverride = response.reactions.takeIf { reactions -> reactions.isNotEmpty() },
+                    photoMojisOverride = response.photoMojis.takeIf { photoMojis -> photoMojis.isNotEmpty() }
+                )
+            }
             state = state.copy(interactionsLoading = false, photoInteractions = response)
             if (needsFullReload) {
                 loadPhotoInteractions(photoId)
@@ -7778,6 +8130,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     activeTab = AppTab.FEED,
                     feedFocusDay = day,
                     feedFocusPhotoId = targetPhotoId,
+                    feedFocusBoundary = if (targetPhotoId == null) FeedJumpBoundary.START else null,
                     feedScrollRequestId = issueFeedScrollRequestId()
                 )
             }
@@ -8210,7 +8563,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     }
 
     state.viewedProfile?.let { profile ->
-        val profileUsername = safeApiString(profile.user.username, "unbekannt")
+        val viewedProfileUsername = safeApiString(profile.user.username, "unbekannt")
         val profileAvatarUrl = safeApiString(profile.user.avatarUrl)
         val profileBio = safeApiString(profile.user.bio)
         val profileStatusText = safeApiString(profile.user.statusText)
@@ -8226,7 +8579,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     vm.closeViewedProfile()
                 }) { Text("Schliessen") }
             },
-            title = { Text("@$profileUsername") },
+            title = { Text("@$viewedProfileUsername") },
             text = {
                 Column(
                     modifier = Modifier
@@ -8930,7 +9283,10 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     promptMetaByDay = state.promptMetaByDay,
                     focusDay = state.feedFocusDay,
                     focusPhotoId = state.feedFocusPhotoId,
+                    focusBoundary = state.feedFocusBoundary,
                     scrollRequestId = state.feedScrollRequestId,
+                    viewportRestoreAnchor = state.feedViewportRestoreAnchor,
+                    viewportRestoreRequestId = state.feedViewportRestoreRequestId,
                     jumpLoadingDay = state.feedJumpLoadingDay,
                     listState = feedListState,
                     refreshing = state.feedRefreshing,
@@ -8944,10 +9300,12 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onRefresh = { scope.launch { vm.refreshFeed() } },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
                     onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
-                    onVisibleAnchorChanged = vm::updateFeedVisibleAnchor,
+                    onViewportAnchorChanged = vm::updateFeedViewportAnchor,
                     onJumpToDay = { day -> scope.launch { vm.jumpToDay(day) } },
+                    onJumpToBoundary = { day, boundary -> scope.launch { vm.jumpToDayBoundary(day, boundary) } },
                     onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
-                    onFocusPhotoConsumed = { vm.clearFeedPhotoFocus() },
+                    onScrollRequestConsumed = vm::consumeFeedScrollRequest,
+                    onViewportRestoreConsumed = vm::consumeFeedViewportRestore,
                     onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
                     onToggleBookmark = { photoId, bookmarked -> scope.launch { vm.toggleBookmark(photoId, bookmarked) } },
                     onToggleMark = { photoId, marked -> scope.launch { vm.toggleMark(photoId, marked) } },
@@ -9214,7 +9572,6 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onCheckUpdate = { scope.launch { vm.checkForUpdate() } },
                     onShowChangelog = { scope.launch { vm.showChangelogDialog() } },
                     onShowHelp = { vm.showHelpDialog() },
-                    onOpenSetupGuide = { vm.openProfileSetupGuide() },
                     onCheckConnection = { scope.launch { vm.checkConnection() } },
                     onAllowInsecureHttpOverrideChange = { vm.setAllowInsecureHttpOverride(it) },
                     onApplyServerBaseUrlOverride = { input -> scope.launch { vm.applyServerBaseUrlOverride(input) } },
@@ -9495,12 +9852,13 @@ fun CameraTab(
             }
             Text(dayLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (!prompt?.specialTriggeredAt.isNullOrBlank()) {
-            val requester = prompt?.specialRequestedByUser
+        val specialTriggeredAt = prompt?.specialTriggeredAt
+        if (!specialTriggeredAt.isNullOrBlank()) {
+            val requester = prompt.specialRequestedByUser
             if (!requester.isNullOrBlank()) {
-                Text("Sondermoment heute um ${formatMomentTime(prompt?.specialTriggeredAt)} von $requester.")
+                Text("Sondermoment heute um ${formatMomentTime(specialTriggeredAt)} von $requester.")
             } else {
-                Text("Sondermoment heute um ${formatMomentTime(prompt?.specialTriggeredAt)}.")
+                Text("Sondermoment heute um ${formatMomentTime(specialTriggeredAt)}.")
             }
         } else {
             Text("Sondermoment heute noch nicht ausgeloest.")
@@ -9709,7 +10067,7 @@ fun CameraTab(
                     if (uploading) {
                         Text("Upload laeuft im Hintergrund ... $uploadPercent%")
                         LinearProgressIndicator(
-                            progress = uploadPercent / 100f,
+                            progress = { uploadPercent / 100f },
                             modifier = Modifier.fillMaxWidth()
                         )
                         Text("Du kannst den Tab wechseln oder die App schliessen. Die Queue versucht den Upload automatisch erneut.")
@@ -9738,7 +10096,7 @@ fun CameraTab(
                             val p = item.transferProgressPercent.coerceIn(0, 100)
                             Text("Fortschritt: $p%")
                             LinearProgressIndicator(
-                                progress = p / 100f,
+                                progress = { p / 100f },
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
@@ -9988,7 +10346,10 @@ fun FeedTab(
     promptMetaByDay: Map<String, PromptMeta>,
     focusDay: String?,
     focusPhotoId: Long?,
+    focusBoundary: FeedJumpBoundary?,
     scrollRequestId: Long,
+    viewportRestoreAnchor: FeedViewportAnchor,
+    viewportRestoreRequestId: Long,
     jumpLoadingDay: String?,
     listState: LazyListState,
     refreshing: Boolean,
@@ -10002,10 +10363,12 @@ fun FeedTab(
     onRefresh: () -> Unit,
     onLoadOlder: () -> Unit,
     onLoadNewer: () -> Unit,
-    onVisibleAnchorChanged: (String?) -> Unit,
+    onViewportAnchorChanged: (FeedViewportAnchor) -> Unit,
     onJumpToDay: (String) -> Unit,
+    onJumpToBoundary: (String, FeedJumpBoundary) -> Unit,
     onJumpToCapsule: (day: String, photoId: Long) -> Unit,
-    onFocusPhotoConsumed: () -> Unit,
+    onScrollRequestConsumed: () -> Unit,
+    onViewportRestoreConsumed: () -> Unit,
     onOpenUserProfile: (Long) -> Unit,
     onToggleBookmark: (photoId: Long, bookmarked: Boolean) -> Unit,
     onToggleMark: (photoId: Long, marked: Boolean) -> Unit,
@@ -10047,6 +10410,53 @@ fun FeedTab(
         is FeedRow.LoadingItem -> row.day
         null -> null
     }
+    fun rowAnchorAt(index: Int, offsetPx: Int): FeedViewportAnchor? = when (val row = rows.getOrNull(index)) {
+        is FeedRow.PhotoItem -> FeedViewportAnchor(
+            day = row.day,
+            photoId = row.item.photo.id,
+            rowOffsetPx = offsetPx,
+            kind = FeedViewportAnchorKind.PHOTO
+        )
+        is FeedRow.DayHeader -> FeedViewportAnchor(
+            day = row.day,
+            rowOffsetPx = offsetPx,
+            kind = FeedViewportAnchorKind.DAY_HEADER
+        )
+        is FeedRow.MonthRecapItem -> FeedViewportAnchor(
+            day = row.day,
+            rowOffsetPx = offsetPx,
+            kind = FeedViewportAnchorKind.RECAP
+        )
+        is FeedRow.LoadingItem -> FeedViewportAnchor(
+            day = row.day,
+            rowOffsetPx = offsetPx,
+            kind = FeedViewportAnchorKind.LOADING
+        )
+        null -> null
+    }
+    fun boundaryRowIndex(day: String, boundary: FeedJumpBoundary): Int {
+        val matching = rows.withIndex().filter { rowDayAt(it.index) == day }
+        if (matching.isEmpty()) return -1
+        return when (boundary) {
+            FeedJumpBoundary.START -> matching.firstOrNull { it.value is FeedRow.DayHeader }?.index ?: matching.first().index
+            FeedJumpBoundary.END -> matching.last().index
+        }
+    }
+    fun restoreRowIndex(anchor: FeedViewportAnchor): Int = when {
+        anchor.photoId != null ->
+            rows.indexOfFirst { it is FeedRow.PhotoItem && it.item.photo.id == anchor.photoId }
+        anchor.day.isNullOrBlank() -> -1
+        else -> when (anchor.kind) {
+            FeedViewportAnchorKind.PHOTO ->
+                rows.indexOfFirst { row -> row is FeedRow.PhotoItem && row.day == anchor.day }
+            FeedViewportAnchorKind.DAY_HEADER ->
+                rows.indexOfFirst { row -> row is FeedRow.DayHeader && row.day == anchor.day }
+            FeedViewportAnchorKind.RECAP ->
+                rows.indexOfFirst { row -> row is FeedRow.MonthRecapItem && row.day == anchor.day }
+            FeedViewportAnchorKind.LOADING ->
+                rows.indexOfFirst { row -> row is FeedRow.LoadingItem && row.day == anchor.day }
+        }.takeIf { it >= 0 } ?: boundaryRowIndex(anchor.day, FeedJumpBoundary.START)
+    }
 
     val todayDay = prompt?.day ?: LocalDate.now().toString()
     val capsuleTargets = remember(rows, todayDay) {
@@ -10086,10 +10496,9 @@ fun FeedTab(
     }
     val firstVisibleIndex by remember { derivedStateOf { visibleRange.value.first } }
     val lastVisibleIndex by remember { derivedStateOf { visibleRange.value.second } }
-    val currentVisibleAnchorDay by remember(rows, firstVisibleIndex) {
+    val currentViewportAnchor by remember(rows, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
         derivedStateOf {
-            if (firstVisibleIndex < 0) return@derivedStateOf null
-            rowDayAt(firstVisibleIndex)
+            rowAnchorAt(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
         }
     }
     val newestKnownDay = remember(allKnownDays, days, prompt?.day) {
@@ -10130,7 +10539,7 @@ fun FeedTab(
             rows.indexOfFirst { it is FeedRow.PhotoItem && it.item.photo.id == focusPhotoId }
         } else {
             val target = focusDay ?: return@LaunchedEffect
-            rows.indexOfFirst { it is FeedRow.DayHeader && it.day == target }
+            boundaryRowIndex(target, focusBoundary ?: FeedJumpBoundary.START)
         }
         if (idx < 0) return@LaunchedEffect
         val distance = if (firstVisibleIndex >= 0) kotlin.math.abs(idx - firstVisibleIndex) else Int.MAX_VALUE
@@ -10140,8 +10549,18 @@ fun FeedTab(
             listState.scrollToItem(idx)
         }
         handledScrollRequestId = scrollRequestId
-        highlightedDay = focusDay ?: (rows.getOrNull(idx) as? FeedRow.DayHeader)?.day
-        if (focusPhotoId != null) onFocusPhotoConsumed()
+        highlightedDay = focusDay ?: rowDayAt(idx)
+        onScrollRequestConsumed()
+    }
+    var handledViewportRestoreRequestId by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(viewportRestoreRequestId, rows.size) {
+        if (viewportRestoreRequestId <= 0L || viewportRestoreRequestId == handledViewportRestoreRequestId) return@LaunchedEffect
+        val idx = restoreRowIndex(viewportRestoreAnchor)
+        if (idx >= 0) {
+            listState.scrollToItem(idx, viewportRestoreAnchor.rowOffsetPx.coerceAtLeast(0))
+        }
+        handledViewportRestoreRequestId = viewportRestoreRequestId
+        onViewportRestoreConsumed()
     }
     LaunchedEffect(highlightedDay) {
         if (highlightedDay != null) {
@@ -10150,8 +10569,8 @@ fun FeedTab(
         }
     }
 
-    LaunchedEffect(currentVisibleAnchorDay) {
-        onVisibleAnchorChanged(currentVisibleAnchorDay)
+    LaunchedEffect(currentViewportAnchor) {
+        currentViewportAnchor?.let(onViewportAnchorChanged)
     }
 
     LaunchedEffect(listState, rows.size, paging, refreshing, feedWindowReloadInFlight) {
@@ -10364,7 +10783,7 @@ fun FeedTab(
                 scope.launch {
                     val targetDay = newestKnownDay
                     if (!targetDay.isNullOrBlank() && targetDay != loadedNewestDay) {
-                        onJumpToDay(targetDay)
+                        onJumpToBoundary(targetDay, FeedJumpBoundary.START)
                     } else if (rows.isNotEmpty()) {
                         listState.animateScrollToItem(0)
                     }
@@ -10374,9 +10793,10 @@ fun FeedTab(
                 scope.launch {
                     val targetDay = oldestKnownDay
                     if (!targetDay.isNullOrBlank() && targetDay != loadedOldestDay) {
-                        onJumpToDay(targetDay)
+                        onJumpToBoundary(targetDay, FeedJumpBoundary.END)
                     } else if (rows.isNotEmpty()) {
-                        listState.animateScrollToItem(rows.lastIndex)
+                        val boundaryIndex = targetDay?.let { boundaryRowIndex(it, FeedJumpBoundary.END) } ?: rows.lastIndex
+                        listState.animateScrollToItem(boundaryIndex.coerceAtLeast(0))
                     }
                 }
             },
@@ -10558,7 +10978,6 @@ private fun FeedPostCard(
 ) {
     PostCanvasCard(
         item = item,
-        viewerId = viewerId,
         secondaryTextColor = secondaryTextColor,
         primaryTextColor = primaryTextColor,
         showPublicPostNumbers = showPublicPostNumbers,
@@ -10684,7 +11103,6 @@ private fun FeedPostCard(
 private fun PostCanvasCard(
     modifier: Modifier = Modifier,
     item: FeedItem,
-    viewerId: Long?,
     secondaryTextColor: Color,
     primaryTextColor: Color,
     showPublicPostNumbers: Boolean,
@@ -11196,8 +11614,8 @@ private fun PhotoPaintLayer(photo: PromptPhoto, frameRect: Rect, modifier: Modif
             val strokeColor = parseUserColor(paint.color).copy(alpha = 0.72f)
             val basis = if (normalizeOverlaySurface(paint.surface) == "card" || frameRect == Rect.Zero) size.minDimension else minOf(frameRect.width, frameRect.height)
             val strokeWidthPx = (basis * paint.strokeWidth.coerceIn(0.01f, 0.12f)).coerceAtLeast(6.5f)
-            paths.forEach { pathItem ->
-                if (pathItem.points.size < 2) return@forEach
+            for (pathItem in paths) {
+                if (pathItem.points.size < 2) continue
                 val drawPath = ComposePath().apply {
                     val start = pathItem.points.first()
                     moveTo(
@@ -11364,7 +11782,6 @@ private fun PhotoPaintEditorDialog(
                                     PostCanvasCard(
                                         modifier = Modifier.fillMaxWidth(),
                                         item = previewItem,
-                                        viewerId = viewerId,
                                         secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                         primaryTextColor = MaterialTheme.colorScheme.onSurface,
                                         showPublicPostNumbers = true,
@@ -11589,7 +12006,7 @@ private fun EditorScrollbar(
                                     val desiredThumbTop = (change.position.y - thumbGrabOffsetPx).coerceIn(0f, thumbTravelPx)
                                     onScrollOffsetChange((desiredThumbTop / thumbTravelPx) * scrollRangePx)
                                 }
-                                change.consumePositionChange()
+                                change.consume()
                             }
                         )
                     }
@@ -12827,7 +13244,6 @@ fun ProfileTab(
     onCheckUpdate: () -> Unit,
     onShowChangelog: () -> Unit,
     onShowHelp: () -> Unit,
-    onOpenSetupGuide: () -> Unit,
     onCheckConnection: () -> Unit,
     onAllowInsecureHttpOverrideChange: (Boolean) -> Unit,
     onApplyServerBaseUrlOverride: (String) -> Unit,
@@ -15159,7 +15575,7 @@ private fun FullscreenPhotoViewer(
                                 detectVerticalDragGestures(
                                     onVerticalDrag = { change, dragAmount ->
                                         dragY += dragAmount
-                    change.consumePositionChange()
+                                        change.consume()
                                     },
                                     onDragEnd = {
                                         if (dragY > 140f) onClose()
