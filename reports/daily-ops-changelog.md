@@ -4,6 +4,11 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-06-18
 
+- Prepared Android patch release `v0.6.2` with `versionName=0.6.2`, `versionCode=141533`, release notes and signed APK assets on GitHub.
+- Improved Android diagnostics around refresh orchestration, preference-sync conflict detection, FCM/device-token registration and optimistic feed-mutation reconciliation.
+- Verified locally with `gradle -p android :app:compileDebugKotlin` and `gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain` before push/tag.
+- Confirmed successful GitHub Actions completion for `CI`, `Publish Server Images` and `Release Android APK`; release URL: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.2`.
+
 - Prepared the combined feature release `v0.6.0` with `versionName=0.6.0`, `versionCode=141531`, Android release notes and integrated backend/android test coverage.
 - Merged the NSFW post flow with profile opt-in, feed obscuring, YOLO defaults, bookmark-aware push events and auto-subscribe support for foreign NSFW markings.
 - Integrated the multi-image append flow into feed rendering, upload queue handling and bookmarked post change notifications, including duplicate protection against existing primary/secondary media.
