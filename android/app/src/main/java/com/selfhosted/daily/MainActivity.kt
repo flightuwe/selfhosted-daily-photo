@@ -2162,6 +2162,12 @@ class AppRepo(
         prefs.edit().putBoolean("show_public_post_numbers", enabled).apply()
     }
 
+    fun preferSwipeForTwoImagePosts(): Boolean = prefs.getBoolean("prefer_swipe_for_two_image_posts", false)
+
+    fun setPreferSwipeForTwoImagePosts(enabled: Boolean) {
+        prefs.edit().putBoolean("prefer_swipe_for_two_image_posts", enabled).apply()
+    }
+
     fun customNotificationToneEnabled(): Boolean = prefs.getBoolean("custom_notification_tone_enabled", false)
 
     fun setCustomNotificationToneEnabled(enabled: Boolean) {
@@ -3604,6 +3610,7 @@ data class UiState(
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
     val showPublicPostNumbers: Boolean = false,
+    val preferSwipeForTwoImagePosts: Boolean = false,
     val customNotificationToneEnabled: Boolean = false,
     val customNotificationToneUri: String = "",
     val diagnosticsUploadEnabled: Boolean = false,
@@ -3639,6 +3646,7 @@ private data class YoloPreferenceState(
     var feedPostPushEnabled: Boolean,
     var useFotomojiReactions: Boolean,
     var showPublicPostNumbers: Boolean,
+    var preferSwipeForTwoImagePosts: Boolean,
     var chatPushEnabled: Boolean,
     var pollPushEnabled: Boolean,
     var specialMomentPushEnabled: Boolean,
@@ -3745,7 +3753,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             it.locationShareDefaultEnabled = true
         },
         YoloFeatureDefinition("use_fotomoji_reactions_v1", "0.6.0", "FotoMoji statt Emoji-Reaktion", "interactions") { it.useFotomojiReactions = true },
-        YoloFeatureDefinition("show_public_post_numbers_v1", "0.6.0", "Postnummern anzeigen", "display") { it.showPublicPostNumbers = true }
+        YoloFeatureDefinition("show_public_post_numbers_v1", "0.6.0", "Postnummern anzeigen", "display") { it.showPublicPostNumbers = true },
+        YoloFeatureDefinition("prefer_swipe_for_two_image_posts_v1", "0.6.0", "2-Bild-Posts als Wischansicht", "display") { it.preferSwipeForTwoImagePosts = true }
     )
 
     init {
@@ -3777,6 +3786,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedOrderMode = repo.feedOrderMode(),
             randomFeedSeed = repo.randomFeedSeed(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
+            preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -4506,6 +4516,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
+            preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -5068,6 +5079,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             } else {
                 repo.unmarkPhoto(photoId, null)
             }
+            clearPendingFeedMutation(photoId)
             serverPhoto?.let(::applyServerPhoto)
             refreshVisibleFeedAfterCreativeMutation(photoId, reason = "photo_mark")
         } catch (t: Throwable) {
@@ -5080,6 +5092,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun deletePhotoMark(photoId: Long, targetUserId: Long? = null) {
         runCatching { repo.unmarkPhoto(photoId, targetUserId) }
             .onSuccess { serverPhoto ->
+                clearPendingFeedMutation(photoId)
                 serverPhoto?.let(::applyServerPhoto)
                 refreshVisibleFeedAfterCreativeMutation(photoId, reason = "photo_mark_delete")
                 state = state.copy(message = "Markierung entfernt")
@@ -5093,6 +5106,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun savePhotoPaint(photoId: Long, paths: List<PhotoPaintPath>, strokeWidth: Float) {
         runCatching { repo.savePhotoPaint(photoId, paths, strokeWidth) }
             .onSuccess { serverPhoto ->
+                clearPendingFeedMutation(photoId)
                 serverPhoto?.let(::applyServerPhoto)
                 refreshVisibleFeedAfterCreativeMutation(photoId, reason = "photo_paint_save")
                 state = state.copy(message = "Malerei gespeichert")
@@ -5106,6 +5120,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun deletePhotoPaint(photoId: Long, targetUserId: Long? = null) {
         runCatching { repo.deletePhotoPaint(photoId, targetUserId) }
             .onSuccess { serverPhoto ->
+                clearPendingFeedMutation(photoId)
                 serverPhoto?.let(::applyServerPhoto)
                 refreshVisibleFeedAfterCreativeMutation(photoId, reason = "photo_paint_delete")
                 state = state.copy(message = "Malerei entfernt")
@@ -5140,6 +5155,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             } else {
                 repo.unmarkPhotoNsfw(photoId)
             }
+            clearPendingFeedMutation(photoId)
             serverPhoto?.let(::applyServerPhoto)
             refreshVisibleFeedAfterCreativeMutation(photoId, reason = if (nsfw) "photo_nsfw_mark" else "photo_nsfw_unmark")
             state = state.copy(message = if (nsfw) "Beitrag als NSFW markiert" else "NSFW-Markierung entfernt")
@@ -5539,6 +5555,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 postNumberInPushEnabled = postNumberInPushEnabled,
                 yoloModeEnabled = me.yoloModeEnabled,
                 showPublicPostNumbers = repo.showPublicPostNumbers(),
+                preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
                 notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled, postChangePushEnabled),
                 diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && me.diagnosticsConsentGranted,
                 diagnosticsConsentGranted = me.diagnosticsConsentGranted,
@@ -6221,12 +6238,23 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         shareLocation: Boolean
     ): Boolean {
         state = state.copy(loading = true)
+        val freshPrompt = runCatching { repo.prompt() }.getOrNull()
+        val targetPhotoId = freshPrompt?.appendTargetPhotoId ?: photoId
+        if (freshPrompt != null && (!freshPrompt.canAppendToOwnLatestPost || freshPrompt.appendTargetPhotoId == null)) {
+            state = state.copy(
+                loading = false,
+                prompt = freshPrompt,
+                message = "Zum aktuellen letzten sichtbaren Beitrag von heute kann gerade kein Bild angehaengt werden."
+            )
+            return false
+        }
         return runCatching {
-            repo.enqueuePhotoAttachmentUpload(photoId, uri, shareLocation)
+            repo.enqueuePhotoAttachmentUpload(targetPhotoId, uri, shareLocation)
         }.onSuccess {
             repo.syncUploadQueueScheduler()
             state = state.copy(
                 loading = false,
+                prompt = freshPrompt ?: state.prompt,
                 uploadQueue = repo.uploadQueue(),
                 message = "Bild zum letzten Beitrag eingeplant."
             )
@@ -6749,6 +6777,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
+            preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -6828,6 +6857,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             autoSubscribeInteractedPostsEnabled = repo.autoSubscribeInteractedPostsLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
+            preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -6994,6 +7024,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun setShowPublicPostNumbers(enabled: Boolean) {
         repo.setShowPublicPostNumbers(enabled)
         state = state.copy(showPublicPostNumbers = repo.showPublicPostNumbers())
+    }
+
+    fun setPreferSwipeForTwoImagePosts(enabled: Boolean) {
+        repo.setPreferSwipeForTwoImagePosts(enabled)
+        state = state.copy(preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts())
     }
 
     fun setFeedOrderMode(mode: FeedOrderMode) {
@@ -7172,6 +7207,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedPostPushEnabled = repo.feedPostPushEnabled(),
             useFotomojiReactions = repo.useFotomojiReactions(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
+            preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
             chatPushEnabled = current?.chatPushEnabled ?: repo.chatPushLocalEnabled(),
             pollPushEnabled = current?.pollPushEnabled ?: repo.pollPushLocalEnabled(),
             specialMomentPushEnabled = current?.specialMomentPushEnabled ?: repo.specialMomentPushLocalEnabled(),
@@ -7198,6 +7234,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setFeedPostPushEnabled(preferences.feedPostPushEnabled)
         repo.setUseFotomojiReactions(preferences.useFotomojiReactions)
         repo.setShowPublicPostNumbers(preferences.showPublicPostNumbers)
+        repo.setPreferSwipeForTwoImagePosts(preferences.preferSwipeForTwoImagePosts)
         repo.setChatPushLocalEnabled(preferences.chatPushEnabled)
         repo.setPollPushLocalEnabled(preferences.pollPushEnabled)
         repo.setSpecialMomentPushLocalEnabled(preferences.specialMomentPushEnabled)
@@ -7307,6 +7344,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             locationFeatureEnabled = user?.locationFeatureEnabled ?: false,
             locationShareDefaultEnabled = user?.locationShareDefaultEnabled ?: false,
             showPublicPostNumbers = repo.showPublicPostNumbers(),
+            preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
             notificationMasterEnabled = master,
             message = when {
                 pending.isEmpty() -> ""
@@ -9295,6 +9333,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     feedWindowReloadInFlight = state.feedWindowReloadInFlight,
                     feedOrderMode = state.feedOrderMode,
                     showPublicPostNumbers = state.showPublicPostNumbers,
+                    preferSwipeForTwoImagePosts = state.preferSwipeForTwoImagePosts,
                     showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
                     onRefresh = { scope.launch { vm.refreshFeed() } },
@@ -9443,6 +9482,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     locationPermissionGranted = locationPermissionGranted,
                     feedPostPushEnabled = state.feedPostPushEnabled,
                     showPublicPostNumbers = state.showPublicPostNumbers,
+                    preferSwipeForTwoImagePosts = state.preferSwipeForTwoImagePosts,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
                     diagnosticsUploadEnabled = state.diagnosticsUploadEnabled,
@@ -9576,6 +9616,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onAllowInsecureHttpOverrideChange = { vm.setAllowInsecureHttpOverride(it) },
                     onApplyServerBaseUrlOverride = { input -> scope.launch { vm.applyServerBaseUrlOverride(input) } },
                     onShowPublicPostNumbersChange = { vm.setShowPublicPostNumbers(it) },
+                    onPreferSwipeForTwoImagePostsChange = { vm.setPreferSwipeForTwoImagePosts(it) },
                     onClearAllBookmarks = { scope.launch { vm.clearAllBookmarks() } },
                     onRollInviteCode = { scope.launch { vm.rollInviteCode() } },
                     onShareInviteCode = {
@@ -10358,6 +10399,7 @@ fun FeedTab(
     feedWindowReloadInFlight: Boolean,
     feedOrderMode: FeedOrderMode,
     showPublicPostNumbers: Boolean,
+    preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
     onTakePhoto: () -> Unit,
     onRefresh: () -> Unit,
@@ -10707,6 +10749,7 @@ fun FeedTab(
                         secondaryTextColor = secondaryTextColor,
                         primaryTextColor = primaryTextColor,
                         showPublicPostNumbers = showPublicPostNumbers,
+                        preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
                         showNsfwByDefault = showNsfwByDefault,
                         nsfwRevealed = revealedNsfwPhotoIds.contains(item.photo.id),
                         isMomentWindowPost = isMomentWindowPost,
@@ -10954,6 +10997,7 @@ private fun FeedPostCard(
     secondaryTextColor: Color,
     primaryTextColor: Color,
     showPublicPostNumbers: Boolean,
+    preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
     nsfwRevealed: Boolean,
     isMomentWindowPost: Boolean,
@@ -10981,6 +11025,7 @@ private fun FeedPostCard(
         secondaryTextColor = secondaryTextColor,
         primaryTextColor = primaryTextColor,
         showPublicPostNumbers = showPublicPostNumbers,
+        preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
         showNsfwByDefault = showNsfwByDefault,
         nsfwRevealed = nsfwRevealed,
         isMomentWindowPost = isMomentWindowPost,
@@ -11106,6 +11151,7 @@ private fun PostCanvasCard(
     secondaryTextColor: Color,
     primaryTextColor: Color,
     showPublicPostNumbers: Boolean,
+    preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
     nsfwRevealed: Boolean,
     isMomentWindowPost: Boolean,
@@ -11258,7 +11304,8 @@ private fun PostCanvasCard(
                 } else if (urls.isNotEmpty()) {
                     val frameShape = RoundedCornerShape(22.dp)
                     val imageShape = RoundedCornerShape(16.dp)
-                    val pagerState = rememberPagerState(pageCount = { urls.size })
+                    val usePagerLayout = urls.size > 2 || (urls.size == 2 && preferSwipeForTwoImagePosts)
+                    val pagerState = if (usePagerLayout) rememberPagerState(pageCount = { urls.size }) else null
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -11270,26 +11317,52 @@ private fun PostCanvasCard(
                                 frameSize = Size(it.size.width.toFloat(), it.size.height.toFloat())
                             }
                     ) {
-                        HorizontalPager(
-                            state = pagerState,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(10.dp)
-                        ) {
-                            AsyncImage(
-                                model = urls[it],
-                                contentDescription = "${item.user.username} Foto",
+                        if (usePagerLayout) {
+                            val activePagerState = requireNotNull(pagerState)
+                            HorizontalPager(
+                                state = activePagerState,
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .then(obscuredModifier)
-                                    .clip(imageShape)
-                                    .then(
-                                        if (onOpenViewer != null) Modifier.clickable { onOpenViewer(urls, item.photo.id) } else Modifier
-                                    ),
-                                contentScale = ContentScale.Crop
-                            )
+                                    .padding(10.dp)
+                            ) {
+                                AsyncImage(
+                                    model = urls[it],
+                                    contentDescription = "${item.user.username} Foto",
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .then(obscuredModifier)
+                                        .clip(imageShape)
+                                        .then(
+                                            if (onOpenViewer != null) Modifier.clickable { onOpenViewer(urls, item.photo.id) } else Modifier
+                                        ),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                urls.forEach { url ->
+                                    AsyncImage(
+                                        model = url,
+                                        contentDescription = "${item.user.username} Foto",
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                            .then(obscuredModifier)
+                                            .clip(imageShape)
+                                            .then(
+                                                if (onOpenViewer != null) Modifier.clickable { onOpenViewer(urls, item.photo.id) } else Modifier
+                                            ),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            }
                         }
-                        if (urls.size > 1) {
+                        if (usePagerLayout && urls.size > 1 && pagerState != null) {
                             Card(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
@@ -11785,6 +11858,7 @@ private fun PhotoPaintEditorDialog(
                                         secondaryTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                         primaryTextColor = MaterialTheme.colorScheme.onSurface,
                                         showPublicPostNumbers = true,
+                                        preferSwipeForTwoImagePosts = false,
                                         showNsfwByDefault = true,
                                         nsfwRevealed = true,
                                         isMomentWindowPost = target.isMomentWindowPost,
@@ -13156,6 +13230,7 @@ fun ProfileTab(
     locationPermissionGranted: Boolean,
     feedPostPushEnabled: Boolean,
     showPublicPostNumbers: Boolean,
+    preferSwipeForTwoImagePosts: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
     diagnosticsUploadEnabled: Boolean,
@@ -13248,6 +13323,7 @@ fun ProfileTab(
     onAllowInsecureHttpOverrideChange: (Boolean) -> Unit,
     onApplyServerBaseUrlOverride: (String) -> Unit,
     onShowPublicPostNumbersChange: (Boolean) -> Unit,
+    onPreferSwipeForTwoImagePostsChange: (Boolean) -> Unit,
     onClearAllBookmarks: () -> Unit,
     onRollInviteCode: () -> Unit,
     onShareInviteCode: () -> Unit,
@@ -14340,6 +14416,12 @@ fun ProfileTab(
                       checked = showPublicPostNumbers,
                       onCheckedChange = onShowPublicPostNumbersChange,
                       supportingText = "Zeigt die stabile Tages-ID wie #260526001 an sichtbaren Beitraegen."
+                  )
+                  SettingsToggleRow(
+                      label = "2-Bild-Posts als Wischansicht",
+                      checked = preferSwipeForTwoImagePosts,
+                      onCheckedChange = onPreferSwipeForTwoImagePostsChange,
+                      supportingText = "Bei genau zwei Bildern bleibt sonst die alte geteilte Ansicht aktiv. Ab drei Bildern wird immer gewischt."
                   )
                   SettingsToggleRow(
                       label = "Erweiterte Einstellungen anzeigen",

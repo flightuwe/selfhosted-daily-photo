@@ -1195,6 +1195,60 @@ func TestHandlePhotoAttachmentCreateReturnsUpdatedMediaAndRejectsPrimaryDuplicat
 	}
 }
 
+func TestHandlePhotoAttachmentCreateAllowsOlderVisiblePostOfSameDay(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "owner", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Now().UTC()
+	older := models.Photo{
+		UserID:    user.ID,
+		User:      user,
+		Day:       now.Format("2006-01-02"),
+		FilePath:  "2026-06-18/older.jpg",
+		CreatedAt: now.Add(-3 * time.Minute),
+	}
+	latest := models.Photo{
+		UserID:    user.ID,
+		User:      user,
+		Day:       now.Format("2006-01-02"),
+		FilePath:  "2026-06-18/latest.jpg",
+		CreatedAt: now.Add(-time.Minute),
+	}
+	if err := server.DB.Create(&older).Error; err != nil {
+		t.Fatalf("create older photo: %v", err)
+	}
+	if err := server.DB.Create(&latest).Error; err != nil {
+		t.Fatalf("create latest photo: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("photo", "append.jpg")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write([]byte("append-visible-same-day")); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/photos/%d/attachments", older.ID), &body)
+	ctx.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	ctx.Set("user", user)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", older.ID)}}
+	server.handlePhotoAttachmentCreate(ctx)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("attachment to older visible post status = %d, want 201", rec.Code)
+	}
+}
+
 func TestSendPhotoNotificationUsesOwnAndBookmarkPostNumberFlagsSeparately(t *testing.T) {
 	server := newSearchTestServer(t)
 	sender, ok := server.Notifier.(*recordingSender)

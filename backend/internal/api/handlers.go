@@ -8541,15 +8541,6 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "append not allowed for hidden post"})
 		return
 	}
-	latestPhoto, ok, err := s.latestAppendablePhotoForDay(user.ID, day, now)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-		return
-	}
-	if !ok || latestPhoto.ID != photo.ID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "append only allowed on latest visible post"})
-		return
-	}
 	if s.photoMediaCount(photo) >= 6 {
 		c.JSON(http.StatusConflict, gin.H{"error": "attachment limit reached"})
 		return
@@ -11031,6 +11022,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
 		"bookmarkedPhotoPushEnabled":    u.BookmarkedPhotoPushEnabled,
 		"postChangePushEnabled":         u.PostChangePushEnabled,
+		"autoSubscribeInteractedPostsEnabled": u.AutoSubscribeInteractedPostsEnabled,
 		"ownPostNumberInPushEnabled":    u.OwnPostNumberInPushEnabled,
 		"postNumberInPushEnabled":       u.PostNumberInPushEnabled,
 		"yoloModeEnabled":               u.YoloModeEnabled,
@@ -11075,6 +11067,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"photoCommentPushEnabled":       false,
 		"bookmarkedPhotoPushEnabled":    false,
 		"postChangePushEnabled":         false,
+		"autoSubscribeInteractedPostsEnabled": false,
 		"ownPostNumberInPushEnabled":    false,
 		"postNumberInPushEnabled":       false,
 		"yoloModeEnabled":               false,
