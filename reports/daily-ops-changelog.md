@@ -2,6 +2,13 @@
 
 This file is append-only operational history for Forge-side Daily continuity.
 
+## 2026-06-30
+
+- Prepared Android patch release `v0.6.3` with `versionName=0.6.3` and `versionCode=141534` for the notification cleanup and push-preference hardening work.
+- Fixed Android push handling so chat poll notifications now respect the dedicated local poll toggle and app entry clears previously tracked Daily push notifications from the shade.
+- Introduced stable notification grouping/ID rules plus JVM test coverage for push filtering, grouping and ID stability to reduce silent regressions before the next APK rollout.
+- Verified locally with `gradle :app:compileDebugKotlin`, `gradle :app:testDebugUnitTest` and `gradle :app:assembleDebug`; release assembly status recorded separately based on local signing availability.
+
 ## 2026-06-18
 
 - Prepared Android patch release `v0.6.2` with `versionName=0.6.2`, `versionCode=141533`, release notes and signed APK assets on GitHub.

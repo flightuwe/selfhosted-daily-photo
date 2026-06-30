@@ -8,13 +8,13 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import java.time.LocalTime
-import kotlin.random.Random
 
 class PushMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
@@ -28,37 +28,36 @@ class PushMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
-        val masterEnabled = prefs.getBoolean("notifications_master_enabled", true)
-        if (!masterEnabled) return
-
-        val type = message.data["type"]?.trim()?.lowercase().orEmpty()
-        val chatEnabled = prefs.getBoolean("chat_push_enabled_local", false)
-        val feedEnabled = prefs.getBoolean("feed_post_push_enabled", false)
-        val specialEnabled = prefs.getBoolean("special_moment_push_enabled_local", false)
-        val inviteEnabled = prefs.getBoolean("invite_registration_push_enabled_local", false)
-        val reactionEnabled = prefs.getBoolean("photo_reaction_push_enabled_local", false)
-        val commentEnabled = prefs.getBoolean("photo_comment_push_enabled_local", false)
-        val bookmarkedEnabled = prefs.getBoolean("bookmarked_photo_push_enabled_local", false)
-        if ((type == "chat" || type == "chat_message") && !chatEnabled) return
-        if ((type == "feed_post" || type == "post" || type == "extra_post") && !feedEnabled) return
-        if ((type == "special_request" || type == "special_moment") && !specialEnabled) return
-        if ((type == "invite_registered" || type == "invite_registration") && !inviteEnabled) return
-        if ((type == "photo_reaction" || type == "photo_fotomoji") && !reactionEnabled) return
-        if (type == "photo_comment" && !commentEnabled) return
-        if ((type == "bookmarked_photo_reaction" || type == "bookmarked_photo_fotomoji" || type == "bookmarked_photo_comment") && !bookmarkedEnabled) return
+        val type = PushNotificationRules.normalizeType(message.data["type"])
+        val prefsSnapshot = PushPreferenceSnapshot(
+            masterEnabled = prefs.getBoolean("notifications_master_enabled", true),
+            chatEnabled = prefs.getBoolean("chat_push_enabled_local", false),
+            pollEnabled = prefs.getBoolean("poll_push_enabled_local", false),
+            feedEnabled = prefs.getBoolean("feed_post_push_enabled", false),
+            specialEnabled = prefs.getBoolean("special_moment_push_enabled_local", false),
+            inviteEnabled = prefs.getBoolean("invite_registration_push_enabled_local", false),
+            reactionEnabled = prefs.getBoolean("photo_reaction_push_enabled_local", false),
+            commentEnabled = prefs.getBoolean("photo_comment_push_enabled_local", false),
+            bookmarkedEnabled = prefs.getBoolean("bookmarked_photo_push_enabled_local", false),
+        )
+        if (!PushNotificationRules.shouldDisplay(type, prefsSnapshot)) return
         if (isBlockedByQuietHours(type, prefs)) return
 
+        val action = message.data["action"]?.trim().orEmpty()
+        val day = message.data["day"]?.trim().orEmpty()
+        val photoId = message.data["photoId"]?.trim().orEmpty()
         val tone = toneConfig(prefs)
         val channelId = ensurePromptChannel(this, tone)
         val title = message.notification?.title ?: "Daily Moment"
         val body = message.notification?.body ?: message.data["body"] ?: "Zeit fuer deinen taeglichen Moment."
+        val notificationId = PushNotificationRules.notificationId(type, action, day, photoId, title, body)
 
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra(EXTRA_LAUNCH_ACTION, message.data["action"]?.trim().orEmpty())
+            putExtra(EXTRA_LAUNCH_ACTION, action)
             putExtra(EXTRA_LAUNCH_TYPE, type)
-            putExtra(EXTRA_LAUNCH_DAY, message.data["day"]?.trim().orEmpty())
-            message.data["photoId"]?.trim()?.toLongOrNull()?.takeIf { it > 0L }?.let {
+            putExtra(EXTRA_LAUNCH_DAY, day)
+            photoId.toLongOrNull()?.takeIf { it > 0L }?.let {
                 putExtra(EXTRA_LAUNCH_PHOTO_ID, it)
             }
         }
@@ -75,6 +74,7 @@ class PushMessagingService : FirebaseMessagingService() {
             .setContentText(body)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
+            .setGroup(PushNotificationRules.groupKey(type, action))
             .setContentIntent(pending)
             .apply {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && tone.enabled && tone.uri != null) {
@@ -83,17 +83,31 @@ class PushMessagingService : FirebaseMessagingService() {
             }
             .build()
 
-        NotificationManagerCompat.from(this).notify(Random.nextInt(), notification)
+        NotificationManagerCompat.from(this).notify(notificationId, notification)
+        trackPushNotificationId(this, notificationId)
     }
 
     companion object {
         private const val CHANNEL_PROMPT_ID = "daily_prompt"
         private const val CHANNEL_UPDATE_ID = "daily_updates"
+        private const val PUSH_NOTIFICATION_PREFS = "app"
+        private const val PUSH_NOTIFICATION_IDS_KEY = "tracked_push_notification_ids_v1"
         private const val PREF_CUSTOM_TONE_ENABLED = "custom_notification_tone_enabled"
         private const val PREF_CUSTOM_TONE_URI = "custom_notification_tone_uri"
         private const val PREF_QUIET_HOURS_ENABLED = "quiet_hours_enabled"
         private const val PREF_QUIET_HOURS_START = "quiet_hours_start"
         private const val PREF_QUIET_HOURS_END = "quiet_hours_end"
+
+        fun clearTrackedPushNotifications(context: Context) {
+            val prefs = context.getSharedPreferences(PUSH_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+            val ids = prefs.getStringSet(PUSH_NOTIFICATION_IDS_KEY, emptySet())
+                ?.mapNotNull { it.toIntOrNull() }
+                .orEmpty()
+            if (ids.isEmpty()) return
+            val notifications = NotificationManagerCompat.from(context)
+            ids.forEach(notifications::cancel)
+            prefs.edit().remove(PUSH_NOTIFICATION_IDS_KEY).apply()
+        }
 
         fun showLocalUpdateNotification(context: Context, update: UpdateInfo) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -170,6 +184,16 @@ class PushMessagingService : FirebaseMessagingService() {
         }
 
         private data class ToneConfig(val enabled: Boolean, val uri: Uri?)
+
+        private fun trackPushNotificationId(context: Context, notificationId: Int) {
+            val prefs = context.getSharedPreferences(PUSH_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+            val stored = prefs.getStringSet(PUSH_NOTIFICATION_IDS_KEY, emptySet()).orEmpty().toMutableSet()
+            stored.add(notificationId.toString())
+            val trimmed = if (stored.size > 64) stored.toList().takeLast(64).toSet() else stored
+            if (!prefs.edit().putStringSet(PUSH_NOTIFICATION_IDS_KEY, trimmed).commit()) {
+                Log.w("PushMessagingService", "Failed to persist tracked push notification id")
+            }
+        }
 
         private fun toneConfig(prefs: android.content.SharedPreferences): ToneConfig {
             val enabled = prefs.getBoolean(PREF_CUSTOM_TONE_ENABLED, false)

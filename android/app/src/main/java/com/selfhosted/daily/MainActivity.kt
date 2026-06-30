@@ -8393,6 +8393,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        PushMessagingService.clearTrackedPushNotifications(this)
 
         val httpClient = buildStandardHttpClient()
         repo = AppRepo(this, httpClient)
@@ -8417,10 +8418,16 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        PushMessagingService.clearTrackedPushNotifications(this)
         if (::repo.isInitialized) {
             repo.captureLaunchIntent(intent)
         }
         launchIntentTick += 1
+    }
+
+    override fun onResume() {
+        super.onResume()
+        PushMessagingService.clearTrackedPushNotifications(this)
     }
 
 }
