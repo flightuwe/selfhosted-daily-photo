@@ -1815,7 +1815,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 		day = resolvedDay
 		acceptedViaOfflineGrace = acceptedOffline
 		if !allowed {
-			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive", "errorCode": "prompt_inactive"})
 			return
 		}
 	}
@@ -1832,7 +1832,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 	}
 
 	if kind == "extra" && todayWindowActive {
-		c.JSON(http.StatusForbidden, gin.H{"error": "extra unavailable during daily moment window"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "extra unavailable during daily moment window", "errorCode": "extra_window_blocked"})
 		return
 	}
 
@@ -1908,9 +1908,20 @@ func (s *Server) handleUpload(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true, "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 		return
 	}
+	if uploadClientID != "" {
+		if existing, ok, err := s.findPhotoByUploadClientID(user.ID, uploadClientID); err != nil {
+			s.removePhotoFiles(photo)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		} else if ok {
+			s.removePhotoFiles(photo)
+			c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true, "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
+			return
+		}
+	}
 	if kind == "prompt" && hasPromptPosted {
 		s.removePhotoFiles(photo)
-		c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+		c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet", "errorCode": "already_posted"})
 		return
 	}
 	if err := s.DB.Create(&photo).Error; err != nil {
@@ -8396,7 +8407,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		day = resolvedDay
 		acceptedViaOfflineGrace = acceptedOffline
 		if !allowed {
-			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive", "errorCode": "prompt_inactive"})
 			return
 		}
 	}
@@ -8413,7 +8424,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	}
 
 	if kind == "extra" && todayWindowActive {
-		c.JSON(http.StatusForbidden, gin.H{"error": "extra unavailable during daily moment window"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "extra unavailable during daily moment window", "errorCode": "extra_window_blocked"})
 		return
 	}
 
@@ -8500,9 +8511,20 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true, "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 		return
 	}
+	if uploadClientID != "" {
+		if existing, ok, err := s.findPhotoByUploadClientID(user.ID, uploadClientID); err != nil {
+			s.removePhotoFiles(photo)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		} else if ok {
+			s.removePhotoFiles(photo)
+			c.JSON(http.StatusOK, gin.H{"photo": s.photoJSON(existing), "deduplicated": true, "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
+			return
+		}
+	}
 	if kind == "prompt" && hasPromptPosted {
 		s.removePhotoFiles(photo)
-		c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet"})
+		c.JSON(http.StatusConflict, gin.H{"error": "Du hast heute bereits gepostet", "errorCode": "already_posted"})
 		return
 	}
 	if err := s.DB.Create(&photo).Error; err != nil {

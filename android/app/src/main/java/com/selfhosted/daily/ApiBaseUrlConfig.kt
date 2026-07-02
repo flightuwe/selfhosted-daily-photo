@@ -12,6 +12,27 @@ private const val PREF_NAME = "app"
 private const val PREF_KEY_SERVER_BASE_URL_OVERRIDE = "server_base_url_override"
 private const val PREF_KEY_ALLOW_INSECURE_HTTP = "allow_insecure_http_server_override"
 
+data class HttpTimeoutProfile(
+    val connectTimeoutSeconds: Long,
+    val readTimeoutSeconds: Long,
+    val writeTimeoutSeconds: Long,
+    val callTimeoutSeconds: Long
+)
+
+val DefaultHttpTimeoutProfile = HttpTimeoutProfile(
+    connectTimeoutSeconds = 10,
+    readTimeoutSeconds = 20,
+    writeTimeoutSeconds = 20,
+    callTimeoutSeconds = 25
+)
+
+val QueueUploadHttpTimeoutProfile = HttpTimeoutProfile(
+    connectTimeoutSeconds = 15,
+    readTimeoutSeconds = 90,
+    writeTimeoutSeconds = 90,
+    callTimeoutSeconds = 120
+)
+
 data class ApiBaseUrlValidationResult(
     val normalizedBaseUrl: String?,
     val errorMessage: String?
@@ -108,13 +129,14 @@ fun buildApiService(baseUrl: String, httpClient: OkHttpClient): Api {
 }
 
 fun buildStandardHttpClient(
-    extraInterceptors: List<Interceptor> = emptyList()
+    extraInterceptors: List<Interceptor> = emptyList(),
+    timeoutProfile: HttpTimeoutProfile = DefaultHttpTimeoutProfile
 ): OkHttpClient {
     val builder = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
-        .callTimeout(25, TimeUnit.SECONDS)
+        .connectTimeout(timeoutProfile.connectTimeoutSeconds, TimeUnit.SECONDS)
+        .readTimeout(timeoutProfile.readTimeoutSeconds, TimeUnit.SECONDS)
+        .writeTimeout(timeoutProfile.writeTimeoutSeconds, TimeUnit.SECONDS)
+        .callTimeout(timeoutProfile.callTimeoutSeconds, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .addInterceptor { chain ->
             val requestId = "req_${UUID.randomUUID()}"

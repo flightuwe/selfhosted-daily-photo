@@ -26,7 +26,7 @@ func (s *Server) handleAuthRefresh(c *gin.Context) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "session_revoked", "errorCode": "session_revoked"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "refresh failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "refresh failed", "errorCode": "refresh_failed"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
