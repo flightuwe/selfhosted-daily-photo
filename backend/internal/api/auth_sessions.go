@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 
@@ -84,18 +85,50 @@ func (s *Server) rotateSessionTokens(rawRefreshToken string) (authTokens, models
 		return authTokens{}, models.User{}, err
 	}
 	newExpiresAt := now.Add(s.Config.RefreshTokenTTL)
-	update := s.DB.Model(&models.UserSession{}).
-		Where("id = ? AND revoked_at IS NULL AND refresh_token_hash = ?", session.ID, hashed).
-		Updates(map[string]any{
-			"refresh_token_hash": hashRefreshToken(newRawRefresh),
-			"last_used_at":       now,
-			"expires_at":         newExpiresAt,
-		})
+	nextHash := hashRefreshToken(newRawRefresh)
+	update := s.DB.Exec(
+		`UPDATE user_sessions
+		SET refresh_token_hash = ?, last_used_at = ?, expires_at = ?, updated_at = ?
+		WHERE id = ? AND revoked_at IS NULL AND refresh_token_hash = ?`,
+		nextHash,
+		now,
+		newExpiresAt,
+		now,
+		session.ID,
+		hashed,
+	)
 	if update.Error != nil {
 		return authTokens{}, models.User{}, update.Error
 	}
 	if update.RowsAffected != 1 {
-		return authTokens{}, models.User{}, gorm.ErrRecordNotFound
+		var current models.UserSession
+		err := s.DB.Select("id", "refresh_token_hash", "revoked_at").First(&current, session.ID).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return authTokens{}, models.User{}, gorm.ErrRecordNotFound
+			}
+			return authTokens{}, models.User{}, err
+		}
+		if current.RevokedAt != nil || current.RefreshTokenHash != hashed {
+			return authTokens{}, models.User{}, gorm.ErrRecordNotFound
+		}
+		retry := s.DB.Exec(
+			`UPDATE user_sessions
+			SET refresh_token_hash = ?, last_used_at = ?, expires_at = ?, updated_at = ?
+			WHERE id = ? AND revoked_at IS NULL AND refresh_token_hash = ?`,
+			nextHash,
+			now,
+			newExpiresAt,
+			now,
+			session.ID,
+			hashed,
+		)
+		if retry.Error != nil {
+			return authTokens{}, models.User{}, retry.Error
+		}
+		if retry.RowsAffected != 1 {
+			return authTokens{}, models.User{}, gorm.ErrRecordNotFound
+		}
 	}
 	accessToken, signErr := s.Auth.SignAccess(user.ID, user.Username, user.IsAdmin, session.SessionID)
 	if signErr != nil {
