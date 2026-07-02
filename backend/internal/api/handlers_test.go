@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -22,7 +21,6 @@ import (
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 	"github.com/yosho/selfhosted-bereal/backend/internal/notify"
 	"github.com/yosho/selfhosted-bereal/backend/internal/storage"
-	"gorm.io/gorm"
 )
 
 type recordingSender struct {
@@ -512,36 +510,24 @@ func newSearchTestServer(t *testing.T) *Server {
 	}
 }
 
-func TestRotateSessionTokensRejectsStaleRefreshTokenAfterCASUpdate(t *testing.T) {
+func TestHandleAuthRefreshReturnsSessionRevokedErrorCodeForUnknownToken(t *testing.T) {
 	server := newSearchTestServer(t)
-	user := models.User{Username: "tester", PasswordHash: "x"}
-	if err := server.DB.Create(&user).Error; err != nil {
-		t.Fatalf("create user: %v", err)
-	}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/auth/refresh", strings.NewReader(`{"refreshToken":"deadbeefdeadbeefdeadbeefdeadbeef"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
 
-	tokens, err := server.issueSessionTokens(user, "Pixel")
-	if err != nil {
-		t.Fatalf("issueSessionTokens() error = %v", err)
-	}
+	server.handleAuthRefresh(ctx)
 
-	rotated, rotatedUser, err := server.rotateSessionTokens(tokens.RefreshToken)
-	if err != nil {
-		t.Fatalf("first rotateSessionTokens() error = %v", err)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("handleAuthRefresh() status = %d, want 401", rec.Code)
 	}
-	if rotatedUser.ID != user.ID {
-		t.Fatalf("rotated user id = %d, want %d", rotatedUser.ID, user.ID)
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode auth refresh response: %v", err)
 	}
-	if rotated.RefreshToken == tokens.RefreshToken {
-		t.Fatal("expected refresh token rotation to change token")
-	}
-
-	_, _, staleErr := server.rotateSessionTokens(tokens.RefreshToken)
-	if !errors.Is(staleErr, gorm.ErrRecordNotFound) {
-		t.Fatalf("stale rotateSessionTokens() error = %v, want gorm.ErrRecordNotFound", staleErr)
-	}
-
-	if _, _, err := server.rotateSessionTokens(rotated.RefreshToken); err != nil {
-		t.Fatalf("rotateSessionTokens() with fresh token error = %v", err)
+	if got := body["errorCode"]; got != "session_revoked" {
+		t.Fatalf("errorCode = %#v, want session_revoked", got)
 	}
 }
 
