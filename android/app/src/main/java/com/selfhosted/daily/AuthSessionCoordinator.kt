@@ -13,6 +13,19 @@ data class AuthSessionSnapshot(
     fun hasRefreshToken(): Boolean = refreshToken.isNotBlank()
 }
 
+class RefreshLockCoordinator {
+    private val mutex = Mutex()
+
+    suspend fun <T> withLock(block: suspend () -> T): T = mutex.run {
+        lock()
+        try {
+            block()
+        } finally {
+            unlock()
+        }
+    }
+}
+
 object AuthSessionCoordinator {
     private const val PREF_NAME = "app"
     private const val KEY_TOKEN = "token"
@@ -20,7 +33,7 @@ object AuthSessionCoordinator {
     private const val KEY_REFRESH_TOKEN = "refresh_token"
     private const val KEY_SESSION_ID = "session_id"
 
-    private val refreshMutex = Mutex()
+    private val refreshCoordinator = RefreshLockCoordinator()
 
     fun snapshot(context: Context): AuthSessionSnapshot {
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -59,12 +72,5 @@ object AuthSessionCoordinator {
             .commit()
     }
 
-    suspend fun <T> withRefreshLock(block: suspend () -> T): T = refreshMutex.run {
-        lock()
-        try {
-            block()
-        } finally {
-            unlock()
-        }
-    }
+    suspend fun <T> withRefreshLock(block: suspend () -> T): T = refreshCoordinator.withLock(block)
 }

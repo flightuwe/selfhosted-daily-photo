@@ -4,6 +4,23 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-07-02
 
+- Released combined server/android stabilization `v0.6.6` from `main` commit `415053d11e272ca5646f501d703db2f8e53e2676` after merge of PR `#2`.
+- Hardened Android queued uploads against worker replacement, added a process-wide auth session coordinator, classified post-body ACK timeouts as safe retry state and reduced push/refresh cancellation noise.
+- Hardened backend refresh-token rotation and upload retry idempotency with stable `errorCode` responses plus regression coverage for `uploadClientId` retry and auth refresh contract handling.
+- Verified locally with `go test ./internal/api/...`, `npm run build`, `gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain`; full local `go test ./...` on this workstation still remains environment-limited when SQLite runs without CGO.
+- Verified GitHub Actions success for `CI` run `28614842092`, `Publish Server Images` run `28614842184` and `Release Android APK` run `28615166991`.
+- Confirmed GHCR manifests for `ghcr.io/flightuwe/daily-backend:sha-415053d`, `ghcr.io/flightuwe/daily-backend:srv-302.1` and `ghcr.io/flightuwe/daily-admin:sha-415053d`.
+- Confirmed GitHub release `v0.6.6` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.6`.
+- Device smoke and live runtime checks against `daily.broutschek.de` were not executed from this workstation during this release cut; follow-up should cover health/admin endpoints plus real upload/queue behavior on device.
+
+## 2026-07-03
+
+- Prepared combined server/android patch release `v0.6.7` from `main` for connection-health visibility, queue observability follow-up and stable `daily_required` / `upload_window_closed` errorCode contracts.
+- Added optional camera-tab connection health indicator with live popup details, local status evaluation from network/refresh/queue signals and Android fallback-safe `errorCode` parsing for upload and access failures.
+- Added backend regression coverage for `upload_window_closed` and `daily_required`, plus Android unit coverage for connection-health evaluation and refresh-lock serialization.
+- Locally verified before release with `go test ./internal/api/...`, `gradle -p android :app:testDebugUnitTest --no-daemon --stacktrace --console=plain` and `gradle -p android clean :app:assembleDebug --no-daemon --stacktrace --console=plain`.
+- Real device validation and live checks against `daily.broutschek.de` remain follow-up work after the GitHub/GHCR release path completes.
+
 - Prepared combined server/android release `v0.6.5` with `versionName=0.6.5` and `versionCode=141536` for the chat composer, chat-length controls and push-diagnostics follow-up.
 - Added global admin-managed chat message limits with default `5000` characters, optional unlimited mode, server-side normalized length validation and portable text storage for long chat bodies.
 - Reworked the Android chat composer into a multi-line mobile layout with inline limit feedback, local over-limit blocking and richer debug metadata for failed chat sends.

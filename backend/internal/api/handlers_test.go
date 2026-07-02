@@ -95,9 +95,9 @@ func TestResolvePromptUploadDayUsesCapturedAtGrace(t *testing.T) {
 	now := time.Date(2026, 3, 13, 10, 0, 0, 0, time.UTC)
 	capturedAt := triggeredAt.Add(5 * time.Minute)
 
-	day, allowed, acceptedGrace := server.resolvePromptUploadDay("2026-03-13", now, &capturedAt)
+	day, allowed, acceptedGrace, blockedCode := server.resolvePromptUploadDecision("2026-03-13", now, &capturedAt)
 	if day != "2026-03-12" || !allowed || !acceptedGrace {
-		t.Fatalf("resolvePromptUploadDay() = (%q, %v, %v), want (%q, true, true)", day, allowed, acceptedGrace, "2026-03-12")
+		t.Fatalf("resolvePromptUploadDecision() = (%q, %v, %v, %q), want (%q, true, true, \"\")", day, allowed, acceptedGrace, blockedCode, "2026-03-12")
 	}
 }
 
@@ -116,9 +116,9 @@ func TestResolvePromptUploadDayRejectsTooOldCapturedAt(t *testing.T) {
 	now := time.Date(2026, 3, 21, 10, 0, 0, 0, time.UTC)
 	capturedAt := triggeredAt.Add(5 * time.Minute)
 
-	day, allowed, acceptedGrace := server.resolvePromptUploadDay("2026-03-21", now, &capturedAt)
+	day, allowed, acceptedGrace, blockedCode := server.resolvePromptUploadDecision("2026-03-21", now, &capturedAt)
 	if day != "2026-03-21" || allowed || acceptedGrace {
-		t.Fatalf("resolvePromptUploadDay() = (%q, %v, %v), want (%q, false, false)", day, allowed, acceptedGrace, "2026-03-21")
+		t.Fatalf("resolvePromptUploadDecision() = (%q, %v, %v, %q), want (%q, false, false, prompt_inactive)", day, allowed, acceptedGrace, blockedCode, "2026-03-21")
 	}
 }
 
@@ -609,6 +609,59 @@ func TestHandleUploadDeduplicatesByUploadClientIDOnRetry(t *testing.T) {
 	}
 	if photos[0].UploadClientID != "retry-client-1" {
 		t.Fatalf("stored upload client id = %q, want retry-client-1", photos[0].UploadClientID)
+	}
+}
+
+func TestHandleUploadReturnsUploadWindowClosedErrorCode(t *testing.T) {
+	server := newSearchTestServer(t)
+	now := time.Now().UTC()
+	user := models.User{Username: "poster", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	prompt := models.DailyPrompt{
+		Day:         now.Format("2006-01-02"),
+		TriggeredAt: ptrTime(now.Add(-2 * time.Hour)),
+		UploadUntil: ptrTime(now.Add(-time.Minute)),
+	}
+	if err := server.DB.Create(&prompt).Error; err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("kind", "prompt"); err != nil {
+		t.Fatalf("write kind: %v", err)
+	}
+	part, err := writer.CreateFormFile("photo", "prompt-a.jpg")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write([]byte("prompt-upload-a")); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/api/uploads", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	ctx.Request = req
+	ctx.Set("user", user)
+
+	server.handleUpload(ctx)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("handleUpload() status = %d, want 403", rec.Code)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := response["errorCode"]; got != "upload_window_closed" {
+		t.Fatalf("errorCode = %#v, want upload_window_closed", got)
 	}
 }
 
@@ -1435,6 +1488,9 @@ func TestHandleFeedWindowLocksTodayWithoutOwnVisiblePost(t *testing.T) {
 	}
 	if got := body["code"]; got != "feed_locked" {
 		t.Fatalf("code = %#v, want feed_locked", got)
+	}
+	if got := body["errorCode"]; got != "daily_required" {
+		t.Fatalf("errorCode = %#v, want daily_required", got)
 	}
 }
 

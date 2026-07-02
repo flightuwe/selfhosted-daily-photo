@@ -550,6 +550,10 @@ object UploadQueueManager {
     }
 
     @Synchronized
+    fun findById(context: Context, id: String): QueuedUploadItem? =
+        read(context).firstOrNull { it.id == id }
+
+    @Synchronized
     fun nextDelaySeconds(context: Context): Long? {
         val now = System.currentTimeMillis()
         val items = read(context).filter {
@@ -782,6 +786,24 @@ class UploadQueueWorker(
                         error = displayError,
                         failureClass = failureInfo.reason
                     )
+                    UploadQueueManager.findById(applicationContext, item.id)?.let { updated ->
+                        appendDebugLog(
+                            context = applicationContext,
+                            type = "upload_queue_paused",
+                            message = displayError,
+                            meta = buildString {
+                                append("source=queue")
+                                append(";kind=").append(if (item.isPrompt) "prompt" else "extra")
+                                append(";queueItemId=").append(item.id)
+                                append(";uploadClientId=").append(item.uploadClientId)
+                                append(";attempt=").append(updated.attempts)
+                                append(";failureClass=").append(failureInfo.reason)
+                                append(";http=").append(failureInfo.httpCode ?: -1)
+                                append(";status=").append(updated.status)
+                                append(";action=user_reauth_required")
+                            }
+                        )
+                    }
                 }
                 failureInfo.permanent -> {
                     UploadQueueManager.markFailedPermanent(
@@ -791,6 +813,23 @@ class UploadQueueWorker(
                         failureClass = failureInfo.reason,
                         httpCode = failureInfo.httpCode
                     )
+                    UploadQueueManager.findById(applicationContext, item.id)?.let { updated ->
+                        appendDebugLog(
+                            context = applicationContext,
+                            type = "upload_queue_action_required",
+                            message = displayError,
+                            meta = buildString {
+                                append("source=queue")
+                                append(";kind=").append(if (item.isPrompt) "prompt" else "extra")
+                                append(";queueItemId=").append(item.id)
+                                append(";uploadClientId=").append(item.uploadClientId)
+                                append(";attempt=").append(updated.attempts)
+                                append(";failureClass=").append(failureInfo.reason)
+                                append(";http=").append(failureInfo.httpCode ?: -1)
+                                append(";status=").append(updated.status)
+                            }
+                        )
+                    }
                 }
                 else -> {
                     UploadQueueManager.markFailedTransient(
@@ -804,6 +843,26 @@ class UploadQueueWorker(
                         overrideDelayMs = failureInfo.overrideDelayMs
                             ?: if (failureInfo.reason == "ssl_handshake" || failureInfo.reason == "cert_path_validator" || failureInfo.reason == "ssl_other") 15L * 60L * 1000L else null
                     )
+                    UploadQueueManager.findById(applicationContext, item.id)?.let { updated ->
+                        appendDebugLog(
+                            context = applicationContext,
+                            type = "upload_queue_retry_scheduled",
+                            message = displayError,
+                            meta = buildString {
+                                append("source=queue")
+                                append(";kind=").append(if (item.isPrompt) "prompt" else "extra")
+                                append(";queueItemId=").append(item.id)
+                                append(";uploadClientId=").append(item.uploadClientId)
+                                append(";attempt=").append(updated.attempts)
+                                append(";failureClass=").append(failureInfo.reason)
+                                append(";http=").append(failureInfo.httpCode ?: -1)
+                                append(";status=").append(updated.status)
+                                append(";nextRetryAtMs=").append(updated.nextRetryAtMs)
+                                append(";retryDelayMs=").append((updated.nextRetryAtMs - updated.updatedAtMs).coerceAtLeast(0L))
+                                append(";ackUncertain=").append(failureInfo.ackUncertain)
+                            }
+                        )
+                    }
                 }
             }
             if (failure != null && failureInfo != null) {
@@ -1044,15 +1103,17 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
         )
     }
     if (throwable is HttpException) {
-        val raw = runCatching { throwable.response()?.errorBody()?.string().orEmpty() }.getOrDefault("").lowercase()
+        val rawBody = runCatching { throwable.response()?.errorBody()?.string().orEmpty() }.getOrDefault("")
+        val raw = rawBody.lowercase()
+        val errorCode = parseApiErrorCode(rawBody)?.lowercase().orEmpty()
         val reason = when (throwable.code()) {
             400 -> "invalid_request"
             401 -> "http_401"
             403 -> when {
-                raw.contains("prompt inactive") -> "prompt_inactive"
-                raw.contains("extra unavailable during daily moment window") -> "extra_window_blocked"
-                raw.contains("upload window closed") -> "upload_window_closed"
-                raw.contains("poste zuerst dein tagesmoment") -> "daily_required"
+                errorCode == "prompt_inactive" || raw.contains("prompt inactive") -> "prompt_inactive"
+                errorCode == "extra_window_blocked" || raw.contains("extra unavailable during daily moment window") -> "extra_window_blocked"
+                errorCode == "upload_window_closed" || raw.contains("upload window closed") -> "upload_window_closed"
+                errorCode == "daily_required" || raw.contains("poste zuerst dein tagesmoment") || raw.contains("sichtbaren beitrag") -> "daily_required"
                 else -> "forbidden"
             }
             409 -> "already_posted"
@@ -1064,10 +1125,10 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
             400 -> "Upload-Daten sind ungueltig. Bitte neu aufnehmen oder erneut versuchen."
             401 -> "Sitzung abgelaufen. Bitte App oeffnen und erneut anmelden."
             403 -> when {
-                raw.contains("prompt inactive") -> "Kein aktiver Daily-Moment mehr. Diesen Upload loeschen oder als Extra posten."
-                raw.contains("extra unavailable during daily moment window") -> "Waehrend des aktiven Daily-Moments sind Extras gesperrt."
-                raw.contains("upload window closed") -> "Upload-Zeitfenster ist geschlossen."
-                raw.contains("poste zuerst dein tagesmoment") -> "Poste zuerst dein Tagesmoment."
+                errorCode == "prompt_inactive" || raw.contains("prompt inactive") -> "Kein aktiver Daily-Moment mehr. Diesen Upload loeschen oder als Extra posten."
+                errorCode == "extra_window_blocked" || raw.contains("extra unavailable during daily moment window") -> "Waehrend des aktiven Daily-Moments sind Extras gesperrt."
+                errorCode == "upload_window_closed" || raw.contains("upload window closed") -> "Upload-Zeitfenster ist geschlossen."
+                errorCode == "daily_required" || raw.contains("poste zuerst dein tagesmoment") || raw.contains("sichtbaren beitrag") -> "Poste zuerst dein Tagesmoment."
                 else -> "Aktion nicht erlaubt"
             }
             409 -> "Du hast fuer diesen Fall bereits gepostet."

@@ -2228,6 +2228,12 @@ class AppRepo(
         prefs.edit().putBoolean("prefer_swipe_for_two_image_posts", enabled).apply()
     }
 
+    fun showConnectionHealthIndicator(): Boolean = prefs.getBoolean("show_connection_health_indicator", false)
+
+    fun setShowConnectionHealthIndicator(enabled: Boolean) {
+        prefs.edit().putBoolean("show_connection_health_indicator", enabled).apply()
+    }
+
     fun customNotificationToneEnabled(): Boolean = prefs.getBoolean("custom_notification_tone_enabled", false)
 
     fun setCustomNotificationToneEnabled(enabled: Boolean) {
@@ -3760,6 +3766,12 @@ data class UiState(
     val locationShareDefaultEnabled: Boolean = false,
     val showPublicPostNumbers: Boolean = false,
     val preferSwipeForTwoImagePosts: Boolean = false,
+    val showConnectionHealthIndicator: Boolean = false,
+    val connectionHealthSnapshot: ConnectionHealthSnapshot = ConnectionHealthSnapshot(),
+    val lastApiSuccessAtMs: Long = 0L,
+    val lastApiFailureAtMs: Long = 0L,
+    val lastApiFailureMessage: String = "",
+    val networkSnapshot: String = "activeNetwork=false;capabilities=false;reason=not_checked",
     val customNotificationToneEnabled: Boolean = false,
     val customNotificationToneUri: String = "",
     val diagnosticsUploadEnabled: Boolean = false,
@@ -3889,6 +3901,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var consecutiveNetworkRefreshFailures = 0
     private var lastRefreshFailureClass: String = ""
     private var refreshCircuitOpenUntilMs = 0L
+    private var lastApiSuccessAtMs = 0L
+    private var lastApiFailureAtMs = 0L
+    private var lastApiFailureMessage = ""
     private var lastRefreshExecutionDisposition = RefreshExecutionDisposition.IDLE
     private var nextFeedScrollRequestId = 1L
     private val pendingFeedMutations = mutableMapOf<Long, PendingFeedMutation>()
@@ -4648,6 +4663,33 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         return if (remaining > 0L) remaining else 0L
     }
 
+    private fun currentNetworkSnapshot(): String = repo.networkSnapshotMeta()
+
+    private fun refreshConnectionHealthState(base: UiState = state): UiState {
+        val next = base.copy(
+            lastApiSuccessAtMs = lastApiSuccessAtMs,
+            lastApiFailureAtMs = lastApiFailureAtMs,
+            lastApiFailureMessage = lastApiFailureMessage,
+            networkSnapshot = currentNetworkSnapshot()
+        )
+        val snapshot = evaluateConnectionHealth(
+            ConnectionHealthInputs(
+                nowMs = System.currentTimeMillis(),
+                startupDone = next.startupDone,
+                serverConnected = next.serverConnected,
+                lastPingMs = next.lastPingMs,
+                lastApiSuccessAtMs = next.lastApiSuccessAtMs,
+                lastApiFailureAtMs = next.lastApiFailureAtMs,
+                lastApiFailureMessage = next.lastApiFailureMessage,
+                networkSnapshot = next.networkSnapshot,
+                refreshCircuitRemainingMs = refreshCircuitOpenRemainingMs(System.currentTimeMillis()),
+                lastRefreshFailureClass = lastRefreshFailureClass,
+                uploadQueue = next.uploadQueue
+            )
+        )
+        return next.copy(connectionHealthSnapshot = snapshot)
+    }
+
     private fun logPerfEvent(event: String, durationMs: Long, success: Boolean, extra: String = "") {
         logPerfEvent(
             event = event,
@@ -4696,7 +4738,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (state.startupDone) return
         val perfStartedAt = System.currentTimeMillis()
         profileSetupPromptShownInSession = false
-        state = state.copy(startupDone = false, startupQuote = "")
+        state = refreshConnectionHealthState(state.copy(startupDone = false, startupQuote = ""))
         repo.syncAutoUpdateScheduler()
         repo.syncUploadQueueScheduler()
         val started = System.currentTimeMillis()
@@ -4717,17 +4759,23 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
         } else ""
         if (healthOk && startupQuote.isNotBlank()) {
-            state = state.copy(
+            lastApiSuccessAtMs = System.currentTimeMillis()
+            lastApiFailureAtMs = 0L
+            lastApiFailureMessage = ""
+            state = refreshConnectionHealthState(state.copy(
                 startupDone = false,
                 startupQuote = startupQuote,
                 serverConnected = true,
                 serverVersion = health?.version ?: "nicht erreichbar",
                 pushProvider = health?.provider ?: "unknown",
                 chatDeleteSupported = health?.features?.chatDelete == true
-            )
+            ))
             delay(1300)
+        } else if (!healthOk) {
+            lastApiFailureAtMs = System.currentTimeMillis()
+            lastApiFailureMessage = "Server nicht erreichbar"
         }
-        state = state.copy(
+        state = refreshConnectionHealthState(state.copy(
             startupDone = true,
             startupQuote = startupQuote,
             serverConnected = healthOk,
@@ -4754,11 +4802,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
+            showConnectionHealthIndicator = repo.showConnectionHealthIndicator(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
             diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
             debugLogs = repo.recentDebugLogs(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
-        )
+        ))
         repo.pendingUpdateInstallWarning(BuildConfig.VERSION_NAME)?.let { warning ->
             state = state.copy(message = warning)
         }
@@ -4869,6 +4918,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             pollPushEnabled = repo.pollPushLocalEnabled(),
             specialMomentPushEnabled = repo.specialMomentPushLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
+            showConnectionHealthIndicator = repo.showConnectionHealthIndicator(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -4879,6 +4929,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             debugLogs = repo.recentDebugLogs(),
             invitePreview = null
         )
+        state = refreshConnectionHealthState(state)
     }
 
     fun setProfileSectionExpanded(sectionId: String, expanded: Boolean) {
@@ -5871,7 +5922,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 repo.getProfileSectionExpanded(me.id, sectionId)
             }
 
-            state = state.copy(
+            state = refreshConnectionHealthState(state.copy(
                 user = me,
                 myInviteCode = inviteCode,
                 prompt = prompt,
@@ -5912,11 +5963,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 diagnosticsConsentGranted = me.diagnosticsConsentGranted,
                 diagnosticsConsentUpdatedAt = me.diagnosticsConsentUpdatedAt,
                 debugLogs = repo.recentDebugLogs(),
+                showConnectionHealthIndicator = repo.showConnectionHealthIndicator(),
                 profileSectionExpanded = profileSectionExpanded,
                 loading = if (showLoading) false else state.loading,
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
-            )
+            ))
             if (me.yoloModeEnabled) {
                 runCatching { applyYoloFeatures(forceAll = false, reason = "refresh_all") }
                     .onFailure { state = state.copy(message = apiError(it, "YOLO-Feature-Sync fehlgeschlagen")) }
@@ -5993,6 +6045,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             success = true
             lastRefreshExecutionDisposition = RefreshExecutionDisposition.SUCCESS
             markRefreshSuccess()
+            lastApiSuccessAtMs = System.currentTimeMillis()
+            lastApiFailureAtMs = 0L
+            lastApiFailureMessage = ""
+            state = refreshConnectionHealthState(state)
             if (reason == "feed_pull" || reason == "feed_auto" || forceFeedReload) {
                 val durationMs = System.currentTimeMillis() - now
                 repo.logDebug(
@@ -6012,7 +6068,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             if (isBenignCancellation(t)) {
                 lastRefreshExecutionDisposition = RefreshExecutionDisposition.CANCELLED
-                state = state.copy(loading = if (showLoading) false else state.loading, communityStatsLoading = false)
+                state = refreshConnectionHealthState(state.copy(loading = if (showLoading) false else state.loading, communityStatsLoading = false))
                 return false
             }
             val failureClass = classifyFailure(actual)
@@ -6025,11 +6081,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     meta = "reason=$reason;failureClass=$failureClass;snapshot=${repo.networkSnapshotMeta()}"
                 )
             }
-            state = state.copy(
+            lastApiFailureAtMs = System.currentTimeMillis()
+            lastApiFailureMessage = apiError(actual, "Laden fehlgeschlagen")
+            state = refreshConnectionHealthState(state.copy(
                 loading = if (showLoading) false else state.loading,
                 communityStatsLoading = false,
-                message = apiError(actual, "Laden fehlgeschlagen")
-            )
+                message = lastApiFailureMessage
+            ))
             logApiFailure(
                 "dashboard_load_failed",
                 "refresh_all/$failedCall",
@@ -6672,13 +6730,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun removeQueuedUpload(id: String) {
         val ok = repo.removeUploadQueueItem(id)
         if (ok) {
-            state = state.copy(uploadQueue = repo.uploadQueue(), message = "Upload aus Warteschlange entfernt")
+            state = refreshConnectionHealthState(state.copy(uploadQueue = repo.uploadQueue(), message = "Upload aus Warteschlange entfernt"))
         }
     }
 
     fun refreshUploadQueueLocal() {
         if (repo.token().isBlank()) return
-        state = state.copy(uploadQueue = repo.uploadQueue())
+        state = refreshConnectionHealthState(state.copy(uploadQueue = repo.uploadQueue()))
     }
 
     suspend fun sendChat(body: String): Boolean {
@@ -7128,12 +7186,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun checkConnection() {
-        state = state.copy(loading = true)
+        state = refreshConnectionHealthState(state.copy(loading = true))
         val startedAt = System.currentTimeMillis()
         runCatching { repo.health() }
             .onSuccess { health ->
                 val pingMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
-                state = state.copy(
+                lastApiSuccessAtMs = System.currentTimeMillis()
+                lastApiFailureAtMs = 0L
+                lastApiFailureMessage = ""
+                state = refreshConnectionHealthState(state.copy(
                     loading = false,
                     serverConnected = health.ok,
                     serverVersion = health.version,
@@ -7141,16 +7202,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     chatDeleteSupported = health.features.chatDelete,
                     lastPingMs = pingMs,
                     message = if (health.ok) "Verbindung erfolgreich geprueft" else "Server nicht erreichbar"
-                )
+                ))
             }
-            .onFailure {
-                state = state.copy(
+            .onFailure { error ->
+                lastApiFailureAtMs = System.currentTimeMillis()
+                lastApiFailureMessage = apiError(error, "Verbindung pruefen fehlgeschlagen")
+                state = refreshConnectionHealthState(state.copy(
                     loading = false,
                     serverConnected = false,
                     chatDeleteSupported = false,
                     lastPingMs = null,
-                    message = apiError(it, "Verbindung pruefen fehlgeschlagen")
-                )
+                    message = lastApiFailureMessage
+                ))
             }
     }
 
@@ -7190,6 +7253,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
+            showConnectionHealthIndicator = repo.showConnectionHealthIndicator(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -7200,6 +7264,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             debugLogs = repo.recentDebugLogs(),
             message = message
         )
+        state = refreshConnectionHealthState(state)
     }
 
     fun setAllowInsecureHttpOverride(enabled: Boolean) {
@@ -7270,6 +7335,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
+            showConnectionHealthIndicator = repo.showConnectionHealthIndicator(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
@@ -7285,6 +7351,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 "Custom-Server gespeichert. Bitte neu anmelden."
             }
         )
+        state = refreshConnectionHealthState(state)
     }
 
     suspend fun migrateWithSessionShortcut() {
@@ -7435,12 +7502,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun setShowPublicPostNumbers(enabled: Boolean) {
         repo.setShowPublicPostNumbers(enabled)
-        state = state.copy(showPublicPostNumbers = repo.showPublicPostNumbers())
+        state = refreshConnectionHealthState(state.copy(showPublicPostNumbers = repo.showPublicPostNumbers()))
     }
 
     fun setPreferSwipeForTwoImagePosts(enabled: Boolean) {
         repo.setPreferSwipeForTwoImagePosts(enabled)
-        state = state.copy(preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts())
+        state = refreshConnectionHealthState(state.copy(preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts()))
+    }
+
+    fun setShowConnectionHealthIndicator(enabled: Boolean) {
+        repo.setShowConnectionHealthIndicator(enabled)
+        state = refreshConnectionHealthState(state.copy(showConnectionHealthIndicator = repo.showConnectionHealthIndicator()))
     }
 
     fun setFeedOrderMode(mode: FeedOrderMode) {
@@ -9677,6 +9749,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     locationShareEnabled = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true) && locationPermissionGranted,
                     updateAvailable = state.updateAvailable,
                     updateCheckInFlight = state.updateCheckInFlight,
+                    showConnectionHealthIndicator = state.showConnectionHealthIndicator,
+                    connectionHealthSnapshot = state.connectionHealthSnapshot,
                     specialMomentStatus = state.specialMomentStatus,
                     backPreviewUri = backPreviewUri,
                     frontPreviewUri = frontPreviewUri,
@@ -9924,6 +9998,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     feedPostPushEnabled = state.feedPostPushEnabled,
                     showPublicPostNumbers = state.showPublicPostNumbers,
                     preferSwipeForTwoImagePosts = state.preferSwipeForTwoImagePosts,
+                    showConnectionHealthIndicator = state.showConnectionHealthIndicator,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
                     diagnosticsUploadEnabled = state.diagnosticsUploadEnabled,
@@ -10087,6 +10162,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onApplyServerBaseUrlOverride = { input -> scope.launch { vm.applyServerBaseUrlOverride(input) } },
                     onShowPublicPostNumbersChange = { vm.setShowPublicPostNumbers(it) },
                     onPreferSwipeForTwoImagePostsChange = { vm.setPreferSwipeForTwoImagePosts(it) },
+                    onShowConnectionHealthIndicatorChange = { vm.setShowConnectionHealthIndicator(it) },
                     onClearAllBookmarks = { scope.launch { vm.clearAllBookmarks() } },
                     onRollInviteCode = { scope.launch { vm.rollInviteCode() } },
                     onShareInviteCode = {
@@ -10252,6 +10328,8 @@ fun CameraTab(
     locationShareEnabled: Boolean,
     updateAvailable: Boolean,
     updateCheckInFlight: Boolean,
+    showConnectionHealthIndicator: Boolean,
+    connectionHealthSnapshot: ConnectionHealthSnapshot,
     specialMomentStatus: SpecialMomentStatus?,
     backPreviewUri: Uri?,
     frontPreviewUri: Uri?,
@@ -10295,6 +10373,7 @@ fun CameraTab(
     val ownMedia = prompt?.ownPhoto?.mediaItems().orEmpty()
     var showCapsuleDialog by remember { mutableStateOf(false) }
     var pendingCapsule by remember { mutableStateOf<CapsuleUploadOptions?>(null) }
+    var showConnectionHealthDialog by remember { mutableStateOf(false) }
     val dayLabel = formatDayLabel(prompt?.day ?: LocalDate.now().toString())
     val specialLabel = if (canSpecial) {
         "Sondermoment anfordern"
@@ -10342,6 +10421,12 @@ fun CameraTab(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 RainbowDailyTitle()
+                if (showConnectionHealthIndicator) {
+                    ConnectionHealthDot(
+                        snapshot = connectionHealthSnapshot,
+                        onClick = { showConnectionHealthDialog = true }
+                    )
+                }
                 if (updateAvailable) {
                     Text(
                         text = "UPDATE VERFUEGBAR",
@@ -10373,6 +10458,12 @@ fun CameraTab(
             }
         } else {
             Text("Sondermoment heute noch nicht ausgeloest.")
+        }
+        if (showConnectionHealthIndicator && showConnectionHealthDialog) {
+            ConnectionHealthDialog(
+                snapshot = connectionHealthSnapshot,
+                onDismiss = { showConnectionHealthDialog = false }
+            )
         }
         if (!prompt?.dailyTriggeredAt.isNullOrBlank()) {
             Text("Daily-Moment heute war um ${formatMomentTime(prompt?.dailyTriggeredAt)}.")
@@ -13732,6 +13823,7 @@ fun ProfileTab(
     feedPostPushEnabled: Boolean,
     showPublicPostNumbers: Boolean,
     preferSwipeForTwoImagePosts: Boolean,
+    showConnectionHealthIndicator: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
     diagnosticsUploadEnabled: Boolean,
@@ -13789,6 +13881,7 @@ fun ProfileTab(
     onOpenLocationPermissionSettings: () -> Unit,
     onNotificationMasterEnabledChange: (Boolean) -> Unit,
     onFeedPostPushEnabledChange: (Boolean) -> Unit,
+    onShowConnectionHealthIndicatorChange: (Boolean) -> Unit,
     onCustomNotificationToneEnabledChange: (Boolean) -> Unit,
     onPickCustomNotificationTone: () -> Unit,
     onClearCustomNotificationTone: () -> Unit,
@@ -14942,6 +15035,12 @@ fun ProfileTab(
                       supportingText = "Bei genau zwei Bildern bleibt sonst die alte geteilte Ansicht aktiv. Ab drei Bildern wird immer gewischt."
                   )
                   SettingsToggleRow(
+                      label = "Verbindungsstatus im Kamera-Reiter anzeigen",
+                      checked = showConnectionHealthIndicator,
+                      onCheckedChange = onShowConnectionHealthIndicatorChange,
+                      supportingText = "Zeigt einen kleinen Punkt fuer Netz- und Sync-Zustand neben dem Daily-Logo."
+                  )
+                  SettingsToggleRow(
                       label = "Erweiterte Einstellungen anzeigen",
                       checked = advancedSettingsVisible,
                       onCheckedChange = {
@@ -16079,6 +16178,7 @@ private fun apiError(t: Throwable, fallback: String, httpErrorRawOverride: Strin
     if (t is HttpException) {
         val rawBody = httpErrorRawOverride ?: peekHttpErrorBody(t)
         val raw = rawBody.lowercase()
+        val errorCode = parseApiErrorCode(rawBody)?.lowercase().orEmpty()
         return when (t.code()) {
             400 -> when {
                 raw.contains("message too long") -> {
@@ -16089,8 +16189,8 @@ private fun apiError(t: Throwable, fallback: String, httpErrorRawOverride: Strin
                 else -> "Ungueltige Eingabe"
             }
             401 -> when {
+                errorCode == "session_revoked" || raw.contains("session_revoked") -> "Sitzung wurde beendet. Bitte erneut einloggen."
                 raw.contains("invalid_credentials") -> "Login fehlgeschlagen"
-                raw.contains("session_revoked") -> "Sitzung wurde beendet. Bitte erneut einloggen."
                 else -> "Nicht autorisiert. Bitte erneut einloggen."
             }
             404 -> when {
@@ -16098,11 +16198,10 @@ private fun apiError(t: Throwable, fallback: String, httpErrorRawOverride: Strin
                 else -> fallback
             }
             403 -> when {
-                raw.contains("prompt inactive") -> "Heute ist gerade kein aktiver Daily-Moment."
-                raw.contains("extra unavailable during daily moment window") -> "Waehrend des aktiven Daily-Moments sind Extras gesperrt."
-                raw.contains("upload window closed") -> "Upload-Zeitfenster ist geschlossen."
-                raw.contains("feed_locked") || raw.contains("sichtbaren beitrag") -> "Poste zuerst einen sichtbaren Beitrag, um die Beitraege der anderen zu sehen."
-                raw.contains("poste zuerst dein tagesmoment") -> "Poste zuerst dein Tagesmoment."
+                errorCode == "prompt_inactive" || raw.contains("prompt inactive") -> "Heute ist gerade kein aktiver Daily-Moment."
+                errorCode == "extra_window_blocked" || raw.contains("extra unavailable during daily moment window") -> "Waehrend des aktiven Daily-Moments sind Extras gesperrt."
+                errorCode == "upload_window_closed" || raw.contains("upload window closed") -> "Upload-Zeitfenster ist geschlossen."
+                errorCode == "daily_required" || raw.contains("feed_locked") || raw.contains("sichtbaren beitrag") || raw.contains("poste zuerst dein tagesmoment") -> "Poste zuerst dein Tagesmoment."
                 else -> "Aktion nicht erlaubt"
             }
             409 -> when {

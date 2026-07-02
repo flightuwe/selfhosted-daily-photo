@@ -1811,11 +1811,15 @@ func (s *Server) handleUpload(c *gin.Context) {
 	day := now.Format("2006-01-02")
 	todayWindowActive := s.isDailyWindowActive(day, now)
 	if kind == "prompt" {
-		resolvedDay, allowed, acceptedOffline := s.resolvePromptUploadDay(day, now, capturedAt)
+		resolvedDay, allowed, acceptedOffline, blockedCode := s.resolvePromptUploadDecision(day, now, capturedAt)
 		day = resolvedDay
 		acceptedViaOfflineGrace = acceptedOffline
 		if !allowed {
-			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive", "errorCode": "prompt_inactive"})
+			message := "prompt inactive"
+			if blockedCode == "upload_window_closed" {
+				message = "upload window closed"
+			}
+			c.JSON(http.StatusForbidden, gin.H{"error": message, "errorCode": blockedCode})
 			return
 		}
 	}
@@ -2675,8 +2679,9 @@ func discoverOffsetForTarget(total int, limit int, targetIndex int) int {
 func writeFeedDayAccessError(c *gin.Context, status int, err error) {
 	if status == http.StatusForbidden && err != nil && err.Error() == "feed locked" {
 		c.JSON(http.StatusForbidden, gin.H{
-			"error": "Poste zuerst einen sichtbaren Beitrag, um die Beitraege der anderen zu sehen",
-			"code":  "feed_locked",
+			"error":     "Poste zuerst einen sichtbaren Beitrag, um die Beitraege der anderen zu sehen",
+			"code":      "feed_locked",
+			"errorCode": "daily_required",
 		})
 		return
 	}
@@ -8403,11 +8408,15 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	day := now.Format("2006-01-02")
 	todayWindowActive := s.isDailyWindowActive(day, now)
 	if kind == "prompt" {
-		resolvedDay, allowed, acceptedOffline := s.resolvePromptUploadDay(day, now, capturedAt)
+		resolvedDay, allowed, acceptedOffline, blockedCode := s.resolvePromptUploadDecision(day, now, capturedAt)
 		day = resolvedDay
 		acceptedViaOfflineGrace = acceptedOffline
 		if !allowed {
-			c.JSON(http.StatusForbidden, gin.H{"error": "prompt inactive", "errorCode": "prompt_inactive"})
+			message := "prompt inactive"
+			if blockedCode == "upload_window_closed" {
+				message = "upload window closed"
+			}
+			c.JSON(http.StatusForbidden, gin.H{"error": message, "errorCode": blockedCode})
 			return
 		}
 	}
@@ -11551,22 +11560,37 @@ func (s *Server) isPromptUploadAllowed(day string, now time.Time) bool {
 	return isPromptWindowActive(prompt, now)
 }
 
-func (s *Server) resolvePromptUploadDay(defaultDay string, now time.Time, capturedAt *time.Time) (string, bool, bool) {
-	if s.isPromptUploadAllowed(defaultDay, now) {
-		return defaultDay, true, false
+func (s *Server) promptUploadBlockedCode(day string, effectiveAt time.Time) string {
+	var prompt models.DailyPrompt
+	if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
+		return "prompt_inactive"
 	}
+	if prompt.TriggeredAt == nil || prompt.UploadUntil == nil {
+		return "prompt_inactive"
+	}
+	if effectiveAt.After(*prompt.UploadUntil) {
+		return "upload_window_closed"
+	}
+	return "prompt_inactive"
+}
+
+func (s *Server) resolvePromptUploadDecision(defaultDay string, now time.Time, capturedAt *time.Time) (string, bool, bool, string) {
+	if s.isPromptUploadAllowed(defaultDay, now) {
+		return defaultDay, true, false, ""
+	}
+	blockedCode := s.promptUploadBlockedCode(defaultDay, now)
 	if capturedAt == nil || capturedAt.IsZero() {
-		return defaultDay, false, false
+		return defaultDay, false, false, blockedCode
 	}
 	capturedLocal := capturedAt.In(s.Location)
 	if now.Sub(capturedLocal) > 7*24*time.Hour {
-		return defaultDay, false, false
+		return defaultDay, false, false, blockedCode
 	}
 	capturedDay := capturedLocal.Format("2006-01-02")
 	if s.isPromptUploadAllowed(capturedDay, capturedLocal) {
-		return capturedDay, true, true
+		return capturedDay, true, true, ""
 	}
-	return defaultDay, false, false
+	return defaultDay, false, false, s.promptUploadBlockedCode(capturedDay, capturedLocal)
 }
 
 type dayTriggerStatus struct {
