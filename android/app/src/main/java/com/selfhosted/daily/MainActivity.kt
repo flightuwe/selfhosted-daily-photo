@@ -962,6 +962,11 @@ private fun debugNetworkFailureKindShared(throwable: Throwable): String? {
     }
 }
 
+private fun isBenignCancellationShared(throwable: Throwable): Boolean {
+    if (throwable is CancellationException) return true
+    return throwable::class.java.simpleName.contains("LeftCompositionCancellationException")
+}
+
 private fun debugMetaSanitizeShared(value: String, maxLen: Int = 160): String {
     val clean = value
         .replace(";", ",")
@@ -1434,21 +1439,14 @@ class AppRepo(
     private val debugMaxEntries = 500
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
     private val debugAggregateWindowMs = 10 * 60 * 1000L
-    private val refreshMutex = Mutex()
     @Volatile
     private var lastAuthTransitionReason: String = "startup"
 
     fun token(): String = accessToken()
 
-    private fun accessToken(): String {
-        val access = prefs.getString("access_token", "") ?: ""
-        if (access.isNotBlank()) return access
-        return prefs.getString("token", "") ?: ""
-    }
+    private fun accessToken(): String = AuthSessionCoordinator.snapshot(context).accessToken
 
-    private fun refreshToken(): String = prefs.getString("refresh_token", "") ?: ""
-
-    private fun currentSessionId(): String = prefs.getString("session_id", "") ?: ""
+    private fun currentSessionId(): String = AuthSessionCoordinator.snapshot(context).sessionId
 
     fun resolvedApiBaseUrl(): String = resolveApiBaseUrl(context)
 
@@ -1527,17 +1525,8 @@ class AppRepo(
     fun authStateTransitionReason(): String = lastAuthTransitionReason.ifBlank { "unknown" }
 
     private fun saveAuthSession(auth: AuthResponse, source: String = "auth_response") {
-        val beforeTokenPresent = accessToken().trim().isNotBlank()
-        val access = auth.accessToken.trim().ifBlank { auth.token.trim() }
-        val refresh = auth.refreshToken.trim()
-        val sessionId = auth.sessionId.trim()
-        prefs.edit().apply {
-            putString("token", access)
-            putString("access_token", access)
-            if (refresh.isNotBlank()) putString("refresh_token", refresh) else remove("refresh_token")
-            if (sessionId.isNotBlank()) putString("session_id", sessionId) else remove("session_id")
-        }.apply()
-        val afterTokenPresent = accessToken().trim().isNotBlank()
+        val beforeTokenPresent = AuthSessionCoordinator.snapshot(context).hasAccessToken()
+        val afterTokenPresent = AuthSessionCoordinator.persist(context, auth).hasAccessToken()
         recordAuthStateTransition(
             reason = source,
             endpoint = "/api/auth",
@@ -1551,14 +1540,9 @@ class AppRepo(
     }
 
     fun clearToken(reason: String = "clear_token", endpoint: String = "") {
-        val beforeTokenPresent = accessToken().trim().isNotBlank()
-        prefs.edit()
-            .remove("token")
-            .remove("access_token")
-            .remove("refresh_token")
-            .remove("session_id")
-            .apply()
-        val afterTokenPresent = accessToken().trim().isNotBlank()
+        val beforeTokenPresent = AuthSessionCoordinator.snapshot(context).hasAccessToken()
+        AuthSessionCoordinator.clear(context)
+        val afterTokenPresent = AuthSessionCoordinator.snapshot(context).hasAccessToken()
         recordAuthStateTransition(
             reason = reason,
             endpoint = endpoint,
@@ -1567,12 +1551,15 @@ class AppRepo(
         )
     }
 
-    private fun authHeader(): String = "Bearer ${accessToken()}"
+    private fun authHeader(): String = AuthSessionCoordinator.snapshot(context).authHeader()
 
-    private suspend fun tryRefreshSessionLocked(): Boolean {
-        val oldRefresh = refreshToken().trim()
-        if (oldRefresh.isBlank()) return false
-        val response = runCatching { api.refresh(RefreshRequest(oldRefresh)) }.getOrElse { return false }
+    private suspend fun tryRefreshSessionLocked(expectedHeader: String? = null): Boolean {
+        val before = AuthSessionCoordinator.snapshot(context)
+        if (!expectedHeader.isNullOrBlank() && before.hasAccessToken() && before.authHeader() != expectedHeader) {
+            return true
+        }
+        if (!before.hasRefreshToken()) return false
+        val response = runCatching { api.refresh(RefreshRequest(before.refreshToken)) }.getOrElse { return false }
         val nextAccess = response.accessToken.trim().ifBlank { response.token.trim() }
         val nextRefresh = response.refreshToken.trim()
         if (nextAccess.isBlank() || nextRefresh.isBlank()) return false
@@ -1580,14 +1567,8 @@ class AppRepo(
         return true
     }
 
-    private suspend fun tryRefreshSession(): Boolean {
-        refreshMutex.lock()
-        return try {
-            tryRefreshSessionLocked()
-        } finally {
-            refreshMutex.unlock()
-        }
-    }
+    private suspend fun tryRefreshSession(expectedHeader: String? = null): Boolean =
+        AuthSessionCoordinator.withRefreshLock { tryRefreshSessionLocked(expectedHeader) }
 
     private suspend fun <T> authorizedCall(endpoint: String, block: suspend (header: String) -> T): T {
         val firstHeader = authHeader()
@@ -1607,7 +1588,11 @@ class AppRepo(
                 throw IllegalStateException("migration_required", http)
             }
             if (http.code() != 401) throw http
-            val refreshed = tryRefreshSession()
+            val latestHeader = authHeader()
+            if (latestHeader.length > "Bearer ".length && latestHeader != firstHeader) {
+                return block(latestHeader)
+            }
+            val refreshed = tryRefreshSession(firstHeader)
             if (!refreshed) {
                 logDebug(
                     type = "auth_refresh_failed",
@@ -2805,16 +2790,18 @@ class AppRepo(
 
     suspend fun syncDeviceTokenIfNeeded(force: Boolean = false) {
         if (token().isBlank()) {
-            logDebug(
-                type = "push_token_sync_skipped",
-                message = "push token sync skipped without auth token",
-                meta = "force=$force"
-            )
             return
         }
         val pending = prefs.getString("pending_fcm_token", "") ?: ""
+        val recentSync = (System.currentTimeMillis() - lastSyncedDeviceTokenAt()) < 6 * 60 * 60 * 1000L
+        if (!force && pending.isBlank() && recentSync && lastSyncedDeviceToken().isNotBlank()) {
+            return
+        }
         val firebaseAttempt = runCatching { FirebaseMessaging.getInstance().token.await() }
         firebaseAttempt.exceptionOrNull()?.let {
+            if (isBenignCancellationShared(it)) {
+                return
+            }
             val failureKind = debugNetworkFailureKindShared(it) ?: it::class.java.simpleName
             logDebug(
                 type = "push_token_fetch_failed",
@@ -2838,14 +2825,8 @@ class AppRepo(
             return
         }
         val sameToken = deviceToken == lastSyncedDeviceToken()
-        val recentSync = (System.currentTimeMillis() - lastSyncedDeviceTokenAt()) < 6 * 60 * 60 * 1000L
         val tokenFingerprint = "${deviceToken.length}:${deviceToken.hashCode().toUInt().toString(16)}"
         if (!force && sameToken && recentSync) {
-            logDebug(
-                type = "push_token_sync_skipped",
-                message = "push token already synced recently",
-                meta = "force=$force;source=$source;token=$tokenFingerprint"
-            )
             return
         }
 
@@ -4520,8 +4501,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun isBenignCancellation(throwable: Throwable): Boolean {
-        if (throwable is CancellationException) return true
-        return throwable::class.java.simpleName.contains("LeftCompositionCancellationException")
+        return isBenignCancellationShared(throwable)
     }
 
     private fun networkFailureKind(throwable: Throwable): String? {
@@ -5685,7 +5665,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         var refreshedFeedDays = 0
         var failedCall = "none"
         try {
-            repo.syncDeviceTokenIfNeeded()
             val payload = runCatching {
                 val bootstrap = repo.dashboardBootstrap(
                     includeChat = true,
@@ -10623,7 +10602,7 @@ fun CameraTab(
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         val kindLabel = if (item.isPrompt) "Tagesmoment" else "Extra"
-                        Text("$kindLabel - ${queueStatusLabel(item.status)}", fontWeight = FontWeight.SemiBold)
+                        Text("$kindLabel - ${queueStatusLabel(item)}", fontWeight = FontWeight.SemiBold)
                         if (item.status == UploadQueueStatus.RUNNING || item.status == UploadQueueStatus.AWAITING_SERVER_ACK) {
                             val p = item.transferProgressPercent.coerceIn(0, 100)
                             Text("Fortschritt: $p%")
@@ -15915,8 +15894,11 @@ private fun momentReasonLine(momentKind: String?, triggerSource: String?, reques
     }
 }
 
-private fun queueStatusLabel(status: String): String {
-    return when (status) {
+private fun queueStatusLabel(item: QueuedUploadItem): String {
+    if (item.lastFailureClass == "server_ack_timeout") {
+        return "gleicht Server-Bestaetigung erneut ab"
+    }
+    return when (item.status) {
         UploadQueueStatus.WAITING -> "wartend"
         UploadQueueStatus.RUNNING -> "wird hochgeladen"
         UploadQueueStatus.WAITING_FOR_NETWORK -> "wartet auf Verbindung"
@@ -15926,7 +15908,7 @@ private fun queueStatusLabel(status: String): String {
         UploadQueueStatus.FAILED_PERMANENT -> "Aktion erforderlich"
         UploadQueueStatus.SUCCESS -> "erfolgreich hochgeladen"
         UploadQueueStatus.PAUSED -> "pausiert"
-        else -> status
+        else -> item.status
     }
 }
 

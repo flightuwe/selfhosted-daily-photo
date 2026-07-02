@@ -84,14 +84,18 @@ func (s *Server) rotateSessionTokens(rawRefreshToken string) (authTokens, models
 		return authTokens{}, models.User{}, err
 	}
 	newExpiresAt := now.Add(s.Config.RefreshTokenTTL)
-	if err := s.DB.Model(&models.UserSession{}).
-		Where("id = ? AND revoked_at IS NULL", session.ID).
+	update := s.DB.Model(&models.UserSession{}).
+		Where("id = ? AND revoked_at IS NULL AND refresh_token_hash = ?", session.ID, hashed).
 		Updates(map[string]any{
 			"refresh_token_hash": hashRefreshToken(newRawRefresh),
 			"last_used_at":       now,
 			"expires_at":         newExpiresAt,
-		}).Error; err != nil {
-		return authTokens{}, models.User{}, err
+		})
+	if update.Error != nil {
+		return authTokens{}, models.User{}, update.Error
+	}
+	if update.RowsAffected != 1 {
+		return authTokens{}, models.User{}, gorm.ErrRecordNotFound
 	}
 	accessToken, signErr := s.Auth.SignAccess(user.ID, user.Username, user.IsAdmin, session.SessionID)
 	if signErr != nil {

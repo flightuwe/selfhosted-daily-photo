@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -15,11 +16,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/yosho/selfhosted-bereal/backend/internal/auth"
 	"github.com/yosho/selfhosted-bereal/backend/internal/config"
 	"github.com/yosho/selfhosted-bereal/backend/internal/db"
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 	"github.com/yosho/selfhosted-bereal/backend/internal/notify"
 	"github.com/yosho/selfhosted-bereal/backend/internal/storage"
+	"gorm.io/gorm"
 )
 
 type recordingSender struct {
@@ -503,10 +506,127 @@ func newSearchTestServer(t *testing.T) *Server {
 		DB:       database,
 		Store:    store,
 		Notifier: &recordingSender{},
+		Auth:     auth.NewManager("test-secret", time.Hour),
 		Config:   config.Config{PublicBaseURL: "https://daily.example", UploadDir: uploadDir},
 		Location: time.UTC,
 	}
 }
+
+func TestRotateSessionTokensRejectsStaleRefreshTokenAfterCASUpdate(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "tester", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	tokens, err := server.issueSessionTokens(user, "Pixel")
+	if err != nil {
+		t.Fatalf("issueSessionTokens() error = %v", err)
+	}
+
+	rotated, rotatedUser, err := server.rotateSessionTokens(tokens.RefreshToken)
+	if err != nil {
+		t.Fatalf("first rotateSessionTokens() error = %v", err)
+	}
+	if rotatedUser.ID != user.ID {
+		t.Fatalf("rotated user id = %d, want %d", rotatedUser.ID, user.ID)
+	}
+	if rotated.RefreshToken == tokens.RefreshToken {
+		t.Fatal("expected refresh token rotation to change token")
+	}
+
+	_, _, staleErr := server.rotateSessionTokens(tokens.RefreshToken)
+	if !errors.Is(staleErr, gorm.ErrRecordNotFound) {
+		t.Fatalf("stale rotateSessionTokens() error = %v, want gorm.ErrRecordNotFound", staleErr)
+	}
+
+	if _, _, err := server.rotateSessionTokens(rotated.RefreshToken); err != nil {
+		t.Fatalf("rotateSessionTokens() with fresh token error = %v", err)
+	}
+}
+
+func TestHandleUploadDeduplicatesByUploadClientIDOnRetry(t *testing.T) {
+	server := newSearchTestServer(t)
+	now := time.Now().UTC()
+	user := models.User{Username: "poster", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	prompt := models.DailyPrompt{
+		Day:         now.Format("2006-01-02"),
+		TriggeredAt: ptrTime(now.Add(-time.Minute)),
+		UploadUntil: ptrTime(now.Add(5 * time.Minute)),
+	}
+	if err := server.DB.Create(&prompt).Error; err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+
+	makeRequest := func(filename string, payload []byte) *http.Request {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		if err := writer.WriteField("kind", "prompt"); err != nil {
+			t.Fatalf("write kind: %v", err)
+		}
+		if err := writer.WriteField("upload_client_id", "retry-client-1"); err != nil {
+			t.Fatalf("write upload_client_id: %v", err)
+		}
+		part, err := writer.CreateFormFile("photo", filename)
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		if _, err := part.Write(payload); err != nil {
+			t.Fatalf("write payload: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close writer: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/uploads", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		return req
+	}
+
+	firstRec := httptest.NewRecorder()
+	firstCtx, _ := gin.CreateTestContext(firstRec)
+	firstCtx.Request = makeRequest("prompt-a.jpg", []byte("prompt-upload-a"))
+	firstCtx.Set("user", user)
+	server.handleUpload(firstCtx)
+	if firstRec.Code != http.StatusCreated {
+		t.Fatalf("first handleUpload() status = %d, want 201", firstRec.Code)
+	}
+
+	retryRec := httptest.NewRecorder()
+	retryCtx, _ := gin.CreateTestContext(retryRec)
+	retryCtx.Request = makeRequest("prompt-b.jpg", []byte("prompt-upload-b"))
+	retryCtx.Set("user", user)
+	server.handleUpload(retryCtx)
+	if retryRec.Code != http.StatusOK {
+		t.Fatalf("retry handleUpload() status = %d, want 200", retryRec.Code)
+	}
+
+	var retryBody struct {
+		Deduplicated bool           `json:"deduplicated"`
+		Photo        map[string]any `json:"photo"`
+	}
+	if err := json.Unmarshal(retryRec.Body.Bytes(), &retryBody); err != nil {
+		t.Fatalf("decode retry response: %v", err)
+	}
+	if !retryBody.Deduplicated {
+		t.Fatalf("retry response deduplicated = %v, want true", retryBody.Deduplicated)
+	}
+
+	var photos []models.Photo
+	if err := server.DB.Where("user_id = ?", user.ID).Order("id asc").Find(&photos).Error; err != nil {
+		t.Fatalf("load photos: %v", err)
+	}
+	if len(photos) != 1 {
+		t.Fatalf("photo count = %d, want 1", len(photos))
+	}
+	if photos[0].UploadClientID != "retry-client-1" {
+		t.Fatalf("stored upload client id = %q, want retry-client-1", photos[0].UploadClientID)
+	}
+}
+
+func ptrTime(v time.Time) *time.Time { return &v }
 
 func TestHandleUpdatePreferencesPersistsYoloMode(t *testing.T) {
 	server := newSearchTestServer(t)

@@ -13,6 +13,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.CancellationException
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
@@ -99,7 +100,9 @@ private data class QueuedUploadFailureInfo(
     val httpCode: Int?,
     val network: String?,
     val permanent: Boolean = false,
-    val pauseQueue: Boolean = false
+    val pauseQueue: Boolean = false,
+    val overrideDelayMs: Long? = null,
+    val ackUncertain: Boolean = false
 )
 
 private const val queueRetryRetentionMs = 7L * 24L * 60L * 60L * 1000L
@@ -343,6 +346,28 @@ object UploadQueueManager {
                 (it.nextRetryAtMs <= 0L || it.nextRetryAtMs <= nowMs) &&
                 (it.retentionUntilMs <= 0L || it.retentionUntilMs > nowMs)
         }
+    }
+
+    @Synchronized
+    fun claimNextRunnable(context: Context, nowMs: Long = System.currentTimeMillis()): QueuedUploadItem? {
+        val all = read(context).toMutableList()
+        val index = all.indexOfFirst {
+            isAutoRetryState(it.status) &&
+                (it.nextRetryAtMs <= 0L || it.nextRetryAtMs <= nowMs) &&
+                (it.retentionUntilMs <= 0L || it.retentionUntilMs > nowMs)
+        }
+        if (index < 0) return null
+        val claimed = all[index].copy(
+            status = UploadQueueStatus.RUNNING,
+            transferProgressPercent = 1,
+            serverAckState = UploadQueueServerAckState.NONE,
+            updatedAtMs = nowMs,
+            lastAttemptStartedAtMs = nowMs,
+            leaseExpiresAtMs = nowMs + queueLeaseMs
+        )
+        all[index] = claimed
+        write(context, prune(all))
+        return claimed
     }
 
     @Synchronized
@@ -665,7 +690,7 @@ class UploadQueueWorker(
 
     override suspend fun doWork(): Result {
         UploadQueueManager.recoverStaleEntries(applicationContext)
-        val item = UploadQueueManager.nextRunnable(applicationContext) ?: return Result.success()
+        val item = UploadQueueManager.claimNextRunnable(applicationContext) ?: return Result.success()
         val networkSnapshot = queueNetworkSnapshotMeta(applicationContext)
         if (!queueHasStableNetwork(applicationContext)) {
             UploadQueueManager.markFailedTransient(
@@ -687,9 +712,7 @@ class UploadQueueWorker(
             UploadQueueScheduler.sync(applicationContext)
             return Result.success()
         }
-
-        UploadQueueManager.markRunning(applicationContext, item.id)
-        val repo = AppRepo(applicationContext, buildStandardHttpClient())
+        val repo = AppRepo(applicationContext, buildStandardHttpClient(timeoutProfile = QueueUploadHttpTimeoutProfile))
         val probe = repo.measureUploadTelemetryProbe()
         appendDebugLog(
             context = applicationContext,
@@ -778,7 +801,8 @@ class UploadQueueWorker(
                         httpCode = failureInfo.httpCode,
                         networkWaiting = failureInfo.network != null && failureInfo.reason != "ssl_handshake" && failureInfo.reason != "cert_path_validator" && failureInfo.reason != "ssl_other",
                         secureNetworkWaiting = failureInfo.reason == "ssl_handshake" || failureInfo.reason == "cert_path_validator" || failureInfo.reason == "ssl_other",
-                        overrideDelayMs = if (failureInfo.reason == "ssl_handshake" || failureInfo.reason == "cert_path_validator" || failureInfo.reason == "ssl_other") 15L * 60L * 1000L else null
+                        overrideDelayMs = failureInfo.overrideDelayMs
+                            ?: if (failureInfo.reason == "ssl_handshake" || failureInfo.reason == "cert_path_validator" || failureInfo.reason == "ssl_other") 15L * 60L * 1000L else null
                     )
                 }
             }
@@ -890,21 +914,30 @@ class UploadQueueWorker(
         val locationLongitudePart = item.locationLongitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
 
         UploadQueueManager.markProgress(applicationContext, item.id, 1)
-        repo.uploadDualAuthorized(
-            backPart = backPart,
-            frontPart = frontPart,
-            kind = kind,
-            capturedAtPart = capturedAtPart,
-            uploadClientIdPart = uploadClientIdPart,
-            capsuleModePart = capsuleModePart,
-            capsulePrivatePart = capsulePrivatePart,
-            capsuleGroupRemindPart = capsuleGroupRemindPart,
-            locationSharedPart = locationSharedPart,
-            locationLatitudePart = locationLatitudePart,
-            locationLongitudePart = locationLongitudePart
-        )
+        try {
+            repo.uploadDualAuthorized(
+                backPart = backPart,
+                frontPart = frontPart,
+                kind = kind,
+                capturedAtPart = capturedAtPart,
+                uploadClientIdPart = uploadClientIdPart,
+                capsuleModePart = capsuleModePart,
+                capsulePrivatePart = capsulePrivatePart,
+                capsuleGroupRemindPart = capsuleGroupRemindPart,
+                locationSharedPart = locationSharedPart,
+                locationLatitudePart = locationLatitudePart,
+                locationLongitudePart = locationLongitudePart
+            )
+        } catch (t: Throwable) {
+            if (awaitingAckLogged && queuedUploadNetworkFailureKind(t) == "timeout") {
+                throw QueueServerAckTimeoutException(t)
+            }
+            throw t
+        }
     }
 }
+
+private class QueueServerAckTimeoutException(cause: Throwable) : IOException("queue_server_ack_timeout", cause)
 
 private fun logQueuedUploadFailure(
     context: Context,
@@ -926,6 +959,7 @@ private fun logQueuedUploadFailure(
         append(";reason=").append(failureInfo.reason)
         append(";failureClass=").append(failureInfo.reason)
         append(";securityFailureClass=").append(failureInfo.reason)
+        append(";ackUncertain=").append(failureInfo.ackUncertain)
         append(";networkStateClass=").append(if (probe.networkStable) "stable" else "unstable")
         append(";retrySuppressedReason=").append(
             if (failureInfo.reason == "ssl_handshake" || failureInfo.reason == "cert_path_validator" || failureInfo.reason == "ssl_other") "waiting_for_secure_network" else "-"
@@ -971,6 +1005,25 @@ private fun queuedUploadNetworkFailureKind(throwable: Throwable): String? {
 }
 
 private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureInfo {
+    if (throwable is QueueServerAckTimeoutException) {
+        return QueuedUploadFailureInfo(
+            message = "Upload wurde gesendet, aber der Server hat zu spaet bestaetigt. Die App gleicht den Status automatisch erneut ab.",
+            reason = "server_ack_timeout",
+            httpCode = null,
+            network = "timeout",
+            overrideDelayMs = 20_000L,
+            ackUncertain = true
+        )
+    }
+    if (throwable is CancellationException || throwable::class.java.simpleName.contains("JobCancellationException")) {
+        return QueuedUploadFailureInfo(
+            message = "Vorheriger Uploadlauf wurde intern neu geplant. Neuer Versuch folgt automatisch.",
+            reason = "worker_cancelled",
+            httpCode = null,
+            network = null,
+            overrideDelayMs = 10_000L
+        )
+    }
     val networkKind = queuedUploadNetworkFailureKind(throwable)
     if (networkKind != null) {
         val message = when (networkKind) {
@@ -986,7 +1039,8 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
             message = message,
             reason = networkKind,
             httpCode = null,
-            network = networkKind
+            network = networkKind,
+            overrideDelayMs = if (networkKind == "timeout") 45_000L else null
         )
     }
     if (throwable is HttpException) {
@@ -1122,21 +1176,12 @@ object UploadQueueScheduler {
         if (nextDelay != null) {
             scheduleIn(context, nextDelay)
         } else {
-            WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+            cancelPendingWork(context)
         }
     }
 
     fun enqueueNow(context: Context) {
-        if (hasRunningWork(context)) return
-        val req = OneTimeWorkRequestBuilder<UploadQueueWorker>()
-            .setConstraints(constraints)
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(
-            WORK_NAME,
-            ExistingWorkPolicy.REPLACE,
-            req
-        )
+        scheduleInternal(context, 0L)
     }
 
     fun scheduleSoon(context: Context, delaySeconds: Long = 20) {
@@ -1144,7 +1189,19 @@ object UploadQueueScheduler {
     }
 
     fun scheduleIn(context: Context, delaySeconds: Long) {
+        scheduleInternal(context, delaySeconds.coerceAtLeast(0L))
+    }
+
+    @Synchronized
+    private fun scheduleInternal(context: Context, delaySeconds: Long) {
         if (hasRunningWork(context)) return
+        val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
+        val desiredAtMs = System.currentTimeMillis() + delaySeconds * 1000L
+        val existingScheduledAtMs = prefs.getLong(PREF_KEY_NEXT_SCHEDULED_AT_MS, 0L)
+        if (hasPendingWork(context) && existingScheduledAtMs in 1..desiredAtMs) {
+            return
+        }
+        cancelPendingWork(context)
         val req = OneTimeWorkRequestBuilder<UploadQueueWorker>()
             .setConstraints(constraints)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
@@ -1152,9 +1209,10 @@ object UploadQueueScheduler {
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             WORK_NAME,
-            ExistingWorkPolicy.REPLACE,
+            ExistingWorkPolicy.KEEP,
             req
         )
+        prefs.edit().putLong(PREF_KEY_NEXT_SCHEDULED_AT_MS, desiredAtMs).apply()
     }
 
     private fun hasRunningWork(context: Context): Boolean {
@@ -1163,7 +1221,25 @@ object UploadQueueScheduler {
         return infos.any { it.state == WorkInfo.State.RUNNING }
     }
 
+    private fun hasPendingWork(context: Context): Boolean {
+        val infos = runCatching { WorkManager.getInstance(context).getWorkInfosForUniqueWork(WORK_NAME).get() }.getOrNull()
+            ?: return false
+        return infos.any { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.BLOCKED }
+    }
+
+    private fun cancelPendingWork(context: Context) {
+        val workManager = WorkManager.getInstance(context)
+        val infos = runCatching { workManager.getWorkInfosForUniqueWork(WORK_NAME).get() }.getOrNull().orEmpty()
+        infos.filter { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.BLOCKED }
+            .forEach { workManager.cancelWorkById(it.id) }
+        context.getSharedPreferences("app", Context.MODE_PRIVATE)
+            .edit()
+            .remove(PREF_KEY_NEXT_SCHEDULED_AT_MS)
+            .apply()
+    }
+
     private const val WORK_NAME = "daily_upload_queue_worker"
+    private const val PREF_KEY_NEXT_SCHEDULED_AT_MS = "upload_queue_next_scheduled_at_ms"
 }
 
 private fun retryDelayMs(attemptNumber: Int): Long {
