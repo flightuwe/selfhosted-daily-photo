@@ -24,11 +24,39 @@ class PushMessagingService : FirebaseMessagingService() {
             .remove("last_synced_device_token")
             .remove("last_synced_device_token_at")
             .apply()
+        PushNotificationDiagnostics.recordEvent(
+            this,
+            type = "push_new_token",
+            message = "pending_fcm_token_updated",
+            meta = "tokenLength=${token.length}"
+        )
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
         val prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
         val type = PushNotificationRules.normalizeType(message.data["type"])
+        val action = message.data["action"]?.trim().orEmpty()
+        val day = message.data["day"]?.trim().orEmpty()
+        val photoId = message.data["photoId"]?.trim().orEmpty()
+        PushNotificationDiagnostics.recordEvent(
+            this,
+            type = "push_message_received",
+            message = if (type.isBlank()) "unknown" else type,
+            meta = "action=${if (action.isBlank()) "-" else action};day=${if (day.isBlank()) "-" else day};photoId=${if (photoId.isBlank()) "-" else photoId};hasNotificationPayload=${message.notification != null};dataKeys=${message.data.keys.sorted().joinToString(",")}"
+        )
+        PushNotificationDiagnostics.recordPayload(
+            this,
+            source = "fcm_service",
+            type = type,
+            action = action,
+            day = day,
+            photoId = photoId,
+            title = message.notification?.title.orEmpty(),
+            body = message.notification?.body ?: message.data["body"].orEmpty(),
+            hasNotificationPayload = message.notification != null,
+            hasDataPayload = message.data.isNotEmpty(),
+            dataKeys = message.data.keys
+        )
         val prefsSnapshot = PushPreferenceSnapshot(
             masterEnabled = prefs.getBoolean("notifications_master_enabled", true),
             chatEnabled = prefs.getBoolean("chat_push_enabled_local", false),
@@ -43,48 +71,10 @@ class PushMessagingService : FirebaseMessagingService() {
         if (!PushNotificationRules.shouldDisplay(type, prefsSnapshot)) return
         if (isBlockedByQuietHours(type, prefs)) return
 
-        val action = message.data["action"]?.trim().orEmpty()
-        val day = message.data["day"]?.trim().orEmpty()
-        val photoId = message.data["photoId"]?.trim().orEmpty()
         val tone = toneConfig(prefs)
-        val channelId = ensurePromptChannel(this, tone)
         val title = message.notification?.title ?: "Daily Moment"
         val body = message.notification?.body ?: message.data["body"] ?: "Zeit fuer deinen taeglichen Moment."
-        val notificationId = PushNotificationRules.notificationId(type, action, day, photoId, title, body)
-
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra(EXTRA_LAUNCH_ACTION, action)
-            putExtra(EXTRA_LAUNCH_TYPE, type)
-            putExtra(EXTRA_LAUNCH_DAY, day)
-            photoId.toLongOrNull()?.takeIf { it > 0L }?.let {
-                putExtra(EXTRA_LAUNCH_PHOTO_ID, it)
-            }
-        }
-        val pending = PendingIntent.getActivity(
-            this,
-            1001,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = NotificationCompat.Builder(this, channelId)
-            .setSmallIcon(android.R.drawable.ic_menu_camera)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            .setGroup(PushNotificationRules.groupKey(type, action))
-            .setContentIntent(pending)
-            .apply {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && tone.enabled && tone.uri != null) {
-                    setSound(tone.uri)
-                }
-            }
-            .build()
-
-        NotificationManagerCompat.from(this).notify(notificationId, notification)
-        trackPushNotificationId(this, notificationId)
+        postTrackedNotification(this, tone, type, action, day, photoId, title, body, source = "fcm_service")
     }
 
     companion object {
@@ -98,15 +88,105 @@ class PushMessagingService : FirebaseMessagingService() {
         private const val PREF_QUIET_HOURS_START = "quiet_hours_start"
         private const val PREF_QUIET_HOURS_END = "quiet_hours_end"
 
-        fun clearTrackedPushNotifications(context: Context) {
+        fun clearTrackedPushNotifications(context: Context, reason: String = "unknown", aggressive: Boolean = true) {
             val prefs = context.getSharedPreferences(PUSH_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
             val ids = prefs.getStringSet(PUSH_NOTIFICATION_IDS_KEY, emptySet())
                 ?.mapNotNull { it.toIntOrNull() }
                 .orEmpty()
-            if (ids.isEmpty()) return
             val notifications = NotificationManagerCompat.from(context)
+            val beforeSnapshot = PushNotificationDiagnostics.activeNotificationsSnapshot(context)
+            PushNotificationDiagnostics.recordEvent(
+                context,
+                type = "push_clear_started",
+                message = reason,
+                meta = "trackedIds=${if (ids.isEmpty()) "-" else ids.joinToString(",")};before=$beforeSnapshot"
+            )
             ids.forEach(notifications::cancel)
+            val remainingBeforeFallback = PushNotificationDiagnostics.activeNotificationsCount(context)
+            var usedCancelAll = false
+            if (aggressive && remainingBeforeFallback > 0) {
+                notifications.cancelAll()
+                usedCancelAll = true
+            }
+            val afterSnapshot = PushNotificationDiagnostics.activeNotificationsSnapshot(context)
+            PushNotificationDiagnostics.recordEvent(
+                context,
+                type = "push_clear_finished",
+                message = reason,
+                meta = "trackedIds=${if (ids.isEmpty()) "-" else ids.joinToString(",")};usedCancelAll=$usedCancelAll;after=$afterSnapshot"
+            )
             prefs.edit().remove(PUSH_NOTIFICATION_IDS_KEY).apply()
+        }
+
+        fun clearAllNotifications(context: Context, reason: String = "unknown_cancel_all") {
+            val notifications = NotificationManagerCompat.from(context)
+            val beforeSnapshot = PushNotificationDiagnostics.activeNotificationsSnapshot(context)
+            notifications.cancelAll()
+            PushNotificationDiagnostics.recordEvent(
+                context,
+                type = "push_cancel_all",
+                message = reason,
+                meta = "before=$beforeSnapshot;after=${PushNotificationDiagnostics.activeNotificationsSnapshot(context)}"
+            )
+        }
+
+        fun showDebugTrackedNotificationBurst(context: Context) {
+            val prefs = context.getSharedPreferences(PUSH_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+            val tone = toneConfig(prefs)
+            repeat(3) { index ->
+                postTrackedNotification(
+                    context = context,
+                    tone = tone,
+                    type = "chat",
+                    action = "open_chat",
+                    day = "",
+                    photoId = "",
+                    title = "Daily Debug ${index + 1}",
+                    body = "Test-Benachrichtigung ${index + 1} fuer die Aufraeum-Diagnose.",
+                    source = "debug_burst"
+                )
+            }
+            PushNotificationDiagnostics.recordEvent(
+                context,
+                type = "push_debug_burst_posted",
+                message = "posted 3 debug notifications",
+                meta = PushNotificationDiagnostics.activeNotificationsSnapshot(context)
+            )
+        }
+
+        fun showDebugNotificationScenario(context: Context, scenarioId: String) {
+            val prefs = context.getSharedPreferences(PUSH_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+            val tone = toneConfig(prefs)
+            when (scenarioId.trim().lowercase()) {
+                "mixed_matrix" -> {
+                    postTrackedNotification(context, tone, "chat", "open_chat", "", "", "Debug Chat", "Chat-Matrix 1", "debug_mixed")
+                    postTrackedNotification(context, tone, "chat_poll", "open_chat", "", "", "Debug Poll", "Poll-Matrix 2", "debug_mixed")
+                    postTrackedNotification(context, tone, "post", "open_feed", "2026-07-02", "321", "Debug Feed", "Feed-Matrix 3", "debug_mixed")
+                    postTrackedNotification(context, tone, "special_request", "open_camera", "", "", "Debug Prompt", "Prompt-Matrix 4", "debug_mixed")
+                }
+                "same_id_matrix" -> {
+                    repeat(3) {
+                        postTrackedNotification(context, tone, "chat", "open_chat", "", "", "Debug Same ID", "Immer gleicher Inhalt", "debug_same_id")
+                    }
+                }
+                "feed_matrix" -> {
+                    postTrackedNotification(context, tone, "post", "open_feed", "2026-07-02", "501", "Debug Feed", "Feed-Test A", "debug_feed")
+                    postTrackedNotification(context, tone, "photo_comment", "open_feed", "2026-07-01", "502", "Debug Kommentar", "Feed-Test B", "debug_feed")
+                    postTrackedNotification(context, tone, "chat_poll", "open_chat", "", "", "Debug Poll", "Feed/Poll-Test", "debug_feed")
+                }
+                "summary_group_matrix" -> {
+                    postTrackedNotification(context, tone, "chat", "open_chat", "", "", "Group Chat 1", "Gruppen-Test 1", "debug_group")
+                    postTrackedNotification(context, tone, "chat_poll", "open_chat", "", "", "Group Chat 2", "Gruppen-Test 2", "debug_group")
+                    postTrackedNotification(context, tone, "chat_message", "open_chat", "", "", "Group Chat 3", "Gruppen-Test 3", "debug_group")
+                }
+                else -> showDebugTrackedNotificationBurst(context)
+            }
+            PushNotificationDiagnostics.recordEvent(
+                context,
+                type = "push_debug_scenario",
+                message = scenarioId,
+                meta = PushNotificationDiagnostics.activeNotificationsSnapshot(context)
+            )
         }
 
         fun showLocalUpdateNotification(context: Context, update: UpdateInfo) {
@@ -184,6 +264,73 @@ class PushMessagingService : FirebaseMessagingService() {
         }
 
         private data class ToneConfig(val enabled: Boolean, val uri: Uri?)
+
+        private fun postTrackedNotification(
+            context: Context,
+            tone: ToneConfig,
+            type: String,
+            action: String,
+            day: String,
+            photoId: String,
+            title: String,
+            body: String,
+            source: String
+        ) {
+            val channelId = ensurePromptChannel(context, tone)
+            val notificationId = PushNotificationRules.notificationId(type, action, day, photoId, title, body)
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra(EXTRA_LAUNCH_ACTION, action)
+                putExtra(EXTRA_LAUNCH_TYPE, type)
+                putExtra(EXTRA_LAUNCH_DAY, day)
+                photoId.toLongOrNull()?.takeIf { it > 0L }?.let {
+                    putExtra(EXTRA_LAUNCH_PHOTO_ID, it)
+                }
+            }
+            val pending = PendingIntent.getActivity(
+                context,
+                1001,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(android.R.drawable.ic_menu_camera)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setGroup(PushNotificationRules.groupKey(type, action))
+                .setContentIntent(pending)
+                .apply {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && tone.enabled && tone.uri != null) {
+                        setSound(tone.uri)
+                    }
+                }
+                .build()
+
+            NotificationManagerCompat.from(context).notify(notificationId, notification)
+            trackPushNotificationId(context, notificationId)
+            PushNotificationDiagnostics.recordPayload(
+                context,
+                source = source,
+                type = type,
+                action = action,
+                day = day,
+                photoId = photoId,
+                title = title,
+                body = body,
+                hasNotificationPayload = true,
+                hasDataPayload = true,
+                dataKeys = listOf("type", "action", "day", "photoId", "body")
+            )
+            PushNotificationDiagnostics.recordEvent(
+                context,
+                type = "push_notification_posted",
+                message = if (type.isBlank()) "unknown" else type,
+                meta = "source=$source;id=$notificationId;action=${if (action.isBlank()) "-" else action};group=${PushNotificationRules.groupKey(type, action)};channel=$channelId;snapshot=${PushNotificationDiagnostics.activeNotificationsSnapshot(context)}"
+            )
+        }
 
         private fun trackPushNotificationId(context: Context, notificationId: Int) {
             val prefs = context.getSharedPreferences(PUSH_NOTIFICATION_PREFS, Context.MODE_PRIVATE)

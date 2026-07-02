@@ -2,6 +2,13 @@
 
 This file is append-only operational history for Forge-side Daily continuity.
 
+## 2026-07-02
+
+- Prepared Android patch release `v0.6.4` with `versionName=0.6.4` and `versionCode=141535` for the new optional notification-debug tooling.
+- Kept the release Android-only; no backend rollout is required for these diagnostic and local notification-lab additions.
+- Added a gated notification-debug mode with push-event history, launch-intent tracking, active-notification snapshots, export bundles, local scenario generation and clear-lab controls.
+- Verified locally with `gradle :app:compileDebugKotlin`, `gradle :app:testDebugUnitTest`, `gradle :app:assembleDebug` and `gradle :app:assembleRelease` before GitHub release preparation.
+
 ## 2026-06-30
 
 - Prepared Android patch release `v0.6.3` with `versionName=0.6.3` and `versionCode=141534` for the notification cleanup and push-preference hardening work.

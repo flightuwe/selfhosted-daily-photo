@@ -1802,6 +1802,57 @@ class AppRepo(
         writeDebugLogsInternal(current)
     }
 
+    fun postDebugNotificationBurst() {
+        PushMessagingService.showDebugTrackedNotificationBurst(context)
+    }
+
+    fun logNotificationDebugSnapshot(reason: String) {
+        PushNotificationDiagnostics.recordEvent(
+            context,
+            type = "push_snapshot_manual",
+            message = reason,
+            meta = PushNotificationDiagnostics.activeNotificationsSnapshot(context)
+        )
+    }
+
+    fun notificationDebugState(): NotificationDebugState = PushNotificationDiagnostics.readState(context)
+
+    fun notificationDebugEnabled(): Boolean = PushNotificationDiagnostics.isEnabled(context)
+
+    fun notificationDebugExpiresAt(): String = PushNotificationDiagnostics.expiresAt(context)
+
+    fun setNotificationDebugEnabled(enabled: Boolean) {
+        PushNotificationDiagnostics.setEnabled(context, enabled)
+    }
+
+    fun clearNotificationDebugData(keepMode: Boolean = true) {
+        PushNotificationDiagnostics.clearStoredState(context, keepMode)
+    }
+
+    fun exportNotificationDebugBundle(): Uri {
+        return PushNotificationDiagnostics.exportBundle(context)
+    }
+
+    fun refreshNotificationDebugEnvironment(reason: String = "manual_refresh") {
+        PushNotificationDiagnostics.recordEnvironmentSnapshot(context, reason)
+    }
+
+    fun clearTrackedNotificationsForDebug(reason: String = "debug_tracked_only") {
+        PushMessagingService.clearTrackedPushNotifications(context, reason = reason, aggressive = false)
+    }
+
+    fun clearAllNotificationsForDebug(reason: String = "debug_cancel_all") {
+        PushMessagingService.clearAllNotifications(context, reason = reason)
+    }
+
+    fun clearTrackedAndAllNotificationsForDebug(reason: String = "debug_tracked_plus_all") {
+        PushMessagingService.clearTrackedPushNotifications(context, reason = reason, aggressive = true)
+    }
+
+    fun postNotificationDebugScenario(scenarioId: String) {
+        PushMessagingService.showDebugNotificationScenario(context, scenarioId)
+    }
+
     fun exportDebugLogsForShare(): Uri {
         val exportDir = File(context.cacheDir, "diagnostics").apply { mkdirs() }
         val file = File(exportDir, "daily-diagnose-${System.currentTimeMillis()}.txt")
@@ -3712,6 +3763,22 @@ data class UiState(
     val showDiagnosticsConsentDialog: Boolean = false,
     val diagnosticsConsentPrompt: UserPromptRule? = null,
     val debugLogs: List<DebugLogEntry> = emptyList(),
+    val notificationDebugEnabled: Boolean = false,
+    val notificationDebugExpiresAt: String = "",
+    val notificationDebugEvents: List<NotificationDebugEvent> = emptyList(),
+    val notificationDebugLaunches: List<NotificationDebugLaunch> = emptyList(),
+    val notificationDebugPayloads: List<NotificationDebugPayload> = emptyList(),
+    val notificationDebugActiveItems: List<NotificationDebugActiveItem> = emptyList(),
+    val notificationDebugEnvironment: NotificationDebugEnvironment = NotificationDebugEnvironment(
+        notificationsEnabled = true,
+        postPermissionGranted = true,
+        activeCount = 0,
+        manufacturer = "",
+        model = "",
+        sdkInt = Build.VERSION.SDK_INT,
+        release = Build.VERSION.RELEASE.orEmpty(),
+        channels = emptyList()
+    ),
     val networkAdvice: String = "",
     val fotomojiTemplates: List<FotomojiTemplateItem> = emptyList(),
     val fotomojiTemplatesLoading: Boolean = false,
@@ -3908,9 +3975,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
             allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
             debugLogs = repo.recentDebugLogs()
-        )
+        ).let(::withNotificationDebugState)
     )
         private set
+
+    private fun withNotificationDebugState(base: UiState): UiState {
+        val debugState = repo.notificationDebugState()
+        return base.copy(
+            notificationDebugEnabled = debugState.enabled,
+            notificationDebugExpiresAt = debugState.expiresAt,
+            notificationDebugEvents = debugState.events,
+            notificationDebugLaunches = debugState.launches,
+            notificationDebugPayloads = debugState.payloads,
+            notificationDebugActiveItems = debugState.activeItems,
+            notificationDebugEnvironment = debugState.environment
+        )
+    }
 
     private fun normalizeChatBody(body: String): String =
         body.trim().split(Regex("\\s+")).filter { it.isNotBlank() }.joinToString(" ").lowercase()
@@ -4896,7 +4976,100 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun refreshDebugLogs() {
-        state = state.copy(debugLogs = repo.recentDebugLogs())
+        state = withNotificationDebugState(state.copy(debugLogs = repo.recentDebugLogs()))
+    }
+
+    fun postDebugNotificationBurst() {
+        repo.postDebugNotificationBurst()
+        state = withNotificationDebugState(state.copy(
+            debugLogs = repo.recentDebugLogs(),
+            message = "Debug-Benachrichtigungen erzeugt"
+        ))
+    }
+
+    fun captureNotificationDebugSnapshot() {
+        repo.logNotificationDebugSnapshot("profile_debug_button")
+        state = withNotificationDebugState(state.copy(
+            debugLogs = repo.recentDebugLogs(),
+            message = "Notification-Snapshot protokolliert"
+        ))
+    }
+
+    fun setNotificationDebugEnabled(enabled: Boolean) {
+        repo.setNotificationDebugEnabled(enabled)
+        if (enabled) {
+            repo.refreshNotificationDebugEnvironment("ui_toggle_enabled")
+        }
+        state = withNotificationDebugState(
+            state.copy(
+                debugLogs = repo.recentDebugLogs(),
+                message = if (enabled) "Notification-Debugmodus aktiviert" else "Notification-Debugmodus deaktiviert"
+            )
+        )
+    }
+
+    fun clearNotificationDebugData() {
+        repo.clearNotificationDebugData(keepMode = true)
+        state = withNotificationDebugState(
+            state.copy(
+                debugLogs = repo.recentDebugLogs(),
+                message = "Notification-Debugdaten geloescht"
+            )
+        )
+    }
+
+    fun refreshNotificationDebugState() {
+        repo.refreshNotificationDebugEnvironment("ui_manual_refresh")
+        state = withNotificationDebugState(
+            state.copy(
+                debugLogs = repo.recentDebugLogs(),
+                message = "Notification-Debug aktualisiert"
+            )
+        )
+    }
+
+    fun exportNotificationDebugBundle(): Uri? {
+        return runCatching { repo.exportNotificationDebugBundle() }.getOrNull()
+    }
+
+    fun clearTrackedNotificationsForDebug() {
+        repo.clearTrackedNotificationsForDebug()
+        state = withNotificationDebugState(
+            state.copy(
+                debugLogs = repo.recentDebugLogs(),
+                message = "Tracked Notifications geloescht"
+            )
+        )
+    }
+
+    fun clearAllNotificationsForDebug() {
+        repo.clearAllNotificationsForDebug()
+        state = withNotificationDebugState(
+            state.copy(
+                debugLogs = repo.recentDebugLogs(),
+                message = "cancelAll() ausgefuehrt"
+            )
+        )
+    }
+
+    fun clearTrackedAndAllNotificationsForDebug() {
+        repo.clearTrackedAndAllNotificationsForDebug()
+        state = withNotificationDebugState(
+            state.copy(
+                debugLogs = repo.recentDebugLogs(),
+                message = "Tracked + cancelAll() ausgefuehrt"
+            )
+        )
+    }
+
+    fun postNotificationDebugScenario(scenarioId: String) {
+        repo.postNotificationDebugScenario(scenarioId)
+        state = withNotificationDebugState(
+            state.copy(
+                debugLogs = repo.recentDebugLogs(),
+                message = "Notification-Test '$scenarioId' erzeugt"
+            )
+        )
     }
 
     suspend fun autoUploadDebugLogsIfEnabled() {
@@ -8393,7 +8566,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        PushMessagingService.clearTrackedPushNotifications(this)
+        PushNotificationDiagnostics.recordEvent(
+            this,
+            type = "push_activity_open",
+            message = "onCreate",
+            meta = "intentAction=${intent?.getStringExtra(EXTRA_LAUNCH_ACTION).orEmpty().ifBlank { "-" }};intentType=${intent?.getStringExtra(EXTRA_LAUNCH_TYPE).orEmpty().ifBlank { "-" }};snapshot=${PushNotificationDiagnostics.activeNotificationsSnapshot(this)}"
+        )
+        PushNotificationDiagnostics.recordLaunchIntent(this, "activity_on_create", intent)
+        PushMessagingService.clearTrackedPushNotifications(this, reason = "activity_on_create")
 
         val httpClient = buildStandardHttpClient()
         repo = AppRepo(this, httpClient)
@@ -8418,7 +8598,14 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        PushMessagingService.clearTrackedPushNotifications(this)
+        PushNotificationDiagnostics.recordEvent(
+            this,
+            type = "push_activity_open",
+            message = "onNewIntent",
+            meta = "intentAction=${intent.getStringExtra(EXTRA_LAUNCH_ACTION).orEmpty().ifBlank { "-" }};intentType=${intent.getStringExtra(EXTRA_LAUNCH_TYPE).orEmpty().ifBlank { "-" }};snapshot=${PushNotificationDiagnostics.activeNotificationsSnapshot(this)}"
+        )
+        PushNotificationDiagnostics.recordLaunchIntent(this, "activity_on_new_intent", intent)
+        PushMessagingService.clearTrackedPushNotifications(this, reason = "activity_on_new_intent")
         if (::repo.isInitialized) {
             repo.captureLaunchIntent(intent)
         }
@@ -8427,7 +8614,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        PushMessagingService.clearTrackedPushNotifications(this)
+        PushNotificationDiagnostics.recordEvent(
+            this,
+            type = "push_activity_open",
+            message = "onResume",
+            meta = "snapshot=${PushNotificationDiagnostics.activeNotificationsSnapshot(this)}"
+        )
+        PushMessagingService.clearTrackedPushNotifications(this, reason = "activity_on_resume")
     }
 
 }
@@ -9692,6 +9885,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     diagnosticsUploadEnabled = state.diagnosticsUploadEnabled,
                     diagnosticsConsentGranted = state.diagnosticsConsentGranted,
                     debugLogs = state.debugLogs,
+                    notificationDebugEnabled = state.notificationDebugEnabled,
+                    notificationDebugExpiresAt = state.notificationDebugExpiresAt,
+                    notificationDebugEvents = state.notificationDebugEvents,
+                    notificationDebugLaunches = state.notificationDebugLaunches,
+                    notificationDebugPayloads = state.notificationDebugPayloads,
+                    notificationDebugActiveItems = state.notificationDebugActiveItems,
+                    notificationDebugEnvironment = state.notificationDebugEnvironment,
                     fotomojiTemplates = state.fotomojiTemplates,
                     fotomojiTemplatesLoading = state.fotomojiTemplatesLoading,
                     profileSetupJumpTarget = state.profileSetupJumpTarget,
@@ -9767,6 +9967,28 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                             context.startActivity(Intent.createChooser(share, "Diagnose teilen"))
                         }
                     },
+                    onNotificationDebugEnabledChange = { vm.setNotificationDebugEnabled(it) },
+                    onRefreshNotificationDebug = { vm.refreshNotificationDebugState() },
+                    onExportNotificationDebug = {
+                        val uri = vm.exportNotificationDebugBundle()
+                        if (uri != null) {
+                            val share = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                putExtra(Intent.EXTRA_SUBJECT, "Daily Notification Debug")
+                                putExtra(Intent.EXTRA_TEXT, "Notification-Debug-Export aus Daily")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(share, "Notification-Diagnose teilen"))
+                        }
+                    },
+                    onClearNotificationDebugData = { vm.clearNotificationDebugData() },
+                    onPostDebugNotifications = { vm.postDebugNotificationBurst() },
+                    onCaptureNotificationSnapshot = { vm.captureNotificationDebugSnapshot() },
+                    onNotificationDebugScenario = { vm.postNotificationDebugScenario(it) },
+                    onClearTrackedNotificationsForDebug = { vm.clearTrackedNotificationsForDebug() },
+                    onClearAllNotificationsForDebug = { vm.clearAllNotificationsForDebug() },
+                    onClearTrackedAndAllNotificationsForDebug = { vm.clearTrackedAndAllNotificationsForDebug() },
                     onRefreshFotomojiTemplates = { scope.launch { vm.refreshFotomojiTemplates() } },
                     onCaptureFotomojiTemplate = { emoji ->
                         pendingProfileFotomojiTemplateEmoji = emoji
@@ -13440,6 +13662,13 @@ fun ProfileTab(
     diagnosticsUploadEnabled: Boolean,
     diagnosticsConsentGranted: Boolean,
     debugLogs: List<DebugLogEntry>,
+    notificationDebugEnabled: Boolean,
+    notificationDebugExpiresAt: String,
+    notificationDebugEvents: List<NotificationDebugEvent>,
+    notificationDebugLaunches: List<NotificationDebugLaunch>,
+    notificationDebugPayloads: List<NotificationDebugPayload>,
+    notificationDebugActiveItems: List<NotificationDebugActiveItem>,
+    notificationDebugEnvironment: NotificationDebugEnvironment,
     fotomojiTemplates: List<FotomojiTemplateItem>,
     fotomojiTemplatesLoading: Boolean,
     profileSetupJumpTarget: String,
@@ -13493,6 +13722,16 @@ fun ProfileTab(
     onDiagnosticsConsentChange: (Boolean) -> Unit,
     onRefreshDebugLogs: () -> Unit,
     onShareDebugLogs: () -> Unit,
+    onNotificationDebugEnabledChange: (Boolean) -> Unit,
+    onRefreshNotificationDebug: () -> Unit,
+    onExportNotificationDebug: () -> Unit,
+    onClearNotificationDebugData: () -> Unit,
+    onPostDebugNotifications: () -> Unit,
+    onCaptureNotificationSnapshot: () -> Unit,
+    onNotificationDebugScenario: (String) -> Unit,
+    onClearTrackedNotificationsForDebug: () -> Unit,
+    onClearAllNotificationsForDebug: () -> Unit,
+    onClearTrackedAndAllNotificationsForDebug: () -> Unit,
     onRefreshFotomojiTemplates: () -> Unit,
     onCaptureFotomojiTemplate: (String) -> Unit,
     onDeleteFotomojiTemplate: (String) -> Unit,
@@ -14832,12 +15071,149 @@ fun ProfileTab(
                                   "Erfordert zuerst die freiwillige Datenfreigabe."
                               }
                           )
+                          SettingsToggleRow(
+                              label = "Notification-Debugmodus",
+                              checked = notificationDebugEnabled,
+                              onCheckedChange = onNotificationDebugEnabledChange,
+                              supportingText = if (notificationDebugEnabled) {
+                                  "Aktiv bis ${notificationDebugExpiresAt.take(16).ifBlank { "-" }}. Erfasst Push-Pfade, Launch-Intents, aktive Notifications und Clear-Versuche lokal."
+                              } else {
+                                  "Optionaler Tiefen-Debug nur fuer Benachrichtigungsprobleme. Standardmaessig aus und ohne Alltagsauswirkung."
+                              }
+                          )
                           Row(
                               modifier = Modifier.fillMaxWidth(),
                               horizontalArrangement = Arrangement.spacedBy(8.dp)
                           ) {
                               Button(onClick = onRefreshDebugLogs, modifier = Modifier.weight(1f)) { Text("Letzte Fehler") }
                               Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) { Text("Diagnose exportieren") }
+                          }
+                          if (notificationDebugEnabled) {
+                              Card(modifier = Modifier.fillMaxWidth()) {
+                                  Column(
+                                      modifier = Modifier.padding(10.dp),
+                                      verticalArrangement = Arrangement.spacedBy(8.dp)
+                                  ) {
+                                      Text("Notification-Debugmodus", fontWeight = FontWeight.SemiBold)
+                                      Text("Umgebung: enabled=${notificationDebugEnvironment.notificationsEnabled}, permission=${notificationDebugEnvironment.postPermissionGranted}, active=${notificationDebugEnvironment.activeCount}, device=${notificationDebugEnvironment.manufacturer} ${notificationDebugEnvironment.model}, sdk=${notificationDebugEnvironment.sdkInt}")
+                                      Text(
+                                          "Kanaele: ${if (notificationDebugEnvironment.channels.isEmpty()) "-" else notificationDebugEnvironment.channels.take(4).joinToString(" | ") { "${it.id}:${it.importance}" }}",
+                                          color = MaterialTheme.colorScheme.onSurfaceVariant
+                                      )
+                                      Row(
+                                          modifier = Modifier.fillMaxWidth(),
+                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                      ) {
+                                          Button(onClick = onRefreshNotificationDebug, modifier = Modifier.weight(1f)) { Text("Aktualisieren") }
+                                          Button(onClick = onExportNotificationDebug, modifier = Modifier.weight(1f)) { Text("Notif-Export") }
+                                      }
+                                      Row(
+                                          modifier = Modifier.fillMaxWidth(),
+                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                      ) {
+                                          Button(onClick = onClearNotificationDebugData, modifier = Modifier.weight(1f)) { Text("Debug reset") }
+                                          Button(onClick = onCaptureNotificationSnapshot, modifier = Modifier.weight(1f)) { Text("Snapshot") }
+                                      }
+                                      Text("Testmatrix", fontWeight = FontWeight.SemiBold)
+                                      Row(
+                                          modifier = Modifier.fillMaxWidth(),
+                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                      ) {
+                                          Button(onClick = onPostDebugNotifications, modifier = Modifier.weight(1f)) { Text("Burst") }
+                                          Button(onClick = { onNotificationDebugScenario("mixed_matrix") }, modifier = Modifier.weight(1f)) { Text("Mixed") }
+                                      }
+                                      Row(
+                                          modifier = Modifier.fillMaxWidth(),
+                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                      ) {
+                                          Button(onClick = { onNotificationDebugScenario("same_id_matrix") }, modifier = Modifier.weight(1f)) { Text("Gleiche IDs") }
+                                          Button(onClick = { onNotificationDebugScenario("feed_matrix") }, modifier = Modifier.weight(1f)) { Text("Feed/Poll") }
+                                      }
+                                      Text("Clear-Labor", fontWeight = FontWeight.SemiBold)
+                                      Row(
+                                          modifier = Modifier.fillMaxWidth(),
+                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                      ) {
+                                          Button(onClick = onClearTrackedNotificationsForDebug, modifier = Modifier.weight(1f)) { Text("Tracked") }
+                                          Button(onClick = onClearAllNotificationsForDebug, modifier = Modifier.weight(1f)) { Text("cancelAll") }
+                                      }
+                                      Row(
+                                          modifier = Modifier.fillMaxWidth(),
+                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                      ) {
+                                          Button(onClick = onClearTrackedAndAllNotificationsForDebug, modifier = Modifier.weight(1f)) { Text("Tracked+All") }
+                                          Button(onClick = { onNotificationDebugScenario("summary_group_matrix") }, modifier = Modifier.weight(1f)) { Text("Group-Test") }
+                                      }
+                                  }
+                              }
+                              Card(modifier = Modifier.fillMaxWidth()) {
+                                  Column(
+                                      modifier = Modifier.padding(10.dp),
+                                      verticalArrangement = Arrangement.spacedBy(6.dp)
+                                  ) {
+                                      Text("Aktive Notifications", fontWeight = FontWeight.SemiBold)
+                                      if (notificationDebugActiveItems.isEmpty()) {
+                                          Text("Keine aktiven Notifications sichtbar")
+                                      } else {
+                                          notificationDebugActiveItems.take(6).forEach { item ->
+                                              Text("id=${item.id} channel=${item.channelId.ifBlank { "-" }} group=${item.groupKey.ifBlank { "-" }} summary=${item.isGroupSummary}", fontWeight = FontWeight.SemiBold)
+                                              Text("${item.title.ifBlank { "-" }} | ${item.text.ifBlank { "-" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                          }
+                                      }
+                                  }
+                              }
+                              Card(modifier = Modifier.fillMaxWidth()) {
+                                  Column(
+                                      modifier = Modifier.padding(10.dp),
+                                      verticalArrangement = Arrangement.spacedBy(6.dp)
+                                  ) {
+                                      Text("Push-Historie", fontWeight = FontWeight.SemiBold)
+                                      if (notificationDebugEvents.isEmpty()) {
+                                          Text("Noch keine Notification-Debug-Events")
+                                      } else {
+                                          notificationDebugEvents.take(8).forEach { row ->
+                                              Text("[${row.createdAt.take(16)}] ${row.type}", fontWeight = FontWeight.SemiBold)
+                                              Text(row.message, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                              if (row.meta.isNotBlank()) {
+                                                  Text(row.meta, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                              Card(modifier = Modifier.fillMaxWidth()) {
+                                  Column(
+                                      modifier = Modifier.padding(10.dp),
+                                      verticalArrangement = Arrangement.spacedBy(6.dp)
+                                  ) {
+                                      Text("Launch-Intents", fontWeight = FontWeight.SemiBold)
+                                      if (notificationDebugLaunches.isEmpty()) {
+                                          Text("Noch keine Launch-Intents protokolliert")
+                                      } else {
+                                          notificationDebugLaunches.take(5).forEach { row ->
+                                              Text("[${row.createdAt.take(16)}] ${row.source}", fontWeight = FontWeight.SemiBold)
+                                              Text("action=${row.action.ifBlank { "-" }} type=${row.type.ifBlank { "-" }} day=${row.day.ifBlank { "-" }} photoId=${row.photoId.ifBlank { "-" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                          }
+                                      }
+                                  }
+                              }
+                              Card(modifier = Modifier.fillMaxWidth()) {
+                                  Column(
+                                      modifier = Modifier.padding(10.dp),
+                                      verticalArrangement = Arrangement.spacedBy(6.dp)
+                                  ) {
+                                      Text("Payloads", fontWeight = FontWeight.SemiBold)
+                                      if (notificationDebugPayloads.isEmpty()) {
+                                          Text("Noch keine Payloads protokolliert")
+                                      } else {
+                                          notificationDebugPayloads.take(5).forEach { row ->
+                                              Text("[${row.createdAt.take(16)}] ${row.source}/${row.type.ifBlank { "unknown" }}", fontWeight = FontWeight.SemiBold)
+                                              Text("notification=${row.hasNotificationPayload} data=${row.hasDataPayload} action=${row.action.ifBlank { "-" }} keys=${row.dataKeys.ifBlank { "-" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                              Text("${row.title.ifBlank { "-" }} | ${row.body.ifBlank { "-" }}", color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                          }
+                                      }
+                                  }
+                              }
                           }
                           Card(modifier = Modifier.fillMaxWidth()) {
                               Column(
