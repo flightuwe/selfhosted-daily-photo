@@ -4,6 +4,12 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-07-02
 
+- Prepared combined server/android release `v0.6.5` with `versionName=0.6.5` and `versionCode=141536` for the chat composer, chat-length controls and push-diagnostics follow-up.
+- Added global admin-managed chat message limits with default `5000` characters, optional unlimited mode, server-side normalized length validation and portable text storage for long chat bodies.
+- Reworked the Android chat composer into a multi-line mobile layout with inline limit feedback, local over-limit blocking and richer debug metadata for failed chat sends.
+- Extended notification diagnostics so real FCM deliveries are marked separately from local debug scenarios and clear-path metadata remains exportable for follow-up analysis.
+- Verified locally with `go test ./internal/api`, `go build ./cmd/server`, `npm run build`, `gradle :app:compileDebugKotlin`, `gradle :app:testDebugUnitTest`, `gradle :app:assembleDebug` and `gradle :app:assembleRelease`; full `go test ./...` remains locally blocked by missing CGO/GCC for SQLite-backed scheduler tests.
+
 - Prepared Android patch release `v0.6.4` with `versionName=0.6.4` and `versionCode=141535` for the new optional notification-debug tooling.
 - Kept the release Android-only; no backend rollout is required for these diagnostic and local notification-lab additions.
 - Added a gated notification-debug mode with push-event history, launch-intent tracking, active-notification snapshots, export bundles, local scenario generation and clear-lab controls.

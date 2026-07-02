@@ -25,6 +25,8 @@ export type Settings = {
   performanceTrackingOneShot: boolean;
   promptNotificationText: string;
   maxUploadBytes: number;
+  chatMessageMaxLength: number;
+  chatMessageUnlimited: boolean;
   chatCommandEnabled: boolean;
   chatCommandValue: string;
   chatCommandTrigger: boolean;
@@ -60,7 +62,8 @@ export type AdminStats = {
   diagnosticsConsentRate?: number;
 };
 
-export type AdminSearchScope = "users" | "reports" | "commands" | "history" | "posts";
+export type AdminSearchScope =
+  "users" | "reports" | "commands" | "history" | "posts";
 
 export type AdminSearchResult = {
   type: AdminSearchScope;
@@ -270,8 +273,19 @@ export type MonthlyRecap = {
   month: string;
   monthLabel: string;
   yourMoments: number;
-  mostReliableUser?: { id: number; username: string; favoriteColor?: string; count: number };
-  topSpontaneous: Array<{ day: string; userId: number; username: string; minutesAfterTrigger: number; createdAt: string }>;
+  mostReliableUser?: {
+    id: number;
+    username: string;
+    favoriteColor?: string;
+    count: number;
+  };
+  topSpontaneous: Array<{
+    day: string;
+    userId: number;
+    username: string;
+    minutesAfterTrigger: number;
+    createdAt: string;
+  }>;
 };
 
 export type AdminFeedResponse = {
@@ -761,7 +775,8 @@ export type ChatCommand = {
   id: number;
   name: string;
   command: string;
-  action: "trigger_moment" | "clear_chat" | "broadcast_push" | "send_chat_message";
+  action:
+    "trigger_moment" | "clear_chat" | "broadcast_push" | "send_chat_message";
   enabled: boolean;
   requireAdmin: boolean;
   sendPush: boolean;
@@ -1006,6 +1021,8 @@ const settingsDefaults: Settings = {
   performanceTrackingOneShot: false,
   promptNotificationText: "Zeit fuer dein Daily Foto",
   maxUploadBytes: 0,
+  chatMessageMaxLength: 5000,
+  chatMessageUnlimited: false,
   chatCommandEnabled: false,
   chatCommandValue: "-moment",
   chatCommandTrigger: true,
@@ -1020,9 +1037,11 @@ const settingsDefaults: Settings = {
   migrationTargetBaseUrl: "",
   migrationDownloadUrl: "",
   migrationPushTitle: "Daily umgezogen",
-  migrationPushBody: "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.",
+  migrationPushBody:
+    "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.",
   migrationScreenTitle: "Daily ist umgezogen",
-  migrationScreenBody: "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.",
+  migrationScreenBody:
+    "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.",
   migrationRequirePromptFirst: true,
   migrationExpectedSource: "",
   migrationBaselineUserCount: 0,
@@ -1050,13 +1069,17 @@ async function parse<T>(res: Response): Promise<T> {
 }
 
 function normalizeSettings(raw: any): Settings {
-  const rawRules = Array.isArray(raw?.userPromptRules) ? raw.userPromptRules : [];
+  const rawRules = Array.isArray(raw?.userPromptRules)
+    ? raw.userPromptRules
+    : [];
   const normalizedRules: UserPromptRule[] =
     rawRules.length > 0
       ? rawRules.map((rule: any, idx: number) => ({
           id: String(rule?.id ?? `rule_${idx + 1}`),
           enabled: Boolean(rule?.enabled ?? true),
-          triggerType: (String(rule?.triggerType ?? "app_version") as UserPromptRule["triggerType"]),
+          triggerType: String(
+            rule?.triggerType ?? "app_version",
+          ) as UserPromptRule["triggerType"],
           title: String(rule?.title ?? ""),
           body: String(rule?.body ?? ""),
           confirmLabel: String(rule?.confirmLabel ?? "Zustimmen"),
@@ -1066,35 +1089,159 @@ function normalizeSettings(raw: any): Settings {
         }))
       : settingsDefaults.userPromptRules;
   return {
-    promptWindowStartHour: Number(raw?.promptWindowStartHour ?? raw?.PromptWindowStartHour ?? settingsDefaults.promptWindowStartHour),
-    promptWindowEndHour: Number(raw?.promptWindowEndHour ?? raw?.PromptWindowEndHour ?? settingsDefaults.promptWindowEndHour),
-    uploadWindowMinutes: Number(raw?.uploadWindowMinutes ?? raw?.UploadWindowMinutes ?? settingsDefaults.uploadWindowMinutes),
-    feedCommentPreviewLimit: Number(raw?.feedCommentPreviewLimit ?? raw?.FeedCommentPreviewLimit ?? settingsDefaults.feedCommentPreviewLimit),
-    performanceTrackingEnabled: Boolean(raw?.performanceTrackingEnabled ?? raw?.PerformanceTrackingEnabled ?? settingsDefaults.performanceTrackingEnabled),
-    performanceTrackingWindowMinutes: Number(raw?.performanceTrackingWindowMinutes ?? raw?.PerformanceTrackingWindowMinutes ?? settingsDefaults.performanceTrackingWindowMinutes),
-    performanceTrackingOneShot: Boolean(raw?.performanceTrackingOneShot ?? raw?.PerformanceTrackingOneShot ?? settingsDefaults.performanceTrackingOneShot),
-    promptNotificationText: String(raw?.promptNotificationText ?? raw?.PromptNotificationText ?? settingsDefaults.promptNotificationText),
-    maxUploadBytes: Number(raw?.maxUploadBytes ?? raw?.MaxUploadBytes ?? settingsDefaults.maxUploadBytes),
-    chatCommandEnabled: Boolean(raw?.chatCommandEnabled ?? raw?.ChatCommandEnabled ?? settingsDefaults.chatCommandEnabled),
-    chatCommandValue: String(raw?.chatCommandValue ?? raw?.ChatCommandValue ?? settingsDefaults.chatCommandValue),
-    chatCommandTrigger: Boolean(raw?.chatCommandTrigger ?? raw?.ChatCommandTrigger ?? settingsDefaults.chatCommandTrigger),
-    chatCommandSendPush: Boolean(raw?.chatCommandSendPush ?? raw?.ChatCommandSendPush ?? settingsDefaults.chatCommandSendPush),
-    chatCommandPushText: String(raw?.chatCommandPushText ?? raw?.ChatCommandPushText ?? settingsDefaults.chatCommandPushText),
-    chatCommandEchoChat: Boolean(raw?.chatCommandEchoChat ?? raw?.ChatCommandEchoChat ?? settingsDefaults.chatCommandEchoChat),
-    chatCommandEchoText: String(raw?.chatCommandEchoText ?? raw?.ChatCommandEchoText ?? settingsDefaults.chatCommandEchoText),
-    migrationEnabled: Boolean(raw?.migrationEnabled ?? raw?.MigrationEnabled ?? settingsDefaults.migrationEnabled),
-    migrationStartedAt: raw?.migrationStartedAt ?? raw?.MigrationStartedAt ?? settingsDefaults.migrationStartedAt,
-    migrationUntil: raw?.migrationUntil ?? raw?.MigrationUntil ?? settingsDefaults.migrationUntil,
-    migrationAutoOffEnabled: Boolean(raw?.migrationAutoOffEnabled ?? raw?.MigrationAutoOffEnabled ?? settingsDefaults.migrationAutoOffEnabled),
-    migrationTargetBaseUrl: String(raw?.migrationTargetBaseUrl ?? raw?.MigrationTargetBaseURL ?? settingsDefaults.migrationTargetBaseUrl),
-    migrationDownloadUrl: String(raw?.migrationDownloadUrl ?? raw?.MigrationDownloadURL ?? settingsDefaults.migrationDownloadUrl),
-    migrationPushTitle: String(raw?.migrationPushTitle ?? raw?.MigrationPushTitle ?? settingsDefaults.migrationPushTitle),
-    migrationPushBody: String(raw?.migrationPushBody ?? raw?.MigrationPushBody ?? settingsDefaults.migrationPushBody),
-    migrationScreenTitle: String(raw?.migrationScreenTitle ?? raw?.MigrationScreenTitle ?? settingsDefaults.migrationScreenTitle),
-    migrationScreenBody: String(raw?.migrationScreenBody ?? raw?.MigrationScreenBody ?? settingsDefaults.migrationScreenBody),
-    migrationRequirePromptFirst: Boolean(raw?.migrationRequirePromptFirst ?? raw?.MigrationRequirePromptFirst ?? settingsDefaults.migrationRequirePromptFirst),
-    migrationExpectedSource: String(raw?.migrationExpectedSource ?? raw?.MigrationExpectedSource ?? settingsDefaults.migrationExpectedSource),
-    migrationBaselineUserCount: Number(raw?.migrationBaselineUserCount ?? raw?.MigrationBaselineUserCount ?? settingsDefaults.migrationBaselineUserCount),
+    promptWindowStartHour: Number(
+      raw?.promptWindowStartHour ??
+        raw?.PromptWindowStartHour ??
+        settingsDefaults.promptWindowStartHour,
+    ),
+    promptWindowEndHour: Number(
+      raw?.promptWindowEndHour ??
+        raw?.PromptWindowEndHour ??
+        settingsDefaults.promptWindowEndHour,
+    ),
+    uploadWindowMinutes: Number(
+      raw?.uploadWindowMinutes ??
+        raw?.UploadWindowMinutes ??
+        settingsDefaults.uploadWindowMinutes,
+    ),
+    feedCommentPreviewLimit: Number(
+      raw?.feedCommentPreviewLimit ??
+        raw?.FeedCommentPreviewLimit ??
+        settingsDefaults.feedCommentPreviewLimit,
+    ),
+    performanceTrackingEnabled: Boolean(
+      raw?.performanceTrackingEnabled ??
+      raw?.PerformanceTrackingEnabled ??
+      settingsDefaults.performanceTrackingEnabled,
+    ),
+    performanceTrackingWindowMinutes: Number(
+      raw?.performanceTrackingWindowMinutes ??
+        raw?.PerformanceTrackingWindowMinutes ??
+        settingsDefaults.performanceTrackingWindowMinutes,
+    ),
+    performanceTrackingOneShot: Boolean(
+      raw?.performanceTrackingOneShot ??
+      raw?.PerformanceTrackingOneShot ??
+      settingsDefaults.performanceTrackingOneShot,
+    ),
+    promptNotificationText: String(
+      raw?.promptNotificationText ??
+        raw?.PromptNotificationText ??
+        settingsDefaults.promptNotificationText,
+    ),
+    maxUploadBytes: Number(
+      raw?.maxUploadBytes ??
+        raw?.MaxUploadBytes ??
+        settingsDefaults.maxUploadBytes,
+    ),
+    chatMessageMaxLength: Number(
+      raw?.chatMessageMaxLength ??
+        raw?.ChatMessageMaxLength ??
+        settingsDefaults.chatMessageMaxLength,
+    ),
+    chatMessageUnlimited: Boolean(
+      raw?.chatMessageUnlimited ??
+      raw?.ChatMessageUnlimited ??
+      settingsDefaults.chatMessageUnlimited,
+    ),
+    chatCommandEnabled: Boolean(
+      raw?.chatCommandEnabled ??
+      raw?.ChatCommandEnabled ??
+      settingsDefaults.chatCommandEnabled,
+    ),
+    chatCommandValue: String(
+      raw?.chatCommandValue ??
+        raw?.ChatCommandValue ??
+        settingsDefaults.chatCommandValue,
+    ),
+    chatCommandTrigger: Boolean(
+      raw?.chatCommandTrigger ??
+      raw?.ChatCommandTrigger ??
+      settingsDefaults.chatCommandTrigger,
+    ),
+    chatCommandSendPush: Boolean(
+      raw?.chatCommandSendPush ??
+      raw?.ChatCommandSendPush ??
+      settingsDefaults.chatCommandSendPush,
+    ),
+    chatCommandPushText: String(
+      raw?.chatCommandPushText ??
+        raw?.ChatCommandPushText ??
+        settingsDefaults.chatCommandPushText,
+    ),
+    chatCommandEchoChat: Boolean(
+      raw?.chatCommandEchoChat ??
+      raw?.ChatCommandEchoChat ??
+      settingsDefaults.chatCommandEchoChat,
+    ),
+    chatCommandEchoText: String(
+      raw?.chatCommandEchoText ??
+        raw?.ChatCommandEchoText ??
+        settingsDefaults.chatCommandEchoText,
+    ),
+    migrationEnabled: Boolean(
+      raw?.migrationEnabled ??
+      raw?.MigrationEnabled ??
+      settingsDefaults.migrationEnabled,
+    ),
+    migrationStartedAt:
+      raw?.migrationStartedAt ??
+      raw?.MigrationStartedAt ??
+      settingsDefaults.migrationStartedAt,
+    migrationUntil:
+      raw?.migrationUntil ??
+      raw?.MigrationUntil ??
+      settingsDefaults.migrationUntil,
+    migrationAutoOffEnabled: Boolean(
+      raw?.migrationAutoOffEnabled ??
+      raw?.MigrationAutoOffEnabled ??
+      settingsDefaults.migrationAutoOffEnabled,
+    ),
+    migrationTargetBaseUrl: String(
+      raw?.migrationTargetBaseUrl ??
+        raw?.MigrationTargetBaseURL ??
+        settingsDefaults.migrationTargetBaseUrl,
+    ),
+    migrationDownloadUrl: String(
+      raw?.migrationDownloadUrl ??
+        raw?.MigrationDownloadURL ??
+        settingsDefaults.migrationDownloadUrl,
+    ),
+    migrationPushTitle: String(
+      raw?.migrationPushTitle ??
+        raw?.MigrationPushTitle ??
+        settingsDefaults.migrationPushTitle,
+    ),
+    migrationPushBody: String(
+      raw?.migrationPushBody ??
+        raw?.MigrationPushBody ??
+        settingsDefaults.migrationPushBody,
+    ),
+    migrationScreenTitle: String(
+      raw?.migrationScreenTitle ??
+        raw?.MigrationScreenTitle ??
+        settingsDefaults.migrationScreenTitle,
+    ),
+    migrationScreenBody: String(
+      raw?.migrationScreenBody ??
+        raw?.MigrationScreenBody ??
+        settingsDefaults.migrationScreenBody,
+    ),
+    migrationRequirePromptFirst: Boolean(
+      raw?.migrationRequirePromptFirst ??
+      raw?.MigrationRequirePromptFirst ??
+      settingsDefaults.migrationRequirePromptFirst,
+    ),
+    migrationExpectedSource: String(
+      raw?.migrationExpectedSource ??
+        raw?.MigrationExpectedSource ??
+        settingsDefaults.migrationExpectedSource,
+    ),
+    migrationBaselineUserCount: Number(
+      raw?.migrationBaselineUserCount ??
+        raw?.MigrationBaselineUserCount ??
+        settingsDefaults.migrationBaselineUserCount,
+    ),
     userPromptRules: normalizedRules,
   };
 }
@@ -1126,7 +1273,10 @@ function normalizeMigrationInfo(raw: any): AdminMigrationInfo {
   };
 }
 
-export async function login(username: string, password: string): Promise<AuthResponse> {
+export async function login(
+  username: string,
+  password: string,
+): Promise<AuthResponse> {
   const res = await fetch(`${apiBase}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1143,7 +1293,10 @@ export async function getSettings(token: string): Promise<Settings> {
   return normalizeSettings(data);
 }
 
-export async function updateSettings(token: string, settings: Settings): Promise<Settings> {
+export async function updateSettings(
+  token: string,
+  settings: Settings,
+): Promise<Settings> {
   const res = await fetch(`${apiBase}/admin/settings`, {
     method: "PUT",
     headers: {
@@ -1165,11 +1318,13 @@ export async function getStats(token: string): Promise<AdminStats> {
 
 export async function triggerPrompt(
   token: string,
-  opts?: { silent?: boolean; notifyUserIds?: number[] }
+  opts?: { silent?: boolean; notifyUserIds?: number[] },
 ): Promise<AdminTriggerPromptResponse> {
   const payload = {
     silent: Boolean(opts?.silent),
-    notifyUserIds: (opts?.notifyUserIds || []).filter((id) => Number.isFinite(id) && id > 0),
+    notifyUserIds: (opts?.notifyUserIds || []).filter(
+      (id) => Number.isFinite(id) && id > 0,
+    ),
   };
   const res = await fetch(`${apiBase}/admin/prompt/trigger`, {
     method: "POST",
@@ -1182,7 +1337,9 @@ export async function triggerPrompt(
   return parse<AdminTriggerPromptResponse>(res);
 }
 
-export async function resetTodayPrompt(token: string): Promise<{ day: string; message: string }> {
+export async function resetTodayPrompt(
+  token: string,
+): Promise<{ day: string; message: string }> {
   const res = await fetch(`${apiBase}/admin/prompt/reset-today`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
@@ -1190,7 +1347,10 @@ export async function resetTodayPrompt(token: string): Promise<{ day: string; me
   return parse<{ day: string; message: string }>(res);
 }
 
-export async function broadcastNotification(token: string, body: string): Promise<{ sentTo: number; provider: string }> {
+export async function broadcastNotification(
+  token: string,
+  body: string,
+): Promise<{ sentTo: number; provider: string }> {
   const res = await fetch(`${apiBase}/admin/notifications/broadcast`, {
     method: "POST",
     headers: {
@@ -1205,8 +1365,14 @@ export async function broadcastNotification(token: string, body: string): Promis
 export async function notifyUser(
   token: string,
   userId: number,
-  body: string
-): Promise<{ sentTo: number; failed: number; provider: string; username: string; devices: number }> {
+  body: string,
+): Promise<{
+  sentTo: number;
+  failed: number;
+  provider: string;
+  username: string;
+  devices: number;
+}> {
   const res = await fetch(`${apiBase}/admin/notifications/user/${userId}`, {
     method: "POST",
     headers: {
@@ -1215,7 +1381,13 @@ export async function notifyUser(
     },
     body: JSON.stringify({ body }),
   });
-  return parse<{ sentTo: number; failed: number; provider: string; username: string; devices: number }>(res);
+  return parse<{
+    sentTo: number;
+    failed: number;
+    provider: string;
+    username: string;
+    devices: number;
+  }>(res);
 }
 
 export async function listUsers(token: string): Promise<AdminUser[]> {
@@ -1226,7 +1398,12 @@ export async function listUsers(token: string): Promise<AdminUser[]> {
   return data.items;
 }
 
-export async function createUser(token: string, username: string, password: string, isAdmin: boolean): Promise<void> {
+export async function createUser(
+  token: string,
+  username: string,
+  password: string,
+  isAdmin: boolean,
+): Promise<void> {
   const res = await fetch(`${apiBase}/admin/users`, {
     method: "POST",
     headers: {
@@ -1238,7 +1415,11 @@ export async function createUser(token: string, username: string, password: stri
   await parse(res);
 }
 
-export async function updateUser(token: string, id: number, payload: { password?: string; isAdmin?: boolean }): Promise<void> {
+export async function updateUser(
+  token: string,
+  id: number,
+  payload: { password?: string; isAdmin?: boolean },
+): Promise<void> {
   const res = await fetch(`${apiBase}/admin/users/${id}`, {
     method: "PUT",
     headers: {
@@ -1258,7 +1439,10 @@ export async function deleteUser(token: string, id: number): Promise<void> {
   await parse(res);
 }
 
-export async function issueUserAccessToken(token: string, id: number): Promise<AdminUserAccessToken> {
+export async function issueUserAccessToken(
+  token: string,
+  id: number,
+): Promise<AdminUserAccessToken> {
   const res = await fetch(`${apiBase}/admin/users/${id}/token`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
@@ -1266,7 +1450,10 @@ export async function issueUserAccessToken(token: string, id: number): Promise<A
   return parse<AdminUserAccessToken>(res);
 }
 
-export async function getAdminFeed(token: string, day?: string): Promise<AdminFeedResponse> {
+export async function getAdminFeed(
+  token: string,
+  day?: string,
+): Promise<AdminFeedResponse> {
   const qs = day ? `?day=${encodeURIComponent(day)}` : "";
   const res = await fetch(`${apiBase}/admin/feed${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -1276,13 +1463,15 @@ export async function getAdminFeed(token: string, day?: string): Promise<AdminFe
 
 export async function getAdminLocations(
   token: string,
-  filters?: { userId?: number; from?: string; to?: string }
+  filters?: { userId?: number; from?: string; to?: string },
 ): Promise<AdminLocationItem[]> {
   const qs = new URLSearchParams();
   if (filters?.userId) qs.set("userId", String(filters.userId));
   if (filters?.from) qs.set("from", filters.from);
   if (filters?.to) qs.set("to", filters.to);
-  const url = qs.toString() ? `${apiBase}/admin/locations?${qs.toString()}` : `${apiBase}/admin/locations`;
+  const url = qs.toString()
+    ? `${apiBase}/admin/locations?${qs.toString()}`
+    : `${apiBase}/admin/locations`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -1290,7 +1479,10 @@ export async function getAdminLocations(
   return data.items || [];
 }
 
-export async function deleteAdminPhotoLocation(token: string, photoId: number): Promise<void> {
+export async function deleteAdminPhotoLocation(
+  token: string,
+  photoId: number,
+): Promise<void> {
   const res = await fetch(`${apiBase}/admin/photos/${photoId}/location`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
@@ -1315,16 +1507,20 @@ export async function getAdminPolls(
     to?: string;
     openOnly?: boolean;
     creatorUserId?: number;
-  }
+  },
 ): Promise<AdminPollResponse> {
   const qs = new URLSearchParams();
   if (opts?.limit && opts.limit > 0) qs.set("limit", String(opts.limit));
   if (opts?.day) qs.set("day", opts.day);
   if (opts?.from) qs.set("from", opts.from);
   if (opts?.to) qs.set("to", opts.to);
-  if (typeof opts?.openOnly === "boolean") qs.set("openOnly", String(opts.openOnly));
-  if (opts?.creatorUserId && opts.creatorUserId > 0) qs.set("creatorUserId", String(opts.creatorUserId));
-  const url = qs.toString() ? `${apiBase}/admin/polls?${qs.toString()}` : `${apiBase}/admin/polls`;
+  if (typeof opts?.openOnly === "boolean")
+    qs.set("openOnly", String(opts.openOnly));
+  if (opts?.creatorUserId && opts.creatorUserId > 0)
+    qs.set("creatorUserId", String(opts.creatorUserId));
+  const url = qs.toString()
+    ? `${apiBase}/admin/polls?${qs.toString()}`
+    : `${apiBase}/admin/polls`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -1336,7 +1532,10 @@ export async function getAdminPolls(
   };
 }
 
-export async function sendChat(token: string, body: string): Promise<ChatSendResult> {
+export async function sendChat(
+  token: string,
+  body: string,
+): Promise<ChatSendResult> {
   const res = await fetch(`${apiBase}/chat`, {
     method: "POST",
     headers: {
@@ -1364,7 +1563,10 @@ export async function getChatCommands(token: string): Promise<ChatCommand[]> {
   return data.items;
 }
 
-export async function createChatCommand(token: string, body: Omit<ChatCommand, "id" | "lastUsedAt" | "createdAt" | "updatedAt">): Promise<ChatCommand> {
+export async function createChatCommand(
+  token: string,
+  body: Omit<ChatCommand, "id" | "lastUsedAt" | "createdAt" | "updatedAt">,
+): Promise<ChatCommand> {
   const res = await fetch(`${apiBase}/admin/chat/commands`, {
     method: "POST",
     headers: {
@@ -1376,7 +1578,11 @@ export async function createChatCommand(token: string, body: Omit<ChatCommand, "
   return parse<ChatCommand>(res);
 }
 
-export async function updateChatCommand(token: string, id: number, body: Omit<ChatCommand, "id" | "lastUsedAt" | "createdAt" | "updatedAt">): Promise<ChatCommand> {
+export async function updateChatCommand(
+  token: string,
+  id: number,
+  body: Omit<ChatCommand, "id" | "lastUsedAt" | "createdAt" | "updatedAt">,
+): Promise<ChatCommand> {
   const res = await fetch(`${apiBase}/admin/chat/commands/${id}`, {
     method: "PUT",
     headers: {
@@ -1388,7 +1594,10 @@ export async function updateChatCommand(token: string, id: number, body: Omit<Ch
   return parse<ChatCommand>(res);
 }
 
-export async function deleteChatCommand(token: string, id: number): Promise<void> {
+export async function deleteChatCommand(
+  token: string,
+  id: number,
+): Promise<void> {
   const res = await fetch(`${apiBase}/admin/chat/commands/${id}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
@@ -1396,7 +1605,10 @@ export async function deleteChatCommand(token: string, id: number): Promise<void
   await parse(res);
 }
 
-export async function getCalendar(token: string, days = 7): Promise<CalendarItem[]> {
+export async function getCalendar(
+  token: string,
+  days = 7,
+): Promise<CalendarItem[]> {
   const res = await fetch(`${apiBase}/admin/calendar?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -1404,7 +1616,12 @@ export async function getCalendar(token: string, days = 7): Promise<CalendarItem
   return data.items;
 }
 
-export async function getAdminHistory(token: string, days = 30, offset = 0, excludeEmpty = true): Promise<AdminHistoryResponse> {
+export async function getAdminHistory(
+  token: string,
+  days = 30,
+  offset = 0,
+  excludeEmpty = true,
+): Promise<AdminHistoryResponse> {
   const qs = new URLSearchParams();
   qs.set("days", String(days));
   qs.set("offset", String(offset));
@@ -1458,7 +1675,9 @@ export async function getAdminHistory(token: string, days = 30, offset = 0, excl
   };
 }
 
-export async function getAdminTimeCapsules(token: string): Promise<AdminTimeCapsuleItem[]> {
+export async function getAdminTimeCapsules(
+  token: string,
+): Promise<AdminTimeCapsuleItem[]> {
   const res = await fetch(`${apiBase}/admin/time-capsules`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -1468,7 +1687,14 @@ export async function getAdminTimeCapsules(token: string): Promise<AdminTimeCaps
 
 export async function getAdminFotomojis(
   token: string,
-  opts?: { day?: string; userId?: number; emoji?: string; from?: string; to?: string; limit?: number }
+  opts?: {
+    day?: string;
+    userId?: number;
+    emoji?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  },
 ): Promise<AdminFotomojiItem[]> {
   const qs = new URLSearchParams();
   if (opts?.day) qs.set("day", opts.day);
@@ -1487,7 +1713,13 @@ export async function getAdminFotomojis(
 
 export async function getAdminFotomojiHistory(
   token: string,
-  opts?: { userId?: number; emoji?: string; from?: string; to?: string; limit?: number }
+  opts?: {
+    userId?: number;
+    emoji?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  },
 ): Promise<AdminFotomojiHistoryResponse> {
   const qs = new URLSearchParams();
   if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
@@ -1495,9 +1727,12 @@ export async function getAdminFotomojiHistory(
   if (opts?.from) qs.set("from", opts.from);
   if (opts?.to) qs.set("to", opts.to);
   qs.set("limit", String(opts?.limit ?? 1200));
-  const res = await fetch(`${apiBase}/admin/fotomojis/history?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/fotomojis/history?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   const data = await parse<AdminFotomojiHistoryResponse>(res);
   return {
     items: data.items || [],
@@ -1514,7 +1749,7 @@ export async function getAdminFotomojiHistory(
 
 export async function deleteAdminFotomoji(
   token: string,
-  id: number
+  id: number,
 ): Promise<{ ok: boolean; deletedId: number }> {
   const res = await fetch(`${apiBase}/admin/fotomojis/${id}`, {
     method: "DELETE",
@@ -1525,9 +1760,15 @@ export async function deleteAdminFotomoji(
 
 export async function deleteAdminFotomojisBulk(
   token: string,
-  ids: number[]
+  ids: number[],
 ): Promise<{ ok: boolean; deletedCount: number; deletedIds: number[] }> {
-  const cleanIds = Array.from(new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+  const cleanIds = Array.from(
+    new Set(
+      ids
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0),
+    ),
+  );
   const res = await fetch(`${apiBase}/admin/fotomojis/bulk-delete`, {
     method: "POST",
     headers: {
@@ -1536,18 +1777,27 @@ export async function deleteAdminFotomojisBulk(
     },
     body: JSON.stringify({ ids: cleanIds }),
   });
-  return parse<{ ok: boolean; deletedCount: number; deletedIds: number[] }>(res);
+  return parse<{ ok: boolean; deletedCount: number; deletedIds: number[] }>(
+    res,
+  );
 }
 
-export async function updateCalendarDay(token: string, day: string, plannedAt: string): Promise<CalendarItem> {
-  const res = await fetch(`${apiBase}/admin/calendar/${encodeURIComponent(day)}`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+export async function updateCalendarDay(
+  token: string,
+  day: string,
+  plannedAt: string,
+): Promise<CalendarItem> {
+  const res = await fetch(
+    `${apiBase}/admin/calendar/${encodeURIComponent(day)}`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ plannedAt }),
     },
-    body: JSON.stringify({ plannedAt }),
-  });
+  );
   return parse<CalendarItem>(res);
 }
 
@@ -1560,15 +1810,18 @@ export async function getSystemHealth(token: string): Promise<SystemHealth> {
 
 export async function getAdminPerformanceOverview(
   token: string,
-  opts?: { from?: string; to?: string; bucket?: "1m" | "5m" }
+  opts?: { from?: string; to?: string; bucket?: "1m" | "5m" },
 ): Promise<AdminPerformanceOverview> {
   const qs = new URLSearchParams();
   if (opts?.from) qs.set("from", opts.from);
   if (opts?.to) qs.set("to", opts.to);
   qs.set("bucket", opts?.bucket || "1m");
-  const res = await fetch(`${apiBase}/admin/performance/overview?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/performance/overview?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   const data = await parse<AdminPerformanceOverview>(res);
   return {
     schemaVersion: data.schemaVersion || "1.0",
@@ -1580,13 +1833,20 @@ export async function getAdminPerformanceOverview(
     dbHotspots: data.dbHotspots || [],
     errorClasses: data.errorClasses || [],
     slo: data.slo,
-    summary: data.summary || { requests: 0, errors: 0, p95Peak: 0, p99Peak: 0, throttleCount: 0, throttleRate: 0 },
+    summary: data.summary || {
+      requests: 0,
+      errors: 0,
+      p95Peak: 0,
+      p99Peak: 0,
+      throttleCount: 0,
+      throttleRate: 0,
+    },
   };
 }
 
 export async function getAdminPerformanceSlo(
   token: string,
-  windowMinutes = 30
+  windowMinutes = 30,
 ): Promise<AdminPerformanceSloState> {
   const qs = new URLSearchParams();
   qs.set("windowMinutes", String(windowMinutes));
@@ -1617,15 +1877,18 @@ export async function getAdminPerformanceSlo(
 
 export async function getAdminPerformanceRoutes(
   token: string,
-  opts?: { from?: string; to?: string; top?: number }
+  opts?: { from?: string; to?: string; top?: number },
 ): Promise<AdminPerformanceRoutesResponse> {
   const qs = new URLSearchParams();
   if (opts?.from) qs.set("from", opts.from);
   if (opts?.to) qs.set("to", opts.to);
   if (opts?.top && opts.top > 0) qs.set("top", String(opts.top));
-  const res = await fetch(`${apiBase}/admin/performance/routes?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/performance/routes?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   const data = await parse<AdminPerformanceRoutesResponse>(res);
   return {
     from: data.from,
@@ -1637,13 +1900,16 @@ export async function getAdminPerformanceRoutes(
 
 export async function getAdminPerformanceSpikes(
   token: string,
-  days = 14
+  days = 14,
 ): Promise<AdminPerformanceSpikesResponse> {
   const qs = new URLSearchParams();
   qs.set("days", String(days));
-  const res = await fetch(`${apiBase}/admin/performance/spikes?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/performance/spikes?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   const data = await parse<AdminPerformanceSpikesResponse>(res);
   return {
     days: data.days || days,
@@ -1651,7 +1917,9 @@ export async function getAdminPerformanceSpikes(
   };
 }
 
-export async function getAdminPerformanceTracking(token: string): Promise<AdminPerformanceTrackingState> {
+export async function getAdminPerformanceTracking(
+  token: string,
+): Promise<AdminPerformanceTrackingState> {
   const res = await fetch(`${apiBase}/admin/performance/tracking`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -1668,7 +1936,7 @@ export async function getAdminPerformanceTracking(token: string): Promise<AdminP
 
 export async function updateAdminPerformanceTracking(
   token: string,
-  payload: { enabled: boolean; windowMinutes: number; oneShot?: boolean }
+  payload: { enabled: boolean; windowMinutes: number; oneShot?: boolean },
 ): Promise<AdminPerformanceTrackingState> {
   const res = await fetch(`${apiBase}/admin/performance/tracking`, {
     method: "PUT",
@@ -1700,7 +1968,7 @@ export async function getAdminTriggerAudit(
     actorUserId?: number;
     requestId?: string;
     limit?: number;
-  }
+  },
 ): Promise<AdminTriggerAuditResponse> {
   const qs = new URLSearchParams();
   if (opts?.day) qs.set("day", opts.day);
@@ -1708,7 +1976,8 @@ export async function getAdminTriggerAudit(
   if (opts?.to) qs.set("to", opts.to);
   if (opts?.source) qs.set("source", opts.source);
   if (opts?.result) qs.set("result", opts.result);
-  if (opts?.actorUserId && opts.actorUserId > 0) qs.set("actorUserId", String(opts.actorUserId));
+  if (opts?.actorUserId && opts.actorUserId > 0)
+    qs.set("actorUserId", String(opts.actorUserId));
   if (opts?.requestId) qs.set("requestId", opts.requestId);
   if (opts?.limit && opts.limit > 0) qs.set("limit", String(opts.limit));
   const res = await fetch(`${apiBase}/admin/trigger-audit?${qs.toString()}`, {
@@ -1726,13 +1995,16 @@ export async function getAdminTriggerAudit(
 
 export async function getAdminTriggerAuditSummary(
   token: string,
-  days = 7
+  days = 7,
 ): Promise<AdminTriggerAuditSummary> {
   const qs = new URLSearchParams();
   qs.set("days", String(days));
-  const res = await fetch(`${apiBase}/admin/trigger-audit/summary?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/trigger-audit/summary?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   const data = await parse<AdminTriggerAuditSummary>(res);
   return {
     days: Number(data.days || days),
@@ -1765,7 +2037,7 @@ export async function downloadTriggerAuditExport(
     actorUserId?: number;
     requestId?: string;
     format?: "json" | "csv";
-  }
+  },
 ): Promise<void> {
   const qs = new URLSearchParams();
   if (opts?.day) qs.set("day", opts.day);
@@ -1773,14 +2045,20 @@ export async function downloadTriggerAuditExport(
   if (opts?.to) qs.set("to", opts.to);
   if (opts?.source) qs.set("source", opts.source);
   if (opts?.result) qs.set("result", opts.result);
-  if (opts?.actorUserId && opts.actorUserId > 0) qs.set("actorUserId", String(opts.actorUserId));
+  if (opts?.actorUserId && opts.actorUserId > 0)
+    qs.set("actorUserId", String(opts.actorUserId));
   if (opts?.requestId) qs.set("requestId", opts.requestId);
   qs.set("format", opts?.format || "json");
-  const res = await fetch(`${apiBase}/admin/trigger-audit/export?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/trigger-audit/export?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: "Download fehlgeschlagen" }));
     throw new Error(body.error || "Download fehlgeschlagen");
   }
   const blob = await res.blob();
@@ -1800,7 +2078,7 @@ export async function downloadTriggerAuditExport(
 
 export async function getAdminIncidentExportStatus(
   token: string,
-  opts?: { from?: string; to?: string; day?: string; includeGateway?: boolean }
+  opts?: { from?: string; to?: string; day?: string; includeGateway?: boolean },
 ): Promise<AdminIncidentExportStatus> {
   const qs = new URLSearchParams();
   qs.set("format", "json");
@@ -1809,9 +2087,12 @@ export async function getAdminIncidentExportStatus(
   if (opts?.to) qs.set("to", opts.to);
   if (opts?.day) qs.set("day", opts.day);
   qs.set("includeGateway", String(opts?.includeGateway ?? true));
-  const res = await fetch(`${apiBase}/admin/incidents/export?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/incidents/export?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   const data = await parse<AdminIncidentExportStatus>(res);
   return {
     meta: {
@@ -1828,9 +2109,15 @@ export async function getAdminIncidentExportStatus(
       duplicateAttempts: Number(data.status?.duplicateAttempts || 0),
       multipleAttemptDays: Number(data.status?.multipleAttemptDays || 0),
       duplicateAttemptsDaily: Number(data.status?.duplicateAttemptsDaily || 0),
-      duplicateAttemptsSpecial: Number(data.status?.duplicateAttemptsSpecial || 0),
-      multipleAttemptDaysDaily: Number(data.status?.multipleAttemptDaysDaily || 0),
-      multipleAttemptDaysSpecial: Number(data.status?.multipleAttemptDaysSpecial || 0),
+      duplicateAttemptsSpecial: Number(
+        data.status?.duplicateAttemptsSpecial || 0,
+      ),
+      multipleAttemptDaysDaily: Number(
+        data.status?.multipleAttemptDaysDaily || 0,
+      ),
+      multipleAttemptDaysSpecial: Number(
+        data.status?.multipleAttemptDaysSpecial || 0,
+      ),
       dailyAttempts: Number(data.status?.dailyAttempts || 0),
       dailyTriggered: Number(data.status?.dailyTriggered || 0),
       dailyBlocked: Number(data.status?.dailyBlocked || 0),
@@ -1850,7 +2137,7 @@ export async function getAdminIncidentExportStatus(
 
 export async function getAdminTriggerRuntime(
   token: string,
-  opts?: { windowMinutes?: number }
+  opts?: { windowMinutes?: number },
 ): Promise<AdminTriggerRuntimeResponse> {
   const qs = new URLSearchParams();
   if (opts?.windowMinutes && opts.windowMinutes > 0) {
@@ -1887,7 +2174,7 @@ export async function getAdminTriggerRuntime(
 
 export async function updateAdminTriggerRuntime(
   token: string,
-  payload: { action: "pause" | "unpause" | "release_lease"; reason?: string }
+  payload: { action: "pause" | "unpause" | "release_lease"; reason?: string },
 ): Promise<AdminTriggerRuntimeResponse> {
   const res = await fetch(`${apiBase}/admin/trigger-runtime`, {
     method: "PUT",
@@ -1900,7 +2187,9 @@ export async function updateAdminTriggerRuntime(
   return parse<AdminTriggerRuntimeResponse>(res);
 }
 
-export async function getAdminMigration(token: string): Promise<AdminMigrationResponse> {
+export async function getAdminMigration(
+  token: string,
+): Promise<AdminMigrationResponse> {
   const res = await fetch(`${apiBase}/admin/migration`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -1925,7 +2214,7 @@ export async function updateAdminMigration(
     migrationReportTarget?: string;
     migrationReportSecret?: string;
     migrationReportSource?: string;
-  }
+  },
 ): Promise<AdminMigrationResponse> {
   const res = await fetch(`${apiBase}/admin/migration`, {
     method: "PUT",
@@ -1939,7 +2228,10 @@ export async function updateAdminMigration(
   return { migration: normalizeMigrationInfo(data?.migration || {}) };
 }
 
-export async function activateAdminMigration(token: string, days = 7): Promise<AdminMigrationResponse> {
+export async function activateAdminMigration(
+  token: string,
+  days = 7,
+): Promise<AdminMigrationResponse> {
   const res = await fetch(`${apiBase}/admin/migration/activate`, {
     method: "POST",
     headers: {
@@ -1952,7 +2244,9 @@ export async function activateAdminMigration(token: string, days = 7): Promise<A
   return { migration: normalizeMigrationInfo(data?.migration || {}) };
 }
 
-export async function deactivateAdminMigration(token: string): Promise<AdminMigrationResponse> {
+export async function deactivateAdminMigration(
+  token: string,
+): Promise<AdminMigrationResponse> {
   const res = await fetch(`${apiBase}/admin/migration/deactivate`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
@@ -1963,8 +2257,13 @@ export async function deactivateAdminMigration(token: string): Promise<AdminMigr
 
 export async function pushAdminMigration(
   token: string,
-  payload: { title?: string; body?: string; testUserId?: number }
-): Promise<{ ok: boolean; sentTo: number; failed: number; invalidRemoved: number }> {
+  payload: { title?: string; body?: string; testUserId?: number },
+): Promise<{
+  ok: boolean;
+  sentTo: number;
+  failed: number;
+  invalidRemoved: number;
+}> {
   const res = await fetch(`${apiBase}/admin/migration/push`, {
     method: "POST",
     headers: {
@@ -1973,20 +2272,30 @@ export async function pushAdminMigration(
     },
     body: JSON.stringify(payload),
   });
-  return parse<{ ok: boolean; sentTo: number; failed: number; invalidRemoved: number }>(res);
+  return parse<{
+    ok: boolean;
+    sentTo: number;
+    failed: number;
+    invalidRemoved: number;
+  }>(res);
 }
 
 export async function downloadAdminMigrationExport(
   token: string,
-  format: "json" | "csv" = "json"
+  format: "json" | "csv" = "json",
 ): Promise<void> {
   const qs = new URLSearchParams();
   qs.set("format", format);
-  const res = await fetch(`${apiBase}/admin/migration/export?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/migration/export?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: "Download fehlgeschlagen" }));
     throw new Error(body.error || "Download fehlgeschlagen");
   }
   const blob = await res.blob();
@@ -2005,7 +2314,7 @@ export async function downloadAdminMigrationExport(
 
 export async function exportAdminMigrationLinkToken(
   token: string,
-  instanceRole: "old" | "new"
+  instanceRole: "old" | "new",
 ): Promise<AdminMigrationLinkExportResponse> {
   const res = await fetch(`${apiBase}/admin/migration/link/export`, {
     method: "POST",
@@ -2017,7 +2326,7 @@ export async function exportAdminMigrationLinkToken(
   });
   const data = await parse<any>(res);
   return {
-    instanceRole: (data.instanceRole === "new" ? "new" : "old"),
+    instanceRole: data.instanceRole === "new" ? "new" : "old",
     token: String(data.token || ""),
     expiresAt: String(data.expiresAt || ""),
     instanceBase: String(data.instanceBase || ""),
@@ -2027,7 +2336,7 @@ export async function exportAdminMigrationLinkToken(
 
 export async function importAdminMigrationLinkToken(
   token: string,
-  linkToken: string
+  linkToken: string,
 ): Promise<AdminMigrationLinkImportResponse> {
   const res = await fetch(`${apiBase}/admin/migration/link/import`, {
     method: "POST",
@@ -2048,7 +2357,7 @@ export async function importAdminMigrationLinkToken(
 
 export async function downloadIncidentExport(
   token: string,
-  opts?: { from?: string; to?: string; day?: string; includeGateway?: boolean }
+  opts?: { from?: string; to?: string; day?: string; includeGateway?: boolean },
 ): Promise<void> {
   const qs = new URLSearchParams();
   qs.set("format", "json");
@@ -2057,17 +2366,24 @@ export async function downloadIncidentExport(
   if (opts?.day) qs.set("day", opts.day);
   qs.set("includeGateway", String(opts?.includeGateway ?? true));
 
-  const res = await fetch(`${apiBase}/admin/incidents/export?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/incidents/export?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: "Download fehlgeschlagen" }));
     throw new Error(body.error || "Download fehlgeschlagen");
   }
   const blob = await res.blob();
   const disposition = res.headers.get("content-disposition") || "";
   const fileMatch = disposition.match(/filename=\"?([^\"]+)\"?/i);
-  const filename = fileMatch?.[1] || `incident-export-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  const filename =
+    fileMatch?.[1] ||
+    `incident-export-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -2080,19 +2396,31 @@ export async function downloadIncidentExport(
 
 export async function downloadPerformanceTrackingExport(
   token: string,
-  opts?: { eventId?: number; day?: string; from?: string; to?: string; bucket?: "1m" | "5m" }
+  opts?: {
+    eventId?: number;
+    day?: string;
+    from?: string;
+    to?: string;
+    bucket?: "1m" | "5m";
+  },
 ): Promise<void> {
   const qs = new URLSearchParams();
-  if (opts?.eventId && opts.eventId > 0) qs.set("eventId", String(opts.eventId));
+  if (opts?.eventId && opts.eventId > 0)
+    qs.set("eventId", String(opts.eventId));
   if (opts?.day) qs.set("day", opts.day);
   if (opts?.from) qs.set("from", opts.from);
   if (opts?.to) qs.set("to", opts.to);
   qs.set("bucket", opts?.bucket || "1m");
-  const res = await fetch(`${apiBase}/admin/performance/tracking/export?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/performance/tracking/export?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: "Download fehlgeschlagen" }));
     throw new Error(body.error || "Download fehlgeschlagen");
   }
   const blob = await res.blob();
@@ -2109,17 +2437,22 @@ export async function downloadPerformanceTrackingExport(
 
 export async function downloadPerformanceExport(
   token: string,
-  opts?: { from?: string; to?: string; format?: "csv" | "json" }
+  opts?: { from?: string; to?: string; format?: "csv" | "json" },
 ): Promise<void> {
   const qs = new URLSearchParams();
   if (opts?.from) qs.set("from", opts.from);
   if (opts?.to) qs.set("to", opts.to);
   qs.set("format", opts?.format || "json");
-  const res = await fetch(`${apiBase}/admin/performance/export?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/performance/export?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: "Download fehlgeschlagen" }));
     throw new Error(body.error || "Download fehlgeschlagen");
   }
 
@@ -2139,7 +2472,12 @@ export async function downloadPerformanceExport(
   URL.revokeObjectURL(url);
 }
 
-export async function getDebugLogs(token: string, userId?: number, limit = 150, sinceHours = 24): Promise<DebugLogsResponse> {
+export async function getDebugLogs(
+  token: string,
+  userId?: number,
+  limit = 150,
+  sinceHours = 24,
+): Promise<DebugLogsResponse> {
   const qs = new URLSearchParams();
   qs.set("limit", String(limit));
   qs.set("sinceHours", String(sinceHours));
@@ -2156,14 +2494,22 @@ export async function getDebugLogs(token: string, userId?: number, limit = 150, 
   };
 }
 
-export async function getDebugLogsSummary(token: string, userId?: number, limit = 1000, sinceHours = 24): Promise<DebugLogSummaryResponse> {
+export async function getDebugLogsSummary(
+  token: string,
+  userId?: number,
+  limit = 1000,
+  sinceHours = 24,
+): Promise<DebugLogSummaryResponse> {
   const qs = new URLSearchParams();
   qs.set("limit", String(limit));
   qs.set("sinceHours", String(sinceHours));
   if (userId && userId > 0) qs.set("userId", String(userId));
-  const res = await fetch(`${apiBase}/admin/debug/logs/summary?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/debug/logs/summary?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   const data = await parse<DebugLogSummaryResponse>(res);
   return {
     items: data.items || [],
@@ -2173,14 +2519,22 @@ export async function getDebugLogsSummary(token: string, userId?: number, limit 
   };
 }
 
-export async function getUploadTimeline(token: string, userId?: number, limit = 150, sinceHours = 24): Promise<UploadTimelineResponse> {
+export async function getUploadTimeline(
+  token: string,
+  userId?: number,
+  limit = 150,
+  sinceHours = 24,
+): Promise<UploadTimelineResponse> {
   const qs = new URLSearchParams();
   qs.set("limit", String(limit));
   qs.set("sinceHours", String(sinceHours));
   if (userId && userId > 0) qs.set("userId", String(userId));
-  const res = await fetch(`${apiBase}/admin/debug/upload-timeline?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/debug/upload-timeline?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   const data = await parse<UploadTimelineResponse>(res);
   return {
     items: data.items || [],
@@ -2199,7 +2553,7 @@ export async function getUploadTimeline(token: string, userId?: number, limit = 
 
 export async function deleteDebugLogs(
   token: string,
-  opts?: { userId?: number; sinceHours?: number }
+  opts?: { userId?: number; sinceHours?: number },
 ): Promise<{ deletedCount: number; userId: number; sinceHours: number }> {
   const qs = new URLSearchParams();
   if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
@@ -2208,12 +2562,19 @@ export async function deleteDebugLogs(
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });
-  return parse<{ deletedCount: number; userId: number; sinceHours: number }>(res);
+  return parse<{ deletedCount: number; userId: number; sinceHours: number }>(
+    res,
+  );
 }
 
 export async function downloadDebugLogs(
   token: string,
-  opts?: { userId?: number; sinceHours?: number; format?: "csv" | "json"; limit?: number }
+  opts?: {
+    userId?: number;
+    sinceHours?: number;
+    format?: "csv" | "json";
+    limit?: number;
+  },
 ): Promise<void> {
   const qs = new URLSearchParams();
   if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));
@@ -2221,11 +2582,16 @@ export async function downloadDebugLogs(
   qs.set("format", opts?.format ?? "csv");
   qs.set("limit", String(opts?.limit ?? 5000));
 
-  const res = await fetch(`${apiBase}/admin/debug/logs/export?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(
+    `${apiBase}/admin/debug/logs/export?${qs.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: "Download fehlgeschlagen" }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: "Download fehlgeschlagen" }));
     throw new Error(body.error || "Download fehlgeschlagen");
   }
 
@@ -2247,7 +2613,12 @@ export async function downloadDebugLogs(
 
 export async function getReports(
   token: string,
-  opts?: { userId?: number; type?: "" | "bug" | "idea" | "post"; status?: "" | "open" | "in_review" | "done" | "rejected"; limit?: number }
+  opts?: {
+    userId?: number;
+    type?: "" | "bug" | "idea" | "post";
+    status?: "" | "open" | "in_review" | "done" | "rejected";
+    limit?: number;
+  },
 ): Promise<AdminReportItem[]> {
   const qs = new URLSearchParams();
   qs.set("limit", String(opts?.limit ?? 200));
@@ -2264,7 +2635,7 @@ export async function getReports(
 export async function getAdminSearch(
   token: string,
   q: string,
-  opts?: { scopes?: AdminSearchScope[]; limit?: number }
+  opts?: { scopes?: AdminSearchScope[]; limit?: number },
 ): Promise<AdminSearchResult[]> {
   const query = q.trim();
   if (!query) return [];
@@ -2286,7 +2657,10 @@ export async function getAdminSearch(
 export async function updateReport(
   token: string,
   id: number,
-  payload: { status: "open" | "in_review" | "done" | "rejected"; githubIssueNumber?: number | null }
+  payload: {
+    status: "open" | "in_review" | "done" | "rejected";
+    githubIssueNumber?: number | null;
+  },
 ): Promise<AdminReportItem> {
   const res = await fetch(`${apiBase}/admin/reports/${id}`, {
     method: "PUT",
@@ -2301,7 +2675,7 @@ export async function updateReport(
 
 export async function deleteReport(
   token: string,
-  id: number
+  id: number,
 ): Promise<{ ok: boolean; deletedId: number }> {
   const res = await fetch(`${apiBase}/admin/reports/${id}`, {
     method: "DELETE",
@@ -2312,7 +2686,11 @@ export async function deleteReport(
 
 export async function deleteReports(
   token: string,
-  opts?: { userId?: number; type?: "" | "bug" | "idea" | "post"; status?: "" | "open" | "in_review" | "done" | "rejected" }
+  opts?: {
+    userId?: number;
+    type?: "" | "bug" | "idea" | "post";
+    status?: "" | "open" | "in_review" | "done" | "rejected";
+  },
 ): Promise<{ ok: boolean; deletedCount: number }> {
   const qs = new URLSearchParams();
   if (opts?.userId && opts.userId > 0) qs.set("userId", String(opts.userId));

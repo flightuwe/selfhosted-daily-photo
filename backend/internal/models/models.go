@@ -89,6 +89,8 @@ type AppSettings struct {
 	FeedCommentPreviewLimit          int        `gorm:"default:10" json:"feedCommentPreviewLimit"`
 	PromptNotificationText           string     `gorm:"size:255;default:'Zeit fuer dein Daily Foto'" json:"promptNotificationText"`
 	MaxUploadBytes                   int64      `gorm:"default:0" json:"maxUploadBytes"`
+	ChatMessageMaxLength             int        `gorm:"default:5000" json:"chatMessageMaxLength"`
+	ChatMessageUnlimited             bool       `gorm:"default:false" json:"chatMessageUnlimited"`
 	ChatCommandEnabled               bool       `gorm:"default:false" json:"chatCommandEnabled"`
 	ChatCommandValue                 string     `gorm:"size:64;default:'-moment'" json:"chatCommandValue"`
 	ChatCommandTrigger               bool       `gorm:"default:true" json:"chatCommandTrigger"`
@@ -415,7 +417,7 @@ type ChatMessage struct {
 	ID                uint       `gorm:"primaryKey" json:"id"`
 	UserID            uint       `gorm:"index;not null;index:idx_chat_msg_user_client,unique" json:"userId"`
 	User              User       `json:"user"`
-	Body              string     `gorm:"size:500;not null" json:"body"`
+	Body              string     `gorm:"type:text;not null" json:"body"`
 	Source            string     `gorm:"size:16;not null;default:'user';index" json:"source"`
 	MessageType       string     `gorm:"size:16;not null;default:'text';index" json:"type"`
 	PollQuestion      string     `gorm:"size:280" json:"pollQuestion"`

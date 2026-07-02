@@ -1573,6 +1573,8 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 			"promptWindowEndHour":   settings.PromptWindowEndHour,
 			"uploadWindowMinutes":   settings.UploadWindowMinutes,
 			"maxUploadBytes":        settings.MaxUploadBytes,
+			"chatMessageMaxLength":  settings.ChatMessageMaxLength,
+			"chatMessageUnlimited":  settings.ChatMessageUnlimited,
 			"timezone":              s.Config.Timezone,
 		},
 		"specialMomentStatus": specialStatus,
@@ -1643,6 +1645,8 @@ func (s *Server) handlePromptRules(c *gin.Context) {
 		"promptWindowEndHour":   settings.PromptWindowEndHour,
 		"uploadWindowMinutes":   settings.UploadWindowMinutes,
 		"maxUploadBytes":        settings.MaxUploadBytes,
+		"chatMessageMaxLength":  settings.ChatMessageMaxLength,
+		"chatMessageUnlimited":  settings.ChatMessageUnlimited,
 		"timezone":              s.Config.Timezone,
 	})
 }
@@ -2808,6 +2812,8 @@ type settingsRequest struct {
 	FeedCommentPreviewLimit          int              `json:"feedCommentPreviewLimit"`
 	PromptNotificationText           string           `json:"promptNotificationText"`
 	MaxUploadBytes                   int64            `json:"maxUploadBytes"`
+	ChatMessageMaxLength             int              `json:"chatMessageMaxLength"`
+	ChatMessageUnlimited             bool             `json:"chatMessageUnlimited"`
 	ChatCommandEnabled               bool             `json:"chatCommandEnabled"`
 	ChatCommandValue                 string           `json:"chatCommandValue"`
 	ChatCommandTrigger               bool             `json:"chatCommandTrigger"`
@@ -2866,6 +2872,8 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	settings.FeedCommentPreviewLimit = req.FeedCommentPreviewLimit
 	settings.PromptNotificationText = req.PromptNotificationText
 	settings.MaxUploadBytes = req.MaxUploadBytes
+	settings.ChatMessageMaxLength = req.ChatMessageMaxLength
+	settings.ChatMessageUnlimited = req.ChatMessageUnlimited
 	settings.ChatCommandEnabled = req.ChatCommandEnabled
 	settings.ChatCommandValue = req.ChatCommandValue
 	settings.ChatCommandTrigger = req.ChatCommandTrigger
@@ -7462,7 +7470,7 @@ func (s *Server) communityStatsPayload(now time.Time) (gin.H, error) {
 func (s *Server) handleChatCreate(c *gin.Context) {
 	user, _ := userFromContext(c)
 	var req struct {
-		Body            string `json:"body" binding:"required,min=1,max=500"`
+		Body            string `json:"body" binding:"required,min=1"`
 		ClientMessageID string `json:"clientMessageId" binding:"omitempty,max=64"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -7472,6 +7480,22 @@ func (s *Server) handleChatCreate(c *gin.Context) {
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "message empty"})
+		return
+	}
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+		return
+	}
+	settings = normalizeSettings(settings)
+	if !settings.ChatMessageUnlimited && len([]rune(body)) > settings.ChatMessageMaxLength {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":          "message too long",
+			"maxLength":      settings.ChatMessageMaxLength,
+			"trimmedLength":  len([]rune(body)),
+			"unlimited":      false,
+			"messageTooLong": true,
+		})
 		return
 	}
 	if reportType, reportBody, ok := parseUserReportPrefix(body); ok {
@@ -11009,87 +11033,87 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		avatarURL = s.avatarURL(u.AvatarPath)
 	}
 	return gin.H{
-		"id":                            u.ID,
-		"username":                      u.Username,
-		"isAdmin":                       u.IsAdmin,
-		"favoriteColor":                 defaultColor(u.FavoriteColor),
-		"chatPushEnabled":               u.ChatPushEnabled,
-		"pollPushEnabled":               u.PollPushEnabled,
-		"specialMomentPushEnabled":      u.SpecialMomentPushEnabled,
-		"inviteRegistrationPushEnabled": u.InviteRegistrationPushEnabled,
-		"photoReactionPushEnabled":      u.PhotoReactionPushEnabled,
-		"photoFotomojiPushEnabled":      u.PhotoFotomojiPushEnabled,
-		"photoCommentPushEnabled":       u.PhotoCommentPushEnabled,
-		"bookmarkedPhotoPushEnabled":    u.BookmarkedPhotoPushEnabled,
-		"postChangePushEnabled":         u.PostChangePushEnabled,
+		"id":                                  u.ID,
+		"username":                            u.Username,
+		"isAdmin":                             u.IsAdmin,
+		"favoriteColor":                       defaultColor(u.FavoriteColor),
+		"chatPushEnabled":                     u.ChatPushEnabled,
+		"pollPushEnabled":                     u.PollPushEnabled,
+		"specialMomentPushEnabled":            u.SpecialMomentPushEnabled,
+		"inviteRegistrationPushEnabled":       u.InviteRegistrationPushEnabled,
+		"photoReactionPushEnabled":            u.PhotoReactionPushEnabled,
+		"photoFotomojiPushEnabled":            u.PhotoFotomojiPushEnabled,
+		"photoCommentPushEnabled":             u.PhotoCommentPushEnabled,
+		"bookmarkedPhotoPushEnabled":          u.BookmarkedPhotoPushEnabled,
+		"postChangePushEnabled":               u.PostChangePushEnabled,
 		"autoSubscribeInteractedPostsEnabled": u.AutoSubscribeInteractedPostsEnabled,
-		"ownPostNumberInPushEnabled":    u.OwnPostNumberInPushEnabled,
-		"postNumberInPushEnabled":       u.PostNumberInPushEnabled,
-		"yoloModeEnabled":               u.YoloModeEnabled,
-		"allowPhotoDownload":            u.AllowPhotoDownload,
-		"allowCommunityNsfwMarking":     u.AllowCommunityNsfwMarking,
-		"showNsfwByDefault":             u.ShowNsfwByDefault,
-		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
-		"locationFeatureEnabled":        u.LocationFeatureEnabled,
-		"locationShareDefaultEnabled":   u.LocationShareDefaultEnabled,
-		"avatarUrl":                     avatarURL,
-		"bio":                           strings.TrimSpace(u.Bio),
-		"statusText":                    strings.TrimSpace(u.StatusText),
-		"statusEmoji":                   strings.TrimSpace(u.StatusEmoji),
-		"statusExpiresAt":               u.StatusExpiresAt,
-		"profileVisible":                u.ProfileVisible,
-		"avatarVisible":                 u.AvatarVisible,
-		"bioVisible":                    u.BioVisible,
-		"statusVisible":                 u.StatusVisible,
-		"quietHoursEnabled":             u.QuietHoursEnabled,
-		"quietHoursStart":               defaultIfBlank(u.QuietHoursStart, "22:00"),
-		"quietHoursEnd":                 defaultIfBlank(u.QuietHoursEnd, "07:00"),
-		"diagnosticsConsentGranted":     u.DiagnosticsConsentGranted,
-		"diagnosticsConsentUpdatedAt":   u.DiagnosticsConsentUpdatedAt,
-		"diagnosticsConsentSource":      strings.TrimSpace(u.DiagnosticsConsentSource),
-		"createdAt":                     u.CreatedAt,
+		"ownPostNumberInPushEnabled":          u.OwnPostNumberInPushEnabled,
+		"postNumberInPushEnabled":             u.PostNumberInPushEnabled,
+		"yoloModeEnabled":                     u.YoloModeEnabled,
+		"allowPhotoDownload":                  u.AllowPhotoDownload,
+		"allowCommunityNsfwMarking":           u.AllowCommunityNsfwMarking,
+		"showNsfwByDefault":                   u.ShowNsfwByDefault,
+		"creativePostMode":                    normalizeCreativePostMode(u.CreativePostMode),
+		"locationFeatureEnabled":              u.LocationFeatureEnabled,
+		"locationShareDefaultEnabled":         u.LocationShareDefaultEnabled,
+		"avatarUrl":                           avatarURL,
+		"bio":                                 strings.TrimSpace(u.Bio),
+		"statusText":                          strings.TrimSpace(u.StatusText),
+		"statusEmoji":                         strings.TrimSpace(u.StatusEmoji),
+		"statusExpiresAt":                     u.StatusExpiresAt,
+		"profileVisible":                      u.ProfileVisible,
+		"avatarVisible":                       u.AvatarVisible,
+		"bioVisible":                          u.BioVisible,
+		"statusVisible":                       u.StatusVisible,
+		"quietHoursEnabled":                   u.QuietHoursEnabled,
+		"quietHoursStart":                     defaultIfBlank(u.QuietHoursStart, "22:00"),
+		"quietHoursEnd":                       defaultIfBlank(u.QuietHoursEnd, "07:00"),
+		"diagnosticsConsentGranted":           u.DiagnosticsConsentGranted,
+		"diagnosticsConsentUpdatedAt":         u.DiagnosticsConsentUpdatedAt,
+		"diagnosticsConsentSource":            strings.TrimSpace(u.DiagnosticsConsentSource),
+		"createdAt":                           u.CreatedAt,
 	}
 }
 
 func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 	own := viewerID == u.ID
 	out := gin.H{
-		"id":                            u.ID,
-		"username":                      u.Username,
-		"isAdmin":                       u.IsAdmin,
-		"favoriteColor":                 defaultColor(u.FavoriteColor),
-		"chatPushEnabled":               false,
-		"pollPushEnabled":               false,
-		"specialMomentPushEnabled":      false,
-		"inviteRegistrationPushEnabled": false,
-		"photoReactionPushEnabled":      false,
-		"photoFotomojiPushEnabled":      false,
-		"photoCommentPushEnabled":       false,
-		"bookmarkedPhotoPushEnabled":    false,
-		"postChangePushEnabled":         false,
+		"id":                                  u.ID,
+		"username":                            u.Username,
+		"isAdmin":                             u.IsAdmin,
+		"favoriteColor":                       defaultColor(u.FavoriteColor),
+		"chatPushEnabled":                     false,
+		"pollPushEnabled":                     false,
+		"specialMomentPushEnabled":            false,
+		"inviteRegistrationPushEnabled":       false,
+		"photoReactionPushEnabled":            false,
+		"photoFotomojiPushEnabled":            false,
+		"photoCommentPushEnabled":             false,
+		"bookmarkedPhotoPushEnabled":          false,
+		"postChangePushEnabled":               false,
 		"autoSubscribeInteractedPostsEnabled": false,
-		"ownPostNumberInPushEnabled":    false,
-		"postNumberInPushEnabled":       false,
-		"yoloModeEnabled":               false,
-		"allowPhotoDownload":            u.AllowPhotoDownload,
-		"allowCommunityNsfwMarking":     false,
-		"showNsfwByDefault":             false,
-		"creativePostMode":              normalizeCreativePostMode(u.CreativePostMode),
-		"locationFeatureEnabled":        false,
-		"locationShareDefaultEnabled":   false,
-		"avatarUrl":                     "",
-		"bio":                           "",
-		"statusText":                    "",
-		"statusEmoji":                   "",
-		"statusExpiresAt":               nil,
-		"profileVisible":                false,
-		"avatarVisible":                 false,
-		"bioVisible":                    false,
-		"statusVisible":                 false,
-		"quietHoursEnabled":             false,
-		"quietHoursStart":               "22:00",
-		"quietHoursEnd":                 "07:00",
-		"createdAt":                     u.CreatedAt,
+		"ownPostNumberInPushEnabled":          false,
+		"postNumberInPushEnabled":             false,
+		"yoloModeEnabled":                     false,
+		"allowPhotoDownload":                  u.AllowPhotoDownload,
+		"allowCommunityNsfwMarking":           false,
+		"showNsfwByDefault":                   false,
+		"creativePostMode":                    normalizeCreativePostMode(u.CreativePostMode),
+		"locationFeatureEnabled":              false,
+		"locationShareDefaultEnabled":         false,
+		"avatarUrl":                           "",
+		"bio":                                 "",
+		"statusText":                          "",
+		"statusEmoji":                         "",
+		"statusExpiresAt":                     nil,
+		"profileVisible":                      false,
+		"avatarVisible":                       false,
+		"bioVisible":                          false,
+		"statusVisible":                       false,
+		"quietHoursEnabled":                   false,
+		"quietHoursStart":                     "22:00",
+		"quietHoursEnd":                       "07:00",
+		"createdAt":                           u.CreatedAt,
 	}
 	now := time.Now().In(s.Location)
 	if own {
@@ -12628,6 +12652,7 @@ func encodeUserPromptRulesJSON(rules []userPromptRule) string {
 }
 
 func normalizeSettings(settings models.AppSettings) models.AppSettings {
+	const defaultChatMessageMaxLength = 5000
 	if strings.TrimSpace(settings.ChatCommandValue) == "" {
 		settings.ChatCommandValue = "-moment"
 	}
@@ -12645,6 +12670,9 @@ func normalizeSettings(settings models.AppSettings) models.AppSettings {
 	}
 	if settings.FeedCommentPreviewLimit > 50 {
 		settings.FeedCommentPreviewLimit = 50
+	}
+	if settings.ChatMessageMaxLength <= 0 {
+		settings.ChatMessageMaxLength = defaultChatMessageMaxLength
 	}
 	if settings.PerformanceTrackingWindowMinutes < 5 {
 		settings.PerformanceTrackingWindowMinutes = 30
@@ -12674,6 +12702,8 @@ func settingsJSON(settings models.AppSettings) gin.H {
 		"feedCommentPreviewLimit":          settings.FeedCommentPreviewLimit,
 		"promptNotificationText":           settings.PromptNotificationText,
 		"maxUploadBytes":                   settings.MaxUploadBytes,
+		"chatMessageMaxLength":             settings.ChatMessageMaxLength,
+		"chatMessageUnlimited":             settings.ChatMessageUnlimited,
 		"chatCommandEnabled":               settings.ChatCommandEnabled,
 		"chatCommandValue":                 settings.ChatCommandValue,
 		"chatCommandTrigger":               settings.ChatCommandTrigger,

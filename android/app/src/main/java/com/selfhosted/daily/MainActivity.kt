@@ -71,6 +71,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -893,6 +894,8 @@ data class PromptRulesResponse(
     val promptWindowEndHour: Int,
     val uploadWindowMinutes: Int,
     val maxUploadBytes: Long,
+    val chatMessageMaxLength: Int = 5000,
+    val chatMessageUnlimited: Boolean = false,
     val timezone: String
 )
 data class DashboardBootstrapResponse(
@@ -1024,6 +1027,27 @@ private fun securityAdviceForFailure(failureClass: String): String {
 
 private fun parseIsoInstantMs(value: String): Long {
     return runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrDefault(0L)
+}
+
+private const val DEFAULT_CHAT_MESSAGE_MAX_LENGTH = 5000
+
+private fun textCodePointLength(value: String): Int = value.codePointCount(0, value.length)
+
+private fun PromptRulesResponse?.effectiveChatMessageMaxLength(): Int =
+    this?.chatMessageMaxLength?.takeIf { it > 0 } ?: DEFAULT_CHAT_MESSAGE_MAX_LENGTH
+
+private fun PromptRulesResponse?.isChatMessageUnlimited(): Boolean = this?.chatMessageUnlimited == true
+
+private fun peekHttpErrorBody(throwable: Throwable, maxBytes: Long = 2048L): String {
+    val http = throwable as? HttpException ?: return ""
+    return runCatching { http.response()?.raw()?.peekBody(maxBytes)?.string().orEmpty() }
+        .getOrDefault("")
+        .trim()
+}
+
+private fun extractJsonIntField(raw: String, field: String): Int? {
+    val regex = Regex(""""$field"\s*:\s*(\d+)""", RegexOption.IGNORE_CASE)
+    return regex.find(raw)?.groupValues?.getOrNull(1)?.toIntOrNull()
 }
 
 interface Api {
@@ -4474,6 +4498,19 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    private fun chatLimitValue(): Int = state.promptRules.effectiveChatMessageMaxLength()
+
+    private fun chatUnlimitedEnabled(): Boolean = state.promptRules.isChatMessageUnlimited()
+
+    private fun chatInputDebugMeta(input: String, trimmed: String = input.trim()): String =
+        buildString {
+            append("inputLength=").append(textCodePointLength(input))
+            append(";trimmedLength=").append(textCodePointLength(trimmed))
+            append(";newlineCount=").append(input.count { it == '\n' })
+            append(";configuredChatLimit=").append(chatLimitValue())
+            append(";unlimited=").append(chatUnlimitedEnabled())
+        }
+
     private fun rootCause(throwable: Throwable): Throwable {
         var current = throwable
         while (current.cause != null && current.cause !== current) {
@@ -4878,6 +4915,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val http = throwable as? HttpException
         val code = http?.code()
         val responseRequestId = http?.response()?.headers()?.get("X-Request-ID")?.trim().orEmpty()
+        val responseBody = debugMetaSanitizeShared(peekHttpErrorBody(throwable), 240)
         val network = networkFailureKind(throwable)
         val base = buildString {
             append("endpoint=").append(endpoint)
@@ -4888,6 +4926,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             if (network != null) {
                 append(";network=").append(network)
+            }
+            if (responseBody.isNotBlank()) {
+                append(";responseBody=").append(responseBody)
             }
             if (throwable is IllegalStateException && throwable.message == "missing_access_token") {
                 append(";derivedFrom=").append(repo.authStateTransitionReason())
@@ -5717,6 +5758,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         promptWindowEndHour = 20,
                         uploadWindowMinutes = 60,
                         maxUploadBytes = 0,
+                        chatMessageMaxLength = DEFAULT_CHAT_MESSAGE_MAX_LENGTH,
+                        chatMessageUnlimited = false,
                         timezone = "UTC"
                     )
                 }
@@ -6662,6 +6705,19 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun sendChat(body: String): Boolean {
         val trimmed = body.trim()
         if (trimmed.isBlank() || state.chatSending) return false
+        if (!chatUnlimitedEnabled()) {
+            val trimmedLength = textCodePointLength(trimmed)
+            val maxLength = chatLimitValue()
+            if (trimmedLength > maxLength) {
+                repo.logDebug(
+                    type = "chat_send_blocked_local",
+                    message = "message too long",
+                    meta = chatInputDebugMeta(body, trimmed)
+                )
+                state = state.copy(message = "Nachricht ist zu lang (max. $maxLength Zeichen).")
+                return false
+            }
+        }
         if (!chatSendMutex.tryLock()) return false
         val nowMs = System.currentTimeMillis()
         val normalized = normalizeChatBody(trimmed)
@@ -6690,8 +6746,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 }
                 .onFailure {
                     pendingChatBodies.remove(normalized)
-                    state = state.copy(message = apiError(it, "Chat senden fehlgeschlagen"))
-                    logApiFailure("chat_send_failed", "/api/chat", it)
+                    val rawError = peekHttpErrorBody(it)
+                    val extraMeta = buildString {
+                        append(chatInputDebugMeta(body, trimmed))
+                        if (rawError.isNotBlank()) {
+                            append(";serverError=").append(debugMetaSanitizeShared(rawError, 240))
+                        }
+                    }
+                    logApiFailure("chat_send_failed", "/api/chat", it, extraMeta)
+                    state = state.copy(message = apiError(it, "Chat senden fehlgeschlagen", rawError))
                 }
                 .isSuccess
         } finally {
@@ -9804,6 +9867,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     chatDeleteSupported = state.chatDeleteSupported,
                     input = chatInput,
                     sending = state.chatSending,
+                    chatMessageMaxLength = state.promptRules.effectiveChatMessageMaxLength(),
+                    chatMessageUnlimited = state.promptRules.isChatMessageUnlimited(),
                     onInput = { chatInput = it },
                     onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
                     onDeleteMessage = { messageId ->
@@ -13264,6 +13329,8 @@ fun ChatTab(
     chatDeleteSupported: Boolean,
     input: String,
     sending: Boolean,
+    chatMessageMaxLength: Int,
+    chatMessageUnlimited: Boolean,
     onInput: (String) -> Unit,
     onOpenUserProfile: (Long) -> Unit,
     onDeleteMessage: (Long) -> Unit,
@@ -13279,6 +13346,15 @@ fun ChatTab(
     var pollOptionsText by remember { mutableStateOf("") }
     var pollAllowMulti by remember { mutableStateOf(false) }
     val pendingMultiVotes = remember { mutableStateMapOf<Long, Set<Long>>() }
+    val hasDraft = input.isNotEmpty()
+    val trimmedInput = input.trim()
+    val trimmedLength = textCodePointLength(trimmedInput)
+    val overLimit = !chatMessageUnlimited && trimmedLength > chatMessageMaxLength
+    val counterText = if (chatMessageUnlimited) {
+        "${textCodePointLength(input)} Zeichen · Unbegrenzt"
+    } else {
+        "$trimmedLength / $chatMessageMaxLength"
+    }
     val rows = remember(items) {
         buildList<ChatRow> {
             var lastDay = ""
@@ -13511,27 +13587,47 @@ fun ChatTab(
                 }
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             OutlinedTextField(
                 value = input,
                 onValueChange = onInput,
                 label = { Text("Nachricht") },
+                placeholder = { Text("Schreibe eine Nachricht...") },
                 enabled = !sending,
-                modifier = Modifier.weight(1f)
+                isError = overLimit,
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 4,
+                maxLines = 8,
+                supportingText = {
+                    Text(
+                        if (overLimit) "Nachricht ist zu lang. $counterText" else counterText,
+                        color = if (overLimit) Color(0xFFD32F2F) else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             )
-            OutlinedButton(
-                onClick = { showPollDialog = true },
-                enabled = !sending,
-                modifier = Modifier.align(Alignment.CenterVertically)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Umfrage")
-            }
-            Button(
-                onClick = onSend,
-                enabled = !sending && input.trim().isNotEmpty(),
-                modifier = Modifier.align(Alignment.CenterVertically)
-            ) {
-                Text(if (sending) "Sende..." else "Senden")
+                if (!hasDraft) {
+                    OutlinedButton(
+                        onClick = { showPollDialog = true },
+                        enabled = !sending
+                    ) {
+                        Text("Umfrage")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Button(
+                    onClick = onSend,
+                    enabled = !sending && trimmedInput.isNotEmpty() && !overLimit
+                ) {
+                    Text(if (sending) "Sende..." else "Senden")
+                }
             }
         }
     }
@@ -14926,6 +15022,7 @@ fun ProfileTab(
                                   Text("Prompt-Fenster: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
                                   Text("Upload-Fenster: ${promptRules.uploadWindowMinutes} Minuten")
                                   Text("Max Upload: ${if (promptRules.maxUploadBytes <= 0) "Unbegrenzt" else formatBytes(promptRules.maxUploadBytes.toDouble())}")
+                                  Text("Chat-Laenge: ${if (promptRules.chatMessageUnlimited) "Unbegrenzt" else "${promptRules.chatMessageMaxLength} Zeichen"}")
                                   Text("Zeitzone: ${promptRules.timezone}")
                               }
                           }
@@ -15987,7 +16084,7 @@ private fun hsvToHex(h: Float, s: Float, v: Float): String {
     return String.format("#%06X", 0xFFFFFF and colorInt)
 }
 
-private fun apiError(t: Throwable, fallback: String): String {
+private fun apiError(t: Throwable, fallback: String, httpErrorRawOverride: String? = null): String {
     if (t is IllegalStateException) {
         return when (t.message?.trim().orEmpty()) {
             "token_expired_refresh_failed" -> "Sitzung abgelaufen. Bitte erneut einloggen."
@@ -15998,9 +16095,17 @@ private fun apiError(t: Throwable, fallback: String): String {
         }
     }
     if (t is HttpException) {
-        val raw = runCatching { t.response()?.errorBody()?.string().orEmpty() }.getOrDefault("").lowercase()
+        val rawBody = httpErrorRawOverride ?: peekHttpErrorBody(t)
+        val raw = rawBody.lowercase()
         return when (t.code()) {
-            400 -> "Ungueltige Eingabe"
+            400 -> when {
+                raw.contains("message too long") -> {
+                    val maxLength = extractJsonIntField(rawBody, "maxLength")
+                    if (maxLength != null) "Nachricht ist zu lang (max. $maxLength Zeichen)." else "Nachricht ist zu lang."
+                }
+                raw.contains("message empty") -> "Nachricht ist leer."
+                else -> "Ungueltige Eingabe"
+            }
             401 -> when {
                 raw.contains("invalid_credentials") -> "Login fehlgeschlagen"
                 raw.contains("session_revoked") -> "Sitzung wurde beendet. Bitte erneut einloggen."

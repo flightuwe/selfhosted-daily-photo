@@ -42,11 +42,11 @@ class PushMessagingService : FirebaseMessagingService() {
             this,
             type = "push_message_received",
             message = if (type.isBlank()) "unknown" else type,
-            meta = "action=${if (action.isBlank()) "-" else action};day=${if (day.isBlank()) "-" else day};photoId=${if (photoId.isBlank()) "-" else photoId};hasNotificationPayload=${message.notification != null};dataKeys=${message.data.keys.sorted().joinToString(",")}"
+            meta = "source=real_fcm;delivery=on_message_received;action=${if (action.isBlank()) "-" else action};day=${if (day.isBlank()) "-" else day};photoId=${if (photoId.isBlank()) "-" else photoId};hasNotificationPayload=${message.notification != null};dataKeys=${message.data.keys.sorted().joinToString(",")}"
         )
         PushNotificationDiagnostics.recordPayload(
             this,
-            source = "fcm_service",
+            source = "real_fcm",
             type = type,
             action = action,
             day = day,
@@ -74,7 +74,7 @@ class PushMessagingService : FirebaseMessagingService() {
         val tone = toneConfig(prefs)
         val title = message.notification?.title ?: "Daily Moment"
         val body = message.notification?.body ?: message.data["body"] ?: "Zeit fuer deinen taeglichen Moment."
-        postTrackedNotification(this, tone, type, action, day, photoId, title, body, source = "fcm_service")
+        postTrackedNotification(this, tone, type, action, day, photoId, title, body, source = "real_fcm")
     }
 
     companion object {

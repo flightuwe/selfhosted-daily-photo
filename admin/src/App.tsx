@@ -131,10 +131,47 @@ import {
   type UserPromptRule,
 } from "./api";
 
-type Tab = "dashboard" | "system" | "events" | "commands" | "users" | "feed" | "chat" | "polls" | "calendar" | "history" | "performance" | "incident_export" | "trigger_audit" | "time_capsule" | "fotomojis" | "reports" | "debug" | "upload_timeline" | "settings" | "migration" | "locations";
+type Tab =
+  | "dashboard"
+  | "system"
+  | "events"
+  | "commands"
+  | "users"
+  | "feed"
+  | "chat"
+  | "polls"
+  | "calendar"
+  | "history"
+  | "performance"
+  | "incident_export"
+  | "trigger_audit"
+  | "time_capsule"
+  | "fotomojis"
+  | "reports"
+  | "debug"
+  | "upload_timeline"
+  | "settings"
+  | "migration"
+  | "locations";
 type AdminArea = "operations" | "analytics" | "config";
-type OperationsSubtab = "cockpit" | "daily_calendar" | "feed" | "chat" | "polls" | "time_capsules" | "fotomojis" | "reports" | "locations";
-type AnalyticsSubtab = "history" | "performance" | "incident_export" | "trigger_audit" | "upload_timeline" | "debug" | "system";
+type OperationsSubtab =
+  | "cockpit"
+  | "daily_calendar"
+  | "feed"
+  | "chat"
+  | "polls"
+  | "time_capsules"
+  | "fotomojis"
+  | "reports"
+  | "locations";
+type AnalyticsSubtab =
+  | "history"
+  | "performance"
+  | "incident_export"
+  | "trigger_audit"
+  | "upload_timeline"
+  | "debug"
+  | "system";
 type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
 
@@ -162,6 +199,8 @@ const DEFAULT_SETTINGS: Settings = {
   performanceTrackingOneShot: false,
   promptNotificationText: "Zeit fuer dein Daily Foto",
   maxUploadBytes: 0,
+  chatMessageMaxLength: 5000,
+  chatMessageUnlimited: false,
   chatCommandEnabled: false,
   chatCommandValue: "-moment",
   chatCommandTrigger: true,
@@ -176,9 +215,11 @@ const DEFAULT_SETTINGS: Settings = {
   migrationTargetBaseUrl: "",
   migrationDownloadUrl: "",
   migrationPushTitle: "Daily umgezogen",
-  migrationPushBody: "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.",
+  migrationPushBody:
+    "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.",
   migrationScreenTitle: "Daily ist umgezogen",
-  migrationScreenBody: "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.",
+  migrationScreenBody:
+    "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.",
   migrationRequirePromptFirst: true,
   migrationExpectedSource: "",
   migrationBaselineUserCount: 0,
@@ -198,7 +239,9 @@ const DEFAULT_SETTINGS: Settings = {
 };
 const cloneDefaultSettings = (): Settings => ({
   ...DEFAULT_SETTINGS,
-  userPromptRules: DEFAULT_SETTINGS.userPromptRules.map((rule) => ({ ...rule })),
+  userPromptRules: DEFAULT_SETTINGS.userPromptRules.map((rule) => ({
+    ...rule,
+  })),
 });
 const emptySettings: Settings = cloneDefaultSettings();
 const legacyNavStorageKey = "admin-legacy-nav-enabled";
@@ -234,7 +277,10 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
   },
 };
 
-const areaSubtabs: Record<AdminArea, Array<{ key: AdminSubtab; label: string }>> = {
+const areaSubtabs: Record<
+  AdminArea,
+  Array<{ key: AdminSubtab; label: string }>
+> = {
   operations: [
     { key: "cockpit", label: "Cockpit" },
     { key: "daily_calendar", label: "Daily & Kalender" },
@@ -319,17 +365,27 @@ function debugMetaValue(meta: string, key: string): string {
   return "";
 }
 
-function normalizeMomentKind(momentKind?: string, triggerSource?: string): "daily" | "special" {
+function normalizeMomentKind(
+  momentKind?: string,
+  triggerSource?: string,
+): "daily" | "special" {
   const kind = (momentKind || "").trim().toLowerCase();
   if (kind === "special" || kind === "daily") return kind;
   const source = (triggerSource || "").trim().toLowerCase();
-  if (source === "special_request" || source === "chat_command") return "special";
+  if (source === "special_request" || source === "chat_command")
+    return "special";
   return "daily";
 }
 
-function momentSourceLabel(momentKind?: string, triggerSource?: string, requestedByUser?: string): string {
+function momentSourceLabel(
+  momentKind?: string,
+  triggerSource?: string,
+  requestedByUser?: string,
+): string {
   if (normalizeMomentKind(momentKind, triggerSource) === "special") {
-    return requestedByUser ? `Sondermoment von ${requestedByUser}` : "Sondermoment";
+    return requestedByUser
+      ? `Sondermoment von ${requestedByUser}`
+      : "Sondermoment";
   }
   if (triggerSource === "admin_manual") return "Admin";
   if (triggerSource === "admin_reset") return "Admin Reset";
@@ -384,13 +440,17 @@ function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
   }
 }
 
-function parseQueryAreaSubtab(): { area: AdminArea; subtab: AdminSubtab } | null {
+function parseQueryAreaSubtab(): {
+  area: AdminArea;
+  subtab: AdminSubtab;
+} | null {
   const params = new URLSearchParams(window.location.search);
   const area = (params.get("area") || "").trim() as AdminArea;
   const subtab = (params.get("subtab") || "").trim() as AdminSubtab;
   if (!area || !subtab) return null;
   if (!(area in subtabToTab)) return null;
-  if (!Object.prototype.hasOwnProperty.call(subtabToTab[area], subtab)) return null;
+  if (!Object.prototype.hasOwnProperty.call(subtabToTab[area], subtab))
+    return null;
   return { area, subtab };
 }
 
@@ -405,8 +465,16 @@ function readSavedViews(): SavedView[] {
       .map((entry) => ({
         id: String(entry.id || `view_${Date.now()}`),
         name: String(entry.name || "Gespeicherte Ansicht"),
-        tab: (entry.tab === "reports" || entry.tab === "debug" || entry.tab === "history" ? entry.tab : "history"),
-        payload: typeof entry.payload === "object" && entry.payload ? entry.payload : {},
+        tab:
+          entry.tab === "reports" ||
+          entry.tab === "debug" ||
+          entry.tab === "history"
+            ? entry.tab
+            : "history",
+        payload:
+          typeof entry.payload === "object" && entry.payload
+            ? entry.payload
+            : {},
       }));
   } catch {
     return [];
@@ -417,33 +485,63 @@ function photoMediaItems(photo: FeedPhoto) {
   if (Array.isArray(photo.media) && photo.media.length > 0) {
     return photo.media.filter((item) => item?.url);
   }
-  const fallback = [{ id: `${photo.id}-primary`, url: photo.url, sourceKind: "primary" }];
+  const fallback = [
+    { id: `${photo.id}-primary`, url: photo.url, sourceKind: "primary" },
+  ];
   if (photo.secondUrl) {
-    fallback.push({ id: `${photo.id}-secondary`, url: photo.secondUrl, sourceKind: "secondary" });
+    fallback.push({
+      id: `${photo.id}-secondary`,
+      url: photo.secondUrl,
+      sourceKind: "secondary",
+    });
   }
   return fallback;
 }
 
-function PhotoMediaCard({ photo, username, compact = false }: { photo: FeedPhoto; username: string; compact?: boolean }) {
+function PhotoMediaCard({
+  photo,
+  username,
+  compact = false,
+}: {
+  photo: FeedPhoto;
+  username: string;
+  compact?: boolean;
+}) {
   const media = photoMediaItems(photo);
   const mediaCount = Math.max(photo.mediaCount || 0, media.length);
   return (
-    <div className={`photo-stack${compact ? " compact" : ""}${photo.nsfw ? " nsfw" : ""}`}>
+    <div
+      className={`photo-stack${compact ? " compact" : ""}${photo.nsfw ? " nsfw" : ""}`}
+    >
       <div className="photo-grid">
         {media.map((item, index) => (
-          <a key={item.id || `${photo.id}-${index}`} href={item.url} target="_blank" rel="noreferrer">
-            <img src={item.url} alt={`${username} ${item.sourceKind || "photo"} ${index + 1}`} />
+          <a
+            key={item.id || `${photo.id}-${index}`}
+            href={item.url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <img
+              src={item.url}
+              alt={`${username} ${item.sourceKind || "photo"} ${index + 1}`}
+            />
           </a>
         ))}
       </div>
       <div className="photo-meta-row">
         <div className="photo-badges">
           {photo.nsfw && <span className="photo-badge nsfw">NSFW</span>}
-          {mediaCount > 1 && <span className="photo-badge">{mediaCount} Medien</span>}
-          {photo.publicNumber && <span className="photo-badge">#{photo.publicNumber}</span>}
+          {mediaCount > 1 && (
+            <span className="photo-badge">{mediaCount} Medien</span>
+          )}
+          {photo.publicNumber && (
+            <span className="photo-badge">#{photo.publicNumber}</span>
+          )}
         </div>
         {photo.nsfwMarkedAt && (
-          <span className="small">markiert {formatDateTime(photo.nsfwMarkedAt)}</span>
+          <span className="small">
+            markiert {formatDateTime(photo.nsfwMarkedAt)}
+          </span>
         )}
       </div>
     </div>
@@ -451,8 +549,12 @@ function PhotoMediaCard({ photo, username, compact = false }: { photo: FeedPhoto
 }
 
 export function App() {
-  const [token, setToken] = useState<string>(() => localStorage.getItem("admin-token") || "");
-  const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem("admin-dark-mode") === "1");
+  const [token, setToken] = useState<string>(
+    () => localStorage.getItem("admin-token") || "",
+  );
+  const [darkMode, setDarkMode] = useState<boolean>(
+    () => localStorage.getItem("admin-dark-mode") === "1",
+  );
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [settings, setSettings] = useState<Settings>(emptySettings);
@@ -460,7 +562,9 @@ export function App() {
   const [stats, setStats] = useState<AdminStats>(emptyStats);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
-  const [feedMonthRecap, setFeedMonthRecap] = useState<MonthlyRecap | null>(null);
+  const [feedMonthRecap, setFeedMonthRecap] = useState<MonthlyRecap | null>(
+    null,
+  );
   const [locationItems, setLocationItems] = useState<AdminLocationItem[]>([]);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [chatDraft, setChatDraft] = useState("");
@@ -476,86 +580,138 @@ export function App() {
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
   const [chatCommands, setChatCommands] = useState<ChatCommand[]>([]);
   const [editingCommandId, setEditingCommandId] = useState<number | null>(null);
-  const [commandDraft, setCommandDraft] = useState<CommandDraft>(emptyCommandDraft);
+  const [commandDraft, setCommandDraft] =
+    useState<CommandDraft>(emptyCommandDraft);
   const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([]);
-  const [calendarDrafts, setCalendarDrafts] = useState<Record<string, string>>({});
+  const [calendarDrafts, setCalendarDrafts] = useState<Record<string, string>>(
+    {},
+  );
   const [historyItems, setHistoryItems] = useState<AdminHistoryDay[]>([]);
   const [historyDays, setHistoryDays] = useState<number>(30);
   const [historyOffset, setHistoryOffset] = useState<number>(0);
   const [historyTrackingSince, setHistoryTrackingSince] = useState("");
-  const [expandedHistoryDays, setExpandedHistoryDays] = useState<Record<string, boolean>>({});
-  const [historyReliableTop, setHistoryReliableTop] = useState<AdminHistoryLeaderboardEntry[]>([]);
-  const [historyExtraHeavyTop, setHistoryExtraHeavyTop] = useState<AdminHistoryLeaderboardEntry[]>([]);
-  const [historyAnomalies, setHistoryAnomalies] = useState<AdminHistoryAnomaly[]>([]);
-  const [historyTimeseries, setHistoryTimeseries] = useState<AdminHistoryTimeSeriesPoint[]>([]);
-  const [historyDistribution, setHistoryDistribution] = useState<AdminHistoryDistribution>({
-    photoMix: { promptRatio: 0, extraRatio: 0, capsuleRatio: 0 },
-    userMix: { promptRatio: 0, extraRatio: 0 },
-    rawTotals: {
-      photos: 0,
-      dailyMomentPhotos: 0,
-      extraPhotos: 0,
-      capsulePhotos: 0,
-      postedUsersSum: 0,
-      onlineUsersSum: 0,
-    },
-  });
-  const [historyConversion, setHistoryConversion] = useState<AdminHistoryConversionPoint[]>([]);
-  const [historyReliability, setHistoryReliability] = useState<AdminHistoryReliability>({
-    daysAnalyzed: 0,
-    daysWithPosts: 0,
-    daysWithTriggerPerformance: 0,
-    onTimeTriggerDays: 0,
-    onTimeTriggerRate: 0,
-    avgAbsoluteTriggerDelayMinutes: 0,
-    debugErrorIndicators: 0,
-    errorIndicatorRatePerDay: 0,
-    avgPostedUsersPerDay: 0,
-    avgOnlineUsersPerDay: 0,
-    avgRequestsPerOnlineUser: 0,
-  });
-  const [historyCohorts, setHistoryCohorts] = useState<AdminHistoryCohortEntry[]>([]);
+  const [expandedHistoryDays, setExpandedHistoryDays] = useState<
+    Record<string, boolean>
+  >({});
+  const [historyReliableTop, setHistoryReliableTop] = useState<
+    AdminHistoryLeaderboardEntry[]
+  >([]);
+  const [historyExtraHeavyTop, setHistoryExtraHeavyTop] = useState<
+    AdminHistoryLeaderboardEntry[]
+  >([]);
+  const [historyAnomalies, setHistoryAnomalies] = useState<
+    AdminHistoryAnomaly[]
+  >([]);
+  const [historyTimeseries, setHistoryTimeseries] = useState<
+    AdminHistoryTimeSeriesPoint[]
+  >([]);
+  const [historyDistribution, setHistoryDistribution] =
+    useState<AdminHistoryDistribution>({
+      photoMix: { promptRatio: 0, extraRatio: 0, capsuleRatio: 0 },
+      userMix: { promptRatio: 0, extraRatio: 0 },
+      rawTotals: {
+        photos: 0,
+        dailyMomentPhotos: 0,
+        extraPhotos: 0,
+        capsulePhotos: 0,
+        postedUsersSum: 0,
+        onlineUsersSum: 0,
+      },
+    });
+  const [historyConversion, setHistoryConversion] = useState<
+    AdminHistoryConversionPoint[]
+  >([]);
+  const [historyReliability, setHistoryReliability] =
+    useState<AdminHistoryReliability>({
+      daysAnalyzed: 0,
+      daysWithPosts: 0,
+      daysWithTriggerPerformance: 0,
+      onTimeTriggerDays: 0,
+      onTimeTriggerRate: 0,
+      avgAbsoluteTriggerDelayMinutes: 0,
+      debugErrorIndicators: 0,
+      errorIndicatorRatePerDay: 0,
+      avgPostedUsersPerDay: 0,
+      avgOnlineUsersPerDay: 0,
+      avgRequestsPerOnlineUser: 0,
+    });
+  const [historyCohorts, setHistoryCohorts] = useState<
+    AdminHistoryCohortEntry[]
+  >([]);
   const [performanceFrom, setPerformanceFrom] = useState("");
   const [performanceTo, setPerformanceTo] = useState("");
   const [performanceBucket, setPerformanceBucket] = useState<"1m" | "5m">("1m");
-  const [performanceOverview, setPerformanceOverview] = useState<AdminPerformanceOverview | null>(null);
-  const [performanceSlo, setPerformanceSlo] = useState<AdminPerformanceSloState | null>(null);
-  const [performanceRoutes, setPerformanceRoutes] = useState<AdminPerformanceRouteHotspot[]>([]);
-  const [performanceSpikes, setPerformanceSpikes] = useState<AdminPerformanceSpikeWindow[]>([]);
-  const [performanceTrackingEnabled, setPerformanceTrackingEnabled] = useState(false);
-  const [performanceTrackingWindowMinutes, setPerformanceTrackingWindowMinutes] = useState(30);
-  const [performanceTrackingOneShot, setPerformanceTrackingOneShot] = useState(false);
-  const [performanceTrackingActiveSpike, setPerformanceTrackingActiveSpike] = useState<AdminPerformanceSpikeWindow | null>(null);
-  const [performanceTrackingLatestSpike, setPerformanceTrackingLatestSpike] = useState<AdminPerformanceSpikeWindow | null>(null);
+  const [performanceOverview, setPerformanceOverview] =
+    useState<AdminPerformanceOverview | null>(null);
+  const [performanceSlo, setPerformanceSlo] =
+    useState<AdminPerformanceSloState | null>(null);
+  const [performanceRoutes, setPerformanceRoutes] = useState<
+    AdminPerformanceRouteHotspot[]
+  >([]);
+  const [performanceSpikes, setPerformanceSpikes] = useState<
+    AdminPerformanceSpikeWindow[]
+  >([]);
+  const [performanceTrackingEnabled, setPerformanceTrackingEnabled] =
+    useState(false);
+  const [
+    performanceTrackingWindowMinutes,
+    setPerformanceTrackingWindowMinutes,
+  ] = useState(30);
+  const [performanceTrackingOneShot, setPerformanceTrackingOneShot] =
+    useState(false);
+  const [performanceTrackingActiveSpike, setPerformanceTrackingActiveSpike] =
+    useState<AdminPerformanceSpikeWindow | null>(null);
+  const [performanceTrackingLatestSpike, setPerformanceTrackingLatestSpike] =
+    useState<AdminPerformanceSpikeWindow | null>(null);
   const [incidentFrom, setIncidentFrom] = useState<string>(() => {
     const now = new Date();
     const from = new Date(now.getTime() - 60 * 60 * 1000);
     return toInputDateTime(from.toISOString());
   });
-  const [incidentTo, setIncidentTo] = useState<string>(() => toInputDateTime(new Date().toISOString()));
+  const [incidentTo, setIncidentTo] = useState<string>(() =>
+    toInputDateTime(new Date().toISOString()),
+  );
   const [incidentDay, setIncidentDay] = useState<string>("");
-  const [incidentIncludeGateway, setIncidentIncludeGateway] = useState<boolean>(true);
-  const [incidentStatus, setIncidentStatus] = useState<AdminIncidentExportStatus | null>(null);
-  const [triggerRuntime, setTriggerRuntime] = useState<AdminTriggerRuntimeResponse | null>(null);
-  const [triggerRuntimeWindowMinutes, setTriggerRuntimeWindowMinutes] = useState<number>(60);
-  const [triggerAuditItems, setTriggerAuditItems] = useState<AdminTriggerAuditItem[]>([]);
-  const [triggerAuditSummary, setTriggerAuditSummary] = useState<AdminTriggerAuditSummary | null>(null);
+  const [incidentIncludeGateway, setIncidentIncludeGateway] =
+    useState<boolean>(true);
+  const [incidentStatus, setIncidentStatus] =
+    useState<AdminIncidentExportStatus | null>(null);
+  const [triggerRuntime, setTriggerRuntime] =
+    useState<AdminTriggerRuntimeResponse | null>(null);
+  const [triggerRuntimeWindowMinutes, setTriggerRuntimeWindowMinutes] =
+    useState<number>(60);
+  const [triggerAuditItems, setTriggerAuditItems] = useState<
+    AdminTriggerAuditItem[]
+  >([]);
+  const [triggerAuditSummary, setTriggerAuditSummary] =
+    useState<AdminTriggerAuditSummary | null>(null);
   const [triggerAuditDays, setTriggerAuditDays] = useState<number>(7);
   const [triggerAuditDay, setTriggerAuditDay] = useState("");
   const [triggerAuditSource, setTriggerAuditSource] = useState("");
   const [triggerAuditResult, setTriggerAuditResult] = useState("");
   const [triggerAuditRequestId, setTriggerAuditRequestId] = useState("");
-  const [triggerAuditActorUserId, setTriggerAuditActorUserId] = useState<number>(0);
+  const [triggerAuditActorUserId, setTriggerAuditActorUserId] =
+    useState<number>(0);
   const [triggerAuditLimit, setTriggerAuditLimit] = useState<number>(200);
-  const [migrationInfo, setMigrationInfo] = useState<AdminMigrationInfo | null>(null);
+  const [migrationInfo, setMigrationInfo] = useState<AdminMigrationInfo | null>(
+    null,
+  );
   const [migrationDays, setMigrationDays] = useState<number>(7);
   const [migrationTargetUrl, setMigrationTargetUrl] = useState("");
   const [migrationDownloadUrl, setMigrationDownloadUrl] = useState("");
-  const [migrationPushTitle, setMigrationPushTitle] = useState("Daily umgezogen");
-  const [migrationPushBody, setMigrationPushBody] = useState("Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.");
-  const [migrationScreenTitle, setMigrationScreenTitle] = useState("Daily ist umgezogen");
-  const [migrationScreenBody, setMigrationScreenBody] = useState("Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.");
-  const [migrationRequirePromptFirst, setMigrationRequirePromptFirst] = useState(true);
+  const [migrationPushTitle, setMigrationPushTitle] =
+    useState("Daily umgezogen");
+  const [migrationPushBody, setMigrationPushBody] = useState(
+    "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.",
+  );
+  const [migrationScreenTitle, setMigrationScreenTitle] = useState(
+    "Daily ist umgezogen",
+  );
+  const [migrationScreenBody, setMigrationScreenBody] = useState(
+    "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.",
+  );
+  const [migrationRequirePromptFirst, setMigrationRequirePromptFirst] =
+    useState(true);
   const [migrationAutoOffEnabled, setMigrationAutoOffEnabled] = useState(true);
   const [migrationExpectedSource, setMigrationExpectedSource] = useState("");
   const [migrationCallbackSecret, setMigrationCallbackSecret] = useState("");
@@ -563,13 +719,21 @@ export function App() {
   const [migrationReportTarget, setMigrationReportTarget] = useState("");
   const [migrationReportSource, setMigrationReportSource] = useState("");
   const [migrationReportSecret, setMigrationReportSecret] = useState("");
-  const [migrationLinkRole, setMigrationLinkRole] = useState<"old" | "new">("old");
-  const [migrationLinkExport, setMigrationLinkExport] = useState<AdminMigrationLinkExportResponse | null>(null);
+  const [migrationLinkRole, setMigrationLinkRole] = useState<"old" | "new">(
+    "old",
+  );
+  const [migrationLinkExport, setMigrationLinkExport] =
+    useState<AdminMigrationLinkExportResponse | null>(null);
   const [migrationLinkImportToken, setMigrationLinkImportToken] = useState("");
-  const [timeCapsuleItems, setTimeCapsuleItems] = useState<AdminTimeCapsuleItem[]>([]);
+  const [timeCapsuleItems, setTimeCapsuleItems] = useState<
+    AdminTimeCapsuleItem[]
+  >([]);
   const [fotomojiItems, setFotomojiItems] = useState<AdminFotomojiItem[]>([]);
-  const [fotomojiHistory, setFotomojiHistory] = useState<AdminFotomojiTemplateHistoryUser[]>([]);
-  const [fotomojiHistoryVersionCount, setFotomojiHistoryVersionCount] = useState<number>(0);
+  const [fotomojiHistory, setFotomojiHistory] = useState<
+    AdminFotomojiTemplateHistoryUser[]
+  >([]);
+  const [fotomojiHistoryVersionCount, setFotomojiHistoryVersionCount] =
+    useState<number>(0);
   const [fotomojiDayFilter, setFotomojiDayFilter] = useState("");
   const [fotomojiUserFilter, setFotomojiUserFilter] = useState<number>(0);
   const [fotomojiEmojiFilter, setFotomojiEmojiFilter] = useState("");
@@ -578,20 +742,38 @@ export function App() {
   const [selectedFotomojiIds, setSelectedFotomojiIds] = useState<number[]>([]);
   const [reports, setReports] = useState<AdminReportItem[]>([]);
   const [reportUserFilter, setReportUserFilter] = useState<number>(0);
-  const [reportTypeFilter, setReportTypeFilter] = useState<"" | "bug" | "idea" | "post">("");
-  const [reportStatusFilter, setReportStatusFilter] = useState<"" | "open" | "in_review" | "done" | "rejected">("");
+  const [reportTypeFilter, setReportTypeFilter] = useState<
+    "" | "bug" | "idea" | "post"
+  >("");
+  const [reportStatusFilter, setReportStatusFilter] = useState<
+    "" | "open" | "in_review" | "done" | "rejected"
+  >("");
   const [debugLogs, setDebugLogs] = useState<DebugLogItem[]>([]);
-  const [debugFilterInfo, setDebugFilterInfo] = useState<{ since: string; serverNow: string; sinceHours: number }>({
+  const [debugFilterInfo, setDebugFilterInfo] = useState<{
+    since: string;
+    serverNow: string;
+    sinceHours: number;
+  }>({
     since: "",
     serverNow: "",
     sinceHours: 24,
   });
   const [debugUserFilter, setDebugUserFilter] = useState<number>(0);
   const [debugSinceHours, setDebugSinceHours] = useState<1 | 12 | 24>(24);
-  const [debugViewMode, setDebugViewMode] = useState<"events" | "summary">("events");
-  const [debugSummaryItems, setDebugSummaryItems] = useState<DebugLogSummaryItem[]>([]);
-  const [uploadTimelineItems, setUploadTimelineItems] = useState<UploadTimelineItem[]>([]);
-  const [uploadTimelineFilterInfo, setUploadTimelineFilterInfo] = useState<{ since: string; serverNow: string; sinceHours: number }>({
+  const [debugViewMode, setDebugViewMode] = useState<"events" | "summary">(
+    "events",
+  );
+  const [debugSummaryItems, setDebugSummaryItems] = useState<
+    DebugLogSummaryItem[]
+  >([]);
+  const [uploadTimelineItems, setUploadTimelineItems] = useState<
+    UploadTimelineItem[]
+  >([]);
+  const [uploadTimelineFilterInfo, setUploadTimelineFilterInfo] = useState<{
+    since: string;
+    serverNow: string;
+    sinceHours: number;
+  }>({
     since: "",
     serverNow: "",
     sinceHours: 24,
@@ -603,35 +785,55 @@ export function App() {
     waitingForNetworkCount: 0,
     liveCount: 0,
   });
-  const [uploadTimelineUserFilter, setUploadTimelineUserFilter] = useState<number>(0);
-  const [uploadTimelineSinceHours, setUploadTimelineSinceHours] = useState<1 | 12 | 24>(24);
-  const [uploadTimelineAutoRefresh, setUploadTimelineAutoRefresh] = useState(true);
-  const [feedDay, setFeedDay] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [uploadTimelineUserFilter, setUploadTimelineUserFilter] =
+    useState<number>(0);
+  const [uploadTimelineSinceHours, setUploadTimelineSinceHours] = useState<
+    1 | 12 | 24
+  >(24);
+  const [uploadTimelineAutoRefresh, setUploadTimelineAutoRefresh] =
+    useState(true);
+  const [feedDay, setFeedDay] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10),
+  );
   const [message, setMessage] = useState("");
   const initialNav = useMemo(() => parseQueryAreaSubtab(), []);
-  const [activeArea, setActiveArea] = useState<AdminArea>(initialNav?.area || "operations");
-  const [activeSubtab, setActiveSubtab] = useState<AdminSubtab>(initialNav?.subtab || "cockpit");
+  const [activeArea, setActiveArea] = useState<AdminArea>(
+    initialNav?.area || "operations",
+  );
+  const [activeSubtab, setActiveSubtab] = useState<AdminSubtab>(
+    initialNav?.subtab || "cockpit",
+  );
   const [activeTab, setActiveTab] = useState<Tab>(() => {
     if (initialNav) {
       return subtabToTab[initialNav.area][initialNav.subtab];
     }
     return "dashboard";
   });
-  const [legacyNavEnabled, setLegacyNavEnabled] = useState<boolean>(() => localStorage.getItem(legacyNavStorageKey) === "1");
+  const [legacyNavEnabled, setLegacyNavEnabled] = useState<boolean>(
+    () => localStorage.getItem(legacyNavStorageKey) === "1",
+  );
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchScope, setSearchScope] = useState<"all" | AdminSearchScope>("all");
+  const [searchScope, setSearchScope] = useState<"all" | AdminSearchScope>(
+    "all",
+  );
   const [searchResults, setSearchResults] = useState<AdminSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
-  const [savedViews, setSavedViews] = useState<SavedView[]>(() => readSavedViews());
+  const [savedViews, setSavedViews] = useState<SavedView[]>(() =>
+    readSavedViews(),
+  );
   const [openReportsCount, setOpenReportsCount] = useState(0);
 
   const [newUsername, setNewUsername] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newIsAdmin, setNewIsAdmin] = useState(false);
 
-  const [resetPassword, setResetPassword] = useState<Record<number, string>>({});
+  const [resetPassword, setResetPassword] = useState<Record<number, string>>(
+    {},
+  );
   const [issuingTokenForUserId, setIssuingTokenForUserId] = useState<number>(0);
-  const [broadcastBody, setBroadcastBody] = useState("Server-Test: Bitte App Ã¶ffnen und Daily Foto posten.");
+  const [broadcastBody, setBroadcastBody] = useState(
+    "Server-Test: Bitte App Ã¶ffnen und Daily Foto posten.",
+  );
   const [updateNoticeVersion, setUpdateNoticeVersion] = useState("0.2.12");
   const [targetUserId, setTargetUserId] = useState<number>(0);
   const [targetUserSearch, setTargetUserSearch] = useState("");
@@ -642,20 +844,31 @@ export function App() {
     if (!q) return users;
     return users.filter((u) => u.username.toLowerCase().includes(q));
   }, [users, targetUserSearch]);
-  const hasReportDeleteFilter = reportUserFilter > 0 || reportTypeFilter !== "" || reportStatusFilter !== "";
-  const selectedFotomojiSet = useMemo(() => new Set(selectedFotomojiIds), [selectedFotomojiIds]);
+  const hasReportDeleteFilter =
+    reportUserFilter > 0 ||
+    reportTypeFilter !== "" ||
+    reportStatusFilter !== "";
+  const selectedFotomojiSet = useMemo(
+    () => new Set(selectedFotomojiIds),
+    [selectedFotomojiIds],
+  );
   const allVisibleFotomojisSelected = useMemo(
-    () => fotomojiItems.length > 0 && fotomojiItems.every((item) => selectedFotomojiSet.has(item.id)),
-    [fotomojiItems, selectedFotomojiSet]
+    () =>
+      fotomojiItems.length > 0 &&
+      fotomojiItems.every((item) => selectedFotomojiSet.has(item.id)),
+    [fotomojiItems, selectedFotomojiSet],
   );
   const debugSummary = useMemo(() => {
-    const uniqueUsers = new Set(debugLogs.map((row) => row.user?.id).filter(Boolean)).size;
+    const uniqueUsers = new Set(
+      debugLogs.map((row) => row.user?.id).filter(Boolean),
+    ).size;
     const typeCounts = debugLogs.reduce<Record<string, number>>((acc, row) => {
       const key = row.type || "unknown";
       acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {});
-    const topType = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "-";
+    const topType =
+      Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "-";
     return {
       total: debugLogs.length,
       uniqueUsers,
@@ -671,33 +884,56 @@ export function App() {
     const failureRows = authRows.filter((row) => {
       const type = (row.type || "").toLowerCase();
       if (type.includes("failed")) return true;
-      const failureClass = debugMetaValue(row.meta || "", "failureClass").toLowerCase();
+      const failureClass = debugMetaValue(
+        row.meta || "",
+        "failureClass",
+      ).toLowerCase();
       const http = debugMetaValue(row.meta || "", "http");
-      return failureClass.startsWith("http_4") || failureClass.startsWith("http_5") || http.startsWith("4") || http.startsWith("5");
+      return (
+        failureClass.startsWith("http_4") ||
+        failureClass.startsWith("http_5") ||
+        http.startsWith("4") ||
+        http.startsWith("5")
+      );
     });
-    const reasonCounts = failureRows.reduce<Record<string, number>>((acc, row) => {
-      const reason =
-        debugMetaValue(row.meta || "", "failureClass") ||
-        debugMetaValue(row.meta || "", "error") ||
-        row.type ||
-        "unknown";
-      acc[reason] = (acc[reason] || 0) + 1;
-      return acc;
-    }, {});
-    const versionCounts = failureRows.reduce<Record<string, number>>((acc, row) => {
-      const version = (row.appVersion || "").trim() || "-";
-      acc[version] = (acc[version] || 0) + 1;
-      return acc;
-    }, {});
+    const reasonCounts = failureRows.reduce<Record<string, number>>(
+      (acc, row) => {
+        const reason =
+          debugMetaValue(row.meta || "", "failureClass") ||
+          debugMetaValue(row.meta || "", "error") ||
+          row.type ||
+          "unknown";
+        acc[reason] = (acc[reason] || 0) + 1;
+        return acc;
+      },
+      {},
+    );
+    const versionCounts = failureRows.reduce<Record<string, number>>(
+      (acc, row) => {
+        const version = (row.appVersion || "").trim() || "-";
+        acc[version] = (acc[version] || 0) + 1;
+        return acc;
+      },
+      {},
+    );
     return {
       total: failureRows.length,
-      uniqueUsers: new Set(failureRows.map((row) => row.user?.id).filter(Boolean)).size,
-      topReason: Object.entries(reasonCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "-",
-      topVersion: Object.entries(versionCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "-",
+      uniqueUsers: new Set(
+        failureRows.map((row) => row.user?.id).filter(Boolean),
+      ).size,
+      topReason:
+        Object.entries(reasonCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "-",
+      topVersion:
+        Object.entries(versionCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ||
+        "-",
     };
   }, [debugLogs]);
   const reduceMotion = useMemo(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    )
+      return false;
     return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }, []);
   const historyTrendChartData = useMemo(
@@ -706,7 +942,7 @@ export function App() {
         ...row,
         dayLabel: formatDateShort(row.day),
       })),
-    [historyTimeseries]
+    [historyTimeseries],
   );
   const historyCompositionChartData = useMemo(
     () =>
@@ -716,7 +952,7 @@ export function App() {
         extraPhotos: row.extraPhotos,
         capsulePhotos: row.capsulePhotos,
       })),
-    [historyTimeseries]
+    [historyTimeseries],
   );
   const historyConversionChartData = useMemo(
     () =>
@@ -724,7 +960,7 @@ export function App() {
         ...row,
         dayLabel: formatDateShort(row.day),
       })),
-    [historyConversion]
+    [historyConversion],
   );
   const historyScatterData = useMemo(
     () =>
@@ -733,15 +969,24 @@ export function App() {
         y: row.postedUsers,
         dayLabel: formatDateShort(row.day),
       })),
-    [historyTimeseries]
+    [historyTimeseries],
   );
   const historyPhotoMixPieData = useMemo(
     () => [
-      { name: "Daily-Moment", value: ratioPercent(historyDistribution.photoMix.promptRatio) },
-      { name: "Extra", value: ratioPercent(historyDistribution.photoMix.extraRatio) },
-      { name: "Capsule", value: ratioPercent(historyDistribution.photoMix.capsuleRatio) },
+      {
+        name: "Daily-Moment",
+        value: ratioPercent(historyDistribution.photoMix.promptRatio),
+      },
+      {
+        name: "Extra",
+        value: ratioPercent(historyDistribution.photoMix.extraRatio),
+      },
+      {
+        name: "Capsule",
+        value: ratioPercent(historyDistribution.photoMix.capsuleRatio),
+      },
     ],
-    [historyDistribution]
+    [historyDistribution],
   );
   const historyReliableChartData = useMemo(
     () =>
@@ -749,7 +994,7 @@ export function App() {
         username: row.username,
         scorePercent: ratioPercent(row.reliabilityScore || 0),
       })),
-    [historyReliableTop]
+    [historyReliableTop],
   );
   const historyExtraHeavyChartData = useMemo(
     () =>
@@ -757,18 +1002,19 @@ export function App() {
         username: row.username,
         scorePercent: ratioPercent(row.extraBiasScore || 0),
       })),
-    [historyExtraHeavyTop]
+    [historyExtraHeavyTop],
   );
   const historyAnomalyTimelineData = useMemo(
     () =>
       historyAnomalies.map((row) => ({
         day: row.day,
         dayLabel: formatDateShort(row.day),
-        severityScore: row.severity === "high" ? 3 : row.severity === "medium" ? 2 : 1,
+        severityScore:
+          row.severity === "high" ? 3 : row.severity === "medium" ? 2 : 1,
         severity: row.severity,
         reason: row.reason,
       })),
-    [historyAnomalies]
+    [historyAnomalies],
   );
   const historyCohortTrendData = useMemo(
     () =>
@@ -777,25 +1023,31 @@ export function App() {
         participation7d: ratioPercent(row.participation7d),
         participation30d: ratioPercent(row.participation30d),
       })),
-    [historyCohorts]
+    [historyCohorts],
   );
   const performanceTrendData = useMemo(
     () =>
       (performanceOverview?.items || []).map((row) => ({
         ...row,
-        bucketLabel: new Date(row.bucketStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        bucketLabel: new Date(row.bucketStart).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
       })),
-    [performanceOverview]
+    [performanceOverview],
   );
   const performanceSystemData = useMemo(
     () =>
       (performanceOverview?.system || []).map((row) => ({
         ...row,
-        bucketLabel: new Date(row.bucketStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        bucketLabel: new Date(row.bucketStart).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
         memAllocMb: Number(row.memAllocBytes || 0) / (1024 * 1024),
         dbWaitMs: Number(row.dbWaitDurationMs || 0),
       })),
-    [performanceOverview]
+    [performanceOverview],
   );
   const performanceSpikeChartData = useMemo(
     () =>
@@ -809,7 +1061,7 @@ export function App() {
           uploadCount: row.uploadCount,
           errorCount: row.errorCount,
         })),
-    [performanceSpikes]
+    [performanceSpikes],
   );
 
   useEffect(() => {
@@ -818,7 +1070,9 @@ export function App() {
   }, [token]);
 
   useEffect(() => {
-    setSelectedFotomojiIds((prev) => prev.filter((id) => fotomojiItems.some((item) => item.id === id)));
+    setSelectedFotomojiIds((prev) =>
+      prev.filter((id) => fotomojiItems.some((item) => item.id === id)),
+    );
   }, [fotomojiItems]);
 
   useEffect(() => {
@@ -839,7 +1093,12 @@ export function App() {
       void loadHistory(token, historyDays, historyOffset);
     }
     if (activeTab === "performance") {
-      void loadPerformance(token, performanceBucket, performanceFrom, performanceTo);
+      void loadPerformance(
+        token,
+        performanceBucket,
+        performanceFrom,
+        performanceTo,
+      );
     }
     if (activeTab === "incident_export") {
       void loadIncidentStatus(token);
@@ -852,11 +1111,29 @@ export function App() {
       void loadTimeCapsules(token);
     }
     if (activeTab === "fotomojis") {
-      void loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
-      void loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
+      void loadFotomojis(
+        token,
+        fotomojiDayFilter,
+        fotomojiUserFilter,
+        fotomojiEmojiFilter,
+        fotomojiFromFilter,
+        fotomojiToFilter,
+      );
+      void loadFotomojiHistory(
+        token,
+        fotomojiUserFilter,
+        fotomojiEmojiFilter,
+        fotomojiFromFilter,
+        fotomojiToFilter,
+      );
     }
     if (activeTab === "reports") {
-      void loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
+      void loadReports(
+        token,
+        reportUserFilter,
+        reportTypeFilter,
+        reportStatusFilter,
+      );
     }
     if (activeTab === "locations") {
       void loadLocations(token);
@@ -872,9 +1149,53 @@ export function App() {
       void loadDebugLogsSummary(token, debugUserFilter, debugSinceHours);
     }
     if (activeTab === "upload_timeline") {
-      void loadUploadTimeline(token, uploadTimelineUserFilter, uploadTimelineSinceHours);
+      void loadUploadTimeline(
+        token,
+        uploadTimelineUserFilter,
+        uploadTimelineSinceHours,
+      );
     }
-  }, [token, activeTab, feedDay, pollDay, pollOpenOnly, pollCreatorUserId, pollLimit, locationFromDay, locationToDay, locationUserId, debugUserFilter, debugSinceHours, uploadTimelineUserFilter, uploadTimelineSinceHours, reportUserFilter, reportTypeFilter, reportStatusFilter, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter, historyDays, historyOffset, performanceBucket, performanceFrom, performanceTo, incidentFrom, incidentTo, incidentDay, incidentIncludeGateway, triggerRuntimeWindowMinutes, triggerAuditDays, triggerAuditDay, triggerAuditSource, triggerAuditResult, triggerAuditRequestId, triggerAuditActorUserId, triggerAuditLimit]);
+  }, [
+    token,
+    activeTab,
+    feedDay,
+    pollDay,
+    pollOpenOnly,
+    pollCreatorUserId,
+    pollLimit,
+    locationFromDay,
+    locationToDay,
+    locationUserId,
+    debugUserFilter,
+    debugSinceHours,
+    uploadTimelineUserFilter,
+    uploadTimelineSinceHours,
+    reportUserFilter,
+    reportTypeFilter,
+    reportStatusFilter,
+    fotomojiDayFilter,
+    fotomojiUserFilter,
+    fotomojiEmojiFilter,
+    fotomojiFromFilter,
+    fotomojiToFilter,
+    historyDays,
+    historyOffset,
+    performanceBucket,
+    performanceFrom,
+    performanceTo,
+    incidentFrom,
+    incidentTo,
+    incidentDay,
+    incidentIncludeGateway,
+    triggerRuntimeWindowMinutes,
+    triggerAuditDays,
+    triggerAuditDay,
+    triggerAuditSource,
+    triggerAuditResult,
+    triggerAuditRequestId,
+    triggerAuditActorUserId,
+    triggerAuditLimit,
+  ]);
 
   useEffect(() => {
     if (!token || activeTab !== "system") return;
@@ -885,12 +1206,23 @@ export function App() {
   }, [token, activeTab]);
 
   useEffect(() => {
-    if (!token || activeTab !== "upload_timeline" || !uploadTimelineAutoRefresh) return;
+    if (!token || activeTab !== "upload_timeline" || !uploadTimelineAutoRefresh)
+      return;
     const id = window.setInterval(() => {
-      void loadUploadTimeline(token, uploadTimelineUserFilter, uploadTimelineSinceHours);
+      void loadUploadTimeline(
+        token,
+        uploadTimelineUserFilter,
+        uploadTimelineSinceHours,
+      );
     }, 10000);
     return () => window.clearInterval(id);
-  }, [token, activeTab, uploadTimelineAutoRefresh, uploadTimelineUserFilter, uploadTimelineSinceHours]);
+  }, [
+    token,
+    activeTab,
+    uploadTimelineAutoRefresh,
+    uploadTimelineUserFilter,
+    uploadTimelineSinceHours,
+  ]);
 
   useEffect(() => {
     localStorage.setItem("admin-dark-mode", darkMode ? "1" : "0");
@@ -917,7 +1249,11 @@ export function App() {
     const params = new URLSearchParams(window.location.search);
     params.set("area", activeArea);
     params.set("subtab", activeSubtab);
-    window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}?${params.toString()}`,
+    );
   }, [legacyNavEnabled, activeArea, activeSubtab]);
 
   function navigateTab(tab: Tab) {
@@ -978,13 +1314,19 @@ export function App() {
     }
     if (activeTab === "reports") {
       tab = "reports";
-      payload = { userId: reportUserFilter, type: reportTypeFilter, status: reportStatusFilter };
+      payload = {
+        userId: reportUserFilter,
+        type: reportTypeFilter,
+        status: reportStatusFilter,
+      };
     }
     if (!tab) {
       setMessage("Saved Views gibt es fuer Reports, Debug und Historie.");
       return;
     }
-    const name = window.prompt("Name fuer diese Ansicht:", `${tab} view`)?.trim();
+    const name = window
+      .prompt("Name fuer diese Ansicht:", `${tab} view`)
+      ?.trim();
     if (!name) return;
     const next: SavedView = {
       id: `view_${Date.now()}`,
@@ -1006,19 +1348,35 @@ export function App() {
     if (view.tab === "debug") {
       const hours = Number(view.payload.sinceHours || 24);
       setDebugUserFilter(Number(view.payload.userId || 0));
-      setDebugSinceHours(hours === 1 || hours === 12 || hours === 24 ? hours : 24);
+      setDebugSinceHours(
+        hours === 1 || hours === 12 || hours === 24 ? hours : 24,
+      );
       navigateTab("debug");
       return;
     }
     setReportUserFilter(Number(view.payload.userId || 0));
     setReportTypeFilter((view.payload.type as "" | "bug" | "idea") || "");
-    setReportStatusFilter((view.payload.status as "" | "open" | "in_review" | "done" | "rejected") || "");
+    setReportStatusFilter(
+      (view.payload.status as
+        "" | "open" | "in_review" | "done" | "rejected") || "",
+    );
     navigateTab("reports");
   }
 
   async function loadAdminData(authToken: string) {
     try {
-      const [s, st, u, cmds, cal, sys, openReports, triggerSummary, runtime, migration] = await Promise.all([
+      const [
+        s,
+        st,
+        u,
+        cmds,
+        cal,
+        sys,
+        openReports,
+        triggerSummary,
+        runtime,
+        migration,
+      ] = await Promise.all([
         getSettings(authToken),
         getStats(authToken),
         listUsers(authToken),
@@ -1027,13 +1385,17 @@ export function App() {
         getSystemHealth(authToken),
         getReports(authToken, { status: "open", limit: 200 }),
         getAdminTriggerAuditSummary(authToken, 7),
-        getAdminTriggerRuntime(authToken, { windowMinutes: triggerRuntimeWindowMinutes }),
+        getAdminTriggerRuntime(authToken, {
+          windowMinutes: triggerRuntimeWindowMinutes,
+        }),
         getAdminMigration(authToken),
       ]);
       setSettings(s);
       setSavedSettings(s);
       setPerformanceTrackingEnabled(Boolean(s.performanceTrackingEnabled));
-      setPerformanceTrackingWindowMinutes(Number(s.performanceTrackingWindowMinutes || 30));
+      setPerformanceTrackingWindowMinutes(
+        Number(s.performanceTrackingWindowMinutes || 30),
+      );
       setPerformanceTrackingOneShot(Boolean(s.performanceTrackingOneShot));
       setStats(st);
       setUsers(u);
@@ -1043,7 +1405,7 @@ export function App() {
         cal.reduce<Record<string, string>>((acc, item) => {
           acc[item.day] = toInputDateTime(item.plannedAt);
           return acc;
-        }, {})
+        }, {}),
       );
       setSystemHealth(sys);
       setOpenReportsCount(openReports.length);
@@ -1053,12 +1415,24 @@ export function App() {
       setMigrationTargetUrl(migration.migration.targetBaseUrl || "");
       setMigrationDownloadUrl(migration.migration.downloadUrl || "");
       setMigrationPushTitle(migration.migration.pushTitle || "Daily umgezogen");
-      setMigrationPushBody(migration.migration.pushBody || "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.");
-      setMigrationScreenTitle(migration.migration.screenTitle || "Daily ist umgezogen");
-      setMigrationScreenBody(migration.migration.screenBody || "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.");
-      setMigrationRequirePromptFirst(Boolean(migration.migration.requirePromptFirst));
+      setMigrationPushBody(
+        migration.migration.pushBody ||
+          "Bitte aktualisiere Daily und verbinde dich mit dem neuen Server.",
+      );
+      setMigrationScreenTitle(
+        migration.migration.screenTitle || "Daily ist umgezogen",
+      );
+      setMigrationScreenBody(
+        migration.migration.screenBody ||
+          "Diese Instanz ist im Migrationsmodus. Bitte installiere die aktuelle App-Version und trage den neuen Server ein.",
+      );
+      setMigrationRequirePromptFirst(
+        Boolean(migration.migration.requirePromptFirst),
+      );
       setMigrationAutoOffEnabled(Boolean(migration.migration.autoOffEnabled));
-      setMigrationExpectedSource(migration.migration.callbackExpectedSource || "");
+      setMigrationExpectedSource(
+        migration.migration.callbackExpectedSource || "",
+      );
       setMigrationReportEnabled(Boolean(migration.migration.reportEnabled));
       setMigrationReportTarget(migration.migration.reportTarget || "");
       setMigrationReportSource(migration.migration.reportSource || "");
@@ -1134,9 +1508,18 @@ export function App() {
     }
   }
 
-  async function loadDebugLogs(authToken: string, userId?: number, sinceHours: 1 | 12 | 24 = 24) {
+  async function loadDebugLogs(
+    authToken: string,
+    userId?: number,
+    sinceHours: 1 | 12 | 24 = 24,
+  ) {
     try {
-      const response: DebugLogsResponse = await getDebugLogs(authToken, userId && userId > 0 ? userId : undefined, 200, sinceHours);
+      const response: DebugLogsResponse = await getDebugLogs(
+        authToken,
+        userId && userId > 0 ? userId : undefined,
+        200,
+        sinceHours,
+      );
       setDebugLogs(response.items);
       setDebugFilterInfo({
         since: response.since,
@@ -1148,18 +1531,36 @@ export function App() {
     }
   }
 
-  async function loadDebugLogsSummary(authToken: string, userId?: number, sinceHours: 1 | 12 | 24 = 24) {
+  async function loadDebugLogsSummary(
+    authToken: string,
+    userId?: number,
+    sinceHours: 1 | 12 | 24 = 24,
+  ) {
     try {
-      const response: DebugLogSummaryResponse = await getDebugLogsSummary(authToken, userId && userId > 0 ? userId : undefined, 1000, sinceHours);
+      const response: DebugLogSummaryResponse = await getDebugLogsSummary(
+        authToken,
+        userId && userId > 0 ? userId : undefined,
+        1000,
+        sinceHours,
+      );
       setDebugSummaryItems(response.items);
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
-  async function loadUploadTimeline(authToken: string, userId?: number, sinceHours: 1 | 12 | 24 = 24) {
+  async function loadUploadTimeline(
+    authToken: string,
+    userId?: number,
+    sinceHours: 1 | 12 | 24 = 24,
+  ) {
     try {
-      const response: UploadTimelineResponse = await getUploadTimeline(authToken, userId && userId > 0 ? userId : undefined, 250, sinceHours);
+      const response: UploadTimelineResponse = await getUploadTimeline(
+        authToken,
+        userId && userId > 0 ? userId : undefined,
+        250,
+        sinceHours,
+      );
       setUploadTimelineItems(response.items);
       setUploadTimelineFilterInfo({
         since: response.since,
@@ -1176,7 +1577,7 @@ export function App() {
     authToken: string,
     userId?: number,
     type: "" | "bug" | "idea" | "post" = "",
-    status: "" | "open" | "in_review" | "done" | "rejected" = ""
+    status: "" | "open" | "in_review" | "done" | "rejected" = "",
   ) {
     try {
       const items = await getReports(authToken, {
@@ -1194,11 +1595,16 @@ export function App() {
   async function onUpdateReportStatus(
     id: number,
     status: "open" | "in_review" | "done" | "rejected",
-    githubIssueNumber?: number | null
+    githubIssueNumber?: number | null,
   ) {
     try {
-      const updated = await updateReport(token, id, { status, githubIssueNumber: githubIssueNumber ?? null });
-      setReports((prev) => prev.map((item) => (item.id === id ? updated : item)));
+      const updated = await updateReport(token, id, {
+        status,
+        githubIssueNumber: githubIssueNumber ?? null,
+      });
+      setReports((prev) =>
+        prev.map((item) => (item.id === id ? updated : item)),
+      );
       setMessage("Meldung aktualisiert.");
     } catch (err) {
       setMessage((err as Error).message);
@@ -1211,7 +1617,12 @@ export function App() {
     setMessage("");
     try {
       await deleteReport(token, id);
-      await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
+      await loadReports(
+        token,
+        reportUserFilter,
+        reportTypeFilter,
+        reportStatusFilter,
+      );
       setMessage("Meldung geloescht.");
     } catch (err) {
       setMessage((err as Error).message);
@@ -1230,7 +1641,7 @@ export function App() {
           ? "Bug-Reports"
           : reportTypeFilter === "idea"
             ? "Ideen"
-            : "Post-Meldungen"
+            : "Post-Meldungen",
       );
     }
     if (reportStatusFilter) {
@@ -1245,10 +1656,14 @@ export function App() {
       scopeParts.push(label);
     }
     if (reportUserFilter > 0) {
-      scopeParts.push(`@${users.find((u) => u.id === reportUserFilter)?.username || `User ${reportUserFilter}`}`);
+      scopeParts.push(
+        `@${users.find((u) => u.id === reportUserFilter)?.username || `User ${reportUserFilter}`}`,
+      );
     }
     const scopeLabel = scopeParts.join(", ");
-    const confirmed = window.confirm(`Wirklich alle Meldungen mit diesem Filter loeschen: ${scopeLabel}?`);
+    const confirmed = window.confirm(
+      `Wirklich alle Meldungen mit diesem Filter loeschen: ${scopeLabel}?`,
+    );
     if (!confirmed) return;
     setMessage("");
     try {
@@ -1257,30 +1672,49 @@ export function App() {
         type: reportTypeFilter,
         status: reportStatusFilter,
       });
-      await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
+      await loadReports(
+        token,
+        reportUserFilter,
+        reportTypeFilter,
+        reportStatusFilter,
+      );
       setMessage(`${result.deletedCount} Meldungen geloescht.`);
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
-  async function onDownloadUserLogs(hours: 1 | 12 | 24, format: "csv" | "json" = "csv") {
+  async function onDownloadUserLogs(
+    hours: 1 | 12 | 24,
+    format: "csv" | "json" = "csv",
+  ) {
     if (debugUserFilter <= 0) {
       setMessage("Bitte erst einen Nutzer auswaehlen.");
       return;
     }
     try {
-      await downloadDebugLogs(token, { userId: debugUserFilter, sinceHours: hours, format });
-      setMessage(`Nutzer-Logs (${hours}h, ${format.toUpperCase()}) wurden heruntergeladen.`);
+      await downloadDebugLogs(token, {
+        userId: debugUserFilter,
+        sinceHours: hours,
+        format,
+      });
+      setMessage(
+        `Nutzer-Logs (${hours}h, ${format.toUpperCase()}) wurden heruntergeladen.`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
-  async function onDownloadAllLogs(hours: 1 | 12 | 24, format: "csv" | "json" = "csv") {
+  async function onDownloadAllLogs(
+    hours: 1 | 12 | 24,
+    format: "csv" | "json" = "csv",
+  ) {
     try {
       await downloadDebugLogs(token, { sinceHours: hours, format });
-      setMessage(`Gesamte Logs (${hours}h, ${format.toUpperCase()}) wurden heruntergeladen.`);
+      setMessage(
+        `Gesamte Logs (${hours}h, ${format.toUpperCase()}) wurden heruntergeladen.`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1288,7 +1722,10 @@ export function App() {
 
   async function onCopyUploadTimelineLog() {
     try {
-      const text = buildUploadTimelineCopyText(uploadTimelineItems, uploadTimelineFilterInfo);
+      const text = buildUploadTimelineCopyText(
+        uploadTimelineItems,
+        uploadTimelineFilterInfo,
+      );
       await copyToClipboard(text);
       setMessage("Upload-Timeline wurde in die Zwischenablage kopiert.");
     } catch (err) {
@@ -1298,10 +1735,20 @@ export function App() {
 
   async function onDownloadPerformance(format: "csv" | "json" = "json") {
     try {
-      const fromIso = performanceFrom ? new Date(performanceFrom).toISOString() : undefined;
-      const toIso = performanceTo ? new Date(performanceTo).toISOString() : undefined;
-      await downloadPerformanceExport(token, { from: fromIso, to: toIso, format });
-      setMessage(`Performance-Export (${format.toUpperCase()}) wurde heruntergeladen.`);
+      const fromIso = performanceFrom
+        ? new Date(performanceFrom).toISOString()
+        : undefined;
+      const toIso = performanceTo
+        ? new Date(performanceTo).toISOString()
+        : undefined;
+      await downloadPerformanceExport(token, {
+        from: fromIso,
+        to: toIso,
+        format,
+      });
+      setMessage(
+        `Performance-Export (${format.toUpperCase()}) wurde heruntergeladen.`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1313,7 +1760,7 @@ export function App() {
         ? `@${users.find((u) => u.id === debugUserFilter)?.username || `User ${debugUserFilter}`}`
         : "alle Nutzer";
     const confirmed = window.confirm(
-      `Willst du wirklich die aktuell gefilterten Debug-Logs der letzten ${debugSinceHours}h fuer ${scopeLabel} loeschen?`
+      `Willst du wirklich die aktuell gefilterten Debug-Logs der letzten ${debugSinceHours}h fuer ${scopeLabel} loeschen?`,
     );
     if (!confirmed) return;
     setMessage("");
@@ -1350,7 +1797,12 @@ export function App() {
       const result = await sendChat(token, text);
       setChatDraft("");
       if (result.report) {
-        await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
+        await loadReports(
+          token,
+          reportUserFilter,
+          reportTypeFilter,
+          reportStatusFilter,
+        );
         setMessage(result.message || "Report wurde an den Server geschickt.");
       } else {
         await loadChat(token);
@@ -1369,7 +1821,7 @@ export function App() {
         items.reduce<Record<string, string>>((acc, item) => {
           acc[item.day] = toInputDateTime(item.plannedAt);
           return acc;
-        }, {})
+        }, {}),
       );
     } catch (err) {
       setMessage((err as Error).message);
@@ -1397,7 +1849,7 @@ export function App() {
             postedUsersSum: 0,
             onlineUsersSum: 0,
           },
-        }
+        },
       );
       setHistoryConversion(data.conversion || []);
       setHistoryReliability(
@@ -1413,7 +1865,7 @@ export function App() {
           avgPostedUsersPerDay: 0,
           avgOnlineUsersPerDay: 0,
           avgRequestsPerOnlineUser: 0,
-        }
+        },
       );
       setHistoryCohorts(data.cohorts || []);
     } catch (err) {
@@ -1421,13 +1873,26 @@ export function App() {
     }
   }
 
-  async function loadPerformance(authToken: string, bucket: "1m" | "5m", fromInput = "", toInput = "") {
+  async function loadPerformance(
+    authToken: string,
+    bucket: "1m" | "5m",
+    fromInput = "",
+    toInput = "",
+  ) {
     try {
       const fromIso = fromInput ? new Date(fromInput).toISOString() : undefined;
       const toIso = toInput ? new Date(toInput).toISOString() : undefined;
       const [overview, routes, spikes, tracking] = await Promise.all([
-        getAdminPerformanceOverview(authToken, { bucket, from: fromIso, to: toIso }),
-        getAdminPerformanceRoutes(authToken, { from: fromIso, to: toIso, top: 20 }),
+        getAdminPerformanceOverview(authToken, {
+          bucket,
+          from: fromIso,
+          to: toIso,
+        }),
+        getAdminPerformanceRoutes(authToken, {
+          from: fromIso,
+          to: toIso,
+          top: 20,
+        }),
         getAdminPerformanceSpikes(authToken, 14),
         getAdminPerformanceTracking(authToken),
       ]);
@@ -1452,11 +1917,12 @@ export function App() {
 
   async function onSavePerformanceTracking() {
     try {
-      const next: AdminPerformanceTrackingState = await updateAdminPerformanceTracking(token, {
-        enabled: performanceTrackingEnabled,
-        windowMinutes: performanceTrackingWindowMinutes,
-        oneShot: performanceTrackingOneShot,
-      });
+      const next: AdminPerformanceTrackingState =
+        await updateAdminPerformanceTracking(token, {
+          enabled: performanceTrackingEnabled,
+          windowMinutes: performanceTrackingWindowMinutes,
+          oneShot: performanceTrackingOneShot,
+        });
       setPerformanceTrackingEnabled(Boolean(next.enabled));
       setPerformanceTrackingWindowMinutes(Number(next.windowMinutes || 30));
       setPerformanceTrackingOneShot(Boolean(next.oneShot));
@@ -1483,11 +1949,19 @@ export function App() {
   async function onDownloadTrackingExport() {
     try {
       if (performanceTrackingActiveSpike?.id) {
-        await downloadPerformanceTrackingExport(token, { eventId: performanceTrackingActiveSpike.id, bucket: performanceBucket });
+        await downloadPerformanceTrackingExport(token, {
+          eventId: performanceTrackingActiveSpike.id,
+          bucket: performanceBucket,
+        });
       } else if (performanceTrackingLatestSpike?.id) {
-        await downloadPerformanceTrackingExport(token, { eventId: performanceTrackingLatestSpike.id, bucket: performanceBucket });
+        await downloadPerformanceTrackingExport(token, {
+          eventId: performanceTrackingLatestSpike.id,
+          bucket: performanceBucket,
+        });
       } else {
-        await downloadPerformanceTrackingExport(token, { bucket: performanceBucket });
+        await downloadPerformanceTrackingExport(token, {
+          bucket: performanceBucket,
+        });
       }
       setMessage("Daily-Tracking JSON wurde heruntergeladen.");
     } catch (err) {
@@ -1502,7 +1976,8 @@ export function App() {
           day: triggerAuditDay || undefined,
           source: triggerAuditSource || undefined,
           result: triggerAuditResult || undefined,
-          actorUserId: triggerAuditActorUserId > 0 ? triggerAuditActorUserId : undefined,
+          actorUserId:
+            triggerAuditActorUserId > 0 ? triggerAuditActorUserId : undefined,
           requestId: triggerAuditRequestId.trim() || undefined,
           limit: triggerAuditLimit,
         }),
@@ -1521,11 +1996,14 @@ export function App() {
         day: triggerAuditDay || undefined,
         source: triggerAuditSource || undefined,
         result: triggerAuditResult || undefined,
-        actorUserId: triggerAuditActorUserId > 0 ? triggerAuditActorUserId : undefined,
+        actorUserId:
+          triggerAuditActorUserId > 0 ? triggerAuditActorUserId : undefined,
         requestId: triggerAuditRequestId.trim() || undefined,
         format,
       });
-      setMessage(`Trigger-Audit Export (${format.toUpperCase()}) wurde heruntergeladen.`);
+      setMessage(
+        `Trigger-Audit Export (${format.toUpperCase()}) wurde heruntergeladen.`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1533,7 +2011,9 @@ export function App() {
 
   async function loadIncidentStatus(authToken: string) {
     try {
-      const fromIso = incidentFrom ? new Date(incidentFrom).toISOString() : undefined;
+      const fromIso = incidentFrom
+        ? new Date(incidentFrom).toISOString()
+        : undefined;
       const toIso = incidentTo ? new Date(incidentTo).toISOString() : undefined;
       const status = await getAdminIncidentExportStatus(authToken, {
         from: fromIso,
@@ -1558,7 +2038,10 @@ export function App() {
     }
   }
 
-  async function onUpdateTriggerRuntime(action: "pause" | "unpause" | "release_lease", reason?: string) {
+  async function onUpdateTriggerRuntime(
+    action: "pause" | "unpause" | "release_lease",
+    reason?: string,
+  ) {
     try {
       const runtime = await updateAdminTriggerRuntime(token, {
         action,
@@ -1579,7 +2062,9 @@ export function App() {
 
   async function onDownloadIncidentBundle() {
     try {
-      const fromIso = incidentFrom ? new Date(incidentFrom).toISOString() : undefined;
+      const fromIso = incidentFrom
+        ? new Date(incidentFrom).toISOString()
+        : undefined;
       const toIso = incidentTo ? new Date(incidentTo).toISOString() : undefined;
       await downloadIncidentExport(token, {
         from: fromIso,
@@ -1611,7 +2096,14 @@ export function App() {
     }
   }
 
-  async function loadFotomojis(authToken: string, day = "", userId = 0, emoji = "", fromDay = "", toDay = "") {
+  async function loadFotomojis(
+    authToken: string,
+    day = "",
+    userId = 0,
+    emoji = "",
+    fromDay = "",
+    toDay = "",
+  ) {
     try {
       const hasRange = fromDay.trim() !== "" && toDay.trim() !== "";
       const items = await getAdminFotomojis(authToken, {
@@ -1623,13 +2115,21 @@ export function App() {
         limit: 400,
       });
       setFotomojiItems(items);
-      setSelectedFotomojiIds((prev) => prev.filter((id) => items.some((item) => item.id === id)));
+      setSelectedFotomojiIds((prev) =>
+        prev.filter((id) => items.some((item) => item.id === id)),
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
   }
 
-  async function loadFotomojiHistory(authToken: string, userId = 0, emoji = "", fromDay = "", toDay = "") {
+  async function loadFotomojiHistory(
+    authToken: string,
+    userId = 0,
+    emoji = "",
+    fromDay = "",
+    toDay = "",
+  ) {
     try {
       const hasRange = fromDay.trim() !== "" && toDay.trim() !== "";
       const response = await getAdminFotomojiHistory(authToken, {
@@ -1678,17 +2178,30 @@ export function App() {
 
   async function onDeleteSelectedFotomojis() {
     if (selectedFotomojiIds.length === 0) return;
-    if (!window.confirm(`${selectedFotomojiIds.length} FotoMojis wirklich loeschen?`)) return;
+    if (
+      !window.confirm(
+        `${selectedFotomojiIds.length} FotoMojis wirklich loeschen?`,
+      )
+    )
+      return;
     try {
       const result = await deleteAdminFotomojisBulk(token, selectedFotomojiIds);
-      const deletedSet = new Set((result.deletedIds || []).map((id) => Number(id)));
+      const deletedSet = new Set(
+        (result.deletedIds || []).map((id) => Number(id)),
+      );
       if (deletedSet.size > 0) {
-        setFotomojiItems((prev) => prev.filter((item) => !deletedSet.has(item.id)));
+        setFotomojiItems((prev) =>
+          prev.filter((item) => !deletedSet.has(item.id)),
+        );
       } else {
-        setFotomojiItems((prev) => prev.filter((item) => !selectedFotomojiSet.has(item.id)));
+        setFotomojiItems((prev) =>
+          prev.filter((item) => !selectedFotomojiSet.has(item.id)),
+        );
       }
       setSelectedFotomojiIds([]);
-      setMessage(`${result.deletedCount || deletedSet.size} FotoMoji(s) geloescht.`);
+      setMessage(
+        `${result.deletedCount || deletedSet.size} FotoMoji(s) geloescht.`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1701,8 +2214,15 @@ export function App() {
     if (activeTab === "chat") await loadChat(token);
     if (activeTab === "polls") await loadPolls(token);
     if (activeTab === "calendar") await loadCalendar(token);
-    if (activeTab === "history") await loadHistory(token, historyDays, historyOffset);
-    if (activeTab === "performance") await loadPerformance(token, performanceBucket, performanceFrom, performanceTo);
+    if (activeTab === "history")
+      await loadHistory(token, historyDays, historyOffset);
+    if (activeTab === "performance")
+      await loadPerformance(
+        token,
+        performanceBucket,
+        performanceFrom,
+        performanceTo,
+      );
     if (activeTab === "incident_export") {
       await loadIncidentStatus(token);
       await loadTriggerRuntime(token);
@@ -1710,11 +2230,31 @@ export function App() {
     if (activeTab === "trigger_audit") await loadTriggerAudit(token);
     if (activeTab === "time_capsule") await loadTimeCapsules(token);
     if (activeTab === "fotomojis") {
-      await loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
-      await loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
+      await loadFotomojis(
+        token,
+        fotomojiDayFilter,
+        fotomojiUserFilter,
+        fotomojiEmojiFilter,
+        fotomojiFromFilter,
+        fotomojiToFilter,
+      );
+      await loadFotomojiHistory(
+        token,
+        fotomojiUserFilter,
+        fotomojiEmojiFilter,
+        fotomojiFromFilter,
+        fotomojiToFilter,
+      );
     }
-    if (activeTab === "debug") await loadDebugLogs(token, debugUserFilter, debugSinceHours);
-    if (activeTab === "reports") await loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter);
+    if (activeTab === "debug")
+      await loadDebugLogs(token, debugUserFilter, debugSinceHours);
+    if (activeTab === "reports")
+      await loadReports(
+        token,
+        reportUserFilter,
+        reportTypeFilter,
+        reportStatusFilter,
+      );
     if (activeTab === "commands") await loadCommands(token);
     if (activeTab === "system") await loadSystemHealth(token);
     if (activeTab === "migration") {
@@ -1749,7 +2289,11 @@ export function App() {
         await createChatCommand(token, commandPayloadFromDraft(commandDraft));
         setMessage("Command erstellt.");
       } else {
-        await updateChatCommand(token, editingCommandId, commandPayloadFromDraft(commandDraft));
+        await updateChatCommand(
+          token,
+          editingCommandId,
+          commandPayloadFromDraft(commandDraft),
+        );
         setMessage("Command aktualisiert.");
       }
       setEditingCommandId(null);
@@ -1837,11 +2381,18 @@ export function App() {
   }
 
   async function onDeleteLocation(photoId: number) {
-    if (!window.confirm("Standortdaten fuer diesen Post wirklich endgueltig loeschen?")) return;
+    if (
+      !window.confirm(
+        "Standortdaten fuer diesen Post wirklich endgueltig loeschen?",
+      )
+    )
+      return;
     setMessage("");
     try {
       await deleteAdminPhotoLocation(token, photoId);
-      setLocationItems((prev) => prev.filter((item) => item.photoId !== photoId));
+      setLocationItems((prev) =>
+        prev.filter((item) => item.photoId !== photoId),
+      );
       if (activeTab === "feed") {
         await loadFeed(token, feedDay);
       }
@@ -1909,7 +2460,9 @@ export function App() {
         title: migrationPushTitle,
         body: migrationPushBody,
       });
-      setMessage(`Migrations-Push gesendet (sent=${result.sentTo}, failed=${result.failed}).`);
+      setMessage(
+        `Migrations-Push gesendet (sent=${result.sentTo}, failed=${result.failed}).`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1918,9 +2471,14 @@ export function App() {
   async function onExportMigrationLinkToken() {
     setMessage("");
     try {
-      const data = await exportAdminMigrationLinkToken(token, migrationLinkRole);
+      const data = await exportAdminMigrationLinkToken(
+        token,
+        migrationLinkRole,
+      );
       setMigrationLinkExport(data);
-      setMessage(`Kopplungs-Token erzeugt (${data.instanceRole} -> ${data.hints?.pasteTokenOn || "-"})`);
+      setMessage(
+        `Kopplungs-Token erzeugt (${data.instanceRole} -> ${data.hints?.pasteTokenOn || "-"})`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1942,7 +2500,9 @@ export function App() {
       setMigrationReportTarget(data.migration.reportTarget || "");
       setMigrationReportSource(data.migration.reportSource || "");
       setMigrationLinkImportToken("");
-      setMessage(`Instanz gekoppelt. Importiert: ${data.imported}, Remote: ${data.remoteUrl}`);
+      setMessage(
+        `Instanz gekoppelt. Importiert: ${data.imported}, Remote: ${data.remoteUrl}`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -1971,7 +2531,9 @@ export function App() {
   function updateUserPromptRule(index: number, patch: Partial<UserPromptRule>) {
     setSettings((prev) => ({
       ...prev,
-      userPromptRules: prev.userPromptRules.map((rule, idx) => (idx === index ? { ...rule, ...patch } : rule)),
+      userPromptRules: prev.userPromptRules.map((rule, idx) =>
+        idx === index ? { ...rule, ...patch } : rule,
+      ),
     }));
   }
 
@@ -2003,10 +2565,22 @@ export function App() {
     }
   }
 
-  const todayCalendar = calendarItems.find((item) => item.day === new Date().toISOString().slice(0, 10)) || calendarItems[0];
+  const todayCalendar =
+    calendarItems.find(
+      (item) => item.day === new Date().toISOString().slice(0, 10),
+    ) || calendarItems[0];
   const quickActions: TopAction[] = [
-    { id: "trigger", label: "Daily jetzt ausloesen", run: () => onTriggerEvent() },
-    { id: "reset", label: "Heutigen Tag resetten", run: () => onResetToday(), tone: "danger" },
+    {
+      id: "trigger",
+      label: "Daily jetzt ausloesen",
+      run: () => onTriggerEvent(),
+    },
+    {
+      id: "reset",
+      label: "Heutigen Tag resetten",
+      run: () => onResetToday(),
+      tone: "danger",
+    },
     {
       id: "scheduler_pause",
       label: "Scheduler pausieren",
@@ -2025,19 +2599,32 @@ export function App() {
       tone: "danger",
     },
     { id: "broadcast", label: "Broadcast senden", run: () => onBroadcast() },
-    { id: "debug_export", label: "Debug JSON exportieren", run: () => onDownloadAllLogs(24, "json") },
+    {
+      id: "debug_export",
+      label: "Debug JSON exportieren",
+      run: () => onDownloadAllLogs(24, "json"),
+    },
   ];
 
-  async function onTriggerEvent(opts?: { silent?: boolean; notifyUserIds?: number[] }) {
+  async function onTriggerEvent(opts?: {
+    silent?: boolean;
+    notifyUserIds?: number[];
+  }) {
     setMessage("");
     try {
       const result = await triggerPrompt(token, opts);
       if (result.mode === "silent") {
-        setMessage("Interner Daily-Test ausgelÃ¶st (silent, ohne Push an alle).");
+        setMessage(
+          "Interner Daily-Test ausgelÃ¶st (silent, ohne Push an alle).",
+        );
       } else if (result.mode === "targeted_users") {
-        setMessage(`Interner Daily-Test ausgelÃ¶st. Push nur an Zielnutzer gesendet (sent=${result.sentTo || 0}, failed=${result.failed || 0}).`);
+        setMessage(
+          `Interner Daily-Test ausgelÃ¶st. Push nur an Zielnutzer gesendet (sent=${result.sentTo || 0}, failed=${result.failed || 0}).`,
+        );
       } else {
-        setMessage("Daily Event ausgelÃ¶st. Nutzer kÃ¶nnen Prompt-Fotos hochladen.");
+        setMessage(
+          "Daily Event ausgelÃ¶st. Nutzer kÃ¶nnen Prompt-Fotos hochladen.",
+        );
       }
       await refreshAll();
     } catch (err) {
@@ -2046,7 +2633,12 @@ export function App() {
   }
 
   async function onResetToday() {
-    if (!confirm("Wirklich den heutigen Tag zurÃ¼cksetzen? Alle heutigen Fotos werden gelÃ¶scht.")) return;
+    if (
+      !confirm(
+        "Wirklich den heutigen Tag zurÃ¼cksetzen? Alle heutigen Fotos werden gelÃ¶scht.",
+      )
+    )
+      return;
     setMessage("");
     try {
       const res = await resetTodayPrompt(token);
@@ -2061,7 +2653,9 @@ export function App() {
     setMessage("");
     try {
       const result = await broadcastNotification(token, broadcastBody);
-      setMessage(`Benachrichtigung an ${result.sentTo} GerÃ¤te gesendet (Provider: ${result.provider}).`);
+      setMessage(
+        `Benachrichtigung an ${result.sentTo} GerÃ¤te gesendet (Provider: ${result.provider}).`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -2076,7 +2670,7 @@ export function App() {
     try {
       const result = await notifyUser(token, targetUserId, broadcastBody);
       setMessage(
-        `Benachrichtigung an ${result.username}: sent=${result.sentTo}, failed=${result.failed}, devices=${result.devices}, provider=${result.provider}.`
+        `Benachrichtigung an ${result.username}: sent=${result.sentTo}, failed=${result.failed}, devices=${result.devices}, provider=${result.provider}.`,
       );
       await refreshAll();
     } catch (err) {
@@ -2089,7 +2683,9 @@ export function App() {
     setBroadcastBody(text);
     try {
       const result = await broadcastNotification(token, text);
-      setMessage(`Update-Hinweis an ${result.sentTo} GerÃ¤te gesendet (Provider: ${result.provider}).`);
+      setMessage(
+        `Update-Hinweis an ${result.sentTo} GerÃ¤te gesendet (Provider: ${result.provider}).`,
+      );
     } catch (err) {
       setMessage((err as Error).message);
     }
@@ -2184,7 +2780,9 @@ export function App() {
     try {
       const issued = await issueUserAccessToken(token, user.id);
       await copyToClipboard(issued.token);
-      const expiry = issued.expiresAt ? ` (gÃ¼ltig bis ${formatDateTime(issued.expiresAt)})` : "";
+      const expiry = issued.expiresAt
+        ? ` (gÃ¼ltig bis ${formatDateTime(issued.expiresAt)})`
+        : "";
       setMessage(`Token fÃ¼r ${user.username} kopiert${expiry}.`);
     } catch (err) {
       setMessage((err as Error).message);
@@ -2212,11 +2810,20 @@ export function App() {
           <form onSubmit={onLogin} className="stack">
             <label>
               Benutzername
-              <input value={username} onChange={(e) => setUsername(e.target.value)} required />
+              <input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                required
+              />
             </label>
             <label>
               Passwort
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
             </label>
             <button type="submit">Einloggen</button>
           </form>
@@ -2232,9 +2839,13 @@ export function App() {
         <div className="row topbar">
           <h1>Admin Panel</h1>
           <div className="row topbar-actions">
-            <button onClick={() => setDarkMode((v) => !v)}>{darkMode ? "Light" : "Dark"}</button>
+            <button onClick={() => setDarkMode((v) => !v)}>
+              {darkMode ? "Light" : "Dark"}
+            </button>
             <button onClick={refreshAll}>Reload</button>
-            <button onClick={() => setLegacyNavEnabled((v) => !v)}>{legacyNavEnabled ? "Neue IA" : "Legacy Tabs"}</button>
+            <button onClick={() => setLegacyNavEnabled((v) => !v)}>
+              {legacyNavEnabled ? "Neue IA" : "Legacy Tabs"}
+            </button>
             <button onClick={logout}>Logout</button>
           </div>
         </div>
@@ -2252,7 +2863,12 @@ export function App() {
                 }
               }}
             />
-            <select value={searchScope} onChange={(e) => setSearchScope(e.target.value as "all" | AdminSearchScope)}>
+            <select
+              value={searchScope}
+              onChange={(e) =>
+                setSearchScope(e.target.value as "all" | AdminSearchScope)
+              }
+            >
               <option value="all">Alle Bereiche</option>
               <option value="users">Nutzer</option>
               <option value="reports">Meldungen</option>
@@ -2260,7 +2876,9 @@ export function App() {
               <option value="history">Historie</option>
               <option value="posts">Posts</option>
             </select>
-            <button onClick={() => void runSearch()}>{searchLoading ? "Suche..." : "Suchen"}</button>
+            <button onClick={() => void runSearch()}>
+              {searchLoading ? "Suche..." : "Suchen"}
+            </button>
           </div>
           <div className="saved-views">
             <button onClick={saveCurrentView}>View speichern</button>
@@ -2287,7 +2905,11 @@ export function App() {
           {searchResults.length > 0 && (
             <div className="search-results">
               {searchResults.map((item, idx) => (
-                <button key={`${item.type}-${item.id}-${idx}`} className="search-result-item" onClick={() => onSelectSearchResult(item)}>
+                <button
+                  key={`${item.type}-${item.id}-${idx}`}
+                  className="search-result-item"
+                  onClick={() => onSelectSearchResult(item)}
+                >
                   <strong>{item.label}</strong>
                   <span className="small">
                     {item.type}
@@ -2301,38 +2923,152 @@ export function App() {
 
         {legacyNavEnabled ? (
           <div className="tabs">
-            <button className={activeTab === "dashboard" ? "tab active" : "tab"} onClick={() => navigateTab("dashboard")}>Dashboard</button>
-            <button className={activeTab === "system" ? "tab active" : "tab"} onClick={() => navigateTab("system")}>System Health</button>
-            <button className={activeTab === "events" ? "tab active" : "tab"} onClick={() => navigateTab("events")}>Events & Notifications</button>
-            <button className={activeTab === "commands" ? "tab active" : "tab"} onClick={() => navigateTab("commands")}>Chat-Commands</button>
-            <button className={activeTab === "users" ? "tab active" : "tab"} onClick={() => navigateTab("users")}>Benutzerverwaltung</button>
-            <button className={activeTab === "feed" ? "tab active" : "tab"} onClick={() => navigateTab("feed")}>Feed</button>
-            <button className={activeTab === "chat" ? "tab active" : "tab"} onClick={() => navigateTab("chat")}>Chat</button>
-            <button className={activeTab === "polls" ? "tab active" : "tab"} onClick={() => navigateTab("polls")}>Umfragen</button>
-            <button className={activeTab === "calendar" ? "tab active" : "tab"} onClick={() => navigateTab("calendar")}>Kalender</button>
-            <button className={activeTab === "history" ? "tab active" : "tab"} onClick={() => navigateTab("history")}>Historie</button>
-            <button className={activeTab === "performance" ? "tab active" : "tab"} onClick={() => navigateTab("performance")}>Performance</button>
-            <button className={activeTab === "incident_export" ? "tab active" : "tab"} onClick={() => navigateTab("incident_export")}>Incident Export</button>
-            <button className={activeTab === "trigger_audit" ? "tab active" : "tab"} onClick={() => navigateTab("trigger_audit")}>Trigger Audit</button>
-            <button className={activeTab === "time_capsule" ? "tab active" : "tab"} onClick={() => navigateTab("time_capsule")}>Time-Capsule</button>
-            <button className={activeTab === "fotomojis" ? "tab active" : "tab"} onClick={() => navigateTab("fotomojis")}>FotoMojis</button>
-            <button className={activeTab === "reports" ? "tab active" : "tab"} onClick={() => navigateTab("reports")}>Meldungen</button>
-            <button className={activeTab === "debug" ? "tab active" : "tab"} onClick={() => navigateTab("debug")}>Debug</button>
-            <button className={activeTab === "settings" ? "tab active" : "tab"} onClick={() => navigateTab("settings")}>Einstellungen</button>
-            <button className={activeTab === "migration" ? "tab active" : "tab"} onClick={() => navigateTab("migration")}>Migration</button>
+            <button
+              className={activeTab === "dashboard" ? "tab active" : "tab"}
+              onClick={() => navigateTab("dashboard")}
+            >
+              Dashboard
+            </button>
+            <button
+              className={activeTab === "system" ? "tab active" : "tab"}
+              onClick={() => navigateTab("system")}
+            >
+              System Health
+            </button>
+            <button
+              className={activeTab === "events" ? "tab active" : "tab"}
+              onClick={() => navigateTab("events")}
+            >
+              Events & Notifications
+            </button>
+            <button
+              className={activeTab === "commands" ? "tab active" : "tab"}
+              onClick={() => navigateTab("commands")}
+            >
+              Chat-Commands
+            </button>
+            <button
+              className={activeTab === "users" ? "tab active" : "tab"}
+              onClick={() => navigateTab("users")}
+            >
+              Benutzerverwaltung
+            </button>
+            <button
+              className={activeTab === "feed" ? "tab active" : "tab"}
+              onClick={() => navigateTab("feed")}
+            >
+              Feed
+            </button>
+            <button
+              className={activeTab === "chat" ? "tab active" : "tab"}
+              onClick={() => navigateTab("chat")}
+            >
+              Chat
+            </button>
+            <button
+              className={activeTab === "polls" ? "tab active" : "tab"}
+              onClick={() => navigateTab("polls")}
+            >
+              Umfragen
+            </button>
+            <button
+              className={activeTab === "calendar" ? "tab active" : "tab"}
+              onClick={() => navigateTab("calendar")}
+            >
+              Kalender
+            </button>
+            <button
+              className={activeTab === "history" ? "tab active" : "tab"}
+              onClick={() => navigateTab("history")}
+            >
+              Historie
+            </button>
+            <button
+              className={activeTab === "performance" ? "tab active" : "tab"}
+              onClick={() => navigateTab("performance")}
+            >
+              Performance
+            </button>
+            <button
+              className={activeTab === "incident_export" ? "tab active" : "tab"}
+              onClick={() => navigateTab("incident_export")}
+            >
+              Incident Export
+            </button>
+            <button
+              className={activeTab === "trigger_audit" ? "tab active" : "tab"}
+              onClick={() => navigateTab("trigger_audit")}
+            >
+              Trigger Audit
+            </button>
+            <button
+              className={activeTab === "time_capsule" ? "tab active" : "tab"}
+              onClick={() => navigateTab("time_capsule")}
+            >
+              Time-Capsule
+            </button>
+            <button
+              className={activeTab === "fotomojis" ? "tab active" : "tab"}
+              onClick={() => navigateTab("fotomojis")}
+            >
+              FotoMojis
+            </button>
+            <button
+              className={activeTab === "reports" ? "tab active" : "tab"}
+              onClick={() => navigateTab("reports")}
+            >
+              Meldungen
+            </button>
+            <button
+              className={activeTab === "debug" ? "tab active" : "tab"}
+              onClick={() => navigateTab("debug")}
+            >
+              Debug
+            </button>
+            <button
+              className={activeTab === "settings" ? "tab active" : "tab"}
+              onClick={() => navigateTab("settings")}
+            >
+              Einstellungen
+            </button>
+            <button
+              className={activeTab === "migration" ? "tab active" : "tab"}
+              onClick={() => navigateTab("migration")}
+            >
+              Migration
+            </button>
           </div>
         ) : (
           <div className="ia-nav">
             <div className="ia-primary">
-              <button className={activeArea === "operations" ? "tab active" : "tab"} onClick={() => navigateSubtab("operations", "cockpit")}>Operations</button>
-              <button className={activeArea === "analytics" ? "tab active" : "tab"} onClick={() => navigateSubtab("analytics", "history")}>Analyse</button>
-              <button className={activeArea === "config" ? "tab active" : "tab"} onClick={() => navigateSubtab("config", "users")}>Konfiguration</button>
+              <button
+                className={activeArea === "operations" ? "tab active" : "tab"}
+                onClick={() => navigateSubtab("operations", "cockpit")}
+              >
+                Operations
+              </button>
+              <button
+                className={activeArea === "analytics" ? "tab active" : "tab"}
+                onClick={() => navigateSubtab("analytics", "history")}
+              >
+                Analyse
+              </button>
+              <button
+                className={activeArea === "config" ? "tab active" : "tab"}
+                onClick={() => navigateSubtab("config", "users")}
+              >
+                Konfiguration
+              </button>
             </div>
             <div className="ia-subtabs">
               {areaSubtabs[activeArea].map((entry) => {
                 const isActive = activeSubtab === entry.key;
                 return (
-                  <button key={entry.key} className={isActive ? "tab active" : "tab"} onClick={() => navigateSubtab(activeArea, entry.key)}>
+                  <button
+                    key={entry.key}
+                    className={isActive ? "tab active" : "tab"}
+                    onClick={() => navigateSubtab(activeArea, entry.key)}
+                  >
                     {entry.label}
                   </button>
                 );
@@ -2343,16 +3079,30 @@ export function App() {
 
         {activeTab === "dashboard" && (
           <div className="stack">
-            {Number(triggerAuditSummary?.summary?.duplicateAttempts || 0) > 0 && (
-              <article className="history-chart-card" style={{ borderColor: "#c74444" }}>
-                <h3 style={{ color: "#ff6f6f" }}>Alarm: Mehrfach-Trigger erkannt</h3>
+            {Number(triggerAuditSummary?.summary?.duplicateAttempts || 0) >
+              0 && (
+              <article
+                className="history-chart-card"
+                style={{ borderColor: "#c74444" }}
+              >
+                <h3 style={{ color: "#ff6f6f" }}>
+                  Alarm: Mehrfach-Trigger erkannt
+                </h3>
                 <p className="small">
-                  In den letzten {triggerAuditDays} Tagen gab es {triggerAuditSummary?.summary?.duplicateAttempts} zusaetzliche Trigger-Versuche
-                  auf bereits ausgeloesten Tagen. Bitte Trigger Audit pruefen.
+                  In den letzten {triggerAuditDays} Tagen gab es{" "}
+                  {triggerAuditSummary?.summary?.duplicateAttempts} zusaetzliche
+                  Trigger-Versuche auf bereits ausgeloesten Tagen. Bitte Trigger
+                  Audit pruefen.
                 </p>
                 <div className="row">
-                  <button onClick={() => navigateTab("trigger_audit")}>Zum Trigger Audit</button>
-                  <button onClick={() => openIncidentExportWithRecentWindow(60)}>Jetzt Incident-Export</button>
+                  <button onClick={() => navigateTab("trigger_audit")}>
+                    Zum Trigger Audit
+                  </button>
+                  <button
+                    onClick={() => openIncidentExportWithRecentWindow(60)}
+                  >
+                    Jetzt Incident-Export
+                  </button>
                 </div>
               </article>
             )}
@@ -2371,46 +3121,93 @@ export function App() {
               </div>
             </div>
             <div className="grid4">
-              <article className="stat clickable" onClick={() => navigateTab("system")}>
+              <article
+                className="stat clickable"
+                onClick={() => navigateTab("system")}
+              >
                 <h3>Serverzustand</h3>
                 <p>{systemHealth?.ok ? "OK" : "CHECK"}</p>
               </article>
-              <article className="stat clickable" onClick={() => navigateTab("reports")}>
+              <article
+                className="stat clickable"
+                onClick={() => navigateTab("reports")}
+              >
                 <h3>Offene Meldungen</h3>
                 <p>{openReportsCount}</p>
               </article>
-              <article className="stat clickable" onClick={() => navigateTab("debug")}>
+              <article
+                className="stat clickable"
+                onClick={() => navigateTab("debug")}
+              >
                 <h3>Debug-Fehlerindikatoren</h3>
-                <p>{historyItems.reduce((acc, row) => acc + Number(row.debugErrorCount || 0), 0)}</p>
+                <p>
+                  {historyItems.reduce(
+                    (acc, row) => acc + Number(row.debugErrorCount || 0),
+                    0,
+                  )}
+                </p>
               </article>
-              <article className="stat clickable" onClick={() => navigateTab("calendar")}>
+              <article
+                className="stat clickable"
+                onClick={() => navigateTab("calendar")}
+              >
                 <h3>Heutiges Daily-Fenster</h3>
-                <p>{todayCalendar?.uploadUntil ? formatDateTime(todayCalendar.uploadUntil) : "-"}</p>
+                <p>
+                  {todayCalendar?.uploadUntil
+                    ? formatDateTime(todayCalendar.uploadUntil)
+                    : "-"}
+                </p>
               </article>
             </div>
             <article className="settings-current">
               <h3>Heute</h3>
               <div className="settings-grid">
-                <p><strong>Tag:</strong> {todayCalendar?.day || "-"}</p>
-                <p><strong>Geplant:</strong> {todayCalendar?.plannedAt ? formatDateTime(todayCalendar.plannedAt) : "-"}</p>
-                <p><strong>Ausgeloest:</strong> {todayCalendar?.triggeredAt ? formatDateTime(todayCalendar.triggeredAt) : "-"}</p>
-                <p><strong>Upload bis:</strong> {todayCalendar?.uploadUntil ? formatDateTime(todayCalendar.uploadUntil) : "-"}</p>
-                <p><strong>Scheduler:</strong> {triggerRuntime?.runtime?.autoPaused ? "pausiert" : "aktiv"}</p>
-                <p><strong>Lease Owner:</strong> {triggerRuntime?.runtime?.lease?.ownerId || "-"}</p>
+                <p>
+                  <strong>Tag:</strong> {todayCalendar?.day || "-"}
+                </p>
+                <p>
+                  <strong>Geplant:</strong>{" "}
+                  {todayCalendar?.plannedAt
+                    ? formatDateTime(todayCalendar.plannedAt)
+                    : "-"}
+                </p>
+                <p>
+                  <strong>Ausgeloest:</strong>{" "}
+                  {todayCalendar?.triggeredAt
+                    ? formatDateTime(todayCalendar.triggeredAt)
+                    : "-"}
+                </p>
+                <p>
+                  <strong>Upload bis:</strong>{" "}
+                  {todayCalendar?.uploadUntil
+                    ? formatDateTime(todayCalendar.uploadUntil)
+                    : "-"}
+                </p>
+                <p>
+                  <strong>Scheduler:</strong>{" "}
+                  {triggerRuntime?.runtime?.autoPaused ? "pausiert" : "aktiv"}
+                </p>
+                <p>
+                  <strong>Lease Owner:</strong>{" "}
+                  {triggerRuntime?.runtime?.lease?.ownerId || "-"}
+                </p>
               </div>
             </article>
             <div className="grid4">
-            <CardStat title="Nutzer" value={stats.users} />
-            <CardStat title="GerÃ¤te" value={stats.devices} />
-            <CardStat title="Fotos" value={stats.photos} />
-            <CardStat title="Prompt-Events" value={stats.prompts} />
-            <CardStat title="Tage aktiv" value={stats.runningDays} />
-            <CardStat title="Bilder gesamt" value={stats.totalImages} />
-            <CardStat title="Speicher gesamt" value={formatBytes(stats.storageBytes)} />
-            <CardStat
-              title="Consent-Quote"
-              value={`${Math.round((stats.diagnosticsConsentRate ?? 0) * 100)}% (${stats.diagnosticsConsentUsers ?? 0})`}
-            />
+              <CardStat title="Nutzer" value={stats.users} />
+              <CardStat title="GerÃ¤te" value={stats.devices} />
+              <CardStat title="Fotos" value={stats.photos} />
+              <CardStat title="Prompt-Events" value={stats.prompts} />
+              <CardStat title="Tage aktiv" value={stats.runningDays} />
+              <CardStat title="Bilder gesamt" value={stats.totalImages} />
+              <CardStat
+                title="Speicher gesamt"
+                value={formatBytes(stats.storageBytes)}
+              />
+              <CardStat
+                title="Consent-Quote"
+                value={`${Math.round((stats.diagnosticsConsentRate ?? 0) * 100)}% (${stats.diagnosticsConsentUsers ?? 0})`}
+              />
             </div>
           </div>
         )}
@@ -2419,19 +3216,37 @@ export function App() {
           <div className="stack">
             <div className="row">
               <h2>System Health</h2>
-              <button onClick={() => loadSystemHealth(token)}>Aktualisieren</button>
+              <button onClick={() => loadSystemHealth(token)}>
+                Aktualisieren
+              </button>
             </div>
             {!systemHealth && <p>Keine Daten geladen.</p>}
             {systemHealth && (
               <>
                 <article className="settings-current">
                   <div className="settings-grid">
-                    <p><strong>Gesamtstatus:</strong> {systemHealth.ok ? "OK" : "DEGRADED"}</p>
-                    <p><strong>Version:</strong> {systemHealth.version}</p>
-                    <p><strong>Push Provider:</strong> {systemHealth.provider}</p>
-                    <p><strong>Zeitpunkt:</strong> {formatDateTime(systemHealth.time)}</p>
-                    <p><strong>Upload-Speicher:</strong> {formatBytes(systemHealth.uploadSizeBytes || 0)}</p>
-                    <p><strong>Uptime:</strong> {formatDuration(systemHealth.metrics?.uptimeSec || 0)}</p>
+                    <p>
+                      <strong>Gesamtstatus:</strong>{" "}
+                      {systemHealth.ok ? "OK" : "DEGRADED"}
+                    </p>
+                    <p>
+                      <strong>Version:</strong> {systemHealth.version}
+                    </p>
+                    <p>
+                      <strong>Push Provider:</strong> {systemHealth.provider}
+                    </p>
+                    <p>
+                      <strong>Zeitpunkt:</strong>{" "}
+                      {formatDateTime(systemHealth.time)}
+                    </p>
+                    <p>
+                      <strong>Upload-Speicher:</strong>{" "}
+                      {formatBytes(systemHealth.uploadSizeBytes || 0)}
+                    </p>
+                    <p>
+                      <strong>Uptime:</strong>{" "}
+                      {formatDuration(systemHealth.metrics?.uptimeSec || 0)}
+                    </p>
                   </div>
                 </article>
 
@@ -2457,31 +3272,85 @@ export function App() {
 
                 <h3>API-Metriken</h3>
                 <div className="grid4">
-                  <CardStat title="Requests gesamt" value={Number(systemHealth.metrics?.requestsTotal || 0)} />
-                  <CardStat title="Fehler gesamt" value={Number(systemHealth.metrics?.errorsTotal || 0)} />
-                  <CardStat title="4xx" value={Number(systemHealth.metrics?.errors4xx || 0)} />
-                  <CardStat title="5xx" value={Number(systemHealth.metrics?.errors5xx || 0)} />
+                  <CardStat
+                    title="Requests gesamt"
+                    value={Number(systemHealth.metrics?.requestsTotal || 0)}
+                  />
+                  <CardStat
+                    title="Fehler gesamt"
+                    value={Number(systemHealth.metrics?.errorsTotal || 0)}
+                  />
+                  <CardStat
+                    title="4xx"
+                    value={Number(systemHealth.metrics?.errors4xx || 0)}
+                  />
+                  <CardStat
+                    title="5xx"
+                    value={Number(systemHealth.metrics?.errors5xx || 0)}
+                  />
                 </div>
                 <div className="grid4">
-                  <CardStat title="Error-Rate %" value={Number(systemHealth.metrics?.errorRatePercent || 0)} />
-                  <CardStat title="P95 ms" value={Number(systemHealth.metrics?.p95LatencyMs || 0)} />
-                  <CardStat title="Recent Req" value={Number(systemHealth.metrics?.recentRequestsCnt || 0)} />
-                  <CardStat title="Push Sent" value={Number(systemHealth.metrics?.push?.sent || 0)} />
+                  <CardStat
+                    title="Error-Rate %"
+                    value={Number(systemHealth.metrics?.errorRatePercent || 0)}
+                  />
+                  <CardStat
+                    title="P95 ms"
+                    value={Number(systemHealth.metrics?.p95LatencyMs || 0)}
+                  />
+                  <CardStat
+                    title="Recent Req"
+                    value={Number(systemHealth.metrics?.recentRequestsCnt || 0)}
+                  />
+                  <CardStat
+                    title="Push Sent"
+                    value={Number(systemHealth.metrics?.push?.sent || 0)}
+                  />
                 </div>
                 <div className="grid4">
-                  <CardStat title="Push Failed" value={Number(systemHealth.metrics?.push?.failed || 0)} />
-                  <CardStat title="Push Invalid" value={Number(systemHealth.metrics?.push?.invalidTokens || 0)} />
-                  <CardStat title="Push Errors" value={Number(systemHealth.metrics?.push?.errors || 0)} />
+                  <CardStat
+                    title="Push Failed"
+                    value={Number(systemHealth.metrics?.push?.failed || 0)}
+                  />
+                  <CardStat
+                    title="Push Invalid"
+                    value={Number(
+                      systemHealth.metrics?.push?.invalidTokens || 0,
+                    )}
+                  />
+                  <CardStat
+                    title="Push Errors"
+                    value={Number(systemHealth.metrics?.push?.errors || 0)}
+                  />
                 </div>
 
                 <h3>Letzter Moment</h3>
                 <article className="settings-current">
                   <div className="settings-grid">
-                    <p><strong>Tag:</strong> {systemHealth.latestPrompt?.day || "-"}</p>
-                    <p><strong>Trigger:</strong> {systemHealth.latestPrompt?.triggeredAt ? formatDateTime(systemHealth.latestPrompt.triggeredAt) : "-"}</p>
-                    <p><strong>Upload bis:</strong> {systemHealth.latestPrompt?.uploadUntil ? formatDateTime(systemHealth.latestPrompt.uploadUntil) : "-"}</p>
-                    <p><strong>Quelle:</strong> {systemHealth.latestPrompt?.triggerSource || "-"}</p>
-                    <p><strong>Angefordert von:</strong> {systemHealth.latestPrompt?.requestedByUser || "-"}</p>
+                    <p>
+                      <strong>Tag:</strong>{" "}
+                      {systemHealth.latestPrompt?.day || "-"}
+                    </p>
+                    <p>
+                      <strong>Trigger:</strong>{" "}
+                      {systemHealth.latestPrompt?.triggeredAt
+                        ? formatDateTime(systemHealth.latestPrompt.triggeredAt)
+                        : "-"}
+                    </p>
+                    <p>
+                      <strong>Upload bis:</strong>{" "}
+                      {systemHealth.latestPrompt?.uploadUntil
+                        ? formatDateTime(systemHealth.latestPrompt.uploadUntil)
+                        : "-"}
+                    </p>
+                    <p>
+                      <strong>Quelle:</strong>{" "}
+                      {systemHealth.latestPrompt?.triggerSource || "-"}
+                    </p>
+                    <p>
+                      <strong>Angefordert von:</strong>{" "}
+                      {systemHealth.latestPrompt?.requestedByUser || "-"}
+                    </p>
                   </div>
                 </article>
               </>
@@ -2491,16 +3360,32 @@ export function App() {
 
         {activeTab === "events" && (
           <div className="stack">
-            <button className="accent" onClick={onTriggerEvent}>Daily Event manuell auslÃ¶sen</button>
-            <button onClick={() => onTriggerEvent({ silent: true })}>Interner Daily-Test (ohne Push)</button>
-            <button onClick={() => onTriggerEvent({ notifyUserIds: targetUserId ? [targetUserId] : [] })} disabled={!targetUserId}>
+            <button className="accent" onClick={onTriggerEvent}>
+              Daily Event manuell auslÃ¶sen
+            </button>
+            <button onClick={() => onTriggerEvent({ silent: true })}>
+              Interner Daily-Test (ohne Push)
+            </button>
+            <button
+              onClick={() =>
+                onTriggerEvent({
+                  notifyUserIds: targetUserId ? [targetUserId] : [],
+                })
+              }
+              disabled={!targetUserId}
+            >
               Daily-Test nur fÃ¼r gewÃ¤hlten Benutzer (mit Push)
             </button>
-            <button className="danger" onClick={onResetToday}>Heutigen Tag zurÃ¼cksetzen</button>
+            <button className="danger" onClick={onResetToday}>
+              Heutigen Tag zurÃ¼cksetzen
+            </button>
 
             <label>
               Custom Nachricht an alle GerÃ¤te
-              <input value={broadcastBody} onChange={(e) => setBroadcastBody(e.target.value)} />
+              <input
+                value={broadcastBody}
+                onChange={(e) => setBroadcastBody(e.target.value)}
+              />
             </label>
             <button onClick={onBroadcast}>Benachrichtigung senden</button>
 
@@ -2511,18 +3396,28 @@ export function App() {
                 value={targetUserSearch}
                 onChange={(e) => setTargetUserSearch(e.target.value)}
               />
-              <select value={targetUserId || ""} onChange={(e) => setTargetUserId(Number(e.target.value || 0))}>
+              <select
+                value={targetUserId || ""}
+                onChange={(e) => setTargetUserId(Number(e.target.value || 0))}
+              >
                 <option value="">Benutzer wÃ¤hlen</option>
                 {filteredTargetUsers.map((u) => (
-                  <option key={u.id} value={u.id}>{u.username} ({u.deviceCount} GerÃ¤te)</option>
+                  <option key={u.id} value={u.id}>
+                    {u.username} ({u.deviceCount} GerÃ¤te)
+                  </option>
                 ))}
               </select>
             </label>
-            <button onClick={onNotifySingleUser}>Nur diesen Benutzer benachrichtigen</button>
+            <button onClick={onNotifySingleUser}>
+              Nur diesen Benutzer benachrichtigen
+            </button>
 
             <label>
               Update-Version fÃ¼r Hinweis
-              <input value={updateNoticeVersion} onChange={(e) => setUpdateNoticeVersion(e.target.value)} />
+              <input
+                value={updateNoticeVersion}
+                onChange={(e) => setUpdateNoticeVersion(e.target.value)}
+              />
             </label>
             <button onClick={onSendUpdateNotice}>Update-Hinweis senden</button>
           </div>
@@ -2531,27 +3426,57 @@ export function App() {
         {activeTab === "commands" && (
           <div className="stack">
             <article className="settings-current">
-              <p>Alle Chat-Command-Einstellungen werden nur hier verwaltet. Im Tab Einstellungen sind keine Command-Optionen mehr.</p>
+              <p>
+                Alle Chat-Command-Einstellungen werden nur hier verwaltet. Im
+                Tab Einstellungen sind keine Command-Optionen mehr.
+              </p>
             </article>
             <div className="row">
               <h2>Command-Builder</h2>
-              <button onClick={() => { setEditingCommandId(null); setCommandDraft(emptyCommandDraft); }}>Neuer Command</button>
+              <button
+                onClick={() => {
+                  setEditingCommandId(null);
+                  setCommandDraft(emptyCommandDraft);
+                }}
+              >
+                Neuer Command
+              </button>
             </div>
 
             <form onSubmit={onSaveCommand} className="stack">
               <label>
                 Name
-                <input value={commandDraft.name} onChange={(e) => setCommandDraft({ ...commandDraft, name: e.target.value })} required />
+                <input
+                  value={commandDraft.name}
+                  onChange={(e) =>
+                    setCommandDraft({ ...commandDraft, name: e.target.value })
+                  }
+                  required
+                />
               </label>
               <label>
                 Command (z. B. -moment)
-                <input value={commandDraft.command} onChange={(e) => setCommandDraft({ ...commandDraft, command: e.target.value })} required />
+                <input
+                  value={commandDraft.command}
+                  onChange={(e) =>
+                    setCommandDraft({
+                      ...commandDraft,
+                      command: e.target.value,
+                    })
+                  }
+                  required
+                />
               </label>
               <label>
                 Aktion
                 <select
                   value={commandDraft.action}
-                  onChange={(e) => setCommandDraft({ ...commandDraft, action: e.target.value as CommandDraft["action"] })}
+                  onChange={(e) =>
+                    setCommandDraft({
+                      ...commandDraft,
+                      action: e.target.value as CommandDraft["action"],
+                    })
+                  }
                 >
                   <option value="trigger_moment">Moment ausloesen</option>
                   <option value="clear_chat">Chat leeren</option>
@@ -2561,31 +3486,83 @@ export function App() {
               </label>
               <div className="row">
                 <label className="checkbox">
-                  <input type="checkbox" checked={commandDraft.enabled} onChange={(e) => setCommandDraft({ ...commandDraft, enabled: e.target.checked })} />
+                  <input
+                    type="checkbox"
+                    checked={commandDraft.enabled}
+                    onChange={(e) =>
+                      setCommandDraft({
+                        ...commandDraft,
+                        enabled: e.target.checked,
+                      })
+                    }
+                  />
                   Aktiv
                 </label>
                 <label className="checkbox">
-                  <input type="checkbox" checked={commandDraft.requireAdmin} onChange={(e) => setCommandDraft({ ...commandDraft, requireAdmin: e.target.checked })} />
+                  <input
+                    type="checkbox"
+                    checked={commandDraft.requireAdmin}
+                    onChange={(e) =>
+                      setCommandDraft({
+                        ...commandDraft,
+                        requireAdmin: e.target.checked,
+                      })
+                    }
+                  />
                   Nur Admin
                 </label>
               </div>
               <div className="row">
                 <label className="checkbox">
-                  <input type="checkbox" checked={commandDraft.sendPush} onChange={(e) => setCommandDraft({ ...commandDraft, sendPush: e.target.checked })} />
+                  <input
+                    type="checkbox"
+                    checked={commandDraft.sendPush}
+                    onChange={(e) =>
+                      setCommandDraft({
+                        ...commandDraft,
+                        sendPush: e.target.checked,
+                      })
+                    }
+                  />
                   Push senden
                 </label>
                 <label className="checkbox">
-                  <input type="checkbox" checked={commandDraft.postChat} onChange={(e) => setCommandDraft({ ...commandDraft, postChat: e.target.checked })} />
+                  <input
+                    type="checkbox"
+                    checked={commandDraft.postChat}
+                    onChange={(e) =>
+                      setCommandDraft({
+                        ...commandDraft,
+                        postChat: e.target.checked,
+                      })
+                    }
+                  />
                   Chat-Meldung posten
                 </label>
               </div>
               <label>
                 Push-Text (Platzhalter: {"{user}"})
-                <input value={commandDraft.pushText} onChange={(e) => setCommandDraft({ ...commandDraft, pushText: e.target.value })} />
+                <input
+                  value={commandDraft.pushText}
+                  onChange={(e) =>
+                    setCommandDraft({
+                      ...commandDraft,
+                      pushText: e.target.value,
+                    })
+                  }
+                />
               </label>
               <label>
                 Chat-Text (Platzhalter: {"{user}"})
-                <input value={commandDraft.responseText} onChange={(e) => setCommandDraft({ ...commandDraft, responseText: e.target.value })} />
+                <input
+                  value={commandDraft.responseText}
+                  onChange={(e) =>
+                    setCommandDraft({
+                      ...commandDraft,
+                      responseText: e.target.value,
+                    })
+                  }
+                />
               </label>
               <label>
                 Cooldown (Sekunden)
@@ -2593,13 +3570,28 @@ export function App() {
                   type="number"
                   min={0}
                   value={commandDraft.cooldownSecond}
-                  onChange={(e) => setCommandDraft({ ...commandDraft, cooldownSecond: Number(e.target.value) })}
+                  onChange={(e) =>
+                    setCommandDraft({
+                      ...commandDraft,
+                      cooldownSecond: Number(e.target.value),
+                    })
+                  }
                 />
               </label>
               <div className="row">
-                <button type="submit">{editingCommandId == null ? "Command erstellen" : "Command speichern"}</button>
+                <button type="submit">
+                  {editingCommandId == null
+                    ? "Command erstellen"
+                    : "Command speichern"}
+                </button>
                 {editingCommandId != null && (
-                  <button type="button" onClick={() => { setEditingCommandId(null); setCommandDraft(emptyCommandDraft); }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingCommandId(null);
+                      setCommandDraft(emptyCommandDraft);
+                    }}
+                  >
                     Bearbeitung abbrechen
                   </button>
                 )}
@@ -2623,14 +3615,25 @@ export function App() {
                 {chatCommands.map((cmd) => (
                   <tr key={cmd.id}>
                     <td>{cmd.name}</td>
-                    <td><code>{cmd.command}</code></td>
+                    <td>
+                      <code>{cmd.command}</code>
+                    </td>
                     <td>{cmd.action}</td>
                     <td>{cmd.enabled ? "Aktiv" : "Aus"}</td>
-                    <td>{cmd.lastUsedAt ? formatDateTime(cmd.lastUsedAt) : "-"}</td>
+                    <td>
+                      {cmd.lastUsedAt ? formatDateTime(cmd.lastUsedAt) : "-"}
+                    </td>
                     <td>
                       <div className="row">
-                        <button onClick={() => onEditCommand(cmd)}>Bearbeiten</button>
-                        <button className="danger" onClick={() => onDeleteCommand(cmd)}>Loeschen</button>
+                        <button onClick={() => onEditCommand(cmd)}>
+                          Bearbeiten
+                        </button>
+                        <button
+                          className="danger"
+                          onClick={() => onDeleteCommand(cmd)}
+                        >
+                          Loeschen
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -2646,14 +3649,27 @@ export function App() {
             <form onSubmit={onCreateUser} className="stack">
               <label>
                 Username
-                <input value={newUsername} onChange={(e) => setNewUsername(e.target.value)} required />
+                <input
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  required
+                />
               </label>
               <label>
                 Passwort
-                <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required />
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  required
+                />
               </label>
               <label className="checkbox">
-                <input type="checkbox" checked={newIsAdmin} onChange={(e) => setNewIsAdmin(e.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={newIsAdmin}
+                  onChange={(e) => setNewIsAdmin(e.target.checked)}
+                />
                 Admin-Rechte
               </label>
               <button type="submit">User erstellen</button>
@@ -2685,7 +3701,12 @@ export function App() {
                     <td>{u.invitedBy || "Direkt angelegt"}</td>
                     <td>{formatDateTime(u.createdAt)}</td>
                     <td>
-                      <select value={u.isAdmin ? "admin" : "user"} onChange={(e) => onToggleAdmin(u, e.target.value === "admin")}>
+                      <select
+                        value={u.isAdmin ? "admin" : "user"}
+                        onChange={(e) =>
+                          onToggleAdmin(u, e.target.value === "admin")
+                        }
+                      >
                         <option value="user">User</option>
                         <option value="admin">Admin</option>
                       </select>
@@ -2701,23 +3722,45 @@ export function App() {
                             </span>
                           ))
                         ) : u.deviceNames && u.deviceNames.length > 0 ? (
-                          <span className="small">{u.deviceNames.join(", ")}</span>
+                          <span className="small">
+                            {u.deviceNames.join(", ")}
+                          </span>
                         ) : (
-                          <span className="small">Keine Geraetenamen gemeldet</span>
+                          <span className="small">
+                            Keine Geraetenamen gemeldet
+                          </span>
                         )}
                       </div>
                     </td>
                     <td>
                       <div className="stack">
-                        <span className="small"><strong>App:</strong> {u.lastAppVersion || "-"}</span>
-                        <span className="small"><strong>Fehler:</strong> {u.lastError ? truncateText(u.lastError, 80) : "-"}</span>
-                        <span className="small"><strong>Fehlerzeit:</strong> {u.lastErrorAt ? formatDateTime(u.lastErrorAt) : "-"}</span>
-                        <span className="small"><strong>Profil OK:</strong> {u.lastProfileOkAt ? formatDateTime(u.lastProfileOkAt) : "-"}</span>
+                        <span className="small">
+                          <strong>App:</strong> {u.lastAppVersion || "-"}
+                        </span>
+                        <span className="small">
+                          <strong>Fehler:</strong>{" "}
+                          {u.lastError ? truncateText(u.lastError, 80) : "-"}
+                        </span>
+                        <span className="small">
+                          <strong>Fehlerzeit:</strong>{" "}
+                          {u.lastErrorAt ? formatDateTime(u.lastErrorAt) : "-"}
+                        </span>
+                        <span className="small">
+                          <strong>Profil OK:</strong>{" "}
+                          {u.lastProfileOkAt
+                            ? formatDateTime(u.lastProfileOkAt)
+                            : "-"}
+                        </span>
                       </div>
                     </td>
                     <td>
-                      <button onClick={() => onCopyUserToken(u)} disabled={issuingTokenForUserId === u.id}>
-                        {issuingTokenForUserId === u.id ? "Erzeuge..." : "Token kopieren"}
+                      <button
+                        onClick={() => onCopyUserToken(u)}
+                        disabled={issuingTokenForUserId === u.id}
+                      >
+                        {issuingTokenForUserId === u.id
+                          ? "Erzeuge..."
+                          : "Token kopieren"}
                       </button>
                     </td>
                     <td>
@@ -2726,13 +3769,25 @@ export function App() {
                           type="password"
                           placeholder="Neues Passwort"
                           value={resetPassword[u.id] || ""}
-                          onChange={(e) => setResetPassword((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                          onChange={(e) =>
+                            setResetPassword((prev) => ({
+                              ...prev,
+                              [u.id]: e.target.value,
+                            }))
+                          }
                         />
-                        <button onClick={() => onResetPassword(u)}>Setzen</button>
+                        <button onClick={() => onResetPassword(u)}>
+                          Setzen
+                        </button>
                       </div>
                     </td>
                     <td>
-                      <button className="danger" onClick={() => onDeleteUser(u)}>LÃ¶schen</button>
+                      <button
+                        className="danger"
+                        onClick={() => onDeleteUser(u)}
+                      >
+                        LÃ¶schen
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -2746,9 +3801,15 @@ export function App() {
             <div className="row">
               <label>
                 Tag
-                <input type="date" value={feedDay} onChange={(e) => setFeedDay(e.target.value)} />
+                <input
+                  type="date"
+                  value={feedDay}
+                  onChange={(e) => setFeedDay(e.target.value)}
+                />
               </label>
-              <button onClick={() => loadFeed(token, feedDay)}>Feed laden</button>
+              <button onClick={() => loadFeed(token, feedDay)}>
+                Feed laden
+              </button>
             </div>
             {feedMonthRecap && (
               <article className="settings-current">
@@ -2756,7 +3817,9 @@ export function App() {
                 <p>Dein Monat in {feedMonthRecap.yourMoments} Momenten</p>
                 {feedMonthRecap.mostReliableUser && (
                   <p>
-                    <strong>Am zuverlaessigsten dabei:</strong> {feedMonthRecap.mostReliableUser.username} ({feedMonthRecap.mostReliableUser.count} Tage)
+                    <strong>Am zuverlaessigsten dabei:</strong>{" "}
+                    {feedMonthRecap.mostReliableUser.username} (
+                    {feedMonthRecap.mostReliableUser.count} Tage)
                   </p>
                 )}
                 {feedMonthRecap.topSpontaneous.length > 0 && (
@@ -2765,7 +3828,8 @@ export function App() {
                     <ul>
                       {feedMonthRecap.topSpontaneous.slice(0, 5).map((row) => (
                         <li key={`${row.day}-${row.userId}-${row.createdAt}`}>
-                          {new Date(`${row.day}T00:00:00`).toLocaleDateString()}: {row.username} nach {row.minutesAfterTrigger} min
+                          {new Date(`${row.day}T00:00:00`).toLocaleDateString()}
+                          : {row.username} nach {row.minutesAfterTrigger} min
                         </li>
                       ))}
                     </ul>
@@ -2776,25 +3840,44 @@ export function App() {
             {feedItems.length === 0 && <p>Keine Eintraege fuer diesen Tag.</p>}
             <div className="feed-grid">
               {feedItems.map((item) => (
-                <article key={`${item.user.id}-${item.photo.id}`} className="feed-card">
+                <article
+                  key={`${item.user.id}-${item.photo.id}`}
+                  className="feed-card"
+                >
                   <div className="row">
                     <strong>{item.user.username}</strong>
                     {item.isLate && <span className="late">Spaet</span>}
                   </div>
-                  {normalizeMomentKind(item.momentKind, item.triggerSource) === "special" && (
+                  {normalizeMomentKind(item.momentKind, item.triggerSource) ===
+                    "special" && (
                     <p className="small">
                       <strong>Sondermoment:</strong>{" "}
-                      {item.requestedByUser ? `von ${item.requestedByUser} angefordert` : "angefordert"}
+                      {item.requestedByUser
+                        ? `von ${item.requestedByUser} angefordert`
+                        : "angefordert"}
                     </p>
                   )}
-                  <PhotoMediaCard photo={item.photo} username={item.user.username} />
+                  <PhotoMediaCard
+                    photo={item.photo}
+                    username={item.user.username}
+                  />
                   {item.photo.locationShared && item.photo.locationMapsUrl && (
                     <p className="small">
-                      <a href={item.photo.locationMapsUrl} target="_blank" rel="noreferrer">📍 Standort</a>
-                      {item.photo.locationDisplay ? ` (${item.photo.locationDisplay})` : ""}
+                      <a
+                        href={item.photo.locationMapsUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        📍 Standort
+                      </a>
+                      {item.photo.locationDisplay
+                        ? ` (${item.photo.locationDisplay})`
+                        : ""}
                     </p>
                   )}
-                  {item.photo.caption && <p className="small">{item.photo.caption}</p>}
+                  {item.photo.caption && (
+                    <p className="small">{item.photo.caption}</p>
+                  )}
                 </article>
               ))}
             </div>
@@ -2806,36 +3889,75 @@ export function App() {
             <div className="row">
               <label>
                 Von
-                <input type="date" value={locationFromDay} onChange={(e) => setLocationFromDay(e.target.value)} />
+                <input
+                  type="date"
+                  value={locationFromDay}
+                  onChange={(e) => setLocationFromDay(e.target.value)}
+                />
               </label>
               <label>
                 Bis
-                <input type="date" value={locationToDay} onChange={(e) => setLocationToDay(e.target.value)} />
+                <input
+                  type="date"
+                  value={locationToDay}
+                  onChange={(e) => setLocationToDay(e.target.value)}
+                />
               </label>
               <label>
                 Nutzer
-                <select value={locationUserId} onChange={(e) => setLocationUserId(Number(e.target.value))}>
+                <select
+                  value={locationUserId}
+                  onChange={(e) => setLocationUserId(Number(e.target.value))}
+                >
                   <option value={0}>Alle</option>
                   {users.map((u) => (
-                    <option key={u.id} value={u.id}>{u.username}</option>
+                    <option key={u.id} value={u.id}>
+                      {u.username}
+                    </option>
                   ))}
                 </select>
               </label>
-              <button onClick={() => loadLocations(token)}>Standorte laden</button>
+              <button onClick={() => loadLocations(token)}>
+                Standorte laden
+              </button>
             </div>
-            {locationItems.length === 0 && <p>Keine Posts mit Standort im aktuellen Filter.</p>}
+            {locationItems.length === 0 && (
+              <p>Keine Posts mit Standort im aktuellen Filter.</p>
+            )}
             <div className="feed-grid">
               {locationItems.map((item) => (
                 <article key={item.photoId} className="feed-card">
                   <div className="row">
                     <strong>{item.user.username}</strong>
-                    <span className="small">{formatDateTime(item.createdAt)}</span>
+                    <span className="small">
+                      {formatDateTime(item.createdAt)}
+                    </span>
                   </div>
-                  <p className="small"><strong>Tag:</strong> {item.day}</p>
-                  <p className="small"><strong>Koordinaten:</strong> {item.locationDisplay}</p>
-                  <p className="small"><a href={item.locationMapsUrl} target="_blank" rel="noreferrer">Google Maps oeffnen</a></p>
-                  <PhotoMediaCard photo={item.photo} username={item.user.username} />
-                  <button className="danger" onClick={() => void onDeleteLocation(item.photoId)}>Standortdaten loeschen</button>
+                  <p className="small">
+                    <strong>Tag:</strong> {item.day}
+                  </p>
+                  <p className="small">
+                    <strong>Koordinaten:</strong> {item.locationDisplay}
+                  </p>
+                  <p className="small">
+                    <a
+                      href={item.locationMapsUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Google Maps oeffnen
+                    </a>
+                  </p>
+                  <PhotoMediaCard
+                    photo={item.photo}
+                    username={item.user.username}
+                  />
+                  <button
+                    className="danger"
+                    onClick={() => void onDeleteLocation(item.photoId)}
+                  >
+                    Standortdaten loeschen
+                  </button>
                 </article>
               ))}
             </div>
@@ -2848,7 +3970,9 @@ export function App() {
               <h2>Chatverlauf</h2>
               <div className="row">
                 <button onClick={() => loadChat(token)}>Aktualisieren</button>
-                <button className="danger" onClick={onClearChat}>Chat leeren</button>
+                <button className="danger" onClick={onClearChat}>
+                  Chat leeren
+                </button>
               </div>
             </div>
             <form onSubmit={onSendAdminChat} className="row">
@@ -2865,7 +3989,9 @@ export function App() {
                 <article key={msg.id} className="chat-item clean">
                   <div className="chat-head">
                     <strong className="chat-user">{msg.user.username}</strong>
-                    <span className="small chat-time">{formatDateTime(msg.createdAt)}</span>
+                    <span className="small chat-time">
+                      {formatDateTime(msg.createdAt)}
+                    </span>
                   </div>
                   <p className="chat-body">{msg.body}</p>
                 </article>
@@ -2885,14 +4011,25 @@ export function App() {
             <div className="settings-grid">
               <label>
                 Tag (optional)
-                <input type="date" value={pollDay} onChange={(e) => setPollDay(e.target.value)} />
+                <input
+                  type="date"
+                  value={pollDay}
+                  onChange={(e) => setPollDay(e.target.value)}
+                />
               </label>
               <label>
                 Ersteller
-                <select value={pollCreatorUserId} onChange={(e) => setPollCreatorUserId(Number(e.target.value) || 0)}>
+                <select
+                  value={pollCreatorUserId}
+                  onChange={(e) =>
+                    setPollCreatorUserId(Number(e.target.value) || 0)
+                  }
+                >
                   <option value={0}>Alle Nutzer</option>
                   {users.map((u) => (
-                    <option key={u.id} value={u.id}>@{u.username}</option>
+                    <option key={u.id} value={u.id}>
+                      @{u.username}
+                    </option>
                   ))}
                 </select>
               </label>
@@ -2903,7 +4040,14 @@ export function App() {
                   min={10}
                   max={500}
                   value={pollLimit}
-                  onChange={(e) => setPollLimit(Math.max(10, Math.min(500, Number(e.target.value) || 100)))}
+                  onChange={(e) =>
+                    setPollLimit(
+                      Math.max(
+                        10,
+                        Math.min(500, Number(e.target.value) || 100),
+                      ),
+                    )
+                  }
                 />
               </label>
               <label className="checkbox">
@@ -2918,10 +4062,18 @@ export function App() {
             <div className="grid4">
               <CardStat title="Geladene Umfragen" value={pollItems.length} />
               <CardStat title="Server Count" value={pollCount} />
-              <CardStat title="Offen" value={pollItems.filter((row) => !row.isClosed).length} />
-              <CardStat title="Geschlossen" value={pollItems.filter((row) => row.isClosed).length} />
+              <CardStat
+                title="Offen"
+                value={pollItems.filter((row) => !row.isClosed).length}
+              />
+              <CardStat
+                title="Geschlossen"
+                value={pollItems.filter((row) => row.isClosed).length}
+              />
             </div>
-            {pollItems.length === 0 && <p>Keine Umfragen fuer den gesetzten Filter.</p>}
+            {pollItems.length === 0 && (
+              <p>Keine Umfragen fuer den gesetzten Filter.</p>
+            )}
             {pollItems.length > 0 && (
               <table className="table">
                 <thead>
@@ -2940,42 +4092,86 @@ export function App() {
                     <tr key={poll.id}>
                       <td>{formatDateTime(poll.createdAt)}</td>
                       <td>
-                        <strong style={{ color: poll.creator?.favoriteColor || undefined }}>
+                        <strong
+                          style={{
+                            color: poll.creator?.favoriteColor || undefined,
+                          }}
+                        >
                           @{poll.creator?.username || "-"}
                         </strong>
-                        <div className="small">ID: {poll.creator?.id || "-"}</div>
+                        <div className="small">
+                          ID: {poll.creator?.id || "-"}
+                        </div>
                       </td>
                       <td>
                         <strong>{poll.question || "-"}</strong>
-                        {poll.body ? <div className="small">{poll.body}</div> : null}
-                        <div className="small">Quelle: {poll.source || "-"}</div>
+                        {poll.body ? (
+                          <div className="small">{poll.body}</div>
+                        ) : null}
+                        <div className="small">
+                          Quelle: {poll.source || "-"}
+                        </div>
                       </td>
                       <td>
-                        <span className={`debug-chip ${poll.isClosed ? "neutral" : "ok"}`}>
+                        <span
+                          className={`debug-chip ${poll.isClosed ? "neutral" : "ok"}`}
+                        >
                           {poll.isClosed ? "geschlossen" : "offen"}
                         </span>
                         <div className="small">
-                          {poll.closedAt ? `geschlossen um ${formatDateTime(poll.closedAt)}` : "noch offen"}
+                          {poll.closedAt
+                            ? `geschlossen um ${formatDateTime(poll.closedAt)}`
+                            : "noch offen"}
                         </div>
                       </td>
-                      <td>{poll.allowMultiSelect ? "Mehrfachantworten" : "Eine Antwort"}</td>
+                      <td>
+                        {poll.allowMultiSelect
+                          ? "Mehrfachantworten"
+                          : "Eine Antwort"}
+                      </td>
                       <td>
                         <strong>{poll.totalVotes}</strong>
-                        <div className="small">{poll.totalVoters} abstimmende Nutzer</div>
+                        <div className="small">
+                          {poll.totalVoters} abstimmende Nutzer
+                        </div>
                       </td>
                       <td>
                         <div className="stack" style={{ marginBottom: 0 }}>
                           {(poll.options || []).map((option) => (
-                            <div key={option.id} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: 8 }}>
-                              <div className="row" style={{ justifyContent: "space-between" }}>
+                            <div
+                              key={option.id}
+                              style={{
+                                border: "1px solid var(--border)",
+                                borderRadius: 10,
+                                padding: 8,
+                              }}
+                            >
+                              <div
+                                className="row"
+                                style={{ justifyContent: "space-between" }}
+                              >
                                 <strong>{option.text || "-"}</strong>
                                 <span>{option.votes} Vote(s)</span>
                               </div>
                               {(option.voters || []).length > 0 ? (
                                 <div className="small">
                                   {(option.voters || []).map((voter) => (
-                                    <span key={`${option.id}-${voter.userId}-${voter.votedAt}`} style={{ display: "inline-block", marginRight: 8 }}>
-                                      <strong style={{ color: voter.favoriteColor || undefined }}>@{voter.username}</strong> ({formatDateTime(voter.votedAt)})
+                                    <span
+                                      key={`${option.id}-${voter.userId}-${voter.votedAt}`}
+                                      style={{
+                                        display: "inline-block",
+                                        marginRight: 8,
+                                      }}
+                                    >
+                                      <strong
+                                        style={{
+                                          color:
+                                            voter.favoriteColor || undefined,
+                                        }}
+                                      >
+                                        @{voter.username}
+                                      </strong>{" "}
+                                      ({formatDateTime(voter.votedAt)})
                                     </span>
                                   ))}
                                 </div>
@@ -3014,21 +4210,34 @@ export function App() {
               <tbody>
                 {calendarItems.map((item) => (
                   <tr key={item.day}>
-                    <td>{new Date(`${item.day}T00:00:00`).toLocaleDateString()}</td>
+                    <td>
+                      {new Date(`${item.day}T00:00:00`).toLocaleDateString()}
+                    </td>
                     <td>
                       <input
                         type="datetime-local"
                         value={calendarDrafts[item.day] || ""}
-                        onChange={(e) => setCalendarDrafts((prev) => ({ ...prev, [item.day]: e.target.value }))}
+                        onChange={(e) =>
+                          setCalendarDrafts((prev) => ({
+                            ...prev,
+                            [item.day]: e.target.value,
+                          }))
+                        }
                       />
                     </td>
                     <td>{item.triggeredAt ? "Ausgeloest" : "Geplant"}</td>
                     <td>{item.source === "manual" ? "Manuell" : "Auto"}</td>
                     <td>
-                      {momentSourceLabel(item.momentKind, item.triggerSource, item.requestedByUser)}
+                      {momentSourceLabel(
+                        item.momentKind,
+                        item.triggerSource,
+                        item.requestedByUser,
+                      )}
                     </td>
                     <td>
-                      <button onClick={() => onSaveCalendarDay(item.day)}>Speichern</button>
+                      <button onClick={() => onSaveCalendarDay(item.day)}>
+                        Speichern
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -3044,7 +4253,10 @@ export function App() {
               <div className="row">
                 <label>
                   Tage
-                  <select value={historyDays} onChange={(e) => setHistoryDays(Number(e.target.value))}>
+                  <select
+                    value={historyDays}
+                    onChange={(e) => setHistoryDays(Number(e.target.value))}
+                  >
                     <option value={1}>Letzter Tag</option>
                     <option value={7}>7</option>
                     <option value={14}>14</option>
@@ -3058,30 +4270,62 @@ export function App() {
                     type="number"
                     min={0}
                     value={historyOffset}
-                    onChange={(e) => setHistoryOffset(Math.max(0, Number(e.target.value) || 0))}
+                    onChange={(e) =>
+                      setHistoryOffset(Math.max(0, Number(e.target.value) || 0))
+                    }
                     style={{ width: 90 }}
                   />
                 </label>
-                <button onClick={() => loadHistory(token, historyDays, historyOffset)}>Aktualisieren</button>
+                <button
+                  onClick={() => loadHistory(token, historyDays, historyOffset)}
+                >
+                  Aktualisieren
+                </button>
               </div>
             </div>
             <div className="grid4">
               <CardStat title="Tage im Blick" value={historyItems.length} />
               <CardStat
                 title="Tracking seit"
-                value={historyTrackingSince ? new Date(`${historyTrackingSince}T00:00:00`).toLocaleDateString() : "-"}
+                value={
+                  historyTrackingSince
+                    ? new Date(
+                        `${historyTrackingSince}T00:00:00`,
+                      ).toLocaleDateString()
+                    : "-"
+                }
               />
               <CardStat
                 title="Ã˜ Poster"
-                value={historyItems.length > 0 ? (historyItems.reduce((acc, row) => acc + row.postedUsersCount, 0) / historyItems.length).toFixed(1) : "-"}
+                value={
+                  historyItems.length > 0
+                    ? (
+                        historyItems.reduce(
+                          (acc, row) => acc + row.postedUsersCount,
+                          0,
+                        ) / historyItems.length
+                      ).toFixed(1)
+                    : "-"
+                }
               />
               <CardStat
                 title="Ã˜ Daily-Poster"
-                value={historyItems.length > 0 ? (historyItems.reduce((acc, row) => acc + row.dailyMomentUsersCount, 0) / historyItems.length).toFixed(1) : "-"}
+                value={
+                  historyItems.length > 0
+                    ? (
+                        historyItems.reduce(
+                          (acc, row) => acc + row.dailyMomentUsersCount,
+                          0,
+                        ) / historyItems.length
+                      ).toFixed(1)
+                    : "-"
+                }
               />
             </div>
             <p className="small">
-              Online-Zeiten stammen aus serverseitigem Activity-Tracking. Tage vor dem Tracking-Rollout zeigen bewusst kein geschaetztes Online-Ergebnis.
+              Online-Zeiten stammen aus serverseitigem Activity-Tracking. Tage
+              vor dem Tracking-Rollout zeigen bewusst kein geschaetztes
+              Online-Ergebnis.
             </p>
             <div className="history-chart-grid">
               <article className="history-chart-card">
@@ -3089,15 +4333,54 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <LineChart data={historyTrendChartData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="dayLabel" />
                       <YAxis allowDecimals={false} />
                       <Tooltip />
                       <Legend />
-                      <Line type="monotone" dataKey="onlineUsers" name="Online" stroke="#386dff" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={550} />
-                      <Line type="monotone" dataKey="postedUsers" name="Poster" stroke="#18a188" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={550} />
-                      <Line type="monotone" dataKey="dailyMomentUsers" name="Daily-Moment" stroke="#31bf62" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={550} />
-                      <Line type="monotone" dataKey="extraUsers" name="Extras" stroke="#f0872f" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={550} />
+                      <Line
+                        type="monotone"
+                        dataKey="onlineUsers"
+                        name="Online"
+                        stroke="#386dff"
+                        strokeWidth={2}
+                        dot={false}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={550}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="postedUsers"
+                        name="Poster"
+                        stroke="#18a188"
+                        strokeWidth={2}
+                        dot={false}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={550}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="dailyMomentUsers"
+                        name="Daily-Moment"
+                        stroke="#31bf62"
+                        strokeWidth={2}
+                        dot={false}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={550}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="extraUsers"
+                        name="Extras"
+                        stroke="#f0872f"
+                        strokeWidth={2}
+                        dot={false}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={550}
+                      />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
@@ -3107,14 +4390,38 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={historyCompositionChartData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="dayLabel" />
                       <YAxis allowDecimals={false} />
                       <Tooltip />
                       <Legend />
-                      <Bar dataKey="dailyMomentPhotos" name="Daily-Moment" stackId="a" fill="#33ba67" isAnimationActive={!reduceMotion} animationDuration={520} />
-                      <Bar dataKey="extraPhotos" name="Extra" stackId="a" fill="#f0872f" isAnimationActive={!reduceMotion} animationDuration={520} />
-                      <Bar dataKey="capsulePhotos" name="Capsule" stackId="a" fill="#7861d8" isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Bar
+                        dataKey="dailyMomentPhotos"
+                        name="Daily-Moment"
+                        stackId="a"
+                        fill="#33ba67"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
+                      <Bar
+                        dataKey="extraPhotos"
+                        name="Extra"
+                        stackId="a"
+                        fill="#f0872f"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
+                      <Bar
+                        dataKey="capsulePhotos"
+                        name="Capsule"
+                        stackId="a"
+                        fill="#7861d8"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -3124,14 +4431,44 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <AreaChart data={historyConversionChartData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="dayLabel" />
                       <YAxis allowDecimals={false} />
                       <Tooltip />
                       <Legend />
-                      <Area type="monotone" dataKey="onlineUsers" name="Online" fill="#4f87ff" stroke="#386dff" fillOpacity={0.28} isAnimationActive={!reduceMotion} animationDuration={500} />
-                      <Area type="monotone" dataKey="postedUsers" name="Gepostet" fill="#1cb39a" stroke="#18a188" fillOpacity={0.3} isAnimationActive={!reduceMotion} animationDuration={500} />
-                      <Area type="monotone" dataKey="dailyMomentUsers" name="Daily-Moment" fill="#53c773" stroke="#32b85b" fillOpacity={0.34} isAnimationActive={!reduceMotion} animationDuration={500} />
+                      <Area
+                        type="monotone"
+                        dataKey="onlineUsers"
+                        name="Online"
+                        fill="#4f87ff"
+                        stroke="#386dff"
+                        fillOpacity={0.28}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="postedUsers"
+                        name="Gepostet"
+                        fill="#1cb39a"
+                        stroke="#18a188"
+                        fillOpacity={0.3}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="dailyMomentUsers"
+                        name="Daily-Moment"
+                        fill="#53c773"
+                        stroke="#32b85b"
+                        fillOpacity={0.34}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
@@ -3141,11 +4478,22 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <ScatterChart>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="x" name="Trigger Delay (min)" />
                       <YAxis dataKey="y" name="Poster" allowDecimals={false} />
-                      <Tooltip cursor={{ strokeDasharray: "4 4" }} formatter={(v) => v} />
-                      <Scatter data={historyScatterData} fill="#3f79ff" isAnimationActive={!reduceMotion} animationDuration={500} />
+                      <Tooltip
+                        cursor={{ strokeDasharray: "4 4" }}
+                        formatter={(v) => v}
+                      />
+                      <Scatter
+                        data={historyScatterData}
+                        fill="#3f79ff"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      />
                     </ScatterChart>
                   </ResponsiveContainer>
                 </div>
@@ -3157,9 +4505,26 @@ export function App() {
                     <PieChart>
                       <Tooltip formatter={(value) => `${value}%`} />
                       <Legend />
-                      <Pie data={historyPhotoMixPieData} dataKey="value" nameKey="name" outerRadius={84} innerRadius={45} isAnimationActive={!reduceMotion} animationDuration={520}>
+                      <Pie
+                        data={historyPhotoMixPieData}
+                        dataKey="value"
+                        nameKey="name"
+                        outerRadius={84}
+                        innerRadius={45}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      >
                         {historyPhotoMixPieData.map((entry, index) => (
-                          <Cell key={`${entry.name}-${index}`} fill={index === 0 ? "#33ba67" : index === 1 ? "#f0872f" : "#7861d8"} />
+                          <Cell
+                            key={`${entry.name}-${index}`}
+                            fill={
+                              index === 0
+                                ? "#33ba67"
+                                : index === 1
+                                  ? "#f0872f"
+                                  : "#7861d8"
+                            }
+                          />
                         ))}
                       </Pie>
                     </PieChart>
@@ -3171,11 +4536,20 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={historyReliableChartData} layout="vertical">
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis type="number" domain={[0, 100]} />
                       <YAxis type="category" dataKey="username" width={90} />
                       <Tooltip formatter={(value) => `${value}%`} />
-                      <Bar dataKey="scorePercent" name="Reliability %" fill="#2cb280" isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Bar
+                        dataKey="scorePercent"
+                        name="Reliability %"
+                        fill="#2cb280"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -3184,12 +4558,24 @@ export function App() {
                 <h3>Extra-Lastige Nutzer</h3>
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
-                    <BarChart data={historyExtraHeavyChartData} layout="vertical">
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                    <BarChart
+                      data={historyExtraHeavyChartData}
+                      layout="vertical"
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis type="number" domain={[0, 100]} />
                       <YAxis type="category" dataKey="username" width={90} />
                       <Tooltip formatter={(value) => `${value}%`} />
-                      <Bar dataKey="scorePercent" name="Extra %" fill="#f08a37" isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Bar
+                        dataKey="scorePercent"
+                        name="Extra %"
+                        fill="#f08a37"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -3199,13 +4585,42 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <ScatterChart>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="dayLabel" name="Tag" />
-                      <YAxis dataKey="severityScore" name="Severity" domain={[0, 3]} ticks={[1, 2, 3]} />
-                      <Tooltip formatter={(value) => (Number(value) === 3 ? "high" : Number(value) === 2 ? "medium" : "low")} />
-                      <Scatter data={historyAnomalyTimelineData} isAnimationActive={!reduceMotion} animationDuration={500}>
+                      <YAxis
+                        dataKey="severityScore"
+                        name="Severity"
+                        domain={[0, 3]}
+                        ticks={[1, 2, 3]}
+                      />
+                      <Tooltip
+                        formatter={(value) =>
+                          Number(value) === 3
+                            ? "high"
+                            : Number(value) === 2
+                              ? "medium"
+                              : "low"
+                        }
+                      />
+                      <Scatter
+                        data={historyAnomalyTimelineData}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      >
                         {historyAnomalyTimelineData.map((row, idx) => (
-                          <Cell key={`${row.day}-${idx}`} fill={row.severity === "high" ? "#de5151" : row.severity === "medium" ? "#e6a13f" : "#51a6df"} />
+                          <Cell
+                            key={`${row.day}-${idx}`}
+                            fill={
+                              row.severity === "high"
+                                ? "#de5151"
+                                : row.severity === "medium"
+                                  ? "#e6a13f"
+                                  : "#51a6df"
+                            }
+                          />
                         ))}
                       </Scatter>
                     </ScatterChart>
@@ -3217,13 +4632,28 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={historyCohortTrendData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="username" />
                       <YAxis domain={[0, 100]} />
                       <Tooltip formatter={(value) => `${value}%`} />
                       <Legend />
-                      <Bar dataKey="participation7d" name="7 Tage" fill="#3f76ff" isAnimationActive={!reduceMotion} animationDuration={520} />
-                      <Bar dataKey="participation30d" name="30 Tage" fill="#28b890" isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Bar
+                        dataKey="participation7d"
+                        name="7 Tage"
+                        fill="#3f76ff"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
+                      <Bar
+                        dataKey="participation30d"
+                        name="30 Tage"
+                        fill="#28b890"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -3244,14 +4674,31 @@ export function App() {
               </article>
               <article className="stat">
                 <h3>Fehlerindikatoren</h3>
-                <p>{historyItems.reduce((acc, row) => acc + Number(row.debugErrorCount || 0), 0)}</p>
+                <p>
+                  {historyItems.reduce(
+                    (acc, row) => acc + Number(row.debugErrorCount || 0),
+                    0,
+                  )}
+                </p>
               </article>
             </div>
             <div className="grid4">
-              <CardStat title="On-Time Trigger" value={`${Math.round(historyReliability.onTimeTriggerRate * 100)}%`} />
-              <CardStat title="Avg Trigger Delay" value={`${historyReliability.avgAbsoluteTriggerDelayMinutes.toFixed(1)} min`} />
-              <CardStat title="Avg Aktivitaet/Online" value={historyReliability.avgRequestsPerOnlineUser.toFixed(2)} />
-              <CardStat title="Error Rate/Tag" value={historyReliability.errorIndicatorRatePerDay.toFixed(2)} />
+              <CardStat
+                title="On-Time Trigger"
+                value={`${Math.round(historyReliability.onTimeTriggerRate * 100)}%`}
+              />
+              <CardStat
+                title="Avg Trigger Delay"
+                value={`${historyReliability.avgAbsoluteTriggerDelayMinutes.toFixed(1)} min`}
+              />
+              <CardStat
+                title="Avg Aktivitaet/Online"
+                value={historyReliability.avgRequestsPerOnlineUser.toFixed(2)}
+              />
+              <CardStat
+                title="Error Rate/Tag"
+                value={historyReliability.errorIndicatorRatePerDay.toFixed(2)}
+              />
             </div>
             {historyAnomalies.length > 0 && (
               <div className="stack">
@@ -3268,7 +4715,9 @@ export function App() {
                   <tbody>
                     {historyAnomalies.map((row, idx) => (
                       <tr key={`${row.day}-${row.reason}-${idx}`}>
-                        <td>{new Date(`${row.day}T00:00:00`).toLocaleDateString()}</td>
+                        <td>
+                          {new Date(`${row.day}T00:00:00`).toLocaleDateString()}
+                        </td>
                         <td>{row.severity}</td>
                         <td>{row.reason}</td>
                         <td>{row.details || "-"}</td>
@@ -3278,7 +4727,8 @@ export function App() {
                 </table>
               </div>
             )}
-            {(historyReliableTop.length > 0 || historyExtraHeavyTop.length > 0) && (
+            {(historyReliableTop.length > 0 ||
+              historyExtraHeavyTop.length > 0) && (
               <div className="grid2">
                 <div className="stack">
                   <h3>Zuverlaessig</h3>
@@ -3301,9 +4751,14 @@ export function App() {
                             <td>@{row.username}</td>
                             <td>{row.promptDays}</td>
                             <td>{row.postedDays}</td>
-                            <td>{typeof row.reliabilityScore === "number" ? `${Math.round(row.reliabilityScore * 100)}%` : "-"}</td>
                             <td>
-                              {typeof row.participation7d === "number" && typeof row.participation30d === "number"
+                              {typeof row.reliabilityScore === "number"
+                                ? `${Math.round(row.reliabilityScore * 100)}%`
+                                : "-"}
+                            </td>
+                            <td>
+                              {typeof row.participation7d === "number" &&
+                              typeof row.participation30d === "number"
                                 ? `${Math.round(row.participation7d * 100)}% / ${Math.round(row.participation30d * 100)}%`
                                 : "-"}
                             </td>
@@ -3333,7 +4788,11 @@ export function App() {
                             <td>@{row.username}</td>
                             <td>{row.extraDays}</td>
                             <td>{row.postedDays}</td>
-                            <td>{typeof row.extraBiasScore === "number" ? `${Math.round(row.extraBiasScore * 100)}%` : "-"}</td>
+                            <td>
+                              {typeof row.extraBiasScore === "number"
+                                ? `${Math.round(row.extraBiasScore * 100)}%`
+                                : "-"}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -3363,19 +4822,47 @@ export function App() {
                   {historyItems.flatMap((item) => {
                     const expanded = !!expandedHistoryDays[item.day];
                     const userRows = item.userActivity ?? [];
-                    const hasDetails = !!item.analytics || userRows.length > 0 || !item.onlineTrackingAvailable || item.commentCount > 0 || item.reactionCount > 0 || item.chatMessageCount > 0 || item.timeCapsuleCount > 0;
-                    const sourceLabel = item.dailyPending && item.specialTriggeredAt
-                      ? "Daily ausstehend (Sondermoment erfolgt)"
-                      : item.source === "manual"
-                        ? "Manuell"
-                        : momentSourceLabel(item.momentKind, item.triggerSource, item.requestedByUser);
+                    const hasDetails =
+                      !!item.analytics ||
+                      userRows.length > 0 ||
+                      !item.onlineTrackingAvailable ||
+                      item.commentCount > 0 ||
+                      item.reactionCount > 0 ||
+                      item.chatMessageCount > 0 ||
+                      item.timeCapsuleCount > 0;
+                    const sourceLabel =
+                      item.dailyPending && item.specialTriggeredAt
+                        ? "Daily ausstehend (Sondermoment erfolgt)"
+                        : item.source === "manual"
+                          ? "Manuell"
+                          : momentSourceLabel(
+                              item.momentKind,
+                              item.triggerSource,
+                              item.requestedByUser,
+                            );
                     const rows = [
                       <tr key={item.day}>
-                        <td>{new Date(`${item.day}T00:00:00`).toLocaleDateString()}</td>
-                        <td>{item.plannedAt ? formatDateTime(item.plannedAt) : "-"}</td>
-                        <td>{item.triggeredAt ? formatDateTime(item.triggeredAt) : "-"}</td>
+                        <td>
+                          {new Date(
+                            `${item.day}T00:00:00`,
+                          ).toLocaleDateString()}
+                        </td>
+                        <td>
+                          {item.plannedAt
+                            ? formatDateTime(item.plannedAt)
+                            : "-"}
+                        </td>
+                        <td>
+                          {item.triggeredAt
+                            ? formatDateTime(item.triggeredAt)
+                            : "-"}
+                        </td>
                         <td>{sourceLabel}</td>
-                        <td>{item.onlineTrackingAvailable ? Number(item.onlineUsersCount || 0) : "-"}</td>
+                        <td>
+                          {item.onlineTrackingAvailable
+                            ? Number(item.onlineUsersCount || 0)
+                            : "-"}
+                        </td>
                         <td>{item.postedUsersCount}</td>
                         <td>{item.dailyMomentUsersCount}</td>
                         <td>{item.extraUsersCount}</td>
@@ -3383,7 +4870,12 @@ export function App() {
                         <td>
                           {hasDetails ? (
                             <button
-                              onClick={() => setExpandedHistoryDays((prev) => ({ ...prev, [item.day]: !expanded }))}
+                              onClick={() =>
+                                setExpandedHistoryDays((prev) => ({
+                                  ...prev,
+                                  [item.day]: !expanded,
+                                }))
+                              }
                             >
                               {expanded ? "Weniger" : "Mehr"}
                             </button>
@@ -3399,27 +4891,60 @@ export function App() {
                           <td colSpan={10}>
                             <div className="stack">
                               <div className="grid4">
-                                <CardStat title="Kommentare" value={item.commentCount} />
-                                <CardStat title="Reaktionen" value={item.reactionCount} />
-                                <CardStat title="Chat" value={item.chatMessageCount} />
-                                <CardStat title="Capsules" value={`${item.timeCapsuleCount} / privat ${item.privateCapsuleCount}`} />
+                                <CardStat
+                                  title="Kommentare"
+                                  value={item.commentCount}
+                                />
+                                <CardStat
+                                  title="Reaktionen"
+                                  value={item.reactionCount}
+                                />
+                                <CardStat
+                                  title="Chat"
+                                  value={item.chatMessageCount}
+                                />
+                                <CardStat
+                                  title="Capsules"
+                                  value={`${item.timeCapsuleCount} / privat ${item.privateCapsuleCount}`}
+                                />
                               </div>
                               {item.analytics && (
                                 <div className="grid4">
-                                  <CardStat title="Prompt/Fotos" value={`${Math.round(item.analytics.promptPhotoRatio * 100)}%`} />
-                                  <CardStat title="Extra/Fotos" value={`${Math.round(item.analytics.extraPhotoRatio * 100)}%`} />
-                                  <CardStat title="Aktivitaet/Online" value={item.analytics.avgRequestsPerOnline.toFixed(1)} />
+                                  <CardStat
+                                    title="Prompt/Fotos"
+                                    value={`${Math.round(item.analytics.promptPhotoRatio * 100)}%`}
+                                  />
+                                  <CardStat
+                                    title="Extra/Fotos"
+                                    value={`${Math.round(item.analytics.extraPhotoRatio * 100)}%`}
+                                  />
+                                  <CardStat
+                                    title="Aktivitaet/Online"
+                                    value={item.analytics.avgRequestsPerOnline.toFixed(
+                                      1,
+                                    )}
+                                  />
                                   <CardStat
                                     title="Trigger Delay"
-                                    value={item.analytics.hasTriggerPerformance ? `${item.analytics.triggerDelayMinutes} min` : "-"}
+                                    value={
+                                      item.analytics.hasTriggerPerformance
+                                        ? `${item.analytics.triggerDelayMinutes} min`
+                                        : "-"
+                                    }
                                   />
                                 </div>
                               )}
                               {!item.onlineTrackingAvailable && (
-                                <p className="small">Exakte Online-Zeiten sind fuer diesen Tag noch nicht verfuegbar.</p>
+                                <p className="small">
+                                  Exakte Online-Zeiten sind fuer diesen Tag noch
+                                  nicht verfuegbar.
+                                </p>
                               )}
                               {userRows.length === 0 ? (
-                                <p className="small">Keine Nutzeraktivitaet fuer diesen Tag gespeichert.</p>
+                                <p className="small">
+                                  Keine Nutzeraktivitaet fuer diesen Tag
+                                  gespeichert.
+                                </p>
                               ) : (
                                 <table className="table">
                                   <thead>
@@ -3435,11 +4960,27 @@ export function App() {
                                     {userRows.map((userRow) => (
                                       <tr key={`${item.day}-${userRow.userId}`}>
                                         <td>@{userRow.username}</td>
-                                        <td>{userRow.firstSeenAt ? formatDateTime(userRow.firstSeenAt) : "-"}</td>
-                                        <td>{userRow.lastSeenAt ? formatDateTime(userRow.lastSeenAt) : "-"}</td>
+                                        <td>
+                                          {userRow.firstSeenAt
+                                            ? formatDateTime(
+                                                userRow.firstSeenAt,
+                                              )
+                                            : "-"}
+                                        </td>
+                                        <td>
+                                          {userRow.lastSeenAt
+                                            ? formatDateTime(userRow.lastSeenAt)
+                                            : "-"}
+                                        </td>
                                         <td>{userRow.requestCount}</td>
                                         <td>
-                                          {userRow.postedPrompt ? "Prompt" : userRow.postedExtra ? "Extra" : userRow.posted ? "Post" : "kein Post"}
+                                          {userRow.postedPrompt
+                                            ? "Prompt"
+                                            : userRow.postedExtra
+                                              ? "Extra"
+                                              : userRow.posted
+                                                ? "Post"
+                                                : "kein Post"}
                                         </td>
                                       </tr>
                                     ))}
@@ -3461,16 +5002,26 @@ export function App() {
 
         {activeTab === "performance" && (
           <div className="stack">
-            {Number(triggerAuditSummary?.summary?.duplicateAttempts || 0) > 0 && (
-              <article className="history-chart-card" style={{ borderColor: "#c74444" }}>
+            {Number(triggerAuditSummary?.summary?.duplicateAttempts || 0) >
+              0 && (
+              <article
+                className="history-chart-card"
+                style={{ borderColor: "#c74444" }}
+              >
                 <h3 style={{ color: "#ff6f6f" }}>Mehrfach-Trigger Alarm</h3>
                 <p className="small">
-                  {triggerAuditSummary?.summary?.duplicateAttempts} zusaetzliche Trigger-Versuche erkannt.
-                  Bitte Trigger Audit pruefen.
+                  {triggerAuditSummary?.summary?.duplicateAttempts} zusaetzliche
+                  Trigger-Versuche erkannt. Bitte Trigger Audit pruefen.
                 </p>
                 <div className="row">
-                  <button onClick={() => navigateTab("trigger_audit")}>Trigger Audit oeffnen</button>
-                  <button onClick={() => openIncidentExportWithRecentWindow(60)}>Incident-Export</button>
+                  <button onClick={() => navigateTab("trigger_audit")}>
+                    Trigger Audit oeffnen
+                  </button>
+                  <button
+                    onClick={() => openIncidentExportWithRecentWindow(60)}
+                  >
+                    Incident-Export
+                  </button>
                 </div>
               </article>
             )}
@@ -3479,22 +5030,50 @@ export function App() {
               <div className="row">
                 <label>
                   Von
-                  <input type="datetime-local" value={performanceFrom} onChange={(e) => setPerformanceFrom(e.target.value)} />
+                  <input
+                    type="datetime-local"
+                    value={performanceFrom}
+                    onChange={(e) => setPerformanceFrom(e.target.value)}
+                  />
                 </label>
                 <label>
                   Bis
-                  <input type="datetime-local" value={performanceTo} onChange={(e) => setPerformanceTo(e.target.value)} />
+                  <input
+                    type="datetime-local"
+                    value={performanceTo}
+                    onChange={(e) => setPerformanceTo(e.target.value)}
+                  />
                 </label>
                 <label>
                   Bucket
-                  <select value={performanceBucket} onChange={(e) => setPerformanceBucket(e.target.value as "1m" | "5m")}>
+                  <select
+                    value={performanceBucket}
+                    onChange={(e) =>
+                      setPerformanceBucket(e.target.value as "1m" | "5m")
+                    }
+                  >
                     <option value="1m">1 Minute</option>
                     <option value="5m">5 Minuten</option>
                   </select>
                 </label>
-                <button onClick={() => loadPerformance(token, performanceBucket, performanceFrom, performanceTo)}>Aktualisieren</button>
-                <button onClick={() => onDownloadPerformance("json")}>JSON Export</button>
-                <button onClick={() => onDownloadPerformance("csv")}>CSV Export</button>
+                <button
+                  onClick={() =>
+                    loadPerformance(
+                      token,
+                      performanceBucket,
+                      performanceFrom,
+                      performanceTo,
+                    )
+                  }
+                >
+                  Aktualisieren
+                </button>
+                <button onClick={() => onDownloadPerformance("json")}>
+                  JSON Export
+                </button>
+                <button onClick={() => onDownloadPerformance("csv")}>
+                  CSV Export
+                </button>
               </div>
             </div>
 
@@ -3505,7 +5084,9 @@ export function App() {
                   <input
                     type="checkbox"
                     checked={performanceTrackingEnabled}
-                    onChange={(e) => setPerformanceTrackingEnabled(e.target.checked)}
+                    onChange={(e) =>
+                      setPerformanceTrackingEnabled(e.target.checked)
+                    }
                   />
                   Tracking bei Daily-Trigger aktivieren
                 </label>
@@ -3513,7 +5094,9 @@ export function App() {
                   <input
                     type="checkbox"
                     checked={performanceTrackingOneShot}
-                    onChange={(e) => setPerformanceTrackingOneShot(e.target.checked)}
+                    onChange={(e) =>
+                      setPerformanceTrackingOneShot(e.target.checked)
+                    }
                     disabled={!performanceTrackingEnabled}
                   />
                   Nur einmal (auto aus nach erstem Daily)
@@ -3525,38 +5108,94 @@ export function App() {
                     min={5}
                     max={180}
                     value={performanceTrackingWindowMinutes}
-                    onChange={(e) => setPerformanceTrackingWindowMinutes(Number(e.target.value))}
+                    onChange={(e) =>
+                      setPerformanceTrackingWindowMinutes(
+                        Number(e.target.value),
+                      )
+                    }
                   />
                 </label>
               </div>
               <div className="row">
-                <button onClick={onSavePerformanceTracking}>Tracking speichern</button>
-                <button onClick={onDownloadTrackingExport}>Daily-Tracking JSON exportieren</button>
+                <button onClick={onSavePerformanceTracking}>
+                  Tracking speichern
+                </button>
+                <button onClick={onDownloadTrackingExport}>
+                  Daily-Tracking JSON exportieren
+                </button>
               </div>
               <p className="small">
-                Aktiv: {performanceTrackingActiveSpike ? `${formatDateTime(performanceTrackingActiveSpike.windowStart)} bis ${formatDateTime(performanceTrackingActiveSpike.windowEnd)}` : "nein"}.
-                Letztes Event: {performanceTrackingLatestSpike ? `${formatDateTime(performanceTrackingLatestSpike.triggerAt)} (${Number(performanceTrackingLatestSpike.p95PeakMs || 0).toFixed(1)} ms)` : "-"}.
-                Modus: {performanceTrackingEnabled ? (performanceTrackingOneShot ? "One-shot armed" : "dauerhaft aktiv") : "aus"}.
+                Aktiv:{" "}
+                {performanceTrackingActiveSpike
+                  ? `${formatDateTime(performanceTrackingActiveSpike.windowStart)} bis ${formatDateTime(performanceTrackingActiveSpike.windowEnd)}`
+                  : "nein"}
+                . Letztes Event:{" "}
+                {performanceTrackingLatestSpike
+                  ? `${formatDateTime(performanceTrackingLatestSpike.triggerAt)} (${Number(performanceTrackingLatestSpike.p95PeakMs || 0).toFixed(1)} ms)`
+                  : "-"}
+                . Modus:{" "}
+                {performanceTrackingEnabled
+                  ? performanceTrackingOneShot
+                    ? "One-shot armed"
+                    : "dauerhaft aktiv"
+                  : "aus"}
+                .
               </p>
             </article>
 
             <div className="grid4">
-              <CardStat title="Requests" value={Number(performanceOverview?.summary?.requests || 0)} />
-              <CardStat title="Errors" value={Number(performanceOverview?.summary?.errors || 0)} />
-              <CardStat title="P95 Peak" value={`${Number(performanceOverview?.summary?.p95Peak || 0).toFixed(1)} ms`} />
-              <CardStat title="P99 Peak" value={`${Number(performanceOverview?.summary?.p99Peak || 0).toFixed(1)} ms`} />
+              <CardStat
+                title="Requests"
+                value={Number(performanceOverview?.summary?.requests || 0)}
+              />
+              <CardStat
+                title="Errors"
+                value={Number(performanceOverview?.summary?.errors || 0)}
+              />
+              <CardStat
+                title="P95 Peak"
+                value={`${Number(performanceOverview?.summary?.p95Peak || 0).toFixed(1)} ms`}
+              />
+              <CardStat
+                title="P99 Peak"
+                value={`${Number(performanceOverview?.summary?.p99Peak || 0).toFixed(1)} ms`}
+              />
             </div>
             <div className="grid4">
-              <CardStat title="Throttle Events" value={Number(performanceOverview?.summary?.throttleCount || 0)} />
-              <CardStat title="Throttle Rate" value={`${(Number(performanceOverview?.summary?.throttleRate || 0) * 100).toFixed(2)}%`} />
-              <CardStat title="Schema" value={performanceOverview?.schemaVersion || "1.0"} />
-              <CardStat title="Error Classes" value={Number((performanceOverview?.errorClasses || []).length)} />
+              <CardStat
+                title="Throttle Events"
+                value={Number(performanceOverview?.summary?.throttleCount || 0)}
+              />
+              <CardStat
+                title="Throttle Rate"
+                value={`${(Number(performanceOverview?.summary?.throttleRate || 0) * 100).toFixed(2)}%`}
+              />
+              <CardStat
+                title="Schema"
+                value={performanceOverview?.schemaVersion || "1.0"}
+              />
+              <CardStat
+                title="Error Classes"
+                value={Number((performanceOverview?.errorClasses || []).length)}
+              />
             </div>
             <div className="grid4">
-              <CardStat title="SLO Status" value={performanceSlo?.status === "breach" ? "Breach" : "OK"} />
-              <CardStat title="Feed P95" value={`${Number(performanceSlo?.metrics?.feedP95PeakMs || 0).toFixed(1)} ms`} />
-              <CardStat title="5xx Rate" value={`${(Number(performanceSlo?.metrics?.global5xxRate || 0) * 100).toFixed(2)}%`} />
-              <CardStat title="Upload Error-Rate" value={`${(Number(performanceSlo?.metrics?.uploadErrorRate || 0) * 100).toFixed(2)}%`} />
+              <CardStat
+                title="SLO Status"
+                value={performanceSlo?.status === "breach" ? "Breach" : "OK"}
+              />
+              <CardStat
+                title="Feed P95"
+                value={`${Number(performanceSlo?.metrics?.feedP95PeakMs || 0).toFixed(1)} ms`}
+              />
+              <CardStat
+                title="5xx Rate"
+                value={`${(Number(performanceSlo?.metrics?.global5xxRate || 0) * 100).toFixed(2)}%`}
+              />
+              <CardStat
+                title="Upload Error-Rate"
+                value={`${(Number(performanceSlo?.metrics?.uploadErrorRate || 0) * 100).toFixed(2)}%`}
+              />
             </div>
 
             {performanceSlo && performanceSlo.violations?.length > 0 && (
@@ -3575,10 +5214,20 @@ export function App() {
                     <tbody>
                       {performanceSlo.violations.map((v) => (
                         <tr key={v.id}>
-                          <td><code>{v.id}</code></td>
+                          <td>
+                            <code>{v.id}</code>
+                          </td>
                           <td>{v.severity}</td>
-                          <td>{v.unit === "ratio" ? `${(v.observed * 100).toFixed(2)}%` : `${Number(v.observed).toFixed(1)} ms`}</td>
-                          <td>{v.unit === "ratio" ? `${(v.threshold * 100).toFixed(2)}%` : `${Number(v.threshold).toFixed(1)} ms`}</td>
+                          <td>
+                            {v.unit === "ratio"
+                              ? `${(v.observed * 100).toFixed(2)}%`
+                              : `${Number(v.observed).toFixed(1)} ms`}
+                          </td>
+                          <td>
+                            {v.unit === "ratio"
+                              ? `${(v.threshold * 100).toFixed(2)}%`
+                              : `${Number(v.threshold).toFixed(1)} ms`}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -3593,13 +5242,34 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <LineChart data={performanceTrendData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="bucketLabel" />
                       <YAxis allowDecimals={false} />
                       <Tooltip />
                       <Legend />
-                      <Line type="monotone" dataKey="requests" name="Requests" stroke="#386dff" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={520} />
-                      <Line type="monotone" dataKey="errors" name="Errors" stroke="#df5656" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Line
+                        type="monotone"
+                        dataKey="requests"
+                        name="Requests"
+                        stroke="#386dff"
+                        strokeWidth={2}
+                        dot={false}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="errors"
+                        name="Errors"
+                        stroke="#df5656"
+                        strokeWidth={2}
+                        dot={false}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
@@ -3609,13 +5279,34 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <AreaChart data={performanceTrendData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="bucketLabel" />
                       <YAxis />
                       <Tooltip />
                       <Legend />
-                      <Area type="monotone" dataKey="p95Ms" name="P95 ms" fill="#3f79ff" stroke="#2c65f5" fillOpacity={0.24} isAnimationActive={!reduceMotion} animationDuration={500} />
-                      <Area type="monotone" dataKey="p99Ms" name="P99 ms" fill="#aa5dff" stroke="#8f44e7" fillOpacity={0.24} isAnimationActive={!reduceMotion} animationDuration={500} />
+                      <Area
+                        type="monotone"
+                        dataKey="p95Ms"
+                        name="P95 ms"
+                        fill="#3f79ff"
+                        stroke="#2c65f5"
+                        fillOpacity={0.24}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="p99Ms"
+                        name="P99 ms"
+                        fill="#aa5dff"
+                        stroke="#8f44e7"
+                        fillOpacity={0.24}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
@@ -3625,14 +5316,35 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={performanceSpikeChartData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="dayLabel" />
                       <YAxis />
                       <Tooltip />
                       <Legend />
-                      <Bar dataKey="feedReadCount" name="Feed Reads" fill="#3d7bff" isAnimationActive={!reduceMotion} animationDuration={500} />
-                      <Bar dataKey="uploadCount" name="Uploads" fill="#2abf88" isAnimationActive={!reduceMotion} animationDuration={500} />
-                      <Bar dataKey="errorCount" name="Errors" fill="#d85a5a" isAnimationActive={!reduceMotion} animationDuration={500} />
+                      <Bar
+                        dataKey="feedReadCount"
+                        name="Feed Reads"
+                        fill="#3d7bff"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      />
+                      <Bar
+                        dataKey="uploadCount"
+                        name="Uploads"
+                        fill="#2abf88"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      />
+                      <Bar
+                        dataKey="errorCount"
+                        name="Errors"
+                        fill="#d85a5a"
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={500}
+                      />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -3642,13 +5354,34 @@ export function App() {
                 <div className="history-chart-wrap">
                   <ResponsiveContainer width="100%" height={260}>
                     <LineChart data={performanceSystemData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(120,140,190,0.25)" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(120,140,190,0.25)"
+                      />
                       <XAxis dataKey="bucketLabel" />
                       <YAxis />
                       <Tooltip />
                       <Legend />
-                      <Line type="monotone" dataKey="memAllocMb" name="Mem Alloc (MB)" stroke="#2abf88" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={520} />
-                      <Line type="monotone" dataKey="dbWaitMs" name="DB Wait (ms)" stroke="#f5a524" strokeWidth={2} dot={false} isAnimationActive={!reduceMotion} animationDuration={520} />
+                      <Line
+                        type="monotone"
+                        dataKey="memAllocMb"
+                        name="Mem Alloc (MB)"
+                        stroke="#2abf88"
+                        strokeWidth={2}
+                        dot={false}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="dbWaitMs"
+                        name="DB Wait (ms)"
+                        stroke="#f5a524"
+                        strokeWidth={2}
+                        dot={false}
+                        isAnimationActive={!reduceMotion}
+                        animationDuration={520}
+                      />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
@@ -3704,7 +5437,9 @@ export function App() {
                 ) : (
                   (performanceOverview?.errorClasses || []).map((row, idx) => (
                     <tr key={`${row.errorClass}-${idx}`}>
-                      <td><code>{row.errorClass}</code></td>
+                      <td>
+                        <code>{row.errorClass}</code>
+                      </td>
                       <td>{row.count}</td>
                       <td>{(Number(row.ratio || 0) * 100).toFixed(2)}%</td>
                     </tr>
@@ -3734,7 +5469,9 @@ export function App() {
                 ) : (
                   performanceSpikes.map((row) => (
                     <tr key={row.id}>
-                      <td>{new Date(`${row.day}T00:00:00`).toLocaleDateString()}</td>
+                      <td>
+                        {new Date(`${row.day}T00:00:00`).toLocaleDateString()}
+                      </td>
                       <td>{formatDateTime(row.triggerAt)}</td>
                       <td>{row.pushSent}</td>
                       <td>{row.uploadCount}</td>
@@ -3768,7 +5505,9 @@ export function App() {
                   (performanceOverview?.dbHotspots || []).map((row, idx) => (
                     <tr key={`${row.route}-${row.queryGroup}-${idx}`}>
                       <td>{row.route}</td>
-                      <td><code>{row.queryGroup}</code></td>
+                      <td>
+                        <code>{row.queryGroup}</code>
+                      </td>
                       <td>{row.count}</td>
                       <td>{Number(row.p95PeakMs || 0).toFixed(1)} ms</td>
                       <td>{Number(row.p99PeakMs || 0).toFixed(1)} ms</td>
@@ -3786,8 +5525,12 @@ export function App() {
             <div className="row">
               <h2>Incident Export</h2>
               <div className="row">
-                <button onClick={() => loadIncidentStatus(token)}>Status aktualisieren</button>
-                <button onClick={onDownloadIncidentBundle}>Incident JSON herunterladen</button>
+                <button onClick={() => loadIncidentStatus(token)}>
+                  Status aktualisieren
+                </button>
+                <button onClick={onDownloadIncidentBundle}>
+                  Incident JSON herunterladen
+                </button>
               </div>
             </div>
             <article className="settings-current">
@@ -3795,21 +5538,35 @@ export function App() {
               <div className="settings-grid">
                 <label>
                   Von
-                  <input type="datetime-local" value={incidentFrom} onChange={(e) => setIncidentFrom(e.target.value)} />
+                  <input
+                    type="datetime-local"
+                    value={incidentFrom}
+                    onChange={(e) => setIncidentFrom(e.target.value)}
+                  />
                 </label>
                 <label>
                   Bis
-                  <input type="datetime-local" value={incidentTo} onChange={(e) => setIncidentTo(e.target.value)} />
+                  <input
+                    type="datetime-local"
+                    value={incidentTo}
+                    onChange={(e) => setIncidentTo(e.target.value)}
+                  />
                 </label>
                 <label>
                   Tagesfokus (optional)
-                  <input type="date" value={incidentDay} onChange={(e) => setIncidentDay(e.target.value)} />
+                  <input
+                    type="date"
+                    value={incidentDay}
+                    onChange={(e) => setIncidentDay(e.target.value)}
+                  />
                 </label>
                 <label className="checkbox">
                   <input
                     type="checkbox"
                     checked={incidentIncludeGateway}
-                    onChange={(e) => setIncidentIncludeGateway(e.target.checked)}
+                    onChange={(e) =>
+                      setIncidentIncludeGateway(e.target.checked)
+                    }
                   />
                   Gateway-Logs einbeziehen (wenn gemountet)
                 </label>
@@ -3817,31 +5574,103 @@ export function App() {
             </article>
 
             <div className="grid4">
-              <CardStat title="Duplicate Attempts" value={Number(incidentStatus?.status?.duplicateAttempts || 0)} />
-              <CardStat title="Mehrfach-Tage" value={Number(incidentStatus?.status?.multipleAttemptDays || 0)} />
-              <CardStat title="Letzte Trigger-Quelle" value={incidentStatus?.status?.lastTriggerSource || "-"} />
-              <CardStat title="Gateway verfügbar" value={incidentStatus?.status?.gatewayLogAvailable ? "ja" : "nein"} />
+              <CardStat
+                title="Duplicate Attempts"
+                value={Number(incidentStatus?.status?.duplicateAttempts || 0)}
+              />
+              <CardStat
+                title="Mehrfach-Tage"
+                value={Number(incidentStatus?.status?.multipleAttemptDays || 0)}
+              />
+              <CardStat
+                title="Letzte Trigger-Quelle"
+                value={incidentStatus?.status?.lastTriggerSource || "-"}
+              />
+              <CardStat
+                title="Gateway verfügbar"
+                value={
+                  incidentStatus?.status?.gatewayLogAvailable ? "ja" : "nein"
+                }
+              />
             </div>
             <div className="grid4">
-              <CardStat title="Daily Attempts" value={Number(incidentStatus?.status?.dailyAttempts || 0)} />
-              <CardStat title="Daily Triggered" value={Number(incidentStatus?.status?.dailyTriggered || 0)} />
-              <CardStat title="Special Attempts" value={Number(incidentStatus?.status?.specialAttempts || 0)} />
-              <CardStat title="Special Triggered" value={Number(incidentStatus?.status?.specialTriggered || 0)} />
+              <CardStat
+                title="Daily Attempts"
+                value={Number(incidentStatus?.status?.dailyAttempts || 0)}
+              />
+              <CardStat
+                title="Daily Triggered"
+                value={Number(incidentStatus?.status?.dailyTriggered || 0)}
+              />
+              <CardStat
+                title="Special Attempts"
+                value={Number(incidentStatus?.status?.specialAttempts || 0)}
+              />
+              <CardStat
+                title="Special Triggered"
+                value={Number(incidentStatus?.status?.specialTriggered || 0)}
+              />
             </div>
             <div className="grid4">
-              <CardStat title="Backend-Log verfügbar" value={incidentStatus?.status?.backendLogAvailable ? "ja" : "nein"} />
-              <CardStat title="Schema" value={incidentStatus?.meta?.schemaVersion || "-"} />
-              <CardStat title="Zeitraum von" value={incidentStatus?.meta?.from ? formatDateTime(incidentStatus.meta.from) : "-"} />
-              <CardStat title="Daily ausstehend" value={incidentStatus?.status?.dailyPending ? "ja" : "nein"} />
+              <CardStat
+                title="Backend-Log verfügbar"
+                value={
+                  incidentStatus?.status?.backendLogAvailable ? "ja" : "nein"
+                }
+              />
+              <CardStat
+                title="Schema"
+                value={incidentStatus?.meta?.schemaVersion || "-"}
+              />
+              <CardStat
+                title="Zeitraum von"
+                value={
+                  incidentStatus?.meta?.from
+                    ? formatDateTime(incidentStatus.meta.from)
+                    : "-"
+                }
+              />
+              <CardStat
+                title="Daily ausstehend"
+                value={incidentStatus?.status?.dailyPending ? "ja" : "nein"}
+              />
             </div>
             <div className="grid4">
-              <CardStat title="Zeitraum bis" value={incidentStatus?.meta?.to ? formatDateTime(incidentStatus.meta.to) : "-"} />
-              <CardStat title="Dup Daily" value={Number(incidentStatus?.status?.duplicateAttemptsDaily || 0)} />
-              <CardStat title="Dup Special" value={Number(incidentStatus?.status?.duplicateAttemptsSpecial || 0)} />
-              <CardStat title="Mehrfach Daily-Tage" value={Number(incidentStatus?.status?.multipleAttemptDaysDaily || 0)} />
+              <CardStat
+                title="Zeitraum bis"
+                value={
+                  incidentStatus?.meta?.to
+                    ? formatDateTime(incidentStatus.meta.to)
+                    : "-"
+                }
+              />
+              <CardStat
+                title="Dup Daily"
+                value={Number(
+                  incidentStatus?.status?.duplicateAttemptsDaily || 0,
+                )}
+              />
+              <CardStat
+                title="Dup Special"
+                value={Number(
+                  incidentStatus?.status?.duplicateAttemptsSpecial || 0,
+                )}
+              />
+              <CardStat
+                title="Mehrfach Daily-Tage"
+                value={Number(
+                  incidentStatus?.status?.multipleAttemptDaysDaily || 0,
+                )}
+              />
             </div>
             <article className="settings-current">
-              <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <div
+                className="row"
+                style={{
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
                 <h3>Trigger Runtime</h3>
                 <div className="row">
                   <label>
@@ -3852,59 +5681,151 @@ export function App() {
                       max={240}
                       value={triggerRuntimeWindowMinutes}
                       onChange={(e) =>
-                        setTriggerRuntimeWindowMinutes(Math.max(5, Math.min(240, Number(e.target.value) || 60)))
+                        setTriggerRuntimeWindowMinutes(
+                          Math.max(
+                            5,
+                            Math.min(240, Number(e.target.value) || 60),
+                          ),
+                        )
                       }
                     />
                   </label>
-                  <button onClick={() => loadTriggerRuntime(token)}>Runtime aktualisieren</button>
-                  <button className="danger" onClick={() => onUpdateTriggerRuntime("pause", "manual_admin_pause")}>
+                  <button onClick={() => loadTriggerRuntime(token)}>
+                    Runtime aktualisieren
+                  </button>
+                  <button
+                    className="danger"
+                    onClick={() =>
+                      onUpdateTriggerRuntime("pause", "manual_admin_pause")
+                    }
+                  >
                     Scheduler pausieren
                   </button>
-                  <button onClick={() => onUpdateTriggerRuntime("unpause")}>Scheduler fortsetzen</button>
-                  <button className="danger" onClick={() => onUpdateTriggerRuntime("release_lease")}>
+                  <button onClick={() => onUpdateTriggerRuntime("unpause")}>
+                    Scheduler fortsetzen
+                  </button>
+                  <button
+                    className="danger"
+                    onClick={() => onUpdateTriggerRuntime("release_lease")}
+                  >
                     Lease freigeben
                   </button>
                 </div>
               </div>
               <div className="grid4">
-                <CardStat title="Auto-Pause" value={triggerRuntime?.runtime?.autoPaused ? "aktiv" : "aus"} />
-                <CardStat title="Pause-Grund" value={triggerRuntime?.runtime?.autoPauseReason || "-"} />
-                <CardStat title="Lease Owner" value={triggerRuntime?.runtime?.lease?.ownerId || "-"} />
-                <CardStat title="Ist Owner?" value={triggerRuntime?.runtime?.lease?.isOwner ? "ja" : "nein"} />
+                <CardStat
+                  title="Auto-Pause"
+                  value={triggerRuntime?.runtime?.autoPaused ? "aktiv" : "aus"}
+                />
+                <CardStat
+                  title="Pause-Grund"
+                  value={triggerRuntime?.runtime?.autoPauseReason || "-"}
+                />
+                <CardStat
+                  title="Lease Owner"
+                  value={triggerRuntime?.runtime?.lease?.ownerId || "-"}
+                />
+                <CardStat
+                  title="Ist Owner?"
+                  value={
+                    triggerRuntime?.runtime?.lease?.isOwner ? "ja" : "nein"
+                  }
+                />
               </div>
               <div className="grid4">
-                <CardStat title="Attempts (Fenster)" value={Number(triggerRuntime?.recent?.attempts || 0)} />
-                <CardStat title="Blocked" value={Number(triggerRuntime?.recent?.blocked || 0)} />
-                <CardStat title="Failed" value={Number(triggerRuntime?.recent?.failed || 0)} />
-                <CardStat title="DB-Lock" value={Number(triggerRuntime?.recent?.dbLocked || 0)} />
+                <CardStat
+                  title="Attempts (Fenster)"
+                  value={Number(triggerRuntime?.recent?.attempts || 0)}
+                />
+                <CardStat
+                  title="Blocked"
+                  value={Number(triggerRuntime?.recent?.blocked || 0)}
+                />
+                <CardStat
+                  title="Failed"
+                  value={Number(triggerRuntime?.recent?.failed || 0)}
+                />
+                <CardStat
+                  title="DB-Lock"
+                  value={Number(triggerRuntime?.recent?.dbLocked || 0)}
+                />
               </div>
               <div className="grid4">
-                <CardStat title="Duplikate heute" value={Number(triggerRuntime?.recent?.duplicateToday || 0)} />
-                <CardStat title="Block-Rate" value={`${(Number(triggerRuntime?.recent?.blockRate || 0) * 100).toFixed(2)}%`} />
-                <CardStat title="Lease Expired?" value={triggerRuntime?.runtime?.lease?.isExpired ? "ja" : "nein"} />
-                <CardStat title="Lease bis" value={triggerRuntime?.runtime?.lease?.expiresAt ? formatDateTime(triggerRuntime.runtime.lease.expiresAt) : "-"} />
+                <CardStat
+                  title="Duplikate heute"
+                  value={Number(triggerRuntime?.recent?.duplicateToday || 0)}
+                />
+                <CardStat
+                  title="Block-Rate"
+                  value={`${(Number(triggerRuntime?.recent?.blockRate || 0) * 100).toFixed(2)}%`}
+                />
+                <CardStat
+                  title="Lease Expired?"
+                  value={
+                    triggerRuntime?.runtime?.lease?.isExpired ? "ja" : "nein"
+                  }
+                />
+                <CardStat
+                  title="Lease bis"
+                  value={
+                    triggerRuntime?.runtime?.lease?.expiresAt
+                      ? formatDateTime(triggerRuntime.runtime.lease.expiresAt)
+                      : "-"
+                  }
+                />
               </div>
               <div className="grid4">
-                <CardStat title="Trigger SLO" value={triggerRuntime?.slo?.status === "breach" ? "BREACH" : "OK"} />
-                <CardStat title="Lease-Contention" value={Number(triggerRuntime?.recent?.byReason?.not_lease_owner || 0)} />
-                <CardStat title="Race Lost" value={Number(triggerRuntime?.recent?.byReason?.race_lost || 0)} />
-                <CardStat title="Already Triggered" value={Number(triggerRuntime?.recent?.byReason?.already_triggered_today || 0)} />
+                <CardStat
+                  title="Trigger SLO"
+                  value={
+                    triggerRuntime?.slo?.status === "breach" ? "BREACH" : "OK"
+                  }
+                />
+                <CardStat
+                  title="Lease-Contention"
+                  value={Number(
+                    triggerRuntime?.recent?.byReason?.not_lease_owner || 0,
+                  )}
+                />
+                <CardStat
+                  title="Race Lost"
+                  value={Number(
+                    triggerRuntime?.recent?.byReason?.race_lost || 0,
+                  )}
+                />
+                <CardStat
+                  title="Already Triggered"
+                  value={Number(
+                    triggerRuntime?.recent?.byReason?.already_triggered_today ||
+                      0,
+                  )}
+                />
               </div>
               {(triggerRuntime?.slo?.violations || []).length > 0 && (
-                <article className="history-chart-card" style={{ borderColor: "#c74444" }}>
+                <article
+                  className="history-chart-card"
+                  style={{ borderColor: "#c74444" }}
+                >
                   <h3 style={{ color: "#ff6f6f" }}>Trigger-SLO verletzt</h3>
                   <ul>
                     {(triggerRuntime?.slo?.violations || []).map((v, idx) => (
                       <li key={`${v.id}-${idx}`}>
-                        <code>{v.id}</code>: observed={Number(v.observed).toFixed(3)} threshold={Number(v.threshold).toFixed(3)} ({v.unit})
+                        <code>{v.id}</code>: observed=
+                        {Number(v.observed).toFixed(3)} threshold=
+                        {Number(v.threshold).toFixed(3)} ({v.unit})
                       </li>
                     ))}
                   </ul>
                 </article>
               )}
               <p className="small">
-                Last Tick: {triggerRuntime?.runtime?.lastTickAt ? formatDateTime(triggerRuntime.runtime.lastTickAt) : "-"} | Ergebnis:{" "}
-                <code>{triggerRuntime?.runtime?.lastTickResult || "-"}</code> | Dispatch:{" "}
+                Last Tick:{" "}
+                {triggerRuntime?.runtime?.lastTickAt
+                  ? formatDateTime(triggerRuntime.runtime.lastTickAt)
+                  : "-"}{" "}
+                | Ergebnis:{" "}
+                <code>{triggerRuntime?.runtime?.lastTickResult || "-"}</code> |
+                Dispatch:{" "}
                 <code>{triggerRuntime?.dispatch?.last?.status || "-"}</code>
               </p>
             </article>
@@ -3912,14 +5833,18 @@ export function App() {
               <article className="history-chart-card">
                 <h3>Collection Warnings</h3>
                 <ul>
-                  {(incidentStatus?.collectionWarnings || []).map((warning, idx) => (
-                    <li key={`${warning}-${idx}`}>{warning}</li>
-                  ))}
+                  {(incidentStatus?.collectionWarnings || []).map(
+                    (warning, idx) => (
+                      <li key={`${warning}-${idx}`}>{warning}</li>
+                    ),
+                  )}
                 </ul>
               </article>
             )}
             <p className="small">
-              Der Export erzeugt ein einzelnes JSON-Bundle mit Trigger-Audit, Performance, History-Slice, Live-Snapshot und optionalen Log-Ausschnitten.
+              Der Export erzeugt ein einzelnes JSON-Bundle mit Trigger-Audit,
+              Performance, History-Slice, Live-Snapshot und optionalen
+              Log-Ausschnitten.
             </p>
           </div>
         )}
@@ -3929,16 +5854,27 @@ export function App() {
             <div className="row">
               <h2>Trigger Audit</h2>
               <div className="row">
-                <button onClick={() => loadTriggerAudit(token)}>Aktualisieren</button>
-                <button onClick={() => onDownloadTriggerAudit("json")}>JSON Export</button>
-                <button onClick={() => onDownloadTriggerAudit("csv")}>CSV Export</button>
+                <button onClick={() => loadTriggerAudit(token)}>
+                  Aktualisieren
+                </button>
+                <button onClick={() => onDownloadTriggerAudit("json")}>
+                  JSON Export
+                </button>
+                <button onClick={() => onDownloadTriggerAudit("csv")}>
+                  CSV Export
+                </button>
               </div>
             </div>
             <article className="settings-current">
               <div className="settings-grid">
                 <label>
                   Summary Zeitraum
-                  <select value={triggerAuditDays} onChange={(e) => setTriggerAuditDays(Number(e.target.value))}>
+                  <select
+                    value={triggerAuditDays}
+                    onChange={(e) =>
+                      setTriggerAuditDays(Number(e.target.value))
+                    }
+                  >
                     <option value={1}>1 Tag</option>
                     <option value={7}>7 Tage</option>
                     <option value={14}>14 Tage</option>
@@ -3947,16 +5883,27 @@ export function App() {
                 </label>
                 <label>
                   Tag (optional)
-                  <input type="date" value={triggerAuditDay} onChange={(e) => setTriggerAuditDay(e.target.value)} />
+                  <input
+                    type="date"
+                    value={triggerAuditDay}
+                    onChange={(e) => setTriggerAuditDay(e.target.value)}
+                  />
                 </label>
                 <label>
                   Quelle
-                  <select value={triggerAuditSource} onChange={(e) => setTriggerAuditSource(e.target.value)}>
+                  <select
+                    value={triggerAuditSource}
+                    onChange={(e) => setTriggerAuditSource(e.target.value)}
+                  >
                     <option value="">Alle</option>
                     <option value="scheduler">scheduler</option>
                     <option value="admin_manual">admin_manual</option>
-                    <option value="admin_manual_targeted">admin_manual_targeted</option>
-                    <option value="admin_manual_silent">admin_manual_silent</option>
+                    <option value="admin_manual_targeted">
+                      admin_manual_targeted
+                    </option>
+                    <option value="admin_manual_silent">
+                      admin_manual_silent
+                    </option>
                     <option value="chat_command">chat_command</option>
                     <option value="special_request">special_request</option>
                     <option value="admin_reset">admin_reset</option>
@@ -3964,7 +5911,10 @@ export function App() {
                 </label>
                 <label>
                   Ergebnis
-                  <select value={triggerAuditResult} onChange={(e) => setTriggerAuditResult(e.target.value)}>
+                  <select
+                    value={triggerAuditResult}
+                    onChange={(e) => setTriggerAuditResult(e.target.value)}
+                  >
                     <option value="">Alle</option>
                     <option value="triggered">triggered</option>
                     <option value="blocked">blocked</option>
@@ -3977,12 +5927,17 @@ export function App() {
                     type="number"
                     min={0}
                     value={triggerAuditActorUserId}
-                    onChange={(e) => setTriggerAuditActorUserId(Number(e.target.value) || 0)}
+                    onChange={(e) =>
+                      setTriggerAuditActorUserId(Number(e.target.value) || 0)
+                    }
                   />
                 </label>
                 <label>
                   Request-ID (optional)
-                  <input value={triggerAuditRequestId} onChange={(e) => setTriggerAuditRequestId(e.target.value)} />
+                  <input
+                    value={triggerAuditRequestId}
+                    onChange={(e) => setTriggerAuditRequestId(e.target.value)}
+                  />
                 </label>
                 <label>
                   Limit
@@ -3991,23 +5946,58 @@ export function App() {
                     min={1}
                     max={2000}
                     value={triggerAuditLimit}
-                    onChange={(e) => setTriggerAuditLimit(Math.max(1, Math.min(2000, Number(e.target.value) || 200)))}
+                    onChange={(e) =>
+                      setTriggerAuditLimit(
+                        Math.max(
+                          1,
+                          Math.min(2000, Number(e.target.value) || 200),
+                        ),
+                      )
+                    }
                   />
                 </label>
               </div>
             </article>
 
             <div className="grid4">
-              <CardStat title="Attempts" value={Number(triggerAuditSummary?.summary?.attempts || 0)} />
-              <CardStat title="Triggered" value={Number(triggerAuditSummary?.summary?.triggered || 0)} />
-              <CardStat title="Blocked" value={Number(triggerAuditSummary?.summary?.blocked || 0)} />
-              <CardStat title="Failed" value={Number(triggerAuditSummary?.summary?.failed || 0)} />
+              <CardStat
+                title="Attempts"
+                value={Number(triggerAuditSummary?.summary?.attempts || 0)}
+              />
+              <CardStat
+                title="Triggered"
+                value={Number(triggerAuditSummary?.summary?.triggered || 0)}
+              />
+              <CardStat
+                title="Blocked"
+                value={Number(triggerAuditSummary?.summary?.blocked || 0)}
+              />
+              <CardStat
+                title="Failed"
+                value={Number(triggerAuditSummary?.summary?.failed || 0)}
+              />
             </div>
             <div className="grid4">
-              <CardStat title="Duplicate Attempts" value={Number(triggerAuditSummary?.summary?.duplicateAttempts || 0)} />
-              <CardStat title="Mehrfach-Tage" value={Number(triggerAuditSummary?.summary?.multipleAttemptDays || 0)} />
-              <CardStat title="DB-Lock" value={Number(triggerAuditSummary?.summary?.dbLocked || 0)} />
-              <CardStat title="Blocked Rate" value={`${(Number(triggerAuditSummary?.summary?.blockedRate || 0) * 100).toFixed(2)}%`} />
+              <CardStat
+                title="Duplicate Attempts"
+                value={Number(
+                  triggerAuditSummary?.summary?.duplicateAttempts || 0,
+                )}
+              />
+              <CardStat
+                title="Mehrfach-Tage"
+                value={Number(
+                  triggerAuditSummary?.summary?.multipleAttemptDays || 0,
+                )}
+              />
+              <CardStat
+                title="DB-Lock"
+                value={Number(triggerAuditSummary?.summary?.dbLocked || 0)}
+              />
+              <CardStat
+                title="Blocked Rate"
+                value={`${(Number(triggerAuditSummary?.summary?.blockedRate || 0) * 100).toFixed(2)}%`}
+              />
             </div>
 
             <h3>Timeline</h3>
@@ -4022,7 +6012,7 @@ export function App() {
                   <th>Reason</th>
                   <th>Nutzer</th>
                   <th>Request-ID</th>
-                    <th>Before -&gt; After</th>
+                  <th>Before -&gt; After</th>
                 </tr>
               </thead>
               <tbody>
@@ -4034,16 +6024,40 @@ export function App() {
                   triggerAuditItems.map((row) => (
                     <tr key={row.id}>
                       <td>{formatDateTime(row.occurredAt)}</td>
-                      <td>{new Date(`${row.day}T00:00:00`).toLocaleDateString()}</td>
-                      <td><code>{row.source || "-"}</code></td>
-                      <td><code>{row.attemptType || "-"}</code></td>
-                      <td><span className={`debug-chip ${row.result === "triggered" ? "ok" : row.result === "blocked" ? "warn" : "error"}`}>{row.result}</span></td>
-                      <td><code>{row.reason || "-"}</code></td>
-                      <td>{row.actorUsername ? `@${row.actorUsername}` : "-"}</td>
-                      <td><code>{row.requestId || "-"}</code></td>
+                      <td>
+                        {new Date(`${row.day}T00:00:00`).toLocaleDateString()}
+                      </td>
+                      <td>
+                        <code>{row.source || "-"}</code>
+                      </td>
+                      <td>
+                        <code>{row.attemptType || "-"}</code>
+                      </td>
+                      <td>
+                        <span
+                          className={`debug-chip ${row.result === "triggered" ? "ok" : row.result === "blocked" ? "warn" : "error"}`}
+                        >
+                          {row.result}
+                        </span>
+                      </td>
+                      <td>
+                        <code>{row.reason || "-"}</code>
+                      </td>
+                      <td>
+                        {row.actorUsername ? `@${row.actorUsername}` : "-"}
+                      </td>
+                      <td>
+                        <code>{row.requestId || "-"}</code>
+                      </td>
                       <td className="small">
-                          {(row.beforeTriggeredAt ? formatDateTime(row.beforeTriggeredAt) : "-")} ({row.beforeTriggerSource || "-"}) -&gt;{" "}
-                        {(row.afterTriggeredAt ? formatDateTime(row.afterTriggeredAt) : "-")} ({row.afterTriggerSource || "-"})
+                        {row.beforeTriggeredAt
+                          ? formatDateTime(row.beforeTriggeredAt)
+                          : "-"}{" "}
+                        ({row.beforeTriggerSource || "-"}) -&gt;{" "}
+                        {row.afterTriggeredAt
+                          ? formatDateTime(row.afterTriggeredAt)
+                          : "-"}{" "}
+                        ({row.afterTriggerSource || "-"})
                       </td>
                     </tr>
                   ))
@@ -4057,38 +6071,78 @@ export function App() {
           <div className="stack">
             <div className="row">
               <h2>Gesperrte Time-Capsules</h2>
-              <button onClick={() => loadTimeCapsules(token)}>Aktualisieren</button>
+              <button onClick={() => loadTimeCapsules(token)}>
+                Aktualisieren
+              </button>
             </div>
             <div className="grid4">
-              <CardStat title="Gesperrte Capsules" value={timeCapsuleItems.length} />
+              <CardStat
+                title="Gesperrte Capsules"
+                value={timeCapsuleItems.length}
+              />
               <CardStat
                 title="Naechster Unlock"
-                value={timeCapsuleItems[0]?.unlocksAt ? formatDateTime(timeCapsuleItems[0].unlocksAt) : "-"}
+                value={
+                  timeCapsuleItems[0]?.unlocksAt
+                    ? formatDateTime(timeCapsuleItems[0].unlocksAt)
+                    : "-"
+                }
               />
             </div>
-            {timeCapsuleItems.length === 0 && <p>Keine gesperrten Time-Capsules vorhanden.</p>}
+            {timeCapsuleItems.length === 0 && (
+              <p>Keine gesperrten Time-Capsules vorhanden.</p>
+            )}
             {timeCapsuleItems.length > 0 && (
               <div className="capsule-grid">
                 {timeCapsuleItems.map((item) => (
                   <article key={item.photoId} className="capsule-card">
                     <div className="row">
-                      <strong style={{ color: item.user.favoriteColor || undefined }}>{item.user.username}</strong>
-                      <span className="small">{item.capsuleMode || "capsule"}</span>
+                      <strong
+                        style={{ color: item.user.favoriteColor || undefined }}
+                      >
+                        {item.user.username}
+                      </strong>
+                      <span className="small">
+                        {item.capsuleMode || "capsule"}
+                      </span>
                     </div>
                     <div className="photo-grid">
-                      <a href={item.previewUrl} target="_blank" rel="noreferrer">
-                        <img src={item.previewUrl} alt={`${item.user.username} capsule`} />
+                      <a
+                        href={item.previewUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        <img
+                          src={item.previewUrl}
+                          alt={`${item.user.username} capsule`}
+                        />
                       </a>
                       {item.secondPreviewUrl && (
-                        <a href={item.secondPreviewUrl} target="_blank" rel="noreferrer">
-                          <img src={item.secondPreviewUrl} alt={`${item.user.username} capsule second`} />
+                        <a
+                          href={item.secondPreviewUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <img
+                            src={item.secondPreviewUrl}
+                            alt={`${item.user.username} capsule second`}
+                          />
                         </a>
                       )}
                     </div>
                     <div className="settings-grid">
-                      <p><strong>Tag:</strong> {new Date(`${item.day}T00:00:00`).toLocaleDateString()}</p>
-                      <p><strong>Gecapsuled:</strong> {formatDateTime(item.capsuledAt)}</p>
-                      <p><strong>Unlock:</strong> {item.unlocksAt ? formatDateTime(item.unlocksAt) : "-"}</p>
+                      <p>
+                        <strong>Tag:</strong>{" "}
+                        {new Date(`${item.day}T00:00:00`).toLocaleDateString()}
+                      </p>
+                      <p>
+                        <strong>Gecapsuled:</strong>{" "}
+                        {formatDateTime(item.capsuledAt)}
+                      </p>
+                      <p>
+                        <strong>Unlock:</strong>{" "}
+                        {item.unlocksAt ? formatDateTime(item.unlocksAt) : "-"}
+                      </p>
                     </div>
                   </article>
                 ))}
@@ -4107,10 +6161,17 @@ export function App() {
                   value={fotomojiDayFilter}
                   onChange={(e) => setFotomojiDayFilter(e.target.value)}
                 />
-                <select value={fotomojiUserFilter} onChange={(e) => setFotomojiUserFilter(Number(e.target.value) || 0)}>
+                <select
+                  value={fotomojiUserFilter}
+                  onChange={(e) =>
+                    setFotomojiUserFilter(Number(e.target.value) || 0)
+                  }
+                >
                   <option value={0}>Alle Reagierenden</option>
                   {users.map((u) => (
-                    <option key={u.id} value={u.id}>@{u.username}</option>
+                    <option key={u.id} value={u.id}>
+                      @{u.username}
+                    </option>
                   ))}
                 </select>
                 <input
@@ -4131,10 +6192,27 @@ export function App() {
                   onChange={(e) => setFotomojiToFilter(e.target.value)}
                   placeholder="Bis"
                 />
-                <button onClick={() => {
-                  void loadFotomojis(token, fotomojiDayFilter, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
-                  void loadFotomojiHistory(token, fotomojiUserFilter, fotomojiEmojiFilter, fotomojiFromFilter, fotomojiToFilter);
-                }}>Aktualisieren</button>
+                <button
+                  onClick={() => {
+                    void loadFotomojis(
+                      token,
+                      fotomojiDayFilter,
+                      fotomojiUserFilter,
+                      fotomojiEmojiFilter,
+                      fotomojiFromFilter,
+                      fotomojiToFilter,
+                    );
+                    void loadFotomojiHistory(
+                      token,
+                      fotomojiUserFilter,
+                      fotomojiEmojiFilter,
+                      fotomojiFromFilter,
+                      fotomojiToFilter,
+                    );
+                  }}
+                >
+                  Aktualisieren
+                </button>
               </div>
             </div>
             <div className="grid4">
@@ -4148,32 +6226,59 @@ export function App() {
                     : "alle"
                 }
               />
-              <CardStat title="Historie-Versionen" value={fotomojiHistoryVersionCount} />
+              <CardStat
+                title="Historie-Versionen"
+                value={fotomojiHistoryVersionCount}
+              />
             </div>
             <h3>Template-Historie pro User</h3>
-            {fotomojiHistory.length === 0 && <p>Keine Template-Historie im aktuellen Filter.</p>}
+            {fotomojiHistory.length === 0 && (
+              <p>Keine Template-Historie im aktuellen Filter.</p>
+            )}
             {fotomojiHistory.length > 0 && (
               <div className="stack">
                 {fotomojiHistory.map((group) => (
                   <article key={`hist_${group.user.id}`} className="card">
                     <div className="row">
-                      <h4 style={{ margin: 0, color: group.user.favoriteColor || undefined }}>@{group.user.username}</h4>
-                      <span className="small">{group.emojis.length} Emoji-Gruppen</span>
+                      <h4
+                        style={{
+                          margin: 0,
+                          color: group.user.favoriteColor || undefined,
+                        }}
+                      >
+                        @{group.user.username}
+                      </h4>
+                      <span className="small">
+                        {group.emojis.length} Emoji-Gruppen
+                      </span>
                     </div>
-                    {group.emojis.length === 0 && <p className="small">Keine Templates</p>}
+                    {group.emojis.length === 0 && (
+                      <p className="small">Keine Templates</p>
+                    )}
                     {group.emojis.map((entry) => (
-                      <div key={`hist_${group.user.id}_${entry.emoji}`} className="stack" style={{ gap: 8 }}>
+                      <div
+                        key={`hist_${group.user.id}_${entry.emoji}`}
+                        className="stack"
+                        style={{ gap: 8 }}
+                      >
                         <div className="row">
                           <strong>{entry.emoji}</strong>
-                          <span className="small">{entry.versions.length} Versionen</span>
+                          <span className="small">
+                            {entry.versions.length} Versionen
+                          </span>
                         </div>
                         {entry.activeVersion && (
                           <p className="small" style={{ marginBottom: 0 }}>
-                            Aktiv: {formatDateTime(entry.activeVersion.createdAt)} ·
-                            genutzt in {entry.activeVersion.postUsageCount} Post-Reaktionen
+                            Aktiv:{" "}
+                            {formatDateTime(entry.activeVersion.createdAt)} ·
+                            genutzt in {entry.activeVersion.postUsageCount}{" "}
+                            Post-Reaktionen
                           </p>
                         )}
-                        <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
+                        <div
+                          className="row"
+                          style={{ flexWrap: "wrap", gap: 10 }}
+                        >
                           {entry.versions.map((version) => (
                             <a
                               key={`hist_v_${version.id}`}
@@ -4181,19 +6286,29 @@ export function App() {
                               target="_blank"
                               rel="noreferrer"
                               className="card"
-                              style={{ textDecoration: "none", color: "inherit", minWidth: 140 }}
+                              style={{
+                                textDecoration: "none",
+                                color: "inherit",
+                                minWidth: 140,
+                              }}
                             >
                               <img
                                 src={version.url}
                                 alt={`FotoMoji ${entry.emoji}`}
-                                style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 12 }}
+                                style={{
+                                  width: 72,
+                                  height: 72,
+                                  objectFit: "cover",
+                                  borderRadius: 12,
+                                }}
                               />
                               <p className="small" style={{ marginBottom: 0 }}>
                                 {formatDateTime(version.createdAt)}
                                 {version.isActive ? " · aktiv" : ""}
                               </p>
                               <p className="small" style={{ marginBottom: 0 }}>
-                                Verwendet in {version.postUsageCount} Post-Reaktionen
+                                Verwendet in {version.postUsageCount}{" "}
+                                Post-Reaktionen
                               </p>
                             </a>
                           ))}
@@ -4205,7 +6320,9 @@ export function App() {
               </div>
             )}
             <h3>Post-Reaktionen (Moderation)</h3>
-            {fotomojiItems.length === 0 && <p>Keine FotoMojis im aktuellen Filter.</p>}
+            {fotomojiItems.length === 0 && (
+              <p>Keine FotoMojis im aktuellen Filter.</p>
+            )}
             {fotomojiItems.length > 0 && (
               <div className="stack">
                 <div className="row">
@@ -4213,11 +6330,15 @@ export function App() {
                     <input
                       type="checkbox"
                       checked={allVisibleFotomojisSelected}
-                      onChange={(e) => onToggleAllVisibleFotomojis(e.target.checked)}
+                      onChange={(e) =>
+                        onToggleAllVisibleFotomojis(e.target.checked)
+                      }
                     />
                     Alle sichtbaren auswaehlen
                   </label>
-                  <span className="small">{selectedFotomojiIds.length} ausgewaehlt</span>
+                  <span className="small">
+                    {selectedFotomojiIds.length} ausgewaehlt
+                  </span>
                   <button
                     className="danger"
                     disabled={selectedFotomojiIds.length === 0}
@@ -4245,23 +6366,51 @@ export function App() {
                           <input
                             type="checkbox"
                             checked={selectedFotomojiSet.has(row.id)}
-                            onChange={(e) => onToggleFotomojiSelection(row.id, e.target.checked)}
+                            onChange={(e) =>
+                              onToggleFotomojiSelection(
+                                row.id,
+                                e.target.checked,
+                              )
+                            }
                           />
                         </td>
                         <td>{formatDateTime(row.createdAt)}</td>
                         <td>{row.emoji}</td>
-                        <td style={{ color: row.user.favoriteColor || undefined }}>@{row.user.username}</td>
+                        <td
+                          style={{ color: row.user.favoriteColor || undefined }}
+                        >
+                          @{row.user.username}
+                        </td>
                         <td>
-                          #{row.photo.id} {row.photo.day ? `(${formatDateShort(row.photo.day)})` : ""}
-                          {row.photo.user?.username ? ` · @${row.photo.user.username}` : ""}
+                          #{row.photo.id}{" "}
+                          {row.photo.day
+                            ? `(${formatDateShort(row.photo.day)})`
+                            : ""}
+                          {row.photo.user?.username
+                            ? ` · @${row.photo.user.username}`
+                            : ""}
                         </td>
                         <td>
                           <a href={row.url} target="_blank" rel="noreferrer">
-                            <img src={row.url} alt="FotoMoji" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 12 }} />
+                            <img
+                              src={row.url}
+                              alt="FotoMoji"
+                              style={{
+                                width: 56,
+                                height: 56,
+                                objectFit: "cover",
+                                borderRadius: 12,
+                              }}
+                            />
                           </a>
                         </td>
                         <td>
-                          <button className="danger" onClick={() => void onDeleteFotomoji(row.id)}>Loeschen</button>
+                          <button
+                            className="danger"
+                            onClick={() => void onDeleteFotomoji(row.id)}
+                          >
+                            Loeschen
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -4278,32 +6427,60 @@ export function App() {
               <div className="debug-toolbar-head">
                 <div className="stack" style={{ marginBottom: 0 }}>
                   <h2>Upload Timeline</h2>
-                  <p className="small">Live-Sicht auf Uploads, Queue-Zustaende, Netzqualitaet und Bestaetigungsphasen.</p>
+                  <p className="small">
+                    Live-Sicht auf Uploads, Queue-Zustaende, Netzqualitaet und
+                    Bestaetigungsphasen.
+                  </p>
                 </div>
                 <div className="debug-actions">
-                  <button onClick={() => loadUploadTimeline(token, uploadTimelineUserFilter, uploadTimelineSinceHours)}>Aktualisieren</button>
-                  <button className="accent" onClick={onCopyUploadTimelineLog}>Kopierlog erzeugen</button>
+                  <button
+                    onClick={() =>
+                      loadUploadTimeline(
+                        token,
+                        uploadTimelineUserFilter,
+                        uploadTimelineSinceHours,
+                      )
+                    }
+                  >
+                    Aktualisieren
+                  </button>
+                  <button className="accent" onClick={onCopyUploadTimelineLog}>
+                    Kopierlog erzeugen
+                  </button>
                 </div>
               </div>
               <div className="debug-filters">
                 <label>
                   Nutzer
-                  <select value={uploadTimelineUserFilter} onChange={(e) => setUploadTimelineUserFilter(Number(e.target.value))}>
+                  <select
+                    value={uploadTimelineUserFilter}
+                    onChange={(e) =>
+                      setUploadTimelineUserFilter(Number(e.target.value))
+                    }
+                  >
                     <option value={0}>Alle Nutzer</option>
                     {users.map((u) => (
-                      <option key={u.id} value={u.id}>@{u.username}</option>
+                      <option key={u.id} value={u.id}>
+                        @{u.username}
+                      </option>
                     ))}
                   </select>
                 </label>
                 <div className="debug-range">
-                  <span className="small"><strong>Zeitraum</strong></span>
+                  <span className="small">
+                    <strong>Zeitraum</strong>
+                  </span>
                   <div className="debug-range-buttons">
                     {[1, 12, 24].map((hours) => (
                       <button
                         key={hours}
                         type="button"
-                        className={uploadTimelineSinceHours === hours ? "active" : ""}
-                        onClick={() => setUploadTimelineSinceHours(hours as 1 | 12 | 24)}
+                        className={
+                          uploadTimelineSinceHours === hours ? "active" : ""
+                        }
+                        onClick={() =>
+                          setUploadTimelineSinceHours(hours as 1 | 12 | 24)
+                        }
                       >
                         {hours}h
                       </button>
@@ -4311,7 +6488,9 @@ export function App() {
                     <button
                       type="button"
                       className={uploadTimelineAutoRefresh ? "active" : ""}
-                      onClick={() => setUploadTimelineAutoRefresh((prev) => !prev)}
+                      onClick={() =>
+                        setUploadTimelineAutoRefresh((prev) => !prev)
+                      }
                     >
                       Live {uploadTimelineAutoRefresh ? "an" : "aus"}
                     </button>
@@ -4319,12 +6498,34 @@ export function App() {
                 </div>
               </div>
               <div className="debug-summary-grid">
-                <CardStat title="Timeline-Events" value={uploadTimelineSummary.total} />
-                <CardStat title="Uploads" value={uploadTimelineSummary.uniqueUploads} />
-                <CardStat title="Live aktiv" value={uploadTimelineSummary.liveCount} />
-                <CardStat title="Wartet auf Netz" value={uploadTimelineSummary.waitingForNetworkCount} />
-                <CardStat title="Fehlgeschlagen" value={uploadTimelineSummary.failedCount} />
-                <CardStat title="Serverzeit" value={uploadTimelineFilterInfo.serverNow ? formatDateTime(uploadTimelineFilterInfo.serverNow) : "-"} />
+                <CardStat
+                  title="Timeline-Events"
+                  value={uploadTimelineSummary.total}
+                />
+                <CardStat
+                  title="Uploads"
+                  value={uploadTimelineSummary.uniqueUploads}
+                />
+                <CardStat
+                  title="Live aktiv"
+                  value={uploadTimelineSummary.liveCount}
+                />
+                <CardStat
+                  title="Wartet auf Netz"
+                  value={uploadTimelineSummary.waitingForNetworkCount}
+                />
+                <CardStat
+                  title="Fehlgeschlagen"
+                  value={uploadTimelineSummary.failedCount}
+                />
+                <CardStat
+                  title="Serverzeit"
+                  value={
+                    uploadTimelineFilterInfo.serverNow
+                      ? formatDateTime(uploadTimelineFilterInfo.serverNow)
+                      : "-"
+                  }
+                />
               </div>
               <p className="small">
                 {uploadTimelineFilterInfo.since
@@ -4332,20 +6533,35 @@ export function App() {
                   : `Zeige Upload-Timeline fuer die letzten ${uploadTimelineSinceHours}h.`}
               </p>
             </div>
-            {uploadTimelineItems.length === 0 && <p>Keine Upload-Eintraege vorhanden.</p>}
+            {uploadTimelineItems.length === 0 && (
+              <p>Keine Upload-Eintraege vorhanden.</p>
+            )}
             {uploadTimelineItems.length > 0 && (
               <div className="upload-timeline-list">
                 {uploadTimelineItems.map((row) => (
-                  <article key={`${row.id}_${row.timelineId}`} className="upload-timeline-card">
+                  <article
+                    key={`${row.id}_${row.timelineId}`}
+                    className="upload-timeline-card"
+                  >
                     <div className="upload-timeline-head">
                       <div className="upload-timeline-title">
-                        <span className={`debug-chip ${uploadTimelineStageClass(row.stage)}`}>{uploadTimelineStageLabel(row.stage)}</span>
+                        <span
+                          className={`debug-chip ${uploadTimelineStageClass(row.stage)}`}
+                        >
+                          {uploadTimelineStageLabel(row.stage)}
+                        </span>
                         <strong>@{row.user?.username || "-"}</strong>
-                        <span className="small">{uploadTimelineSourceLabel(row.source, row.kind)}</span>
+                        <span className="small">
+                          {uploadTimelineSourceLabel(row.source, row.kind)}
+                        </span>
                       </div>
                       <div className="upload-timeline-title">
-                        <span className="small">{formatDateTime(row.createdAt)}</span>
-                        <code className="debug-type-code">{row.uploadClientId || row.timelineId}</code>
+                        <span className="small">
+                          {formatDateTime(row.createdAt)}
+                        </span>
+                        <code className="debug-type-code">
+                          {row.uploadClientId || row.timelineId}
+                        </code>
                       </div>
                     </div>
                     <div className="upload-timeline-grid">
@@ -4356,38 +6572,83 @@ export function App() {
                       </div>
                       <div>
                         <strong>Dauer</strong>
-                        <p>{row.durationMs != null ? `${Math.round(row.durationMs / 100) / 10}s` : "-"}</p>
-                        <p className="small">Ping: {row.pingMs != null ? `${row.pingMs} ms` : row.pingFailure || "-"}</p>
+                        <p>
+                          {row.durationMs != null
+                            ? `${Math.round(row.durationMs / 100) / 10}s`
+                            : "-"}
+                        </p>
+                        <p className="small">
+                          Ping:{" "}
+                          {row.pingMs != null
+                            ? `${row.pingMs} ms`
+                            : row.pingFailure || "-"}
+                        </p>
                       </div>
                       <div>
                         <strong>Uploadgroesse</strong>
-                        <p>{row.bytesTotal != null ? formatBytes(row.bytesTotal) : "-"}</p>
-                        <p className="small">Gesendet: {row.bytesSent != null ? formatBytes(row.bytesSent) : "-"}</p>
+                        <p>
+                          {row.bytesTotal != null
+                            ? formatBytes(row.bytesTotal)
+                            : "-"}
+                        </p>
+                        <p className="small">
+                          Gesendet:{" "}
+                          {row.bytesSent != null
+                            ? formatBytes(row.bytesSent)
+                            : "-"}
+                        </p>
                       </div>
                       <div>
                         <strong>Netz</strong>
                         <p>{uploadTimelineNetworkLabel(row)}</p>
-                        <p className="small">{uploadTimelineBandwidthLabel(row)}</p>
+                        <p className="small">
+                          {uploadTimelineBandwidthLabel(row)}
+                        </p>
                       </div>
                       <div>
                         <strong>Zeitpunkte</strong>
-                        <p className="small">Aufgenommen: {row.capturedAt ? formatDateTime(row.capturedAt) : "-"}</p>
-                        <p className="small">In Queue seit: {row.queuedAt ? formatDateTime(row.queuedAt) : "-"}</p>
+                        <p className="small">
+                          Aufgenommen:{" "}
+                          {row.capturedAt
+                            ? formatDateTime(row.capturedAt)
+                            : "-"}
+                        </p>
+                        <p className="small">
+                          In Queue seit:{" "}
+                          {row.queuedAt ? formatDateTime(row.queuedAt) : "-"}
+                        </p>
                       </div>
                       <div>
                         <strong>Fehlerbild</strong>
                         <p>
-                          <span className={`debug-chip ${debugFailureFamilyClass(row.failureFamily || row.securityFailureClass || row.failureClass)}`}>
-                            {debugFailureFamilyLabel(row.failureFamily || row.securityFailureClass || row.failureClass)}
+                          <span
+                            className={`debug-chip ${debugFailureFamilyClass(row.failureFamily || row.securityFailureClass || row.failureClass)}`}
+                          >
+                            {debugFailureFamilyLabel(
+                              row.failureFamily ||
+                                row.securityFailureClass ||
+                                row.failureClass,
+                            )}
                           </span>
                         </p>
-                        <p className="small">HTTP: {row.httpCode != null ? row.httpCode : "-"}</p>
+                        <p className="small">
+                          HTTP: {row.httpCode != null ? row.httpCode : "-"}
+                        </p>
                       </div>
                     </div>
                     <div className="upload-timeline-meta">
-                      <p><strong>Nachricht:</strong> {row.message || "-"}</p>
-                      <p><strong>Session:</strong> {row.sessionId || "-"} | <strong>Request:</strong> {row.requestId || "-"}</p>
-                      <p><strong>Queue-ID:</strong> {row.queueItemId || "-"} | <strong>Versuch:</strong> {row.attempt != null ? row.attempt : "-"}</p>
+                      <p>
+                        <strong>Nachricht:</strong> {row.message || "-"}
+                      </p>
+                      <p>
+                        <strong>Session:</strong> {row.sessionId || "-"} |{" "}
+                        <strong>Request:</strong> {row.requestId || "-"}
+                      </p>
+                      <p>
+                        <strong>Queue-ID:</strong> {row.queueItemId || "-"} |{" "}
+                        <strong>Versuch:</strong>{" "}
+                        {row.attempt != null ? row.attempt : "-"}
+                      </p>
                       <code>{row.meta || "-"}</code>
                     </div>
                   </article>
@@ -4403,25 +6664,43 @@ export function App() {
               <div className="debug-toolbar-head">
                 <div className="stack" style={{ marginBottom: 0 }}>
                   <h2>Debug-Logs</h2>
-                  <p className="small">Filter, Export und Loeschen arbeiten immer auf demselben Zeitraum.</p>
+                  <p className="small">
+                    Filter, Export und Loeschen arbeiten immer auf demselben
+                    Zeitraum.
+                  </p>
                 </div>
                 <div className="debug-actions">
-                  <button onClick={() => loadDebugLogs(token, debugUserFilter, debugSinceHours)}>Aktualisieren</button>
-                  <button className="danger" onClick={onDeleteDebugLogs}>Logs loeschen</button>
+                  <button
+                    onClick={() =>
+                      loadDebugLogs(token, debugUserFilter, debugSinceHours)
+                    }
+                  >
+                    Aktualisieren
+                  </button>
+                  <button className="danger" onClick={onDeleteDebugLogs}>
+                    Logs loeschen
+                  </button>
                 </div>
               </div>
               <div className="debug-filters">
                 <label>
                   Nutzer
-                  <select value={debugUserFilter} onChange={(e) => setDebugUserFilter(Number(e.target.value))}>
+                  <select
+                    value={debugUserFilter}
+                    onChange={(e) => setDebugUserFilter(Number(e.target.value))}
+                  >
                     <option value={0}>Alle Nutzer</option>
                     {users.map((u) => (
-                      <option key={u.id} value={u.id}>@{u.username}</option>
+                      <option key={u.id} value={u.id}>
+                        @{u.username}
+                      </option>
                     ))}
                   </select>
                 </label>
                 <div className="debug-range">
-                  <span className="small"><strong>Zeitraum</strong></span>
+                  <span className="small">
+                    <strong>Zeitraum</strong>
+                  </span>
                   <div className="debug-range-buttons">
                     {[1, 12, 24].map((hours) => (
                       <button
@@ -4437,25 +6716,60 @@ export function App() {
                 </div>
               </div>
               <div className="debug-range">
-                <span className="small"><strong>Ansicht</strong></span>
+                <span className="small">
+                  <strong>Ansicht</strong>
+                </span>
                 <div className="debug-range-buttons">
-                  <button type="button" className={debugViewMode === "events" ? "active" : ""} onClick={() => setDebugViewMode("events")}>
+                  <button
+                    type="button"
+                    className={debugViewMode === "events" ? "active" : ""}
+                    onClick={() => setDebugViewMode("events")}
+                  >
                     Wichtige Ereignisse
                   </button>
-                  <button type="button" className={debugViewMode === "summary" ? "active" : ""} onClick={() => setDebugViewMode("summary")}>
+                  <button
+                    type="button"
+                    className={debugViewMode === "summary" ? "active" : ""}
+                    onClick={() => setDebugViewMode("summary")}
+                  >
                     Verdichtete Wiederholungen
                   </button>
                 </div>
               </div>
               <div className="debug-summary-grid">
                 <CardStat title="Logs im Filter" value={debugSummary.total} />
-                <CardStat title="Betroffene Nutzer" value={debugSummary.uniqueUsers} />
-                <CardStat title="Haeufigster Typ" value={debugTypeLabel(debugSummary.topType)} />
-                <CardStat title="Juengster Eintrag" value={debugSummary.newestAt ? formatDateTime(debugSummary.newestAt) : "-"} />
-                <CardStat title="Auth-Fehler" value={authFailureSummary.total} />
-                <CardStat title="Auth Nutzer" value={authFailureSummary.uniqueUsers} />
-                <CardStat title="Auth Top-Reason" value={authFailureSummary.topReason} />
-                <CardStat title="Auth Top-Version" value={authFailureSummary.topVersion} />
+                <CardStat
+                  title="Betroffene Nutzer"
+                  value={debugSummary.uniqueUsers}
+                />
+                <CardStat
+                  title="Haeufigster Typ"
+                  value={debugTypeLabel(debugSummary.topType)}
+                />
+                <CardStat
+                  title="Juengster Eintrag"
+                  value={
+                    debugSummary.newestAt
+                      ? formatDateTime(debugSummary.newestAt)
+                      : "-"
+                  }
+                />
+                <CardStat
+                  title="Auth-Fehler"
+                  value={authFailureSummary.total}
+                />
+                <CardStat
+                  title="Auth Nutzer"
+                  value={authFailureSummary.uniqueUsers}
+                />
+                <CardStat
+                  title="Auth Top-Reason"
+                  value={authFailureSummary.topReason}
+                />
+                <CardStat
+                  title="Auth Top-Version"
+                  value={authFailureSummary.topVersion}
+                />
               </div>
               <p className="small">
                 {debugFilterInfo.since
@@ -4466,7 +6780,10 @@ export function App() {
                 <article className="debug-export-card">
                   <div className="stack" style={{ marginBottom: 0 }}>
                     <strong>Nutzer-Export</strong>
-                    <span className="small">Exportiert den aktuell ausgewaehlten Nutzer im aktiven Zeitraum.</span>
+                    <span className="small">
+                      Exportiert den aktuell ausgewaehlten Nutzer im aktiven
+                      Zeitraum.
+                    </span>
                   </div>
                   <div className="row">
                     <button
@@ -4477,7 +6794,9 @@ export function App() {
                     </button>
                     <button
                       className="accent"
-                      onClick={() => onDownloadUserLogs(debugSinceHours, "json")}
+                      onClick={() =>
+                        onDownloadUserLogs(debugSinceHours, "json")
+                      }
                       disabled={debugUserFilter <= 0}
                     >
                       JSON herunterladen
@@ -4487,20 +6806,29 @@ export function App() {
                 <article className="debug-export-card">
                   <div className="stack" style={{ marginBottom: 0 }}>
                     <strong>Gesamt-Export</strong>
-                    <span className="small">Exportiert alle Debug-Logs im aktiven Zeitraum.</span>
+                    <span className="small">
+                      Exportiert alle Debug-Logs im aktiven Zeitraum.
+                    </span>
                   </div>
                   <div className="row">
-                    <button className="accent" onClick={() => onDownloadAllLogs(debugSinceHours, "csv")}>
+                    <button
+                      className="accent"
+                      onClick={() => onDownloadAllLogs(debugSinceHours, "csv")}
+                    >
                       CSV herunterladen
                     </button>
-                    <button onClick={() => onDownloadAllLogs(debugSinceHours, "json")}>
+                    <button
+                      onClick={() => onDownloadAllLogs(debugSinceHours, "json")}
+                    >
                       JSON herunterladen
                     </button>
                   </div>
                 </article>
               </div>
             </div>
-            {debugViewMode === "events" && debugLogs.length === 0 && <p>Keine Debug-Eintraege vorhanden.</p>}
+            {debugViewMode === "events" && debugLogs.length === 0 && (
+              <p>Keine Debug-Eintraege vorhanden.</p>
+            )}
             {debugViewMode === "events" && debugLogs.length > 0 && (
               <div className="debug-table-wrap">
                 <table className="table debug-table">
@@ -4520,32 +6848,54 @@ export function App() {
                       const metaHint = debugMetaHint(row.meta || "");
                       return (
                         <tr key={row.id}>
-                          <td className="debug-time-cell">{formatDateTime(row.createdAt)}</td>
-                          <td className="debug-user-cell">@{row.user?.username || "-"}</td>
+                          <td className="debug-time-cell">
+                            {formatDateTime(row.createdAt)}
+                          </td>
+                          <td className="debug-user-cell">
+                            @{row.user?.username || "-"}
+                          </td>
                           <td>
                             <div className="debug-device">
                               <strong>{row.deviceName || "-"}</strong>
-                              <span className="small">{row.appVersion || "-"}</span>
+                              <span className="small">
+                                {row.appVersion || "-"}
+                              </span>
                             </div>
                           </td>
                           <td>
                             <div className="debug-type-stack">
-                              <code className="debug-type-code">{row.sessionId || "-"}</code>
-                              <code className="debug-type-code">{row.requestId || "-"}</code>
+                              <code className="debug-type-code">
+                                {row.sessionId || "-"}
+                              </code>
+                              <code className="debug-type-code">
+                                {row.requestId || "-"}
+                              </code>
                             </div>
                           </td>
                           <td>
                             <div className="debug-type-stack">
-                              <span className={`debug-chip ${debugTypeClass(row.type)}`}>{debugTypeLabel(row.type)}</span>
-                              <code className="debug-type-code">{row.type}</code>
+                              <span
+                                className={`debug-chip ${debugTypeClass(row.type)}`}
+                              >
+                                {debugTypeLabel(row.type)}
+                              </span>
+                              <code className="debug-type-code">
+                                {row.type}
+                              </code>
                             </div>
                           </td>
                           <td>
-                            <div className="debug-message-cell">{row.message || "-"}</div>
+                            <div className="debug-message-cell">
+                              {row.message || "-"}
+                            </div>
                           </td>
                           <td>
                             <div className="debug-meta-cell">
-                              {metaHint ? <span className="debug-chip info">{metaHint}</span> : null}
+                              {metaHint ? (
+                                <span className="debug-chip info">
+                                  {metaHint}
+                                </span>
+                              ) : null}
                               <code>{row.meta || "-"}</code>
                             </div>
                           </td>
@@ -4556,7 +6906,9 @@ export function App() {
                 </table>
               </div>
             )}
-            {debugViewMode === "summary" && debugSummaryItems.length === 0 && <p>Keine verdichteten Wiederholungen vorhanden.</p>}
+            {debugViewMode === "summary" && debugSummaryItems.length === 0 && (
+              <p>Keine verdichteten Wiederholungen vorhanden.</p>
+            )}
             {debugViewMode === "summary" && debugSummaryItems.length > 0 && (
               <div className="debug-table-wrap">
                 <table className="table debug-table">
@@ -4578,13 +6930,29 @@ export function App() {
                         <td>{row.count}</td>
                         <td>@{row.user?.username || "-"}</td>
                         <td>{row.deviceName || "-"}</td>
-                        <td><span className={`debug-chip ${debugFailureFamilyClass(row.failureFamily)}`}>{debugFailureFamilyLabel(row.failureFamily)}</span></td>
+                        <td>
+                          <span
+                            className={`debug-chip ${debugFailureFamilyClass(row.failureFamily)}`}
+                          >
+                            {debugFailureFamilyLabel(row.failureFamily)}
+                          </span>
+                        </td>
                         <td>{row.topTransport || "-"}</td>
-                        <td>{row.firstSeenAt ? formatDateTime(row.firstSeenAt) : "-"}</td>
-                        <td>{row.lastSeenAt ? formatDateTime(row.lastSeenAt) : "-"}</td>
+                        <td>
+                          {row.firstSeenAt
+                            ? formatDateTime(row.firstSeenAt)
+                            : "-"}
+                        </td>
+                        <td>
+                          {row.lastSeenAt
+                            ? formatDateTime(row.lastSeenAt)
+                            : "-"}
+                        </td>
                         <td>
                           <div className="debug-meta-cell">
-                            <div className="debug-message-cell">{row.sampleMessage || "-"}</div>
+                            <div className="debug-message-cell">
+                              {row.sampleMessage || "-"}
+                            </div>
                             <code>{row.sampleMeta || "-"}</code>
                           </div>
                         </td>
@@ -4602,32 +6970,70 @@ export function App() {
             <div className="row">
               <h2>Meldungen</h2>
               <div className="row">
-                <select value={reportUserFilter} onChange={(e) => setReportUserFilter(Number(e.target.value))}>
+                <select
+                  value={reportUserFilter}
+                  onChange={(e) => setReportUserFilter(Number(e.target.value))}
+                >
                   <option value={0}>Alle Nutzer</option>
                   {users.map((u) => (
-                    <option key={u.id} value={u.id}>@{u.username}</option>
+                    <option key={u.id} value={u.id}>
+                      @{u.username}
+                    </option>
                   ))}
                 </select>
-                <select value={reportTypeFilter} onChange={(e) => setReportTypeFilter(e.target.value as "" | "bug" | "idea" | "post")}>
+                <select
+                  value={reportTypeFilter}
+                  onChange={(e) =>
+                    setReportTypeFilter(
+                      e.target.value as "" | "bug" | "idea" | "post",
+                    )
+                  }
+                >
                   <option value="">Alle Typen</option>
                   <option value="bug">Bug</option>
                   <option value="idea">Idee</option>
                   <option value="post">Post</option>
                 </select>
-                <select value={reportStatusFilter} onChange={(e) => setReportStatusFilter(e.target.value as "" | "open" | "in_review" | "done" | "rejected")}>
+                <select
+                  value={reportStatusFilter}
+                  onChange={(e) =>
+                    setReportStatusFilter(
+                      e.target.value as
+                        "" | "open" | "in_review" | "done" | "rejected",
+                    )
+                  }
+                >
                   <option value="">Alle Status</option>
                   <option value="open">Offen</option>
                   <option value="in_review">In Bearbeitung</option>
                   <option value="done">Erledigt</option>
                   <option value="rejected">Abgelehnt</option>
                 </select>
-                <button onClick={() => loadReports(token, reportUserFilter, reportTypeFilter, reportStatusFilter)}>Aktualisieren</button>
-                <button className="danger" disabled={!hasReportDeleteFilter} onClick={() => void onDeleteFilteredReports()}>
+                <button
+                  onClick={() =>
+                    loadReports(
+                      token,
+                      reportUserFilter,
+                      reportTypeFilter,
+                      reportStatusFilter,
+                    )
+                  }
+                >
+                  Aktualisieren
+                </button>
+                <button
+                  className="danger"
+                  disabled={!hasReportDeleteFilter}
+                  onClick={() => void onDeleteFilteredReports()}
+                >
                   Gefilterte Meldungen loeschen
                 </button>
               </div>
             </div>
-            <p className="small">Bulk-Loeschen wirkt auf alle Meldungen, die zum gesetzten Filter passen, nicht nur auf die aktuell geladene Tabelle.</p>
+            <p className="small">
+              Bulk-Loeschen wirkt auf alle Meldungen, die zum gesetzten Filter
+              passen, nicht nur auf die aktuell geladene Tabelle.
+            </p>
             {reports.length === 0 && <p>Keine Meldungen vorhanden.</p>}
             <table className="table">
               <thead>
@@ -4646,17 +7052,31 @@ export function App() {
                   <tr key={row.id}>
                     <td>{formatDateTime(row.createdAt)}</td>
                     <td>@{row.user?.username || "-"}</td>
-                    <td>{row.type === "bug" ? "Bug" : row.type === "idea" ? "Idee" : "Post"}</td>
+                    <td>
+                      {row.type === "bug"
+                        ? "Bug"
+                        : row.type === "idea"
+                          ? "Idee"
+                          : "Post"}
+                    </td>
                     <td>
                       {row.type === "post" && row.photo ? (
                         <div className="report-photo-card">
-                          <PhotoMediaCard photo={row.photo} username={row.photoUser?.username || "post"} compact />
+                          <PhotoMediaCard
+                            photo={row.photo}
+                            username={row.photoUser?.username || "post"}
+                            compact
+                          />
                           <div className="stack">
                             <strong>
-                              {row.photoUser ? `@${row.photoUser.username}` : "Post"}
+                              {row.photoUser
+                                ? `@${row.photoUser.username}`
+                                : "Post"}
                             </strong>
                             <span className="small">{row.photo.day}</span>
-                            {row.photo.caption ? <span>{row.photo.caption}</span> : null}
+                            {row.photo.caption ? (
+                              <span>{row.photo.caption}</span>
+                            ) : null}
                             <span className="small">{row.body}</span>
                           </div>
                         </div>
@@ -4670,8 +7090,9 @@ export function App() {
                         onChange={(e) =>
                           void onUpdateReportStatus(
                             row.id,
-                            e.target.value as "open" | "in_review" | "done" | "rejected",
-                            row.githubIssueNumber ?? null
+                            e.target.value as
+                              "open" | "in_review" | "done" | "rejected",
+                            row.githubIssueNumber ?? null,
                           )
                         }
                       >
@@ -4681,9 +7102,18 @@ export function App() {
                         <option value="rejected">Abgelehnt</option>
                       </select>
                     </td>
-                    <td>{row.githubIssueNumber ? `#${row.githubIssueNumber}` : "-"}</td>
                     <td>
-                      <button className="danger" onClick={() => void onDeleteReport(row.id)}>Loeschen</button>
+                      {row.githubIssueNumber
+                        ? `#${row.githubIssueNumber}`
+                        : "-"}
+                    </td>
+                    <td>
+                      <button
+                        className="danger"
+                        onClick={() => void onDeleteReport(row.id)}
+                      >
+                        Loeschen
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -4697,26 +7127,83 @@ export function App() {
             <div className="row">
               <h2>Migration</h2>
               <div className="row">
-                <button className="accent" onClick={() => void onSaveMigrationSettings()}>Speichern</button>
-                <button onClick={() => void onActivateMigration()}>Aktivieren</button>
-                <button className="danger" onClick={() => void onDeactivateMigration()}>Deaktivieren</button>
-                <button onClick={() => void onPushMigrationNotice()}>Push senden</button>
+                <button
+                  className="accent"
+                  onClick={() => void onSaveMigrationSettings()}
+                >
+                  Speichern
+                </button>
+                <button onClick={() => void onActivateMigration()}>
+                  Aktivieren
+                </button>
+                <button
+                  className="danger"
+                  onClick={() => void onDeactivateMigration()}
+                >
+                  Deaktivieren
+                </button>
+                <button onClick={() => void onPushMigrationNotice()}>
+                  Push senden
+                </button>
               </div>
             </div>
 
             <article className="settings-current">
               <h3>Status</h3>
               <div className="settings-grid">
-                <p><strong>Aktiv:</strong> {migrationInfo?.enabled ? "ja" : "nein"}</p>
-                <p><strong>Start:</strong> {migrationInfo?.startedAt ? formatDateTime(migrationInfo.startedAt) : "-"}</p>
-                <p><strong>Bis:</strong> {migrationInfo?.until ? formatDateTime(migrationInfo.until) : "-"}</p>
-                <p><strong>Restzeit:</strong> {formatDuration(Number(migrationInfo?.remainingSeconds || 0))}</p>
-                <p><strong>Migriert:</strong> {Number(migrationInfo?.migratedUserCount || 0)} / {Number(migrationInfo?.baselineUserCount || 0)}</p>
-                <p><strong>Quote:</strong> {Math.round(Number(migrationInfo?.migrationRatio || 0) * 100)}%</p>
-                <p><strong>Auto-Off:</strong> {migrationInfo?.autoOffEnabled ? "an" : "aus"} {migrationInfo?.autoOffReason ? `(${migrationInfo.autoOffReason})` : ""}</p>
-                <p><strong>Callback Secret:</strong> {migrationInfo?.callbackSecretConfigured ? "gesetzt" : "nicht gesetzt"}</p>
-                <p><strong>Sync-Report:</strong> {migrationInfo?.reportEnabled ? "an" : "aus"}</p>
-                <p><strong>Report Secret:</strong> {migrationInfo?.reportSecretConfigured ? "gesetzt" : "nicht gesetzt"}</p>
+                <p>
+                  <strong>Aktiv:</strong>{" "}
+                  {migrationInfo?.enabled ? "ja" : "nein"}
+                </p>
+                <p>
+                  <strong>Start:</strong>{" "}
+                  {migrationInfo?.startedAt
+                    ? formatDateTime(migrationInfo.startedAt)
+                    : "-"}
+                </p>
+                <p>
+                  <strong>Bis:</strong>{" "}
+                  {migrationInfo?.until
+                    ? formatDateTime(migrationInfo.until)
+                    : "-"}
+                </p>
+                <p>
+                  <strong>Restzeit:</strong>{" "}
+                  {formatDuration(Number(migrationInfo?.remainingSeconds || 0))}
+                </p>
+                <p>
+                  <strong>Migriert:</strong>{" "}
+                  {Number(migrationInfo?.migratedUserCount || 0)} /{" "}
+                  {Number(migrationInfo?.baselineUserCount || 0)}
+                </p>
+                <p>
+                  <strong>Quote:</strong>{" "}
+                  {Math.round(Number(migrationInfo?.migrationRatio || 0) * 100)}
+                  %
+                </p>
+                <p>
+                  <strong>Auto-Off:</strong>{" "}
+                  {migrationInfo?.autoOffEnabled ? "an" : "aus"}{" "}
+                  {migrationInfo?.autoOffReason
+                    ? `(${migrationInfo.autoOffReason})`
+                    : ""}
+                </p>
+                <p>
+                  <strong>Callback Secret:</strong>{" "}
+                  {migrationInfo?.callbackSecretConfigured
+                    ? "gesetzt"
+                    : "nicht gesetzt"}
+                </p>
+                <p>
+                  <strong>Sync-Report:</strong>{" "}
+                  {migrationInfo?.reportEnabled ? "an" : "aus"}
+                </p>
+                <p>
+                  <strong>Report Secret:</strong>{" "}
+                  {migrationInfo?.reportSecretConfigured
+                    ? "gesetzt"
+                    : "nicht gesetzt"}
+                </p>
               </div>
             </article>
 
@@ -4725,14 +7212,34 @@ export function App() {
               <div className="row">
                 <label>
                   Laufzeit (Tage)
-                  <input type="number" min={1} max={30} value={migrationDays} onChange={(e) => setMigrationDays(Number(e.target.value) || 7)} />
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={migrationDays}
+                    onChange={(e) =>
+                      setMigrationDays(Number(e.target.value) || 7)
+                    }
+                  />
                 </label>
                 <label className="checkbox">
-                  <input type="checkbox" checked={migrationAutoOffEnabled} onChange={(e) => setMigrationAutoOffEnabled(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={migrationAutoOffEnabled}
+                    onChange={(e) =>
+                      setMigrationAutoOffEnabled(e.target.checked)
+                    }
+                  />
                   Auto-Off aktiv
                 </label>
                 <label className="checkbox">
-                  <input type="checkbox" checked={migrationRequirePromptFirst} onChange={(e) => setMigrationRequirePromptFirst(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={migrationRequirePromptFirst}
+                    onChange={(e) =>
+                      setMigrationRequirePromptFirst(e.target.checked)
+                    }
+                  />
                   Migration vor Login zeigen
                 </label>
               </div>
@@ -4742,27 +7249,49 @@ export function App() {
               <h3>Nutzerkommunikation</h3>
               <label>
                 Ziel-Server URL
-                <input value={migrationTargetUrl} onChange={(e) => setMigrationTargetUrl(e.target.value)} placeholder="https://new.daily.example" />
+                <input
+                  value={migrationTargetUrl}
+                  onChange={(e) => setMigrationTargetUrl(e.target.value)}
+                  placeholder="https://new.daily.example"
+                />
               </label>
               <label>
                 Download URL
-                <input value={migrationDownloadUrl} onChange={(e) => setMigrationDownloadUrl(e.target.value)} placeholder="https://.../releases/latest" />
+                <input
+                  value={migrationDownloadUrl}
+                  onChange={(e) => setMigrationDownloadUrl(e.target.value)}
+                  placeholder="https://.../releases/latest"
+                />
               </label>
               <label>
                 Push Titel
-                <input value={migrationPushTitle} onChange={(e) => setMigrationPushTitle(e.target.value)} />
+                <input
+                  value={migrationPushTitle}
+                  onChange={(e) => setMigrationPushTitle(e.target.value)}
+                />
               </label>
               <label>
                 Push Text
-                <textarea rows={2} value={migrationPushBody} onChange={(e) => setMigrationPushBody(e.target.value)} />
+                <textarea
+                  rows={2}
+                  value={migrationPushBody}
+                  onChange={(e) => setMigrationPushBody(e.target.value)}
+                />
               </label>
               <label>
                 Screen Titel
-                <input value={migrationScreenTitle} onChange={(e) => setMigrationScreenTitle(e.target.value)} />
+                <input
+                  value={migrationScreenTitle}
+                  onChange={(e) => setMigrationScreenTitle(e.target.value)}
+                />
               </label>
               <label>
                 Screen Text
-                <textarea rows={4} value={migrationScreenBody} onChange={(e) => setMigrationScreenBody(e.target.value)} />
+                <textarea
+                  rows={4}
+                  value={migrationScreenBody}
+                  onChange={(e) => setMigrationScreenBody(e.target.value)}
+                />
               </label>
             </article>
 
@@ -4770,34 +7299,61 @@ export function App() {
               <h3>Sync Sicherheit</h3>
               <label>
                 Erwartete Source-Instanz (optional)
-                <input value={migrationExpectedSource} onChange={(e) => setMigrationExpectedSource(e.target.value)} />
+                <input
+                  value={migrationExpectedSource}
+                  onChange={(e) => setMigrationExpectedSource(e.target.value)}
+                />
               </label>
               <label>
                 Callback Secret (nur setzen/aendern)
-                <input value={migrationCallbackSecret} onChange={(e) => setMigrationCallbackSecret(e.target.value)} />
+                <input
+                  value={migrationCallbackSecret}
+                  onChange={(e) => setMigrationCallbackSecret(e.target.value)}
+                />
               </label>
-              <p className="small">Das Secret wird aus Sicherheitsgruenden nicht im Klartext zurückgegeben.</p>
+              <p className="small">
+                Das Secret wird aus Sicherheitsgruenden nicht im Klartext
+                zurückgegeben.
+              </p>
             </article>
 
             <article className="settings-current">
               <h3>Neue Instanz zu Alte Instanz Sync-Report</h3>
               <label className="checkbox">
-                <input type="checkbox" checked={migrationReportEnabled} onChange={(e) => setMigrationReportEnabled(e.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={migrationReportEnabled}
+                  onChange={(e) => setMigrationReportEnabled(e.target.checked)}
+                />
                 Login-Quote auf alte Instanz melden
               </label>
               <label>
                 Report Target URL
-                <input value={migrationReportTarget} onChange={(e) => setMigrationReportTarget(e.target.value)} placeholder="https://old.daily.example/api/migration/sync/login" />
+                <input
+                  value={migrationReportTarget}
+                  onChange={(e) => setMigrationReportTarget(e.target.value)}
+                  placeholder="https://old.daily.example/api/migration/sync/login"
+                />
               </label>
               <label>
                 Report Source URL
-                <input value={migrationReportSource} onChange={(e) => setMigrationReportSource(e.target.value)} placeholder="https://new.daily.example" />
+                <input
+                  value={migrationReportSource}
+                  onChange={(e) => setMigrationReportSource(e.target.value)}
+                  placeholder="https://new.daily.example"
+                />
               </label>
               <label>
                 Report Secret (nur setzen/aendern)
-                <input value={migrationReportSecret} onChange={(e) => setMigrationReportSecret(e.target.value)} />
+                <input
+                  value={migrationReportSecret}
+                  onChange={(e) => setMigrationReportSecret(e.target.value)}
+                />
               </label>
-              <p className="small">Wenn aktiviert, meldet die neue Instanz erfolgreiche Logins signiert an die alte Instanz.</p>
+              <p className="small">
+                Wenn aktiviert, meldet die neue Instanz erfolgreiche Logins
+                signiert an die alte Instanz.
+              </p>
             </article>
 
             <article className="settings-current">
@@ -4805,35 +7361,69 @@ export function App() {
               <div className="row">
                 <label>
                   Diese Instanz ist
-                  <select value={migrationLinkRole} onChange={(e) => setMigrationLinkRole((e.target.value === "new" ? "new" : "old"))}>
+                  <select
+                    value={migrationLinkRole}
+                    onChange={(e) =>
+                      setMigrationLinkRole(
+                        e.target.value === "new" ? "new" : "old",
+                      )
+                    }
+                  >
                     <option value="old">Alte Instanz</option>
                     <option value="new">Neue Instanz</option>
                   </select>
                 </label>
-                <button onClick={() => void onExportMigrationLinkToken()}>Token erzeugen</button>
+                <button onClick={() => void onExportMigrationLinkToken()}>
+                  Token erzeugen
+                </button>
               </div>
               {migrationLinkExport?.token ? (
                 <>
                   <label>
                     Export-Token (auf Gegeninstanz importieren)
-                    <textarea rows={4} value={migrationLinkExport.token} readOnly />
+                    <textarea
+                      rows={4}
+                      value={migrationLinkExport.token}
+                      readOnly
+                    />
                   </label>
                   <p className="small">
-                    Rolle: {migrationLinkExport.instanceRole} | Basis: {migrationLinkExport.instanceBase} | Gueltig bis: {migrationLinkExport.expiresAt ? formatDateTime(migrationLinkExport.expiresAt) : "-"}
+                    Rolle: {migrationLinkExport.instanceRole} | Basis:{" "}
+                    {migrationLinkExport.instanceBase} | Gueltig bis:{" "}
+                    {migrationLinkExport.expiresAt
+                      ? formatDateTime(migrationLinkExport.expiresAt)
+                      : "-"}
                   </p>
                 </>
               ) : null}
               <label>
                 Import-Token von Gegeninstanz
-                <textarea rows={4} value={migrationLinkImportToken} onChange={(e) => setMigrationLinkImportToken(e.target.value)} />
+                <textarea
+                  rows={4}
+                  value={migrationLinkImportToken}
+                  onChange={(e) => setMigrationLinkImportToken(e.target.value)}
+                />
               </label>
-              <button onClick={() => void onImportMigrationLinkToken()}>Token importieren</button>
-              <p className="small">Du kannst damit Ziel-URL, Expected Source, Callback/Report-Secret und Report-Target automatisch setzen.</p>
+              <button onClick={() => void onImportMigrationLinkToken()}>
+                Token importieren
+              </button>
+              <p className="small">
+                Du kannst damit Ziel-URL, Expected Source,
+                Callback/Report-Secret und Report-Target automatisch setzen.
+              </p>
             </article>
 
             <div className="row">
-              <button onClick={() => void downloadAdminMigrationExport(token, "json")}>Export JSON</button>
-              <button onClick={() => void downloadAdminMigrationExport(token, "csv")}>Export CSV</button>
+              <button
+                onClick={() => void downloadAdminMigrationExport(token, "json")}
+              >
+                Export JSON
+              </button>
+              <button
+                onClick={() => void downloadAdminMigrationExport(token, "csv")}
+              >
+                Export CSV
+              </button>
             </div>
           </div>
         )}
@@ -4843,12 +7433,43 @@ export function App() {
             <article className="settings-current">
               <h2>Aktuell gueltige Einstellungen</h2>
               <div className="settings-grid">
-                <p><strong>Prompt-Fenster:</strong> {savedSettings.promptWindowStartHour}:00 - {savedSettings.promptWindowEndHour}:00</p>
-                <p><strong>Upload-Fenster:</strong> {savedSettings.uploadWindowMinutes} Minuten</p>
-                <p><strong>Feed-Kommentare pro Bild:</strong> {savedSettings.feedCommentPreviewLimit}</p>
-                <p><strong>Max Upload:</strong> {savedSettings.maxUploadBytes <= 0 ? "Unbegrenzt" : `${Math.round(savedSettings.maxUploadBytes / (1024 * 1024))} MB`}</p>
-                <p><strong>Notification-Text:</strong> {savedSettings.promptNotificationText}</p>
-                <p><strong>Nutzer-Nachfragen aktiv:</strong> {savedSettings.userPromptRules.filter((r) => r.enabled).length}/{savedSettings.userPromptRules.length}</p>
+                <p>
+                  <strong>Prompt-Fenster:</strong>{" "}
+                  {savedSettings.promptWindowStartHour}:00 -{" "}
+                  {savedSettings.promptWindowEndHour}:00
+                </p>
+                <p>
+                  <strong>Upload-Fenster:</strong>{" "}
+                  {savedSettings.uploadWindowMinutes} Minuten
+                </p>
+                <p>
+                  <strong>Feed-Kommentare pro Bild:</strong>{" "}
+                  {savedSettings.feedCommentPreviewLimit}
+                </p>
+                <p>
+                  <strong>Max Upload:</strong>{" "}
+                  {savedSettings.maxUploadBytes <= 0
+                    ? "Unbegrenzt"
+                    : `${Math.round(savedSettings.maxUploadBytes / (1024 * 1024))} MB`}
+                </p>
+                <p>
+                  <strong>Chat-Laenge:</strong>{" "}
+                  {savedSettings.chatMessageUnlimited
+                    ? "Unbegrenzt"
+                    : `${savedSettings.chatMessageMaxLength} Zeichen`}
+                </p>
+                <p>
+                  <strong>Notification-Text:</strong>{" "}
+                  {savedSettings.promptNotificationText}
+                </p>
+                <p>
+                  <strong>Nutzer-Nachfragen aktiv:</strong>{" "}
+                  {
+                    savedSettings.userPromptRules.filter((r) => r.enabled)
+                      .length
+                  }
+                  /{savedSettings.userPromptRules.length}
+                </p>
               </div>
             </article>
 
@@ -4861,7 +7482,12 @@ export function App() {
                   min={0}
                   max={23}
                   value={settings.promptWindowStartHour}
-                  onChange={(e) => setSettings({ ...settings, promptWindowStartHour: Number(e.target.value) })}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      promptWindowStartHour: Number(e.target.value),
+                    })
+                  }
                 />
               </label>
               <label>
@@ -4871,7 +7497,12 @@ export function App() {
                   min={1}
                   max={24}
                   value={settings.promptWindowEndHour}
-                  onChange={(e) => setSettings({ ...settings, promptWindowEndHour: Number(e.target.value) })}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      promptWindowEndHour: Number(e.target.value),
+                    })
+                  }
                 />
               </label>
               <label>
@@ -4881,7 +7512,12 @@ export function App() {
                   min={1}
                   max={60}
                   value={settings.uploadWindowMinutes}
-                  onChange={(e) => setSettings({ ...settings, uploadWindowMinutes: Number(e.target.value) })}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      uploadWindowMinutes: Number(e.target.value),
+                    })
+                  }
                 />
               </label>
               <label>
@@ -4891,14 +7527,24 @@ export function App() {
                   min={1}
                   max={50}
                   value={settings.feedCommentPreviewLimit}
-                  onChange={(e) => setSettings({ ...settings, feedCommentPreviewLimit: Number(e.target.value) })}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      feedCommentPreviewLimit: Number(e.target.value),
+                    })
+                  }
                 />
               </label>
               <label>
                 Prompt Notification Text
                 <input
                   value={settings.promptNotificationText}
-                  onChange={(e) => setSettings({ ...settings, promptNotificationText: e.target.value })}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      promptNotificationText: e.target.value,
+                    })
+                  }
                 />
               </label>
               <label>
@@ -4907,44 +7553,143 @@ export function App() {
                   type="number"
                   min={0}
                   value={settings.maxUploadBytes}
-                  onChange={(e) => setSettings({ ...settings, maxUploadBytes: Number(e.target.value) })}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      maxUploadBytes: Number(e.target.value),
+                    })
+                  }
                 />
               </label>
               <label className="checkbox">
                 <input
                   type="checkbox"
                   checked={settings.maxUploadBytes <= 0}
-                  onChange={(e) => setSettings({ ...settings, maxUploadBytes: e.target.checked ? 0 : 10 * 1024 * 1024 })}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      maxUploadBytes: e.target.checked ? 0 : 10 * 1024 * 1024,
+                    })
+                  }
                 />
                 Unbegrenzte Upload-Groesse
               </label>
+              <div
+                className="stack"
+                style={{
+                  border: "1px solid var(--border)",
+                  borderRadius: 12,
+                  padding: 12,
+                }}
+              >
+                <h3>Chat-Nachrichten</h3>
+                <label>
+                  Max Chat-Zeichen
+                  <input
+                    type="number"
+                    min={1}
+                    value={settings.chatMessageMaxLength}
+                    disabled={settings.chatMessageUnlimited}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        chatMessageMaxLength: Math.max(
+                          1,
+                          Number(e.target.value) ||
+                            DEFAULT_SETTINGS.chatMessageMaxLength,
+                        ),
+                      })
+                    }
+                  />
+                </label>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={settings.chatMessageUnlimited}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        chatMessageUnlimited: e.target.checked,
+                        chatMessageMaxLength:
+                          settings.chatMessageMaxLength > 0
+                            ? settings.chatMessageMaxLength
+                            : DEFAULT_SETTINGS.chatMessageMaxLength,
+                      })
+                    }
+                  />
+                  Unbegrenzte Zeichenlaenge im Chat erlauben
+                </label>
+                <p className="small">
+                  Effektiv:{" "}
+                  {settings.chatMessageUnlimited
+                    ? "Unbegrenzt"
+                    : `${settings.chatMessageMaxLength} Zeichen`}
+                </p>
+              </div>
               <div className="stack">
-                <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                <div
+                  className="row"
+                  style={{
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
                   <h3>Nutzer-Nachfragen</h3>
-                  <button type="button" onClick={addUserPromptRule}>Regel hinzufuegen</button>
+                  <button type="button" onClick={addUserPromptRule}>
+                    Regel hinzufuegen
+                  </button>
                 </div>
                 <p className="small">
-                  Steuert freiwillige Dialoge in der App, z. B. bei neuer Version zur Freigabe von Diagnose-/Performance-Daten.
+                  Steuert freiwillige Dialoge in der App, z. B. bei neuer
+                  Version zur Freigabe von Diagnose-/Performance-Daten.
                 </p>
-                {settings.userPromptRules.length === 0 && <p className="small">Keine Regeln konfiguriert.</p>}
+                {settings.userPromptRules.length === 0 && (
+                  <p className="small">Keine Regeln konfiguriert.</p>
+                )}
                 {settings.userPromptRules.map((rule, idx) => (
-                  <article key={`${rule.id}-${idx}`} className="stack" style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 12 }}>
-                    <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                  <article
+                    key={`${rule.id}-${idx}`}
+                    className="stack"
+                    style={{
+                      border: "1px solid var(--border)",
+                      borderRadius: 12,
+                      padding: 12,
+                    }}
+                  >
+                    <div
+                      className="row"
+                      style={{
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                      }}
+                    >
                       <strong>Regel #{idx + 1}</strong>
-                      <button type="button" className="danger" onClick={() => removeUserPromptRule(idx)}>Entfernen</button>
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => removeUserPromptRule(idx)}
+                      >
+                        Entfernen
+                      </button>
                     </div>
                     <label>
                       Rule-ID
                       <input
                         value={rule.id}
-                        onChange={(e) => updateUserPromptRule(idx, { id: e.target.value })}
+                        onChange={(e) =>
+                          updateUserPromptRule(idx, { id: e.target.value })
+                        }
                       />
                     </label>
                     <label className="checkbox">
                       <input
                         type="checkbox"
                         checked={rule.enabled}
-                        onChange={(e) => updateUserPromptRule(idx, { enabled: e.target.checked })}
+                        onChange={(e) =>
+                          updateUserPromptRule(idx, {
+                            enabled: e.target.checked,
+                          })
+                        }
                       />
                       Aktiv
                     </label>
@@ -4952,7 +7697,12 @@ export function App() {
                       Trigger
                       <select
                         value={rule.triggerType}
-                        onChange={(e) => updateUserPromptRule(idx, { triggerType: e.target.value as UserPromptRule["triggerType"] })}
+                        onChange={(e) =>
+                          updateUserPromptRule(idx, {
+                            triggerType: e.target
+                              .value as UserPromptRule["triggerType"],
+                          })
+                        }
                       >
                         <option value="app_version">Neue App-Version</option>
                         <option value="app_start">App-Start</option>
@@ -4963,14 +7713,18 @@ export function App() {
                       Titel
                       <input
                         value={rule.title}
-                        onChange={(e) => updateUserPromptRule(idx, { title: e.target.value })}
+                        onChange={(e) =>
+                          updateUserPromptRule(idx, { title: e.target.value })
+                        }
                       />
                     </label>
                     <label>
                       Text
                       <textarea
                         value={rule.body}
-                        onChange={(e) => updateUserPromptRule(idx, { body: e.target.value })}
+                        onChange={(e) =>
+                          updateUserPromptRule(idx, { body: e.target.value })
+                        }
                         rows={3}
                       />
                     </label>
@@ -4979,14 +7733,22 @@ export function App() {
                         Zustimmen-Label
                         <input
                           value={rule.confirmLabel}
-                          onChange={(e) => updateUserPromptRule(idx, { confirmLabel: e.target.value })}
+                          onChange={(e) =>
+                            updateUserPromptRule(idx, {
+                              confirmLabel: e.target.value,
+                            })
+                          }
                         />
                       </label>
                       <label style={{ flex: 1 }}>
                         Ablehnen-Label
                         <input
                           value={rule.declineLabel}
-                          onChange={(e) => updateUserPromptRule(idx, { declineLabel: e.target.value })}
+                          onChange={(e) =>
+                            updateUserPromptRule(idx, {
+                              declineLabel: e.target.value,
+                            })
+                          }
                         />
                       </label>
                     </div>
@@ -4998,7 +7760,11 @@ export function App() {
                           min={0}
                           max={720}
                           value={rule.cooldownHours}
-                          onChange={(e) => updateUserPromptRule(idx, { cooldownHours: Number(e.target.value) || 0 })}
+                          onChange={(e) =>
+                            updateUserPromptRule(idx, {
+                              cooldownHours: Number(e.target.value) || 0,
+                            })
+                          }
                         />
                       </label>
                       <label style={{ flex: 1 }}>
@@ -5008,7 +7774,11 @@ export function App() {
                           min={0}
                           max={1000}
                           value={rule.priority}
-                          onChange={(e) => updateUserPromptRule(idx, { priority: Number(e.target.value) || 0 })}
+                          onChange={(e) =>
+                            updateUserPromptRule(idx, {
+                              priority: Number(e.target.value) || 0,
+                            })
+                          }
                         />
                       </label>
                     </div>
@@ -5016,7 +7786,9 @@ export function App() {
                 ))}
               </div>
               <div className="row">
-                <button type="button" onClick={onApplyDefaultSettings}>Standardwerte setzen (8-20, 10 Min, unbegrenzt)</button>
+                <button type="button" onClick={onApplyDefaultSettings}>
+                  Standardwerte setzen (8-20, 10 Min, unbegrenzt)
+                </button>
                 <button type="submit">Settings speichern</button>
               </div>
             </form>
@@ -5118,7 +7890,8 @@ function uploadTimelineStageClass(value: string) {
 }
 
 function uploadTimelineSourceLabel(source?: string, kind?: string) {
-  const kindLabel = kind === "prompt" ? "Daily-Moment" : kind === "extra" ? "Extra" : "Upload";
+  const kindLabel =
+    kind === "prompt" ? "Daily-Moment" : kind === "extra" ? "Extra" : "Upload";
   return source === "queue" ? `${kindLabel} aus Queue` : `${kindLabel} direkt`;
 }
 
@@ -5141,18 +7914,27 @@ function uploadTimelineBandwidthLabel(row: UploadTimelineItem) {
 
 function buildUploadTimelineCopyText(
   items: UploadTimelineItem[],
-  filterInfo: { since: string; serverNow: string; sinceHours: number }
+  filterInfo: { since: string; serverNow: string; sinceHours: number },
 ) {
   const lines: string[] = [];
   const families = {
     dns: items.filter((row) => row.failureFamily === "dns").length,
-    no_active_network: items.filter((row) => row.failureFamily === "no_active_network").length,
-    ssl_handshake: items.filter((row) => row.failureFamily === "ssl_handshake").length,
-    cert_path_validator: items.filter((row) => row.failureFamily === "cert_path_validator").length,
+    no_active_network: items.filter(
+      (row) => row.failureFamily === "no_active_network",
+    ).length,
+    ssl_handshake: items.filter((row) => row.failureFamily === "ssl_handshake")
+      .length,
+    cert_path_validator: items.filter(
+      (row) => row.failureFamily === "cert_path_validator",
+    ).length,
   };
   lines.push("Daily Upload Timeline");
-  lines.push(`Serverzeit: ${filterInfo.serverNow ? formatDateTime(filterInfo.serverNow) : "-"}`);
-  lines.push(`Zeitraum: ${filterInfo.since ? formatDateTime(filterInfo.since) : `letzte ${filterInfo.sinceHours}h`}`);
+  lines.push(
+    `Serverzeit: ${filterInfo.serverNow ? formatDateTime(filterInfo.serverNow) : "-"}`,
+  );
+  lines.push(
+    `Zeitraum: ${filterInfo.since ? formatDateTime(filterInfo.since) : `letzte ${filterInfo.sinceHours}h`}`,
+  );
   lines.push("");
   lines.push(`DNS-Fehler: ${families.dns}x`);
   lines.push(`Keine aktive Verbindung: ${families.no_active_network}x`);
@@ -5161,16 +7943,16 @@ function buildUploadTimelineCopyText(
   lines.push("");
   items.forEach((row) => {
     lines.push(
-      `[${formatDateTime(row.createdAt)}] @${row.user?.username || "-"} | ${uploadTimelineStageLabel(row.stage)} | ${uploadTimelineSourceLabel(row.source, row.kind)}`
+      `[${formatDateTime(row.createdAt)}] @${row.user?.username || "-"} | ${uploadTimelineStageLabel(row.stage)} | ${uploadTimelineSourceLabel(row.source, row.kind)}`,
     );
     lines.push(
-      `  Upload=${row.uploadClientId || row.timelineId} | Queue=${row.queueItemId || "-"} | Versuch=${row.attempt != null ? row.attempt : "-"} | Geraet=${row.deviceName || "-"} | App=${row.appVersion || "-"}`
+      `  Upload=${row.uploadClientId || row.timelineId} | Queue=${row.queueItemId || "-"} | Versuch=${row.attempt != null ? row.attempt : "-"} | Geraet=${row.deviceName || "-"} | App=${row.appVersion || "-"}`,
     );
     lines.push(
-      `  Dauer=${row.durationMs != null ? `${Math.round(row.durationMs / 100) / 10}s` : "-"} | Ping=${row.pingMs != null ? `${row.pingMs} ms` : row.pingFailure || "-"} | Groesse=${row.bytesTotal != null ? formatBytes(row.bytesTotal) : "-"}`
+      `  Dauer=${row.durationMs != null ? `${Math.round(row.durationMs / 100) / 10}s` : "-"} | Ping=${row.pingMs != null ? `${row.pingMs} ms` : row.pingFailure || "-"} | Groesse=${row.bytesTotal != null ? formatBytes(row.bytesTotal) : "-"}`,
     );
     lines.push(
-      `  Netz=${uploadTimelineNetworkLabel(row)} | Bandbreite=${uploadTimelineBandwidthLabel(row)} | HTTP=${row.httpCode != null ? row.httpCode : "-"} | Fehler=${row.failureFamily || row.failureClass || row.networkKind || "-"}`
+      `  Netz=${uploadTimelineNetworkLabel(row)} | Bandbreite=${uploadTimelineBandwidthLabel(row)} | HTTP=${row.httpCode != null ? row.httpCode : "-"} | Fehler=${row.failureFamily || row.failureClass || row.networkKind || "-"}`,
     );
     lines.push(`  Nachricht=${row.message || "-"}`);
     if (row.meta) lines.push(`  Meta=${row.meta}`);
@@ -5294,6 +8076,3 @@ function CardStat({ title, value }: { title: string; value: number | string }) {
     </article>
   );
 }
-
-
-

@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.5",
+  "title": "Chat-Composer, Chat-Laenge und Push-Diagnose erweitert",
+  "items": [
+    "Der Chat-Composer in Android wurde fuer lange Nachrichten neu aufgebaut: mehrzeilig, besser lesbar und ohne das bisherige Zusammenquetschen neben den Aktionsbuttons.",
+    "Das Chat-Zeichenlimit ist jetzt global konfigurierbar. Standardmaessig sind 5000 Zeichen erlaubt, optional kann der Admin unbegrenzte Chat-Laenge freischalten.",
+    "Die App blockiert zu lange Chat-Nachrichten jetzt lokal mit klarer Rueckmeldung und loggt dabei Laengen-, Newline- und Serverfehler-Metadaten fuer die Diagnose.",
+    "Die Push-Diagnose unterscheidet jetzt besser zwischen echten FCM-Ereignissen und lokalen Debug-Szenarien, damit Notification-Clearing und reale Push-Pfade sauberer verglichen werden koennen."
+  ]
+}
