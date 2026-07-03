@@ -15,6 +15,13 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-07-03
 
+- Released Android patch `v0.6.9` from `main` commit `18d5f7593626556d9c31a3e0526240652d385f94`; backend code was unchanged, while GitHub still published the standard server image set for the same commit.
+- Fixed the remaining deep-feed auto-refresh jump by clearing stale jump-navigation state after consumption and by preserving the effective viewport anchor even when old focus state still exists.
+- Tightened diagnostics by exporting primarily the current app session and by adding notification-clear verification/retry logging for stubborn active notifications.
+- Verified locally with `gradle :app:compileDebugKotlin --no-daemon` and `gradle :app:assembleDebug --no-daemon --stacktrace --console=plain`.
+- Confirmed GitHub Actions success for `CI` run `28652705307`, `Publish Server Images` run `28652705196` and `Release Android APK` run `28652959043`.
+- Confirmed GitHub release `v0.6.9` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.9`.
+
 - Prepared combined server/android patch release `v0.6.7` from `main` for connection-health visibility, queue observability follow-up and stable `daily_required` / `upload_window_closed` errorCode contracts.
 - Added optional camera-tab connection health indicator with live popup details, local status evaluation from network/refresh/queue signals and Android fallback-safe `errorCode` parsing for upload and access failures.
 - Added backend regression coverage for `upload_window_closed` and `daily_required`, plus Android unit coverage for connection-health evaluation and refresh-lock serialization.
