@@ -29,7 +29,10 @@ data class ConnectionHealthInputs(
     val networkSnapshot: String,
     val refreshCircuitRemainingMs: Long,
     val lastRefreshFailureClass: String,
-    val uploadQueue: List<QueuedUploadItem>
+    val uploadQueue: List<QueuedUploadItem>,
+    val networkRecoveryActive: Boolean,
+    val networkRecoveryReason: String,
+    val lastNetworkTransitionAtMs: Long
 )
 
 data class ParsedNetworkSnapshot(
@@ -149,6 +152,22 @@ internal fun evaluateConnectionHealth(inputs: ConnectionHealthInputs): Connectio
         reasonLines += "Netzwerk nicht validiert"
     }
 
+    if (inputs.networkRecoveryActive && network.activeNetwork && network.internet) {
+        if (level != ConnectionHealthLevel.RED) {
+            level = ConnectionHealthLevel.YELLOW
+            title = "Verbindung wird wiederhergestellt"
+            summary = "Nach einem Netzwechsel prueft Daily die Verbindung erneut."
+        }
+        reasonLines += when (inputs.networkRecoveryReason) {
+            "transport_changed" -> "Netzwerktyp wurde gewechselt"
+            "network_restored" -> "Netzwerk wurde gerade wiederhergestellt"
+            "validated_network" -> "Validiertes Netzwerk wird neu verifiziert"
+            "network_lost" -> "Netzwerk war kurzzeitig unterbrochen"
+            "dns_failure" -> "DNS-Aufloesung wird nach Netzwechsel erneut geprueft"
+            else -> "Verbindung befindet sich in der Recovery-Phase"
+        }
+    }
+
     if (authPaused) {
         level = ConnectionHealthLevel.RED
         title = "Keine nutzbare Verbindung"
@@ -162,12 +181,25 @@ internal fun evaluateConnectionHealth(inputs: ConnectionHealthInputs): Connectio
     }
 
     if (inputs.lastApiFailureAtMs > inputs.lastApiSuccessAtMs && inputs.lastApiFailureMessage.isNotBlank()) {
+        val recentTransitionFailure = inputs.lastNetworkTransitionAtMs > 0L &&
+            inputs.lastApiFailureAtMs >= inputs.lastNetworkTransitionAtMs &&
+            inputs.networkRecoveryActive &&
+            network.activeNetwork &&
+            network.internet
         if (level != ConnectionHealthLevel.RED) {
             level = ConnectionHealthLevel.YELLOW
-            title = "Verbindung eingeschraenkt"
-            summary = "Der letzte Kontakt zu Daily war fehlerhaft."
+            title = if (recentTransitionFailure) "Verbindung wird wiederhergestellt" else "Verbindung eingeschraenkt"
+            summary = if (recentTransitionFailure) {
+                "Der letzte Serverkontakt fiel waehrend des Netzwechsels aus."
+            } else {
+                "Der letzte Kontakt zu Daily war fehlerhaft."
+            }
         }
-        reasonLines += "Letzter Serverkontakt fehlgeschlagen"
+        reasonLines += if (recentTransitionFailure) {
+            "Letzter Serverkontakt scheiterte waehrend des Netzwechsels"
+        } else {
+            "Letzter Serverkontakt fehlgeschlagen"
+        }
     }
 
     if (inputs.refreshCircuitRemainingMs > 0L) {

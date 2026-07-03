@@ -12,6 +12,7 @@ import android.graphics.Color as AndroidColor
 import android.graphics.Matrix
 import android.location.LocationManager
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
@@ -128,6 +129,7 @@ import androidx.compose.material3.rememberStandardBottomSheetState
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -3893,6 +3895,9 @@ data class UiState(
     val lastApiFailureAtMs: Long = 0L,
     val lastApiFailureMessage: String = "",
     val networkSnapshot: String = "activeNetwork=false;capabilities=false;reason=not_checked",
+    val networkRecoveryActive: Boolean = false,
+    val networkRecoveryReason: String = "",
+    val lastNetworkTransitionAtMs: Long = 0L,
     val customNotificationToneEnabled: Boolean = false,
     val customNotificationToneUri: String = "",
     val debugMasterEnabled: Boolean = false,
@@ -4021,6 +4026,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val circuitBreakerActivationThreshold = 3
     private val manualRefreshDuringNetworkFailureMinIntervalMs = 4_000L
     private val dashboardFailureDedupMs = 5 * 60 * 1000L
+    private val networkRecoveryProbeDebounceMs = 2_500L
+    private val networkRecoveryProbeRetryBaseMs = 4_000L
+    private val networkRecoveryProbeMaxAttempts = 3
+    private val networkRecoverySuccessFreshMs = 15_000L
     private var lastRefreshAllStartedAt = 0L
     private var lastLaunchIntentRefreshAtMs = 0L
     private var lastManualRefreshAtMs = 0L
@@ -4031,6 +4040,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var lastApiFailureAtMs = 0L
     private var lastApiFailureMessage = ""
     private var lastRefreshExecutionDisposition = RefreshExecutionDisposition.IDLE
+    private var networkRecoveryJob: Job? = null
+    private var networkRecoveryActive = false
+    private var networkRecoveryReason = ""
+    private var lastNetworkTransitionAtMs = 0L
+    private var lastObservedNetworkSnapshot = "activeNetwork=false;capabilities=false;reason=not_checked"
     private var nextFeedScrollRequestId = 1L
     private val pendingFeedMutations = mutableMapOf<Long, PendingFeedMutation>()
     private var queuedRefreshRequest: QueuedRefreshRequest? = null
@@ -4902,7 +4916,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             lastApiSuccessAtMs = lastApiSuccessAtMs,
             lastApiFailureAtMs = lastApiFailureAtMs,
             lastApiFailureMessage = lastApiFailureMessage,
-            networkSnapshot = currentNetworkSnapshot()
+            networkSnapshot = currentNetworkSnapshot(),
+            networkRecoveryActive = networkRecoveryActive,
+            networkRecoveryReason = networkRecoveryReason,
+            lastNetworkTransitionAtMs = lastNetworkTransitionAtMs
         )
         val snapshot = evaluateConnectionHealth(
             ConnectionHealthInputs(
@@ -4916,10 +4933,206 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 networkSnapshot = next.networkSnapshot,
                 refreshCircuitRemainingMs = refreshCircuitOpenRemainingMs(System.currentTimeMillis()),
                 lastRefreshFailureClass = lastRefreshFailureClass,
-                uploadQueue = next.uploadQueue
+                uploadQueue = next.uploadQueue,
+                networkRecoveryActive = next.networkRecoveryActive,
+                networkRecoveryReason = next.networkRecoveryReason,
+                lastNetworkTransitionAtMs = next.lastNetworkTransitionAtMs
             )
         )
         return next.copy(connectionHealthSnapshot = snapshot)
+    }
+
+    private fun isValidatedNetworkSnapshot(snapshot: String): Boolean {
+        val parsed = parseNetworkSnapshot(snapshot)
+        return parsed.activeNetwork && parsed.internet && parsed.validated
+    }
+
+    private fun noteApiSuccess(
+        nowMs: Long = System.currentTimeMillis(),
+        clearRefreshFailures: Boolean = false,
+        recoveryResult: String = "api_success"
+    ) {
+        lastApiSuccessAtMs = nowMs
+        lastApiFailureAtMs = 0L
+        lastApiFailureMessage = ""
+        if (clearRefreshFailures) {
+            markRefreshSuccess()
+        }
+        if (networkRecoveryActive) {
+            finishNetworkRecovery(recoveryResult, currentNetworkSnapshot())
+        }
+    }
+
+    private fun finishNetworkRecovery(result: String, snapshot: String) {
+        networkRecoveryJob?.cancel()
+        networkRecoveryJob = null
+        val wasActive = networkRecoveryActive
+        networkRecoveryActive = false
+        networkRecoveryReason = ""
+        if (wasActive) {
+            repo.logDebug(
+                type = "network_recovery_completed",
+                message = "network recovery completed",
+                meta = "result=$result;snapshot=$snapshot;lastTransitionAtMs=$lastNetworkTransitionAtMs"
+            )
+        }
+        state = refreshConnectionHealthState(
+            state.copy(
+                networkSnapshot = snapshot,
+                networkRecoveryActive = false,
+                networkRecoveryReason = "",
+                lastNetworkTransitionAtMs = lastNetworkTransitionAtMs
+            )
+        )
+    }
+
+    private fun startNetworkRecovery(
+        reason: String,
+        snapshot: String,
+        source: String,
+        scheduleProbe: Boolean
+    ) {
+        networkRecoveryReason = reason
+        networkRecoveryActive = true
+        lastNetworkTransitionAtMs = System.currentTimeMillis()
+        state = refreshConnectionHealthState(
+            state.copy(
+                networkSnapshot = snapshot,
+                networkRecoveryActive = true,
+                networkRecoveryReason = reason,
+                lastNetworkTransitionAtMs = lastNetworkTransitionAtMs
+            )
+        )
+        repo.logDebug(
+            type = "network_recovery_started",
+            message = "network recovery started",
+            meta = "reason=$reason;source=$source;snapshot=$snapshot;lastSuccessAtMs=$lastApiSuccessAtMs;lastFailureClass=${lastRefreshFailureClass.ifBlank { "-" }}"
+        )
+        if (scheduleProbe) {
+            scheduleNetworkRecoveryProbe(reason, source)
+        } else {
+            networkRecoveryJob?.cancel()
+            networkRecoveryJob = null
+        }
+    }
+
+    private fun scheduleNetworkRecoveryProbe(reason: String, source: String) {
+        networkRecoveryJob?.cancel()
+        networkRecoveryJob = viewModelScope.launch {
+            delay(networkRecoveryProbeDebounceMs)
+            var attempt = 1
+            while (networkRecoveryActive && attempt <= networkRecoveryProbeMaxAttempts) {
+                val snapshot = currentNetworkSnapshot()
+                state = refreshConnectionHealthState(state.copy(networkSnapshot = snapshot))
+                if (!isValidatedNetworkSnapshot(snapshot)) {
+                    return@launch
+                }
+                val startedAt = System.currentTimeMillis()
+                repo.logDebug(
+                    type = "network_recovery_probe_started",
+                    message = "network recovery probe started",
+                    meta = "reason=$reason;source=$source;attempt=$attempt;snapshot=$snapshot"
+                )
+                val outcome = runCatching { repo.health() }
+                outcome.onSuccess { health ->
+                    val pingMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                    noteApiSuccess(clearRefreshFailures = true, recoveryResult = "probe_success")
+                    state = refreshConnectionHealthState(
+                        state.copy(
+                            serverConnected = health.ok,
+                            serverVersion = health.version,
+                            pushProvider = health.provider,
+                            chatDeleteSupported = health.features.chatDelete,
+                            lastPingMs = pingMs,
+                            message = if (health.ok) state.message else "Server nicht erreichbar"
+                        )
+                    )
+                    repo.logDebug(
+                        type = "network_recovery_probe_succeeded",
+                        message = "network recovery probe succeeded",
+                        meta = "reason=$reason;source=$source;attempt=$attempt;pingMs=$pingMs;snapshot=${state.networkSnapshot}"
+                    )
+                    if (health.ok && repo.token().isNotBlank()) {
+                        refreshAll(
+                            reason = "network_recovery",
+                            refreshFeedWindow = true,
+                            bypassCooldown = true,
+                            showLoading = false,
+                            respectCircuitBreaker = false
+                        )
+                    }
+                    return@launch
+                }.onFailure { error ->
+                    val failureClass = classifyFailure(error)
+                    lastApiFailureAtMs = System.currentTimeMillis()
+                    lastApiFailureMessage = apiError(error, "Verbindung wird wiederhergestellt")
+                    state = refreshConnectionHealthState(state.copy(message = lastApiFailureMessage))
+                    if (failureClass == "dns" && !networkRecoveryActive) {
+                        startNetworkRecovery("dns_failure", snapshot, source, scheduleProbe = false)
+                    }
+                    repo.logDebug(
+                        type = "network_recovery_probe_failed",
+                        message = debugFailureMessage(error),
+                        meta = "reason=$reason;source=$source;attempt=$attempt;failureClass=$failureClass;snapshot=$snapshot;root=${rootCause(error)::class.java.simpleName}"
+                    )
+                    if (!isNetworkFailureClass(failureClass) || attempt >= networkRecoveryProbeMaxAttempts) {
+                        return@launch
+                    }
+                }
+                delay(networkRecoveryProbeRetryBaseMs * attempt)
+                attempt += 1
+            }
+        }
+    }
+
+    fun onConnectivitySnapshotChanged(snapshot: String, source: String = "observer") {
+        val normalized = snapshot.trim().ifBlank { currentNetworkSnapshot() }
+        val previous = lastObservedNetworkSnapshot
+        if (normalized == previous) {
+            if (state.networkSnapshot != normalized) {
+                state = refreshConnectionHealthState(state.copy(networkSnapshot = normalized))
+            }
+            if (networkRecoveryActive && isValidatedNetworkSnapshot(normalized) && networkRecoveryJob == null) {
+                scheduleNetworkRecoveryProbe(networkRecoveryReason.ifBlank { "validated_network" }, source)
+            }
+            return
+        }
+        lastObservedNetworkSnapshot = normalized
+        val before = parseNetworkSnapshot(previous)
+        val after = parseNetworkSnapshot(normalized)
+        val transportChanged = before.transport != after.transport && after.activeNetwork
+        val restored = !before.validated && after.validated && after.activeNetwork && after.internet
+        val lost = before.activeNetwork && !after.activeNetwork
+        val validatedNow = after.activeNetwork && after.internet && after.validated
+        repo.logDebug(
+            type = "network_transition_detected",
+            message = "network transition detected",
+            meta = "source=$source;before=$previous;after=$normalized;transportChanged=$transportChanged;restored=$restored;lost=$lost"
+        )
+        when {
+            lost -> startNetworkRecovery("network_lost", normalized, source, scheduleProbe = false)
+            transportChanged -> startNetworkRecovery("transport_changed", normalized, source, scheduleProbe = validatedNow)
+            restored -> startNetworkRecovery("network_restored", normalized, source, scheduleProbe = true)
+            validatedNow && networkRecoveryActive -> {
+                state = refreshConnectionHealthState(state.copy(networkSnapshot = normalized))
+                scheduleNetworkRecoveryProbe(networkRecoveryReason.ifBlank { "validated_network" }, source)
+            }
+            validatedNow &&
+                isNetworkFailureClass(lastRefreshFailureClass) &&
+                System.currentTimeMillis() - lastApiSuccessAtMs > networkRecoverySuccessFreshMs -> {
+                startNetworkRecovery("validated_network", normalized, source, scheduleProbe = true)
+            }
+            else -> {
+                state = refreshConnectionHealthState(state.copy(networkSnapshot = normalized))
+            }
+        }
+    }
+
+    fun currentObservedNetworkSnapshot(): String = currentNetworkSnapshot()
+
+    override fun onCleared() {
+        networkRecoveryJob?.cancel()
+        super.onCleared()
     }
 
     private fun logPerfEvent(event: String, durationMs: Long, success: Boolean, extra: String = "") {
@@ -4991,9 +5204,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
         } else ""
         if (healthOk && startupQuote.isNotBlank()) {
-            lastApiSuccessAtMs = System.currentTimeMillis()
-            lastApiFailureAtMs = 0L
-            lastApiFailureMessage = ""
+            noteApiSuccess()
             state = refreshConnectionHealthState(state.copy(
                 startupDone = false,
                 startupQuote = startupQuote,
@@ -6036,6 +6247,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         val priority = refreshPriorityFor(reason, forceFeedReload)
         val now = System.currentTimeMillis()
+        if (
+            respectCircuitBreaker &&
+            reason != "network_recovery" &&
+            priority != RefreshPriority.MANUAL &&
+            !repo.hasUsableNetwork()
+        ) {
+            val snapshot = currentNetworkSnapshot()
+            onConnectivitySnapshotChanged(snapshot, source = "refresh_preflight")
+            lastRefreshExecutionDisposition = RefreshExecutionDisposition.SKIPPED_CIRCUIT
+            repo.logDebug(
+                type = "refresh_skipped",
+                message = "refresh skipped without usable network",
+                meta = "reason=$reason;priority=${priority.name.lowercase()};snapshot=$snapshot"
+            )
+            logFeedDecision(
+                type = "feed_refresh_result",
+                message = "feed refresh skipped without usable network",
+                meta = "result=noop_skipped;reason=$reason;failureClass=no_active_network"
+            )
+            return false
+        }
         if (respectCircuitBreaker) {
             val remaining = refreshCircuitOpenRemainingMs(now)
             if (remaining > 0L) {
@@ -6404,6 +6636,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     state.feedDays.isEmpty() -> true
                     !state.feedDays.contains(preferredAnchor) -> true
                     forceFeedReload -> true
+                    networkRecoveryActive && reason != "feed_pull" -> false
                     staleFeedDays.any { it in state.feedDays } -> true
                     else -> false
                 }
@@ -6476,9 +6709,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 RefreshExecutionDisposition.SUCCESS
             }
             markRefreshSuccess()
-            lastApiSuccessAtMs = System.currentTimeMillis()
-            lastApiFailureAtMs = 0L
-            lastApiFailureMessage = ""
+            noteApiSuccess(clearRefreshFailures = false)
             state = refreshConnectionHealthState(state)
             if (reason == "feed_pull" || reason == "feed_auto" || forceFeedReload) {
                 val durationMs = System.currentTimeMillis() - now
@@ -6519,10 +6750,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             lastRefreshExecutionDisposition = RefreshExecutionDisposition.FAILURE
             val (backoffStage, delayMs) = markRefreshFailure(failureClass, System.currentTimeMillis())
             if (isNetworkFailureClass(failureClass)) {
+                val snapshot = repo.networkSnapshotMeta()
+                if (failureClass == "dns" && isValidatedNetworkSnapshot(snapshot)) {
+                    startNetworkRecovery("dns_failure", snapshot, "refresh_failure", scheduleProbe = true)
+                }
                 repo.logDebug(
                     type = "network_snapshot",
                     message = "refresh failure network snapshot",
-                    meta = "reason=$reason;failureClass=$failureClass;snapshot=${repo.networkSnapshotMeta()}"
+                    meta = "reason=$reason;failureClass=$failureClass;snapshot=$snapshot"
                 )
             }
             lastApiFailureAtMs = System.currentTimeMillis()
@@ -7589,6 +7824,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun globalRefreshIntervalMs(): Long {
         val now = System.currentTimeMillis()
+        if (networkRecoveryActive) {
+            return networkRecoveryProbeDebounceMs + Random.nextLong(1_501L)
+        }
         val remaining = refreshCircuitOpenRemainingMs(now)
         if (remaining > 0L) {
             return remaining + Random.nextLong(0L, 2_001L)
@@ -7615,7 +7853,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun shouldPauseFeedAutoRefresh(): Boolean {
         val now = System.currentTimeMillis()
-        return refreshCircuitOpenRemainingMs(now) > 0L || isNetworkFailureClass(lastRefreshFailureClass)
+        return networkRecoveryActive ||
+            refreshCircuitOpenRemainingMs(now) > 0L ||
+            isNetworkFailureClass(lastRefreshFailureClass)
     }
 
     fun clearPhotoInteractions() {
@@ -7678,9 +7918,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         runCatching { repo.health() }
             .onSuccess { health ->
                 val pingMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
-                lastApiSuccessAtMs = System.currentTimeMillis()
-                lastApiFailureAtMs = 0L
-                lastApiFailureMessage = ""
+                noteApiSuccess(clearRefreshFailures = true, recoveryResult = "manual_check")
                 state = refreshConnectionHealthState(state.copy(
                     loading = false,
                     serverConnected = health.ok,
@@ -9423,6 +9661,43 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         cameraUploadError = ""
         cameraUploadDone = false
         openCameraFor("back")
+    }
+
+    DisposableEffect(vm, context) {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (connectivityManager == null) {
+            vm.onConnectivitySnapshotChanged(
+                "activeNetwork=false;capabilities=false;reason=no_connectivity_manager",
+                source = "compose_attach"
+            )
+            onDispose { }
+        } else {
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                private fun publish(source: String) {
+                    vm.onConnectivitySnapshotChanged(vm.currentObservedNetworkSnapshot(), source)
+                }
+
+                override fun onAvailable(network: Network) {
+                    publish("callback_available")
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    publish("callback_capabilities")
+                }
+
+                override fun onLost(network: Network) {
+                    publish("callback_lost")
+                }
+            }
+            vm.onConnectivitySnapshotChanged(vm.currentObservedNetworkSnapshot(), source = "compose_attach")
+            runCatching { connectivityManager.registerDefaultNetworkCallback(callback) }
+                .onFailure {
+                    vm.onConnectivitySnapshotChanged(vm.currentObservedNetworkSnapshot(), source = "callback_register_failed")
+                }
+            onDispose {
+                runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+            }
+        }
     }
 
     LaunchedEffect(requestFrontCapture) {

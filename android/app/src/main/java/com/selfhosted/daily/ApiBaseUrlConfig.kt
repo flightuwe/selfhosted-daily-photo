@@ -1,11 +1,15 @@
 package com.selfhosted.daily
 
 import android.content.Context
+import okhttp3.Dns
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 private const val PREF_NAME = "app"
@@ -37,6 +41,44 @@ data class ApiBaseUrlValidationResult(
     val normalizedBaseUrl: String?,
     val errorMessage: String?
 )
+
+private data class CachedDnsEntry(
+    val addresses: List<InetAddress>,
+    val resolvedAtMs: Long
+)
+
+internal class ResilientDns(
+    private val delegate: Dns = Dns.SYSTEM,
+    private val nowMs: () -> Long = System::currentTimeMillis
+) : Dns {
+    private val cache = ConcurrentHashMap<String, CachedDnsEntry>()
+
+    override fun lookup(hostname: String): List<InetAddress> {
+        val now = nowMs()
+        val cached = cache[hostname]
+        if (cached != null && now - cached.resolvedAtMs <= FRESH_CACHE_TTL_MS) {
+            return cached.addresses
+        }
+        return try {
+            delegate.lookup(hostname).also { resolved ->
+                if (resolved.isNotEmpty()) {
+                    cache[hostname] = CachedDnsEntry(resolved, now)
+                }
+            }
+        } catch (error: UnknownHostException) {
+            if (cached != null && now - cached.resolvedAtMs <= STALE_FALLBACK_TTL_MS) {
+                cached.addresses
+            } else {
+                throw error
+            }
+        }
+    }
+
+    companion object {
+        private const val FRESH_CACHE_TTL_MS = 2 * 60 * 1000L
+        private const val STALE_FALLBACK_TTL_MS = 15 * 60 * 1000L
+    }
+}
 
 fun resolveApiBaseUrl(context: Context): String {
     val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -133,6 +175,7 @@ fun buildStandardHttpClient(
     timeoutProfile: HttpTimeoutProfile = DefaultHttpTimeoutProfile
 ): OkHttpClient {
     val builder = OkHttpClient.Builder()
+        .dns(ResilientDns())
         .connectTimeout(timeoutProfile.connectTimeoutSeconds, TimeUnit.SECONDS)
         .readTimeout(timeoutProfile.readTimeoutSeconds, TimeUnit.SECONDS)
         .writeTimeout(timeoutProfile.writeTimeoutSeconds, TimeUnit.SECONDS)
