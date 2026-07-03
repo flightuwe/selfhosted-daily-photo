@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.12",
+  "title": "Sofortigere Feed-Aktualisierung bei Push und Anhaengen",
+  "items": [
+    "Feed-relevante Pushes werden im laufenden App-Prozess jetzt sofort als Live-Invalidierung an den offenen Feed weitergereicht, statt nur auf einen spaeteren Neustart oder Auto-Refresh zu warten.",
+    "Erfolgreiche Attachment-Uploads aus der Upload-Queue invalidieren den betroffenen Feed jetzt aktiv und ziehen offene Feed-Sichten dadurch deutlich zuverlaessiger nach.",
+    "Wenn genau der betroffene Beitrag offen ist, werden photoInteractions gezielt neu geladen, damit neue Kommentare und angehaengte Fotos nicht erst verspaetet sichtbar werden.",
+    "Der Feed-Diagnosepfad protokolliert die Aktualisierungskette jetzt klarer mit Push-Eingang, Invalidation, sichtbarem Fetch und Interactions-Reload."
+  ]
+}
