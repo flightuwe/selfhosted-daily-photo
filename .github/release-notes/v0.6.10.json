@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.10",
+  "title": "Weitere Feed-Stabilisierung und sauberere Refresh-Semantik",
+  "items": [
+    "Der verbleibende Feed-Sprung bei automatischen Aktualisierungen tief im Feed wurde weiter abgesichert, damit sichtbare Anchors nicht mehr unnoetig auf heute zurueckfallen.",
+    "Feed-Refreshes markieren fehlgeschlagene Viewport-Restores jetzt sauber als degradierten Ausgang statt gleichzeitig Erfolg und Fehler zu melden.",
+    "Mehrfaches manuelles Pull-to-Refresh waehrend einer laufenden Feed-Aktualisierung wird jetzt sauber zusammengefuehrt statt unnoetig noisig oder wirkungslos zu werden.",
+    "Diagnoseexporte und Feed-Debug bleiben damit fuer echte Restprobleme deutlich klarer auswertbar."
+  ]
+}

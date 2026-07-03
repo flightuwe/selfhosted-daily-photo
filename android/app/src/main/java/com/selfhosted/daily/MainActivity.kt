@@ -3994,6 +3994,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private enum class RefreshExecutionDisposition {
         IDLE,
         SUCCESS,
+        RESTORE_FAILED,
         FAILURE,
         QUEUED,
         SKIPPED_CIRCUIT,
@@ -4038,6 +4039,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val staleFeedDays = mutableSetOf<String>()
     private var lastFeedAnchorDebugSignature = ""
     private var lastFeedJumpAnchorBefore: FeedViewportAnchor? = null
+    private var pendingFeedRestoreFailureReason: String = ""
+    private var pendingFeedRestoreFailureAnchor: String = ""
     private val profileSectionIds = listOf(
         "display",
         "yolo_mode",
@@ -4181,6 +4184,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     @Synchronized
+    private fun queueRefreshRequestIfNeeded(request: QueuedRefreshRequest): Boolean {
+        val before = queuedRefreshRequest
+        queueRefreshRequest(request)
+        return queuedRefreshRequest != before
+    }
+
+    @Synchronized
     private fun consumeQueuedRefreshRequest(): QueuedRefreshRequest? {
         val next = queuedRefreshRequest
         queuedRefreshRequest = null
@@ -4250,6 +4260,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private fun requestFeedViewportRestore(anchor: FeedViewportAnchor) {
         if (anchor.day.isNullOrBlank() && anchor.photoId == null) return
         lastFeedJumpAnchorBefore = anchor
+        pendingFeedRestoreFailureReason = ""
+        pendingFeedRestoreFailureAnchor = ""
         state = state.copy(
             feedViewportRestoreAnchor = anchor,
             feedViewportRestoreRequestId = issueFeedScrollRequestId()
@@ -4273,6 +4285,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         failureReason: String = ""
     ) {
         if (resolved == null) {
+            pendingFeedRestoreFailureReason = failureReason.ifBlank { "anchor_not_found" }
+            pendingFeedRestoreFailureAnchor = describeAnchor(requested)
+            lastFeedJumpAnchorBefore = null
             logFeedDecision(
                 type = "feed_viewport_restore_failed",
                 message = "viewport restore failed",
@@ -4285,6 +4300,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
             return
         }
+        pendingFeedRestoreFailureReason = ""
+        pendingFeedRestoreFailureAnchor = ""
         logFeedDecision(
             type = "feed_viewport_restore_applied",
             message = "viewport restore applied",
@@ -6033,7 +6050,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         if (!refreshAllMutex.tryLock()) {
             lastRefreshExecutionDisposition = RefreshExecutionDisposition.QUEUED
-            queueRefreshRequest(
+            val queued = queueRefreshRequestIfNeeded(
                 QueuedRefreshRequest(
                     reason = reason,
                     forceFeedReload = forceFeedReload,
@@ -6044,16 +6061,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     priority = priority
                 )
             )
-            repo.logDebug(
-                type = "refresh_deferred",
-                message = "refresh queued behind active refresh",
-                meta = "reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload;refreshFeedWindow=$refreshFeedWindow;showLoading=$showLoading"
-            )
-            logFeedDecision(
-                type = "feed_refresh_result",
-                message = "feed refresh deferred",
-                meta = "result=deferred;reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload"
-            )
+            if (queued) {
+                repo.logDebug(
+                    type = "refresh_deferred",
+                    message = "refresh queued behind active refresh",
+                    meta = "reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload;refreshFeedWindow=$refreshFeedWindow;showLoading=$showLoading"
+                )
+                logFeedDecision(
+                    type = "feed_refresh_result",
+                    message = "feed refresh deferred",
+                    meta = "result=deferred;reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload"
+                )
+            }
             return false
         }
         if (!bypassCooldown && now - lastRefreshAllStartedAt < refreshAllCooldownMs) {
@@ -6072,6 +6091,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             return false
         }
         lastRefreshAllStartedAt = now
+        pendingFeedRestoreFailureReason = ""
+        pendingFeedRestoreFailureAnchor = ""
         val viewportAnchorBeforeRefresh = effectiveRefreshViewportAnchor()
         if (showLoading) {
             state = state.copy(loading = true, communityStatsLoading = true)
@@ -6362,8 +6383,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             if (refreshFeedWindow) {
                 val viewportAnchor = viewportAnchorBeforeRefresh ?: state.feedViewportAnchor
                 val focus = state.feedFocusDay.takeIf { hasPendingFeedNavigation() }
+                val visibleDaySet = state.feedDays.toSet()
+                val cachedDaySet = state.feedByDay.keys
                 val preferredAnchor = when {
-                    !viewportAnchor.day.isNullOrBlank() && calendarDays.contains(viewportAnchor.day) -> viewportAnchor.day
+                    !viewportAnchor.day.isNullOrBlank() &&
+                        (viewportAnchor.day in visibleDaySet || viewportAnchor.day in cachedDaySet) -> viewportAnchor.day
                     !focus.isNullOrBlank() && calendarDays.contains(focus) -> focus
                     else -> prompt.day
                 }
@@ -6381,7 +6405,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     !state.feedDays.contains(preferredAnchor) -> true
                     forceFeedReload -> true
                     staleFeedDays.any { it in state.feedDays } -> true
-                    reason == "feed_auto" && state.activeTab == AppTab.FEED -> true
                     else -> false
                 }
                 val replaceVisibleDays = state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor) || !preserveVisibleWindow
@@ -6445,7 +6468,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             ensureCalendarStatsPrefix(2)
             success = true
-            lastRefreshExecutionDisposition = RefreshExecutionDisposition.SUCCESS
+            val restoreFailureReason = pendingFeedRestoreFailureReason.ifBlank { "" }
+            val restoreFailureAnchor = pendingFeedRestoreFailureAnchor.ifBlank { "" }
+            lastRefreshExecutionDisposition = if (restoreFailureReason.isNotBlank()) {
+                RefreshExecutionDisposition.RESTORE_FAILED
+            } else {
+                RefreshExecutionDisposition.SUCCESS
+            }
             markRefreshSuccess()
             lastApiSuccessAtMs = System.currentTimeMillis()
             lastApiFailureAtMs = 0L
@@ -6455,13 +6484,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 val durationMs = System.currentTimeMillis() - now
                 repo.logDebug(
                     type = "feed_refresh",
-                    message = "feed refresh ${if (refreshedFeedDays > 0) "ok" else "noop"}",
-                    meta = "reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};windowDays=${state.feedDays.joinToString(",").ifBlank { "-" }}"
+                    message = when {
+                        restoreFailureReason.isNotBlank() -> "feed refresh degraded"
+                        refreshedFeedDays > 0 -> "feed refresh ok"
+                        else -> "feed refresh noop"
+                    },
+                    meta = "reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};windowDays=${state.feedDays.joinToString(",").ifBlank { "-" }};restoreFailureReason=${restoreFailureReason.ifBlank { "-" }};restoreFailureAnchor=${restoreFailureAnchor.ifBlank { "-" }}"
                 )
                 logFeedDecision(
                     type = "feed_refresh_result",
-                    message = "feed refresh finished",
-                    meta = "result=${if (refreshedFeedDays > 0) "fetched_window" else "noop_skipped"};reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;visibleAnchor=${state.feedVisibleAnchorDay ?: "-"}"
+                    message = if (restoreFailureReason.isNotBlank()) "feed refresh finished with restore failure" else "feed refresh finished",
+                    meta = "result=${when {
+                        restoreFailureReason.isNotBlank() -> "restore_failed"
+                        refreshedFeedDays > 0 -> "fetched_window"
+                        else -> "noop_skipped"
+                    }};reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};restoreFailureReason=${restoreFailureReason.ifBlank { "-" }};restoreFailureAnchor=${restoreFailureAnchor.ifBlank { "-" }}"
                 )
             }
         } catch (t: Throwable) {
@@ -6530,11 +6567,38 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun refreshFeed(reason: String = "feed_pull") {
         if (state.feedRefreshing) {
-            repo.logDebug(
-                type = "refresh_deferred",
-                message = "feed refresh ignored because one is already running",
-                meta = "reason=$reason"
-            )
+            val isManual = reason == "feed_pull"
+            if (isManual) {
+                val queued = queueRefreshRequestIfNeeded(
+                    QueuedRefreshRequest(
+                        reason = reason,
+                        forceFeedReload = true,
+                        refreshFeedWindow = true,
+                        bypassCooldown = true,
+                        showLoading = false,
+                        respectCircuitBreaker = false,
+                        priority = RefreshPriority.MANUAL
+                    )
+                )
+                if (queued) {
+                    repo.logDebug(
+                        type = "refresh_deferred",
+                        message = "manual feed refresh queued behind running feed refresh",
+                        meta = "reason=$reason;priority=manual;forced=true;refreshFeedWindow=true;showLoading=false"
+                    )
+                    logFeedDecision(
+                        type = "feed_refresh_result",
+                        message = "feed refresh deferred",
+                        meta = "result=deferred;reason=$reason;priority=manual;forced=true;mergedIntoRunningFeedRefresh=true"
+                    )
+                }
+            } else {
+                repo.logDebug(
+                    type = "refresh_deferred",
+                    message = "feed refresh ignored because one is already running",
+                    meta = "reason=$reason"
+                )
+            }
             return
         }
         val now = System.currentTimeMillis()
@@ -6570,6 +6634,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val elapsed = System.currentTimeMillis() - started
             val result = when (lastRefreshExecutionDisposition) {
                 RefreshExecutionDisposition.SUCCESS -> PerfEventResult.OK
+                RefreshExecutionDisposition.RESTORE_FAILED,
                 RefreshExecutionDisposition.FAILURE -> PerfEventResult.ERROR
                 RefreshExecutionDisposition.QUEUED -> PerfEventResult.DEFERRED
                 RefreshExecutionDisposition.SKIPPED_CIRCUIT,
