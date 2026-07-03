@@ -742,6 +742,41 @@ class UploadQueueWorker(
         val result = runCatching { upload(item, repo, probe) }
         if (result.isSuccess) {
             UploadQueueManager.markSuccess(applicationContext, item.id)
+            if (item.uploadMode == UploadQueueMode.ATTACHMENT) {
+                val targetPhotoId = item.appendTargetPhotoId?.takeIf { it > 0L }
+                appendFeedTraceLog(
+                    context = applicationContext,
+                    type = "attachment_upload_confirmed",
+                    message = "attachment upload confirmed",
+                    meta = "queueItemId=${item.id};targetPhotoId=${targetPhotoId ?: -1L};uploadClientId=${item.uploadClientId};attempt=${item.attempts + 1}"
+                )
+                queuePendingFeedInvalidation(
+                    context = applicationContext,
+                    day = "",
+                    photoId = targetPhotoId,
+                    reason = "attachment_uploaded",
+                    source = "upload_queue_worker"
+                )
+                appendFeedTraceLog(
+                    context = applicationContext,
+                    type = "attachment_feed_invalidation_queued",
+                    message = "attachment feed invalidation queued",
+                    meta = "queueItemId=${item.id};targetPhotoId=${targetPhotoId ?: -1L};source=upload_queue_worker"
+                )
+                publishForegroundFeedInvalidation(
+                    context = applicationContext,
+                    day = "",
+                    photoId = targetPhotoId,
+                    reason = "attachment_uploaded",
+                    source = "upload_queue_worker"
+                )
+                appendFeedTraceLog(
+                    context = applicationContext,
+                    type = "attachment_foreground_refresh_signaled",
+                    message = "attachment foreground refresh signaled",
+                    meta = "queueItemId=${item.id};targetPhotoId=${targetPhotoId ?: -1L};source=upload_queue_worker"
+                )
+            }
             appendDebugLog(
                 context = applicationContext,
                 type = "upload_queue_succeeded",

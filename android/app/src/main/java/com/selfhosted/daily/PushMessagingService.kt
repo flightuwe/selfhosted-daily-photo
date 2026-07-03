@@ -41,6 +41,12 @@ class PushMessagingService : FirebaseMessagingService() {
         val action = message.data["action"]?.trim().orEmpty()
         val day = message.data["day"]?.trim().orEmpty()
         val photoId = message.data["photoId"]?.trim().orEmpty()
+        appendFeedTraceLog(
+            context = this,
+            type = "push_received",
+            message = if (type.isBlank()) "feed push payload received" else type,
+            meta = "action=${if (action.isBlank()) "-" else action};day=${if (day.isBlank()) "-" else day};photoId=${photoId.ifBlank { "-" }};source=real_fcm"
+        )
         PushNotificationDiagnostics.recordEvent(
             this,
             type = "push_message_received",
@@ -62,6 +68,13 @@ class PushMessagingService : FirebaseMessagingService() {
         )
         if (isFeedRelatedPush(action, type, day, photoId)) {
             queuePendingFeedInvalidation(
+                context = this,
+                day = day.ifBlank { LocalDate.now().toString() },
+                photoId = photoId.toLongOrNull()?.takeIf { it > 0L },
+                reason = if (type.isBlank()) "feed_push" else type,
+                source = if (action.isBlank()) "push" else action
+            )
+            publishForegroundFeedInvalidation(
                 context = this,
                 day = day.ifBlank { LocalDate.now().toString() },
                 photoId = photoId.toLongOrNull()?.takeIf { it > 0L },

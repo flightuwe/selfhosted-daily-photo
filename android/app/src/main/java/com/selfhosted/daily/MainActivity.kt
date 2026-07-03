@@ -205,6 +205,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.collectLatest
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -259,6 +263,63 @@ const val DEBUG_MASTER_ENABLED_KEY = "debug_master_enabled_v1"
 const val FEED_DEBUG_ENABLED_KEY = "feed_debug_enabled_v1"
 const val PENDING_FEED_INVALIDATIONS_KEY = "pending_feed_invalidations_v1"
 
+data class ForegroundFeedInvalidation(
+    val day: String = "",
+    val photoId: Long? = null,
+    val reason: String = "",
+    val source: String = "",
+    val receivedAt: String = OffsetDateTime.now().toString()
+)
+
+object FeedForegroundInvalidationBus {
+    private val events = MutableSharedFlow<ForegroundFeedInvalidation>(
+        replay = 0,
+        extraBufferCapacity = 32,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+
+    fun publish(event: ForegroundFeedInvalidation): Boolean = events.tryEmit(event)
+
+    fun events() = events.asSharedFlow()
+}
+
+fun feedDebugEnabledForContext(context: Context): Boolean {
+    val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
+    val master = prefs.getBoolean(DEBUG_MASTER_ENABLED_KEY, false)
+    val feed = prefs.getBoolean(FEED_DEBUG_ENABLED_KEY, false)
+    return master && feed
+}
+
+fun appendLocalDebugLog(context: Context, type: String, message: String, meta: String = "") {
+    val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
+    val raw = prefs.getString("debug_logs_v1", "") ?: ""
+    val current = runCatching {
+        val arr = if (raw.isBlank()) JSONArray() else JSONArray(raw)
+        val out = mutableListOf<JSONObject>()
+        for (i in 0 until arr.length()) {
+            arr.optJSONObject(i)?.let(out::add)
+        }
+        out
+    }.getOrDefault(mutableListOf())
+    current.add(
+        JSONObject().apply {
+            put("id", UUID.randomUUID().toString())
+            put("type", type.trim().ifBlank { "unknown" }.take(32))
+            put("message", message.trim().ifBlank { "unknown" }.take(500))
+            put("meta", meta.trim().take(4000))
+            put("createdAt", OffsetDateTime.now().toString())
+        }
+    )
+    val arr = JSONArray()
+    current.takeLast(500).forEach(arr::put)
+    prefs.edit().putString("debug_logs_v1", arr.toString()).apply()
+}
+
+fun appendFeedTraceLog(context: Context, type: String, message: String, meta: String = "") {
+    if (!feedDebugEnabledForContext(context)) return
+    appendLocalDebugLog(context, type, message, meta)
+}
+
 fun queuePendingFeedInvalidation(
     context: Context,
     day: String,
@@ -267,7 +328,8 @@ fun queuePendingFeedInvalidation(
     source: String = ""
 ) {
     val cleanDay = day.trim()
-    if (cleanDay.isBlank()) return
+    val cleanPhotoId = photoId?.takeIf { it > 0L }
+    if (cleanDay.isBlank() && cleanPhotoId == null) return
     val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     val current = runCatching {
         JSONArray(prefs.getString(PENDING_FEED_INVALIDATIONS_KEY, "").orEmpty())
@@ -275,7 +337,7 @@ fun queuePendingFeedInvalidation(
     current.put(
         JSONObject().apply {
             put("day", cleanDay)
-            put("photoId", photoId ?: 0L)
+            put("photoId", cleanPhotoId ?: 0L)
             put("reason", reason.trim().take(64))
             put("source", source.trim().take(64))
             put("createdAt", OffsetDateTime.now().toString())
@@ -287,6 +349,34 @@ fun queuePendingFeedInvalidation(
         trimmed.put(current.opt(i))
     }
     prefs.edit().putString(PENDING_FEED_INVALIDATIONS_KEY, trimmed.toString()).apply()
+    appendFeedTraceLog(
+        context = context,
+        type = "invalidation_queued",
+        message = "feed invalidation persisted",
+        meta = "targetDay=${cleanDay.ifBlank { "-" }};targetPhotoId=${cleanPhotoId ?: -1L};reason=${reason.trim().ifBlank { "-" }};source=${source.trim().ifBlank { "-" }}"
+    )
+}
+
+fun publishForegroundFeedInvalidation(
+    context: Context,
+    day: String,
+    photoId: Long? = null,
+    reason: String = "",
+    source: String = ""
+) {
+    val signal = ForegroundFeedInvalidation(
+        day = day.trim(),
+        photoId = photoId?.takeIf { it > 0L },
+        reason = reason.trim(),
+        source = source.trim()
+    )
+    val published = FeedForegroundInvalidationBus.publish(signal)
+    appendFeedTraceLog(
+        context = context,
+        type = "foreground_invalidation_signaled",
+        message = "foreground feed invalidation signaled",
+        meta = "targetDay=${signal.day.ifBlank { "-" }};targetPhotoId=${signal.photoId ?: -1L};reason=${signal.reason.ifBlank { "-" }};source=${signal.source.ifBlank { "-" }};published=$published;receivedAt=${signal.receivedAt}"
+    )
 }
 
 fun isFeedRelatedPush(action: String, type: String, day: String, photoId: String): Boolean {
@@ -1758,8 +1848,8 @@ class AppRepo(
         for (i in 0 until arr.length()) {
             val obj = arr.optJSONObject(i) ?: continue
             val day = obj.optString("day", "").trim()
-            if (day.isBlank()) continue
             val photoId = obj.optLong("photoId", 0L).takeIf { it > 0L }
+            if (day.isBlank() && photoId == null) continue
             out += PendingLaunch(
                 action = obj.optString("source", ""),
                 type = obj.optString("reason", ""),
@@ -4051,10 +4141,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var calendarStatsLoadedPrefix = 0
     private var calendarStatsLoading = false
     private val staleFeedDays = mutableSetOf<String>()
+    private val staleFeedPhotoIds = mutableSetOf<Long>()
     private var lastFeedAnchorDebugSignature = ""
     private var lastFeedJumpAnchorBefore: FeedViewportAnchor? = null
     private var pendingFeedRestoreFailureReason: String = ""
     private var pendingFeedRestoreFailureAnchor: String = ""
+    private var activePhotoInteractionsLoadPhotoId: Long? = null
     private val profileSectionIds = listOf(
         "display",
         "yolo_mode",
@@ -4103,6 +4195,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     init {
         repo.ensurePollPushDefaultMigration()
+        viewModelScope.launch {
+            FeedForegroundInvalidationBus.events().collectLatest { event ->
+                handleForegroundFeedInvalidation(event)
+            }
+        }
     }
 
     var state by mutableStateOf(
@@ -4170,6 +4267,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private fun refreshPriorityFor(reason: String, forceFeedReload: Boolean): RefreshPriority = when {
         reason == "feed_auto" -> RefreshPriority.AUTO
         reason == "feed_pull" -> RefreshPriority.MANUAL
+        reason == "feed_push" -> RefreshPriority.MUTATION
         reason.startsWith("photo_") || reason == "comment_submit" -> RefreshPriority.MUTATION
         forceFeedReload && (reason.contains("jump") || reason.contains("capsule") || reason.contains("launch")) -> RefreshPriority.NAVIGATION
         else -> RefreshPriority.GLOBAL
@@ -6133,21 +6231,56 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    private fun resolveFeedInvalidationDay(day: String, photoId: Long?): String {
+        val cleanDay = day.trim()
+        if (cleanDay.isNotBlank()) return cleanDay
+        return photoId?.takeIf { it > 0L }?.let(::findPhotoDay).orEmpty()
+    }
+
+    private fun hasVisiblePhotoInvalidation(): Boolean {
+        if (staleFeedPhotoIds.isEmpty()) return false
+        return state.feedDays.any { day ->
+            state.feedByDay[day].orEmpty().any { it.photo.id in staleFeedPhotoIds }
+        }
+    }
+
+    private fun consumeResolvedPhotoInvalidationsIntoDays() {
+        if (staleFeedPhotoIds.isEmpty()) return
+        staleFeedPhotoIds.mapNotNull(::findPhotoDay).distinct().forEach { day ->
+            if (staleFeedDays.add(day)) {
+                logFeedDecision(
+                    type = "invalidation_consumed",
+                    message = "photo invalidation resolved to day",
+                    meta = "targetDay=$day;resolvedFromPhotoIds=${staleFeedPhotoIds.joinToString(",").ifBlank { "-" }}"
+                )
+            }
+        }
+    }
+
     private fun registerFeedInvalidation(
         day: String,
         photoId: Long? = null,
         reason: String,
         source: String,
-        scheduledRefresh: Boolean
+        scheduledRefresh: Boolean,
+        persist: Boolean = true
     ) {
-        val cleanDay = day.trim()
-        if (cleanDay.isBlank()) return
-        staleFeedDays.add(cleanDay)
-        repo.queueFeedInvalidation(cleanDay, photoId, reason = reason, source = source)
+        val cleanPhotoId = photoId?.takeIf { it > 0L }
+        val cleanDay = resolveFeedInvalidationDay(day, cleanPhotoId)
+        if (cleanDay.isBlank() && cleanPhotoId == null) return
+        if (cleanDay.isNotBlank()) {
+            staleFeedDays.add(cleanDay)
+        }
+        if (cleanPhotoId != null) {
+            staleFeedPhotoIds.add(cleanPhotoId)
+        }
+        if (persist) {
+            repo.queueFeedInvalidation(cleanDay, cleanPhotoId, reason = reason, source = source)
+        }
         logFeedDecision(
-            type = "feed_push_invalidation",
-            message = "feed invalidation queued",
-            meta = "pushType=$reason;action=$source;targetDay=$cleanDay;targetPhotoId=${photoId ?: -1L};markedStale=true;scheduledRefresh=$scheduledRefresh;immediateRefreshEligible=${state.activeTab == AppTab.FEED && !state.feedRefreshing}"
+            type = "invalidation_consumed",
+            message = "feed invalidation registered",
+            meta = "pushType=$reason;action=$source;targetDay=${cleanDay.ifBlank { "-" }};targetPhotoId=${cleanPhotoId ?: -1L};markedStaleDay=${cleanDay.isNotBlank()};markedStalePhoto=${cleanPhotoId != null};scheduledRefresh=$scheduledRefresh;persisted=$persist;immediateRefreshEligible=${state.activeTab == AppTab.FEED && !state.feedRefreshing}"
         )
     }
 
@@ -6155,15 +6288,40 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val pending = repo.consumePendingFeedInvalidations()
         if (pending.isEmpty()) return
         pending.forEach { item ->
-            val day = item.targetDay.trim()
+            val photoId = item.targetPhotoId?.takeIf { it > 0L }
+            val day = resolveFeedInvalidationDay(item.targetDay, photoId)
             if (day.isNotBlank()) {
                 staleFeedDays.add(day)
+            }
+            if (photoId != null) {
+                staleFeedPhotoIds.add(photoId)
+            }
+            if (day.isNotBlank() || photoId != null) {
                 logFeedDecision(
-                    type = "feed_push_invalidation",
+                    type = "invalidation_consumed",
                     message = "persisted feed invalidation consumed",
-                    meta = "pushType=${item.type.ifBlank { "-" }};action=${item.action.ifBlank { "-" }};targetDay=$day;targetPhotoId=${item.targetPhotoId ?: -1L};markedStale=true;scheduledRefresh=${reason == "feed_auto"};immediateRefreshEligible=${state.activeTab == AppTab.FEED && !state.feedRefreshing}"
+                    meta = "pushType=${item.type.ifBlank { "-" }};action=${item.action.ifBlank { "-" }};targetDay=${day.ifBlank { "-" }};targetPhotoId=${photoId ?: -1L};markedStaleDay=${day.isNotBlank()};markedStalePhoto=${photoId != null};scheduledRefresh=${reason == "feed_auto"};immediateRefreshEligible=${state.activeTab == AppTab.FEED && !state.feedRefreshing}"
                 )
             }
+        }
+    }
+
+    private suspend fun handleForegroundFeedInvalidation(event: ForegroundFeedInvalidation) {
+        val cleanPhotoId = event.photoId?.takeIf { it > 0L }
+        val resolvedDay = resolveFeedInvalidationDay(event.day, cleanPhotoId)
+        registerFeedInvalidation(
+            day = resolvedDay,
+            photoId = cleanPhotoId,
+            reason = event.reason.ifBlank { "foreground_signal" },
+            source = event.source.ifBlank { "foreground_signal" },
+            scheduledRefresh = state.activeTab == AppTab.FEED,
+            persist = false
+        )
+        if (cleanPhotoId != null && state.photoInteractions?.photoId == cleanPhotoId) {
+            reloadPhotoInteractionsIfVisible(cleanPhotoId, event.reason.ifBlank { "foreground_signal" })
+        }
+        if (state.activeTab == AppTab.FEED) {
+            refreshFeed(reason = "feed_push")
         }
     }
 
@@ -6172,6 +6330,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val promptMap = state.promptMetaByDay.toMutableMap()
         val recapMap = state.monthRecapByDay.toMutableMap()
         cacheMap[day] = result.items.map(::applyPendingFeedMutation)
+        staleFeedPhotoIds.removeAll(result.items.map { it.photo.id }.toSet())
         promptMap[day] = result.meta
         if (result.monthRecap != null) {
             recapMap[day] = result.monthRecap
@@ -6241,6 +6400,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         respectCircuitBreaker: Boolean = true
     ): Boolean {
         consumePersistedFeedInvalidations(reason)
+        consumeResolvedPhotoInvalidationsIntoDays()
         if (repo.token().isBlank()) {
             lastRefreshExecutionDisposition = RefreshExecutionDisposition.NO_TOKEN
             return false
@@ -6300,9 +6460,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     meta = "reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload;refreshFeedWindow=$refreshFeedWindow;showLoading=$showLoading"
                 )
                 logFeedDecision(
+                    type = "visible_fetch",
+                    message = "visible feed fetch deferred",
+                    meta = "reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload;refreshFeedWindow=$refreshFeedWindow"
+                )
+                logFeedDecision(
                     type = "feed_refresh_result",
                     message = "feed refresh deferred",
-                    meta = "result=deferred;reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload"
+                    meta = "result=visible_fetch_deferred;reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload"
                 )
             }
             return false
@@ -6632,11 +6797,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     staleFeedDays.add(newestCalendarDay)
                 }
                 val offscreenStaleDays = staleFeedDays.filter { it !in state.feedDays.toSet() }.distinct().sortedDescending()
+                val visiblePhotoInvalidation = hasVisiblePhotoInvalidation()
                 val shouldFetchVisibleWindow = when {
                     state.feedDays.isEmpty() -> true
                     !state.feedDays.contains(preferredAnchor) -> true
                     forceFeedReload -> true
-                    networkRecoveryActive && reason != "feed_pull" -> false
+                    networkRecoveryActive && reason != "feed_pull" && reason != "feed_push" -> false
+                    visiblePhotoInvalidation -> true
                     staleFeedDays.any { it in state.feedDays } -> true
                     else -> false
                 }
@@ -6645,14 +6812,19 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 logFeedDecision(
                     type = "feed_refresh_plan",
                     message = "feed refresh planned",
-                    meta = "reason=$reason;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};preferredAnchor=$preferredAnchor;viewportAnchorBefore=${describeAnchor(viewportAnchorBeforeRefresh)};preserveVisibleWindow=$preserveVisibleWindow;replaceVisibleDays=$replaceVisibleDays;showJumpLoading=$showJumpLoading;offscreenStaleDays=${offscreenStaleDays.joinToString(",").ifBlank { "-" }};willFetch=$shouldFetchVisibleWindow"
+                    meta = "reason=$reason;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};preferredAnchor=$preferredAnchor;viewportAnchorBefore=${describeAnchor(viewportAnchorBeforeRefresh)};preserveVisibleWindow=$preserveVisibleWindow;replaceVisibleDays=$replaceVisibleDays;showJumpLoading=$showJumpLoading;offscreenStaleDays=${offscreenStaleDays.joinToString(",").ifBlank { "-" }};visiblePhotoInvalidation=$visiblePhotoInvalidation;willFetch=$shouldFetchVisibleWindow"
                 )
                 logFeedDecision(
                     type = "feed_auto_decision",
                     message = if (shouldFetchVisibleWindow) "feed refresh will fetch" else "feed refresh may reuse cache",
-                    meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=$shouldFetchVisibleWindow;decisionReason=${if (shouldFetchVisibleWindow) "visible_window_refresh" else "cached_today_feed"}"
+                    meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};stalePhotoIds=${staleFeedPhotoIds.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=$shouldFetchVisibleWindow;decisionReason=${if (shouldFetchVisibleWindow) "visible_window_refresh" else "cached_today_feed"}"
                 )
                 if (state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor)) {
+                    logFeedDecision(
+                        type = "visible_fetch",
+                        message = "visible feed fetch started",
+                        meta = "reason=$reason;preferredAnchor=$preferredAnchor;forced=$forceFeedReload;replaceVisibleDays=true;trigger=missing_anchor"
+                    )
                     refreshedFeedDays = loadFeedWindow(
                         anchorDay = preferredAnchor,
                         around = 1,
@@ -6662,6 +6834,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     )
                 } else {
                     refreshedFeedDays = if (shouldFetchVisibleWindow) {
+                        logFeedDecision(
+                            type = "visible_fetch",
+                            message = "visible feed fetch started",
+                            meta = "reason=$reason;preferredAnchor=$preferredAnchor;forced=$forceFeedReload;replaceVisibleDays=${!preserveVisibleWindow};trigger=visible_window_refresh"
+                        )
                         loadFeedWindow(
                             anchorDay = preferredAnchor,
                             around = 1,
@@ -6675,6 +6852,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         state = state.copy(
                             feed = state.feedByDay[today].orEmpty(),
                             feedTodayLocked = !prompt.hasVisiblePostToday && !hasVisibleTodayFeed
+                        )
+                        logFeedDecision(
+                            type = "visible_fetch",
+                            message = "visible feed fetch resolved to noop",
+                            meta = "reason=$reason;preferredAnchor=$preferredAnchor;forced=$forceFeedReload;trigger=cached_today_feed"
                         )
                         logFeedDecision(
                             type = "feed_auto_decision",
@@ -6711,7 +6893,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             markRefreshSuccess()
             noteApiSuccess(clearRefreshFailures = false)
             state = refreshConnectionHealthState(state)
-            if (reason == "feed_pull" || reason == "feed_auto" || forceFeedReload) {
+            if (reason == "feed_pull" || reason == "feed_auto" || reason == "feed_push" || forceFeedReload) {
                 val durationMs = System.currentTimeMillis() - now
                 repo.logDebug(
                     type = "feed_refresh",
@@ -6726,8 +6908,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     type = "feed_refresh_result",
                     message = if (restoreFailureReason.isNotBlank()) "feed refresh finished with restore failure" else "feed refresh finished",
                     meta = "result=${when {
+                        restoreFailureReason.isNotBlank() && (reason == "feed_pull" || reason == "feed_push") -> "visible_fetch_restore_failed"
                         restoreFailureReason.isNotBlank() -> "restore_failed"
+                        refreshedFeedDays > 0 && (reason == "feed_pull" || reason == "feed_push") -> "visible_fetch"
                         refreshedFeedDays > 0 -> "fetched_window"
+                        reason == "feed_pull" || reason == "feed_push" -> "visible_fetch_noop"
                         else -> "noop_skipped"
                     }};reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};restoreFailureReason=${restoreFailureReason.ifBlank { "-" }};restoreFailureAnchor=${restoreFailureAnchor.ifBlank { "-" }}"
                 )
@@ -6822,9 +7007,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         meta = "reason=$reason;priority=manual;forced=true;refreshFeedWindow=true;showLoading=false"
                     )
                     logFeedDecision(
+                        type = "visible_fetch",
+                        message = "visible feed fetch deferred",
+                        meta = "reason=$reason;priority=manual;forced=true;refreshFeedWindow=true;mergedIntoRunningFeedRefresh=true"
+                    )
+                    logFeedDecision(
                         type = "feed_refresh_result",
                         message = "feed refresh deferred",
-                        meta = "result=deferred;reason=$reason;priority=manual;forced=true;mergedIntoRunningFeedRefresh=true"
+                        meta = "result=visible_fetch_deferred;reason=$reason;priority=manual;forced=true;mergedIntoRunningFeedRefresh=true"
                     )
                 }
             } else {
@@ -6838,7 +7028,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         val now = System.currentTimeMillis()
         val isManual = reason == "feed_pull"
-        val requiresHardReload = isManual || reason.startsWith("photo_") || reason == "comment_submit"
+        val requiresHardReload = isManual || reason == "feed_push" || reason.startsWith("photo_") || reason == "comment_submit"
         if (isManual && isNetworkFailureClass(lastRefreshFailureClass) && now - lastManualRefreshAtMs < manualRefreshDuringNetworkFailureMinIntervalMs) {
             val waitMs = manualRefreshDuringNetworkFailureMinIntervalMs - (now - lastManualRefreshAtMs)
             repo.logDebug(
@@ -7138,6 +7328,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val day = dayPayload.day ?: return@forEach
             dayPayload.items.forEach(::reconcilePendingFeedMutation)
             cacheMap[day] = dayPayload.items.map(::applyPendingFeedMutation)
+            staleFeedPhotoIds.removeAll(dayPayload.items.map { it.photo.id }.toSet())
             promptMap[day] = PromptMeta(
                 day = day,
                 triggeredAt = dayPayload.triggeredAt,
@@ -7611,6 +7802,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     suspend fun loadPhotoInteractions(photoId: Long) {
         if (photoId <= 0) return
+        if (activePhotoInteractionsLoadPhotoId == photoId) {
+            logFeedDecision(
+                type = "interactions_reload_skipped",
+                message = "photo interactions reload skipped",
+                meta = "photoId=$photoId;reason=already_loading"
+            )
+            return
+        }
+        activePhotoInteractionsLoadPhotoId = photoId
         state = state.copy(interactionsLoading = true)
         runCatching { repo.photoInteractions(photoId) }
             .onSuccess {
@@ -7623,8 +7823,33 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     )
                 }
                 state = state.copy(interactionsLoading = false, photoInteractions = it)
+                logFeedDecision(
+                    type = "interactions_reloaded",
+                    message = "photo interactions reloaded",
+                    meta = "photoId=$photoId;comments=${it.comments.size};reactions=${it.reactions.size};photoMojis=${it.photoMojis.size}"
+                )
             }
             .onFailure { state = state.copy(interactionsLoading = false, message = apiError(it, "Interaktionen laden fehlgeschlagen")) }
+        activePhotoInteractionsLoadPhotoId = null
+    }
+
+    private suspend fun reloadPhotoInteractionsIfVisible(photoId: Long, reason: String) {
+        if (photoId <= 0) return
+        if (state.photoInteractions?.photoId != photoId) return
+        if (activePhotoInteractionsLoadPhotoId == photoId) {
+            logFeedDecision(
+                type = "interactions_reload_skipped",
+                message = "photo interactions reload skipped",
+                meta = "photoId=$photoId;reason=already_loading;trigger=$reason"
+            )
+            return
+        }
+        logFeedDecision(
+            type = "interactions_reload_requested",
+            message = "photo interactions reload requested",
+            meta = "photoId=$photoId;trigger=$reason"
+        )
+        loadPhotoInteractions(photoId)
     }
 
     suspend fun reactPhoto(photoId: Long, emoji: String) {
