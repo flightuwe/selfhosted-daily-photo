@@ -1816,6 +1816,14 @@ class AppRepo(
         return runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }.getOrDefault(0L)
     }
 
+    private fun currentSessionDebugRows(source: List<DebugLogEntry>): List<DebugLogEntry> {
+        if (source.isEmpty()) return source
+        val sessionStartIdx = source.indexOfLast { row ->
+            row.type == "perf_event" && row.meta.contains("event=app_start")
+        }
+        return if (sessionStartIdx >= 0) source.drop(sessionStartIdx) else source
+    }
+
     private fun appendAggregateFields(meta: String, entry: DebugLogEntry): String {
         val clean = meta.trim()
         val aggregatePart = "aggregateCount=${entry.aggregateCount};firstSeenAt=${entry.firstSeenAt};lastSeenAt=${entry.lastSeenAt}"
@@ -1971,7 +1979,8 @@ class AppRepo(
     fun exportDebugLogsForShare(): Uri {
         val exportDir = File(context.cacheDir, "diagnostics").apply { mkdirs() }
         val file = File(exportDir, "daily-diagnose-${System.currentTimeMillis()}.txt")
-        val rows = recentDebugLogs(300).reversed()
+        val allRows = recentDebugLogs(400).reversed()
+        val rows = currentSessionDebugRows(allRows)
         val families = linkedMapOf(
             "dns" to 0,
             "no_active_network" to 0,
@@ -2002,6 +2011,8 @@ class AppRepo(
             appendLine("Feed debug: ${feedDebugEnabled()}")
             appendLine("Notification debug: ${notificationDebugEnabled()}")
             appendLine("Diagnostics upload: ${diagnosticsUploadEnabled()}")
+            appendLine("Session rows: ${rows.size}")
+            appendLine("Total rows kept locally: ${allRows.size}")
             appendLine("")
             appendLine("Zusammenfassung")
             appendLine("- DNS-Fehler: ${families["dns"] ?: 0}x")
@@ -4184,6 +4195,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             !anchor.day.isNullOrBlank() && state.feedDays.isNotEmpty() && !hasPendingFeedNavigation()
         }
 
+    private fun effectiveRefreshViewportAnchor(): FeedViewportAnchor? {
+        val direct = currentRefreshViewportAnchor()
+        if (direct != null) return direct
+        if (state.activeTab != AppTab.FEED) return null
+        val anchor = state.feedViewportAnchor
+        if (anchor.day.isNullOrBlank() || state.feedDays.isEmpty()) return null
+        return anchor.takeIf { state.feedDays.contains(it.day) || state.calendarDays.contains(it.day) }
+    }
+
     private fun describeAnchor(anchor: FeedViewportAnchor?): String {
         if (anchor == null) return "-"
         return buildString {
@@ -4290,7 +4310,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(
             feedFocusDay = null,
             feedFocusPhotoId = null,
-            feedFocusBoundary = null
+            feedFocusBoundary = null,
+            feedScrollRequestId = 0L
         )
     }
 
@@ -5842,13 +5863,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure {
                 state = state.copy(message = apiError(it, "Feed-Sprung fehlgeschlagen"))
             }
-        state = state.copy(
-            activeTab = AppTab.FEED,
-            feedFocusDay = day,
-            feedFocusPhotoId = null,
-            feedFocusBoundary = FeedJumpBoundary.START,
-            feedScrollRequestId = scrollRequestId
-        )
     }
 
     suspend fun jumpToPhoto(day: String, photoId: Long) {
@@ -5865,13 +5879,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure {
                 state = state.copy(message = apiError(it, "Beitrag laden fehlgeschlagen"))
             }
-        state = state.copy(
-            activeTab = AppTab.FEED,
-            feedFocusDay = day,
-            feedFocusPhotoId = photoId,
-            feedFocusBoundary = null,
-            feedScrollRequestId = scrollRequestId
-        )
     }
 
     suspend fun jumpToDayBoundary(day: String, boundary: FeedJumpBoundary) {
@@ -5888,13 +5895,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             .onFailure {
                 state = state.copy(message = apiError(it, "Feed-Sprung fehlgeschlagen"))
             }
-        state = state.copy(
-            activeTab = AppTab.FEED,
-            feedFocusDay = day,
-            feedFocusPhotoId = null,
-            feedFocusBoundary = boundary,
-            feedScrollRequestId = scrollRequestId
-        )
     }
 
     private fun clearHiddenNewerContentIfReached(day: String?) {
@@ -6072,7 +6072,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             return false
         }
         lastRefreshAllStartedAt = now
-        val viewportAnchorBeforeRefresh = currentRefreshViewportAnchor()
+        val viewportAnchorBeforeRefresh = effectiveRefreshViewportAnchor()
         if (showLoading) {
             state = state.copy(loading = true, communityStatsLoading = true)
         } else {
@@ -6360,7 +6360,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             applyPendingLaunchNavigation(prompt, calendarDays)
             maybeShowProfileSetupPrompt(me)
             if (refreshFeedWindow) {
-                val viewportAnchor = state.feedViewportAnchor
+                val viewportAnchor = viewportAnchorBeforeRefresh ?: state.feedViewportAnchor
                 val focus = state.feedFocusDay.takeIf { hasPendingFeedNavigation() }
                 val preferredAnchor = when {
                     !viewportAnchor.day.isNullOrBlank() && calendarDays.contains(viewportAnchor.day) -> viewportAnchor.day
@@ -6369,8 +6369,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 }
                 val preserveVisibleWindow = viewportAnchorBeforeRefresh != null &&
                     state.feedDays.isNotEmpty() &&
-                    state.feedDays.contains(preferredAnchor) &&
-                    !hasPendingFeedNavigation()
+                    state.feedDays.contains(preferredAnchor)
                 val newestCalendarDay = calendarDays.firstOrNull()
                 val loadedNewestDay = state.feedDays.firstOrNull()
                 if (!newestCalendarDay.isNullOrBlank() && !loadedNewestDay.isNullOrBlank() && compareDayStrings(newestCalendarDay, loadedNewestDay) > 0) {
@@ -6433,7 +6432,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 if (partialRefreshDays > 0) {
                     refreshedFeedDays += partialRefreshDays
                 }
-                if (viewportAnchorBeforeRefresh != null && refreshedFeedDays > 0 && !hasPendingFeedNavigation()) {
+                if (viewportAnchorBeforeRefresh != null && refreshedFeedDays > 0) {
                     requestFeedViewportRestore(viewportAnchorBeforeRefresh)
                 }
             } else {

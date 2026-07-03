@@ -8,6 +8,8 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -132,6 +134,7 @@ class PushMessagingService : FirebaseMessagingService() {
                 meta = "trackedIds=${if (ids.isEmpty()) "-" else ids.joinToString(",")};usedCancelAll=$usedCancelAll;after=$afterSnapshot"
             )
             prefs.edit().remove(PUSH_NOTIFICATION_IDS_KEY).apply()
+            postClearVerification(context, reason, usedCancelAll)
         }
 
         fun clearAllNotifications(context: Context, reason: String = "unknown_cancel_all") {
@@ -144,6 +147,7 @@ class PushMessagingService : FirebaseMessagingService() {
                 message = reason,
                 meta = "before=$beforeSnapshot;after=${PushNotificationDiagnostics.activeNotificationsSnapshot(context)}"
             )
+            postClearVerification(context, reason, usedCancelAll = true)
         }
 
         fun showDebugTrackedNotificationBurst(context: Context) {
@@ -363,6 +367,29 @@ class PushMessagingService : FirebaseMessagingService() {
             val uriRaw = prefs.getString(PREF_CUSTOM_TONE_URI, "").orEmpty().trim()
             val uri = if (enabled && uriRaw.isNotBlank()) runCatching { Uri.parse(uriRaw) }.getOrNull() else null
             return ToneConfig(enabled, uri)
+        }
+
+        private fun postClearVerification(context: Context, reason: String, usedCancelAll: Boolean) {
+            Handler(Looper.getMainLooper()).postDelayed({
+                val notifications = NotificationManagerCompat.from(context)
+                val remaining = PushNotificationDiagnostics.activeNotifications(context)
+                if (remaining.isNotEmpty()) {
+                    remaining.forEach { item ->
+                        if (item.tag.isNotBlank() && item.tag != "-") {
+                            notifications.cancel(item.tag, item.id)
+                        } else {
+                            notifications.cancel(item.id)
+                        }
+                    }
+                    notifications.cancelAll()
+                }
+                PushNotificationDiagnostics.recordEvent(
+                    context,
+                    type = "push_clear_verification",
+                    message = reason,
+                    meta = "usedCancelAll=$usedCancelAll;remainingAfterRetry=${PushNotificationDiagnostics.activeNotificationsSnapshot(context)}"
+                )
+            }, 350L)
         }
 
         private fun isBlockedByQuietHours(type: String, prefs: android.content.SharedPreferences): Boolean {
