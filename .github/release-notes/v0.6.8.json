@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.8",
+  "title": "Feed-Stabilisierung und neues Debug-Setup",
+  "items": [
+    "Der Feed reagiert jetzt robuster auf neue Beitraege und Push-getriebene Aenderungen, ohne dass die App neu gestartet werden muss.",
+    "Auto-Aktualisierungen halten die aktuelle Feed-Position stabiler und vermeiden Spruenge nach oben, wenn du weiter unten im Feed bist.",
+    "Daily hat jetzt einen separaten Feed-Debugmodus mit detaillierter Analyse fuer Anchor-, Viewport-, Refresh- und Restore-Verhalten.",
+    "Der Bereich Debug und Diagnose wurde vereinfacht: klarere Schalter, ein globaler Debug-Modus und ein kompakteres Notification-Debug mit Testmatrix und Export."
+  ]
+}

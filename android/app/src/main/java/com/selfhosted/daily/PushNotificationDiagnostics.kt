@@ -102,8 +102,12 @@ object PushNotificationDiagnostics {
     private const val MAX_LAUNCHES = 40
     private const val MAX_PAYLOADS = 40
 
+    private fun debugMasterEnabled(context: Context): Boolean =
+        context.getSharedPreferences(APP_PREFS, Context.MODE_PRIVATE).getBoolean(DEBUG_MASTER_ENABLED_KEY, false)
+
     fun isEnabled(context: Context): Boolean {
         val prefs = context.getSharedPreferences(APP_PREFS, Context.MODE_PRIVATE)
+        if (!debugMasterEnabled(context)) return false
         val enabled = prefs.getBoolean(MODE_ENABLED_KEY, false)
         if (!enabled) return false
         val expiresAt = prefs.getString(MODE_EXPIRES_AT_KEY, "").orEmpty().trim()
@@ -119,6 +123,10 @@ object PushNotificationDiagnostics {
 
     fun setEnabled(context: Context, enabled: Boolean, durationHours: Long = 24L) {
         val prefs = context.getSharedPreferences(APP_PREFS, Context.MODE_PRIVATE)
+        if (enabled && !debugMasterEnabled(context)) {
+            appendGeneralDebugLog(context, "push_debug_mode", "blocked", "reason=debug_master_disabled")
+            return
+        }
         if (!enabled) {
             prefs.edit()
                 .putBoolean(MODE_ENABLED_KEY, false)

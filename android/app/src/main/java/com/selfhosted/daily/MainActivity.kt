@@ -253,6 +253,52 @@ const val EXTRA_LAUNCH_ACTION = "daily_launch_action"
 const val EXTRA_LAUNCH_TYPE = "daily_launch_type"
 const val EXTRA_LAUNCH_DAY = "daily_launch_day"
 const val EXTRA_LAUNCH_PHOTO_ID = "daily_launch_photo_id"
+const val DEBUG_MASTER_ENABLED_KEY = "debug_master_enabled_v1"
+const val FEED_DEBUG_ENABLED_KEY = "feed_debug_enabled_v1"
+const val PENDING_FEED_INVALIDATIONS_KEY = "pending_feed_invalidations_v1"
+
+fun queuePendingFeedInvalidation(
+    context: Context,
+    day: String,
+    photoId: Long? = null,
+    reason: String = "",
+    source: String = ""
+) {
+    val cleanDay = day.trim()
+    if (cleanDay.isBlank()) return
+    val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
+    val current = runCatching {
+        JSONArray(prefs.getString(PENDING_FEED_INVALIDATIONS_KEY, "").orEmpty())
+    }.getOrDefault(JSONArray())
+    current.put(
+        JSONObject().apply {
+            put("day", cleanDay)
+            put("photoId", photoId ?: 0L)
+            put("reason", reason.trim().take(64))
+            put("source", source.trim().take(64))
+            put("createdAt", OffsetDateTime.now().toString())
+        }
+    )
+    val trimmed = JSONArray()
+    val start = (current.length() - 40).coerceAtLeast(0)
+    for (i in start until current.length()) {
+        trimmed.put(current.opt(i))
+    }
+    prefs.edit().putString(PENDING_FEED_INVALIDATIONS_KEY, trimmed.toString()).apply()
+}
+
+fun isFeedRelatedPush(action: String, type: String, day: String, photoId: String): Boolean {
+    val normalizedAction = action.trim().lowercase()
+    val normalizedType = type.trim().lowercase()
+    return normalizedAction == "open_feed" ||
+        normalizedType == "feed_post" ||
+        normalizedType == "post" ||
+        normalizedType == "extra_post" ||
+        normalizedType.startsWith("photo_") ||
+        normalizedType.startsWith("bookmarked_photo_") ||
+        day.isNotBlank() ||
+        photoId.isNotBlank()
+}
 
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 enum class AuthMode { LOGIN, REGISTER }
@@ -677,7 +723,12 @@ data class FeedViewportAnchor(
     val day: String? = null,
     val photoId: Long? = null,
     val rowOffsetPx: Int = 0,
-    val kind: FeedViewportAnchorKind = FeedViewportAnchorKind.DAY_HEADER
+    val kind: FeedViewportAnchorKind = FeedViewportAnchorKind.DAY_HEADER,
+    val rowIndex: Int = -1,
+    val firstVisibleIndex: Int = -1,
+    val lastVisibleIndex: Int = -1,
+    val rowsSize: Int = 0,
+    val presentInRows: Boolean = false
 )
 
 data class PendingFeedMutation(
@@ -1431,6 +1482,9 @@ class AppRepo(
     private val debugLogsPrefKey = "debug_logs_v1"
     private val debugUploadEnabledKey = "debug_upload_enabled"
     private val debugLastUploadAtKey = "debug_last_upload_at"
+    private val debugMasterEnabledKey = DEBUG_MASTER_ENABLED_KEY
+    private val feedDebugEnabledKey = FEED_DEBUG_ENABLED_KEY
+    private val pendingFeedInvalidationsKey = PENDING_FEED_INVALIDATIONS_KEY
     private val diagnosticsSecurityAdviceLastShownAtKey = "diagnostics_security_advice_last_shown_at"
     private val diagnosticsConsentLocalKey = "diagnostics_consent_local"
     private val diagnosticsConsentPendingKey = "diagnostics_consent_pending"
@@ -1639,6 +1693,18 @@ class AppRepo(
 
     fun diagnosticsUploadEnabled(): Boolean = prefs.getBoolean(debugUploadEnabledKey, false)
 
+    fun debugMasterEnabled(): Boolean = prefs.getBoolean(debugMasterEnabledKey, false)
+
+    fun setDebugMasterEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(debugMasterEnabledKey, enabled).apply()
+    }
+
+    fun feedDebugEnabled(): Boolean = debugMasterEnabled() && prefs.getBoolean(feedDebugEnabledKey, false)
+
+    fun setFeedDebugEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(feedDebugEnabledKey, enabled).apply()
+    }
+
     fun diagnosticsConsentGrantedLocal(): Boolean = prefs.getBoolean(diagnosticsConsentLocalKey, false)
 
     fun setDiagnosticsConsentLocal(granted: Boolean) {
@@ -1670,6 +1736,36 @@ class AppRepo(
 
     fun setDiagnosticsUploadEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(debugUploadEnabledKey, enabled).apply()
+    }
+
+    fun queueFeedInvalidation(
+        day: String,
+        photoId: Long? = null,
+        reason: String = "",
+        source: String = ""
+    ) {
+        queuePendingFeedInvalidation(context, day, photoId, reason, source)
+    }
+
+    fun consumePendingFeedInvalidations(): List<PendingLaunch> {
+        val raw = prefs.getString(pendingFeedInvalidationsKey, "").orEmpty()
+        prefs.edit().remove(pendingFeedInvalidationsKey).apply()
+        if (raw.isBlank()) return emptyList()
+        val arr = runCatching { JSONArray(raw) }.getOrElse { JSONArray() }
+        val out = mutableListOf<PendingLaunch>()
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val day = obj.optString("day", "").trim()
+            if (day.isBlank()) continue
+            val photoId = obj.optLong("photoId", 0L).takeIf { it > 0L }
+            out += PendingLaunch(
+                action = obj.optString("source", ""),
+                type = obj.optString("reason", ""),
+                targetDay = day,
+                targetPhotoId = photoId
+            )
+        }
+        return out
     }
 
     fun diagnosticsSessionId(): String {
@@ -1770,6 +1866,16 @@ class AppRepo(
 
     fun recentDebugLogs(limit: Int = 80): List<DebugLogEntry> =
         readDebugLogsInternal().takeLast(limit).reversed()
+
+    fun logDetailedDebug(type: String, message: String, meta: String = "") {
+        if (!debugMasterEnabled()) return
+        logDebug(type, message, meta)
+    }
+
+    fun logFeedDebug(type: String, message: String, meta: String = "") {
+        if (!feedDebugEnabled()) return
+        logDebug(type, message, meta)
+    }
 
     fun logDebug(type: String, message: String, meta: String = "") {
         val cleanType = type.trim().ifBlank { "unknown" }.take(32)
@@ -1892,6 +1998,10 @@ class AppRepo(
             appendLine("Generated: ${OffsetDateTime.now()}")
             appendLine("App version: ${BuildConfig.VERSION_NAME}")
             appendLine("Device: ${currentDeviceName()}")
+            appendLine("Debug master: ${debugMasterEnabled()}")
+            appendLine("Feed debug: ${feedDebugEnabled()}")
+            appendLine("Notification debug: ${notificationDebugEnabled()}")
+            appendLine("Diagnostics upload: ${diagnosticsUploadEnabled()}")
             appendLine("")
             appendLine("Zusammenfassung")
             appendLine("- DNS-Fehler: ${families["dns"] ?: 0}x")
@@ -3774,6 +3884,8 @@ data class UiState(
     val networkSnapshot: String = "activeNetwork=false;capabilities=false;reason=not_checked",
     val customNotificationToneEnabled: Boolean = false,
     val customNotificationToneUri: String = "",
+    val debugMasterEnabled: Boolean = false,
+    val feedDebugEnabled: Boolean = false,
     val diagnosticsUploadEnabled: Boolean = false,
     val diagnosticsConsentGranted: Boolean = false,
     val diagnosticsConsentUpdatedAt: String? = null,
@@ -3786,6 +3898,8 @@ data class UiState(
     val notificationDebugLaunches: List<NotificationDebugLaunch> = emptyList(),
     val notificationDebugPayloads: List<NotificationDebugPayload> = emptyList(),
     val notificationDebugActiveItems: List<NotificationDebugActiveItem> = emptyList(),
+    val feedHasHiddenNewerContent: Boolean = false,
+    val feedHiddenNewerAnchorDay: String? = null,
     val notificationDebugEnvironment: NotificationDebugEnvironment = NotificationDebugEnvironment(
         notificationsEnabled = true,
         postPermissionGranted = true,
@@ -3911,6 +4025,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var calendarStatsLoadedPrefix = 0
     private var calendarStatsLoading = false
     private val staleFeedDays = mutableSetOf<String>()
+    private var lastFeedAnchorDebugSignature = ""
+    private var lastFeedJumpAnchorBefore: FeedViewportAnchor? = null
     private val profileSectionIds = listOf(
         "display",
         "yolo_mode",
@@ -3989,6 +4105,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
+            debugMasterEnabled = repo.debugMasterEnabled(),
+            feedDebugEnabled = repo.feedDebugEnabled(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
             diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
             activeApiBaseUrl = repo.resolvedApiBaseUrl(),
@@ -4066,6 +4184,29 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             !anchor.day.isNullOrBlank() && state.feedDays.isNotEmpty() && !hasPendingFeedNavigation()
         }
 
+    private fun describeAnchor(anchor: FeedViewportAnchor?): String {
+        if (anchor == null) return "-"
+        return buildString {
+            append("day=").append(anchor.day ?: "-")
+            append(",photoId=").append(anchor.photoId ?: -1L)
+            append(",kind=").append(anchor.kind.name.lowercase())
+            append(",rowIndex=").append(anchor.rowIndex)
+            append(",offsetPx=").append(anchor.rowOffsetPx)
+            append(",firstVisible=").append(anchor.firstVisibleIndex)
+            append(",lastVisible=").append(anchor.lastVisibleIndex)
+            append(",rowsSize=").append(anchor.rowsSize)
+            append(",present=").append(anchor.presentInRows)
+        }
+    }
+
+    private fun logFeedDecision(
+        type: String,
+        message: String,
+        meta: String
+    ) {
+        repo.logFeedDebug(type, message, "$meta;orderMode=${state.feedOrderMode.name.lowercase()};feedDays=${state.feedDays.joinToString(",").ifBlank { "-" }};calendarDaysPrefix=${state.calendarDays.take(8).joinToString(",").ifBlank { "-" }};focusDay=${state.feedFocusDay ?: "-"};focusPhotoId=${state.feedFocusPhotoId ?: -1L};feedWindowReloadInFlight=${state.feedWindowReloadInFlight};paging=${state.feedPaging};networkSnapshot=${state.networkSnapshot}")
+    }
+
     fun updateFeedViewportAnchor(anchor: FeedViewportAnchor) {
         val normalizedDay = anchor.day?.takeIf { it.isNotBlank() }
         val normalized = anchor.copy(day = normalizedDay, rowOffsetPx = anchor.rowOffsetPx.coerceAtLeast(0))
@@ -4074,14 +4215,29 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 feedViewportAnchor = normalized,
                 feedVisibleAnchorDay = normalized.day
             )
+            val signature = "${normalized.day}|${normalized.photoId}|${normalized.kind}|${normalized.rowIndex}|${normalized.firstVisibleIndex}|${normalized.lastVisibleIndex}|${normalized.rowsSize}|${normalized.presentInRows}"
+            if (signature != lastFeedAnchorDebugSignature) {
+                lastFeedAnchorDebugSignature = signature
+                logFeedDecision(
+                    type = "feed_viewport_anchor_changed",
+                    message = "viewport anchor updated",
+                    meta = "anchor=${describeAnchor(normalized)}"
+                )
+            }
         }
     }
 
     private fun requestFeedViewportRestore(anchor: FeedViewportAnchor) {
         if (anchor.day.isNullOrBlank() && anchor.photoId == null) return
+        lastFeedJumpAnchorBefore = anchor
         state = state.copy(
             feedViewportRestoreAnchor = anchor,
             feedViewportRestoreRequestId = issueFeedScrollRequestId()
+        )
+        logFeedDecision(
+            type = "feed_viewport_restore_requested",
+            message = "viewport restore requested",
+            meta = "anchor=${describeAnchor(anchor)}"
         )
     }
 
@@ -4089,6 +4245,44 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (state.feedViewportRestoreRequestId != 0L) {
             state = state.copy(feedViewportRestoreRequestId = 0L)
         }
+    }
+
+    fun reportFeedViewportRestoreResult(
+        requested: FeedViewportAnchor,
+        resolved: FeedViewportAnchor?,
+        failureReason: String = ""
+    ) {
+        if (resolved == null) {
+            logFeedDecision(
+                type = "feed_viewport_restore_failed",
+                message = "viewport restore failed",
+                meta = "requestedAnchor=${describeAnchor(requested)};failureReason=${failureReason.ifBlank { "anchor_not_found" }};rowsSize=${state.feedViewportAnchor.rowsSize}"
+            )
+            logFeedDecision(
+                type = "feed_refresh_result",
+                message = "feed restore failed",
+                meta = "result=restore_failed;requestedAnchor=${describeAnchor(requested)};failureReason=${failureReason.ifBlank { "anchor_not_found" }}"
+            )
+            return
+        }
+        logFeedDecision(
+            type = "feed_viewport_restore_applied",
+            message = "viewport restore applied",
+            meta = "requestedAnchor=${describeAnchor(requested)};resolvedRowIndex=${resolved.rowIndex};resolvedRowType=${resolved.kind.name.lowercase()};resolvedDay=${resolved.day ?: "-"};resolvedPhotoId=${resolved.photoId ?: -1L};offsetPx=${resolved.rowOffsetPx}"
+        )
+        val before = lastFeedJumpAnchorBefore
+        if (before != null && before.day != null && resolved.day != null) {
+            val rowDistance = if (before.rowIndex >= 0 && resolved.rowIndex >= 0) abs(before.rowIndex - resolved.rowIndex) else 0
+            val dayDistance = abs(compareDayStrings(before.day, resolved.day))
+            if (before.day != resolved.day || rowDistance > 6) {
+                logFeedDecision(
+                    type = "feed_jump_detected",
+                    message = "feed viewport moved during restore",
+                    meta = "beforeAnchor=${describeAnchor(before)};afterAnchor=${describeAnchor(resolved)};beforeFirstVisible=${before.firstVisibleIndex};afterFirstVisible=${resolved.firstVisibleIndex};jumpDistanceRows=$rowDistance;jumpDistanceDays=$dayDistance;trigger=viewport_restore"
+                )
+            }
+        }
+        lastFeedJumpAnchorBefore = null
     }
 
     fun consumeFeedScrollRequest() {
@@ -5002,6 +5196,35 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    fun setDebugMasterEnabled(enabled: Boolean) {
+        repo.setDebugMasterEnabled(enabled)
+        if (!enabled) {
+            repo.setFeedDebugEnabled(false)
+            repo.setNotificationDebugEnabled(false)
+        }
+        state = withNotificationDebugState(
+            state.copy(
+                debugMasterEnabled = enabled,
+                feedDebugEnabled = if (enabled) state.feedDebugEnabled else false,
+                debugLogs = repo.recentDebugLogs(),
+                message = if (enabled) "Debug-Modus aktiviert" else "Debug-Modus deaktiviert"
+            )
+        )
+    }
+
+    fun setFeedDebugEnabled(enabled: Boolean) {
+        if (enabled && !state.debugMasterEnabled) {
+            state = state.copy(message = "Bitte zuerst den Debug-Modus aktivieren.")
+            return
+        }
+        repo.setFeedDebugEnabled(enabled)
+        state = state.copy(
+            feedDebugEnabled = repo.feedDebugEnabled(),
+            debugLogs = repo.recentDebugLogs(),
+            message = if (enabled) "Feed-Debug aktiviert" else "Feed-Debug deaktiviert"
+        )
+    }
+
     fun setDiagnosticsConsentGranted(granted: Boolean, source: String = "profile_toggle") {
         repo.setDiagnosticsConsentLocal(granted)
         if (!granted) {
@@ -5048,7 +5271,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun refreshDebugLogs() {
-        state = withNotificationDebugState(state.copy(debugLogs = repo.recentDebugLogs()))
+        state = withNotificationDebugState(state.copy(
+            debugMasterEnabled = repo.debugMasterEnabled(),
+            feedDebugEnabled = repo.feedDebugEnabled(),
+            debugLogs = repo.recentDebugLogs()
+        ))
     }
 
     fun postDebugNotificationBurst() {
@@ -5068,12 +5295,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun setNotificationDebugEnabled(enabled: Boolean) {
+        if (enabled && !state.debugMasterEnabled) {
+            state = state.copy(message = "Bitte zuerst den Debug-Modus aktivieren.")
+            return
+        }
         repo.setNotificationDebugEnabled(enabled)
         if (enabled) {
             repo.refreshNotificationDebugEnvironment("ui_toggle_enabled")
         }
         state = withNotificationDebugState(
             state.copy(
+                debugMasterEnabled = repo.debugMasterEnabled(),
+                feedDebugEnabled = repo.feedDebugEnabled(),
                 debugLogs = repo.recentDebugLogs(),
                 message = if (enabled) "Notification-Debugmodus aktiviert" else "Notification-Debugmodus deaktiviert"
             )
@@ -5096,6 +5329,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             state.copy(
                 debugLogs = repo.recentDebugLogs(),
                 message = "Notification-Debug aktualisiert"
+            )
+        )
+    }
+
+    fun notificationDebugSnapshotAndReset() {
+        repo.refreshNotificationDebugEnvironment("ui_snapshot_and_reset")
+        repo.logNotificationDebugSnapshot("snapshot_and_reset")
+        repo.clearNotificationDebugData(keepMode = true)
+        state = withNotificationDebugState(
+            state.copy(
+                debugLogs = repo.recentDebugLogs(),
+                message = "Notification-Snapshot erfasst und Debugdaten geloescht"
             )
         )
     }
@@ -5584,6 +5829,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun jumpToDay(day: String) {
+        clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
         state = state.copy(
             activeTab = AppTab.FEED,
@@ -5606,6 +5852,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun jumpToPhoto(day: String, photoId: Long) {
+        clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
         state = state.copy(
             activeTab = AppTab.FEED,
@@ -5628,6 +5875,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun jumpToDayBoundary(day: String, boundary: FeedJumpBoundary) {
+        clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
         state = state.copy(
             activeTab = AppTab.FEED,
@@ -5649,6 +5897,113 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         )
     }
 
+    private fun clearHiddenNewerContentIfReached(day: String?) {
+        val targetDay = day?.trim().orEmpty()
+        if (targetDay.isBlank()) return
+        if (state.feedHiddenNewerAnchorDay == targetDay || targetDay == state.feedDays.firstOrNull()) {
+            state = state.copy(feedHasHiddenNewerContent = false, feedHiddenNewerAnchorDay = null)
+        }
+    }
+
+    private fun registerFeedInvalidation(
+        day: String,
+        photoId: Long? = null,
+        reason: String,
+        source: String,
+        scheduledRefresh: Boolean
+    ) {
+        val cleanDay = day.trim()
+        if (cleanDay.isBlank()) return
+        staleFeedDays.add(cleanDay)
+        repo.queueFeedInvalidation(cleanDay, photoId, reason = reason, source = source)
+        logFeedDecision(
+            type = "feed_push_invalidation",
+            message = "feed invalidation queued",
+            meta = "pushType=$reason;action=$source;targetDay=$cleanDay;targetPhotoId=${photoId ?: -1L};markedStale=true;scheduledRefresh=$scheduledRefresh;immediateRefreshEligible=${state.activeTab == AppTab.FEED && !state.feedRefreshing}"
+        )
+    }
+
+    private fun consumePersistedFeedInvalidations(reason: String) {
+        val pending = repo.consumePendingFeedInvalidations()
+        if (pending.isEmpty()) return
+        pending.forEach { item ->
+            val day = item.targetDay.trim()
+            if (day.isNotBlank()) {
+                staleFeedDays.add(day)
+                logFeedDecision(
+                    type = "feed_push_invalidation",
+                    message = "persisted feed invalidation consumed",
+                    meta = "pushType=${item.type.ifBlank { "-" }};action=${item.action.ifBlank { "-" }};targetDay=$day;targetPhotoId=${item.targetPhotoId ?: -1L};markedStale=true;scheduledRefresh=${reason == "feed_auto"};immediateRefreshEligible=${state.activeTab == AppTab.FEED && !state.feedRefreshing}"
+                )
+            }
+        }
+    }
+
+    private fun applyBackgroundFeedDay(day: String, result: DayFetchResult) {
+        val cacheMap = state.feedByDay.toMutableMap()
+        val promptMap = state.promptMetaByDay.toMutableMap()
+        val recapMap = state.monthRecapByDay.toMutableMap()
+        cacheMap[day] = result.items.map(::applyPendingFeedMutation)
+        promptMap[day] = result.meta
+        if (result.monthRecap != null) {
+            recapMap[day] = result.monthRecap
+        } else {
+            recapMap.remove(day)
+        }
+        val mergedKnownDays = mergeDayIndex(state.calendarDays, listOf(day))
+        val pruned = pruneFeedCaches(
+            feedByDay = cacheMap,
+            promptMetaByDay = promptMap,
+            monthRecapByDay = recapMap,
+            visibleDays = state.feedDays,
+            anchorDay = state.feedVisibleAnchorDay ?: day
+        )
+        val hiddenNewerDay = when {
+            state.feedDays.isEmpty() -> null
+            compareDayStrings(day, state.feedDays.first()) > 0 -> maxOf(day, state.feedHiddenNewerAnchorDay ?: day)
+            else -> state.feedHiddenNewerAnchorDay
+        }
+        state = state.copy(
+            calendarDays = mergedKnownDays,
+            feedByDay = pruned.feedByDay,
+            promptMetaByDay = pruned.promptMetaByDay,
+            monthRecapByDay = pruned.monthRecapByDay,
+            feedHasHiddenNewerContent = hiddenNewerDay != null,
+            feedHiddenNewerAnchorDay = hiddenNewerDay
+        )
+    }
+
+    private fun compareDayStrings(a: String?, b: String?): Int {
+        val av = a?.trim().orEmpty()
+        val bv = b?.trim().orEmpty()
+        return when {
+            av > bv -> 1
+            av < bv -> -1
+            else -> 0
+        }
+    }
+
+    private suspend fun refreshOffscreenStaleDays(trigger: String): Int {
+        val visibleSet = state.feedDays.toSet()
+        val hiddenDays = staleFeedDays.filter { it !in visibleSet }.distinct().sortedDescending()
+        if (hiddenDays.isEmpty()) return 0
+        var refreshed = 0
+        hiddenDays.take(2).forEach { day ->
+            val result = fetchDaySafe(day, forceReload = true)
+            applyBackgroundFeedDay(day, result)
+            staleFeedDays.remove(day)
+            refreshed += 1
+        }
+        if (refreshed > 0) {
+            logFeedDecision(
+                type = "feed_refresh_result",
+                message = "offscreen stale days refreshed",
+                meta = "result=fetched_partial;trigger=$trigger;refreshed=$refreshed;hiddenNewer=${state.feedHasHiddenNewerContent};hiddenAnchor=${state.feedHiddenNewerAnchorDay ?: "-"}"
+            )
+        }
+        return refreshed
+    }
+
     suspend fun refreshAll(
         reason: String = "general",
         forceFeedReload: Boolean = false,
@@ -5657,6 +6012,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         showLoading: Boolean = true,
         respectCircuitBreaker: Boolean = true
     ): Boolean {
+        consumePersistedFeedInvalidations(reason)
         if (repo.token().isBlank()) {
             lastRefreshExecutionDisposition = RefreshExecutionDisposition.NO_TOKEN
             return false
@@ -5693,6 +6049,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 message = "refresh queued behind active refresh",
                 meta = "reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload;refreshFeedWindow=$refreshFeedWindow;showLoading=$showLoading"
             )
+            logFeedDecision(
+                type = "feed_refresh_result",
+                message = "feed refresh deferred",
+                meta = "result=deferred;reason=$reason;priority=${priority.name.lowercase()};forced=$forceFeedReload"
+            )
             return false
         }
         if (!bypassCooldown && now - lastRefreshAllStartedAt < refreshAllCooldownMs) {
@@ -5702,6 +6063,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 type = "refresh_skipped",
                 message = "refresh cooldown active",
                 meta = "reason=$reason;cooldownMs=$refreshAllCooldownMs;elapsedSinceLastStartMs=${now - lastRefreshAllStartedAt}"
+            )
+            logFeedDecision(
+                type = "feed_refresh_result",
+                message = "feed refresh skipped by cooldown",
+                meta = "result=noop_skipped;reason=$reason;elapsedSinceLastStartMs=${now - lastRefreshAllStartedAt}"
             )
             return false
         }
@@ -5959,6 +6325,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 showPublicPostNumbers = repo.showPublicPostNumbers(),
                 preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
                 notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled, postChangePushEnabled),
+                debugMasterEnabled = repo.debugMasterEnabled(),
+                feedDebugEnabled = repo.feedDebugEnabled(),
                 diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && me.diagnosticsConsentGranted,
                 diagnosticsConsentGranted = me.diagnosticsConsentGranted,
                 diagnosticsConsentUpdatedAt = me.diagnosticsConsentUpdatedAt,
@@ -6003,6 +6371,32 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     state.feedDays.isNotEmpty() &&
                     state.feedDays.contains(preferredAnchor) &&
                     !hasPendingFeedNavigation()
+                val newestCalendarDay = calendarDays.firstOrNull()
+                val loadedNewestDay = state.feedDays.firstOrNull()
+                if (!newestCalendarDay.isNullOrBlank() && !loadedNewestDay.isNullOrBlank() && compareDayStrings(newestCalendarDay, loadedNewestDay) > 0) {
+                    staleFeedDays.add(newestCalendarDay)
+                }
+                val offscreenStaleDays = staleFeedDays.filter { it !in state.feedDays.toSet() }.distinct().sortedDescending()
+                val shouldFetchVisibleWindow = when {
+                    state.feedDays.isEmpty() -> true
+                    !state.feedDays.contains(preferredAnchor) -> true
+                    forceFeedReload -> true
+                    staleFeedDays.any { it in state.feedDays } -> true
+                    reason == "feed_auto" && state.activeTab == AppTab.FEED -> true
+                    else -> false
+                }
+                val replaceVisibleDays = state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor) || !preserveVisibleWindow
+                val showJumpLoading = state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor) || !preserveVisibleWindow
+                logFeedDecision(
+                    type = "feed_refresh_plan",
+                    message = "feed refresh planned",
+                    meta = "reason=$reason;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};preferredAnchor=$preferredAnchor;viewportAnchorBefore=${describeAnchor(viewportAnchorBeforeRefresh)};preserveVisibleWindow=$preserveVisibleWindow;replaceVisibleDays=$replaceVisibleDays;showJumpLoading=$showJumpLoading;offscreenStaleDays=${offscreenStaleDays.joinToString(",").ifBlank { "-" }};willFetch=$shouldFetchVisibleWindow"
+                )
+                logFeedDecision(
+                    type = "feed_auto_decision",
+                    message = if (shouldFetchVisibleWindow) "feed refresh will fetch" else "feed refresh may reuse cache",
+                    meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=$shouldFetchVisibleWindow;decisionReason=${if (shouldFetchVisibleWindow) "visible_window_refresh" else "cached_today_feed"}"
+                )
                 if (state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor)) {
                     refreshedFeedDays = loadFeedWindow(
                         anchorDay = preferredAnchor,
@@ -6012,7 +6406,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         showJumpLoading = true
                     )
                 } else {
-                    refreshedFeedDays = if (forceFeedReload || staleFeedDays.isNotEmpty()) {
+                    refreshedFeedDays = if (shouldFetchVisibleWindow) {
                         loadFeedWindow(
                             anchorDay = preferredAnchor,
                             around = 1,
@@ -6027,8 +6421,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                             feed = state.feedByDay[today].orEmpty(),
                             feedTodayLocked = !prompt.hasVisiblePostToday && !hasVisibleTodayFeed
                         )
+                        logFeedDecision(
+                            type = "feed_auto_decision",
+                            message = "feed refresh resolved to noop",
+                            meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=false;decisionReason=cached_today_feed"
+                        )
                         0
                     }
+                }
+                val partialRefreshDays = refreshOffscreenStaleDays(reason)
+                if (partialRefreshDays > 0) {
+                    refreshedFeedDays += partialRefreshDays
                 }
                 if (viewportAnchorBeforeRefresh != null && refreshedFeedDays > 0 && !hasPendingFeedNavigation()) {
                     requestFeedViewportRestore(viewportAnchorBeforeRefresh)
@@ -6053,8 +6456,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 val durationMs = System.currentTimeMillis() - now
                 repo.logDebug(
                     type = "feed_refresh",
-                    message = "feed refresh ok",
+                    message = "feed refresh ${if (refreshedFeedDays > 0) "ok" else "noop"}",
                     meta = "reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};windowDays=${state.feedDays.joinToString(",").ifBlank { "-" }}"
+                )
+                logFeedDecision(
+                    type = "feed_refresh_result",
+                    message = "feed refresh finished",
+                    meta = "result=${if (refreshedFeedDays > 0) "fetched_window" else "noop_skipped"};reason=$reason;forced=$forceFeedReload;daysReloaded=$refreshedFeedDays;durationMs=$durationMs;visibleAnchor=${state.feedVisibleAnchorDay ?: "-"}"
                 )
             }
         } catch (t: Throwable) {
@@ -6099,6 +6507,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 type = "feed_refresh_failed",
                 message = debugFailureMessage(actual),
                 meta = "reason=$reason;forced=$forceFeedReload;durationMs=$durationMs;failedCall=$failedCall;failureClass=$failureClass;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};backoffStage=$backoffStage;nextDelayMs=$delayMs;visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};root=${rootCause(actual)::class.java.simpleName};derivedFrom=${if (actual is IllegalStateException && actual.message == "missing_access_token") repo.authStateTransitionReason() else "-"}"
+            )
+            logFeedDecision(
+                type = "feed_refresh_result",
+                message = "feed refresh failed",
+                meta = "result=failed;reason=$reason;failedCall=$failedCall;failureClass=$failureClass;visibleAnchor=${state.feedVisibleAnchorDay ?: "-"}"
             )
         } finally {
             refreshAllMutex.unlock()
@@ -6453,6 +6866,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val finalPromptMeta = if (!postedToday) prunedCache.promptMetaByDay + (today to PromptMeta(day = today)) else prunedCache.promptMetaByDay
         val finalRecapMap = if (!postedToday) prunedCache.monthRecapByDay - today else prunedCache.monthRecapByDay
         val finalVisibleDays = if (!postedToday) visibleDays.filter { it != today } else visibleDays
+        val hiddenNewerCleared = state.feedHiddenNewerAnchorDay != null &&
+            (finalVisibleDays.contains(state.feedHiddenNewerAnchorDay) || finalVisibleDays.firstOrNull() == state.feedHiddenNewerAnchorDay)
         state = state.copy(
             calendarDays = mergedKnownDays,
             feedIndexHasOlder = state.feedIndexHasOlder || window.hasOlder,
@@ -6469,7 +6884,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             randomFeedSeed = if (window.randomSeed != 0L) window.randomSeed else state.randomFeedSeed,
             feedJumpLoadingDay = null,
             feedPaging = false,
-            feedWindowReloadInFlight = false
+            feedWindowReloadInFlight = false,
+            feedHasHiddenNewerContent = if (hiddenNewerCleared) false else state.feedHasHiddenNewerContent,
+            feedHiddenNewerAnchorDay = if (hiddenNewerCleared) null else state.feedHiddenNewerAnchorDay
+        )
+        val anchorPresentAfterApply = finalVisibleDays.contains(requestedAnchorDay) || finalVisibleDays.contains(window.anchorDay)
+        repo.logFeedDebug(
+            type = "feed_window_apply",
+            message = "feed window applied",
+            meta = "requestedAnchor=$requestedAnchorDay;resolvedAnchor=${window.anchorDay.ifBlank { requestedAnchorDay }};visibleBefore=${previousVisibleDays.joinToString(",").ifBlank { "-" }};visibleAfter=${finalVisibleDays.joinToString(",").ifBlank { "-" }};windowDays=${windowDays.joinToString(",").ifBlank { "-" }};replaceVisibleDays=$replaceVisibleDays;appendOlder=$appendOlder;anchorPresentAfterApply=$anchorPresentAfterApply;hiddenNewerCleared=$hiddenNewerCleared"
         )
         if (forceReload) {
             repo.logDebug(
@@ -8648,6 +9071,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     openCamera()
                     return
                 }
+                clearHiddenNewerContentIfReached(day)
                 state = state.copy(
                     activeTab = AppTab.FEED,
                     feedFocusDay = day,
@@ -9842,6 +10266,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     listState = feedListState,
                     refreshing = state.feedRefreshing,
                     todayLocked = state.feedTodayLocked,
+                    hasHiddenNewerContent = state.feedHasHiddenNewerContent,
+                    hiddenNewerAnchorDay = state.feedHiddenNewerAnchorDay,
                     paging = state.feedPaging,
                     feedWindowReloadInFlight = state.feedWindowReloadInFlight,
                     feedOrderMode = state.feedOrderMode,
@@ -9856,8 +10282,10 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onJumpToDay = { day -> scope.launch { vm.jumpToDay(day) } },
                     onJumpToBoundary = { day, boundary -> scope.launch { vm.jumpToDayBoundary(day, boundary) } },
                     onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
+                    onShowHiddenNewerContent = { day -> scope.launch { vm.jumpToDay(day) } },
                     onScrollRequestConsumed = vm::consumeFeedScrollRequest,
                     onViewportRestoreConsumed = vm::consumeFeedViewportRestore,
+                    onViewportRestoreResult = vm::reportFeedViewportRestoreResult,
                     onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
                     onToggleBookmark = { photoId, bookmarked -> scope.launch { vm.toggleBookmark(photoId, bookmarked) } },
                     onToggleMark = { photoId, marked -> scope.launch { vm.toggleMark(photoId, marked) } },
@@ -10001,6 +10429,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     showConnectionHealthIndicator = state.showConnectionHealthIndicator,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
+                    debugMasterEnabled = state.debugMasterEnabled,
+                    feedDebugEnabled = state.feedDebugEnabled,
                     diagnosticsUploadEnabled = state.diagnosticsUploadEnabled,
                     diagnosticsConsentGranted = state.diagnosticsConsentGranted,
                     debugLogs = state.debugLogs,
@@ -10070,6 +10500,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     },
                     onClearCustomNotificationTone = { vm.setCustomNotificationToneUri("") },
                     onTestCustomNotificationTone = { vm.testCustomNotificationTone() },
+                    onDebugMasterEnabledChange = { vm.setDebugMasterEnabled(it) },
+                    onFeedDebugEnabledChange = { vm.setFeedDebugEnabled(it) },
                     onDiagnosticsUploadEnabledChange = { vm.setDiagnosticsUploadEnabled(it) },
                     onDiagnosticsConsentChange = { vm.setDiagnosticsConsentGranted(it, "profile_toggle") },
                     onRefreshDebugLogs = { vm.refreshDebugLogs() },
@@ -10087,7 +10519,6 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         }
                     },
                     onNotificationDebugEnabledChange = { vm.setNotificationDebugEnabled(it) },
-                    onRefreshNotificationDebug = { vm.refreshNotificationDebugState() },
                     onExportNotificationDebug = {
                         val uri = vm.exportNotificationDebugBundle()
                         if (uri != null) {
@@ -10101,13 +10532,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                             context.startActivity(Intent.createChooser(share, "Notification-Diagnose teilen"))
                         }
                     },
-                    onClearNotificationDebugData = { vm.clearNotificationDebugData() },
-                    onPostDebugNotifications = { vm.postDebugNotificationBurst() },
-                    onCaptureNotificationSnapshot = { vm.captureNotificationDebugSnapshot() },
-                    onNotificationDebugScenario = { vm.postNotificationDebugScenario(it) },
-                    onClearTrackedNotificationsForDebug = { vm.clearTrackedNotificationsForDebug() },
-                    onClearAllNotificationsForDebug = { vm.clearAllNotificationsForDebug() },
-                    onClearTrackedAndAllNotificationsForDebug = { vm.clearTrackedAndAllNotificationsForDebug() },
+                    onNotificationDebugPushMatrix = { vm.postNotificationDebugScenario("mixed_matrix") },
+                    onNotificationDebugSnapshotAndReset = { vm.notificationDebugSnapshotAndReset() },
                     onRefreshFotomojiTemplates = { scope.launch { vm.refreshFotomojiTemplates() } },
                     onCaptureFotomojiTemplate = { emoji ->
                         pendingProfileFotomojiTemplateEmoji = emoji
@@ -10956,6 +11382,8 @@ fun FeedTab(
     listState: LazyListState,
     refreshing: Boolean,
     todayLocked: Boolean,
+    hasHiddenNewerContent: Boolean,
+    hiddenNewerAnchorDay: String?,
     paging: Boolean,
     feedWindowReloadInFlight: Boolean,
     feedOrderMode: FeedOrderMode,
@@ -10970,8 +11398,10 @@ fun FeedTab(
     onJumpToDay: (String) -> Unit,
     onJumpToBoundary: (String, FeedJumpBoundary) -> Unit,
     onJumpToCapsule: (day: String, photoId: Long) -> Unit,
+    onShowHiddenNewerContent: (String) -> Unit,
     onScrollRequestConsumed: () -> Unit,
     onViewportRestoreConsumed: () -> Unit,
+    onViewportRestoreResult: (FeedViewportAnchor, FeedViewportAnchor?, String) -> Unit,
     onOpenUserProfile: (Long) -> Unit,
     onToggleBookmark: (photoId: Long, bookmarked: Boolean) -> Unit,
     onToggleMark: (photoId: Long, marked: Boolean) -> Unit,
@@ -11013,27 +11443,47 @@ fun FeedTab(
         is FeedRow.LoadingItem -> row.day
         null -> null
     }
-    fun rowAnchorAt(index: Int, offsetPx: Int): FeedViewportAnchor? = when (val row = rows.getOrNull(index)) {
+    fun rowAnchorAt(index: Int, offsetPx: Int, firstVisibleIndex: Int = index, lastVisibleIndex: Int = index): FeedViewportAnchor? = when (val row = rows.getOrNull(index)) {
         is FeedRow.PhotoItem -> FeedViewportAnchor(
             day = row.day,
             photoId = row.item.photo.id,
             rowOffsetPx = offsetPx,
-            kind = FeedViewportAnchorKind.PHOTO
+            kind = FeedViewportAnchorKind.PHOTO,
+            rowIndex = index,
+            firstVisibleIndex = firstVisibleIndex,
+            lastVisibleIndex = lastVisibleIndex,
+            rowsSize = rows.size,
+            presentInRows = true
         )
         is FeedRow.DayHeader -> FeedViewportAnchor(
             day = row.day,
             rowOffsetPx = offsetPx,
-            kind = FeedViewportAnchorKind.DAY_HEADER
+            kind = FeedViewportAnchorKind.DAY_HEADER,
+            rowIndex = index,
+            firstVisibleIndex = firstVisibleIndex,
+            lastVisibleIndex = lastVisibleIndex,
+            rowsSize = rows.size,
+            presentInRows = true
         )
         is FeedRow.MonthRecapItem -> FeedViewportAnchor(
             day = row.day,
             rowOffsetPx = offsetPx,
-            kind = FeedViewportAnchorKind.RECAP
+            kind = FeedViewportAnchorKind.RECAP,
+            rowIndex = index,
+            firstVisibleIndex = firstVisibleIndex,
+            lastVisibleIndex = lastVisibleIndex,
+            rowsSize = rows.size,
+            presentInRows = true
         )
         is FeedRow.LoadingItem -> FeedViewportAnchor(
             day = row.day,
             rowOffsetPx = offsetPx,
-            kind = FeedViewportAnchorKind.LOADING
+            kind = FeedViewportAnchorKind.LOADING,
+            rowIndex = index,
+            firstVisibleIndex = firstVisibleIndex,
+            lastVisibleIndex = lastVisibleIndex,
+            rowsSize = rows.size,
+            presentInRows = true
         )
         null -> null
     }
@@ -11101,7 +11551,12 @@ fun FeedTab(
     val lastVisibleIndex by remember { derivedStateOf { visibleRange.value.second } }
     val currentViewportAnchor by remember(rows, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
         derivedStateOf {
-            rowAnchorAt(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+            rowAnchorAt(
+                index = listState.firstVisibleItemIndex,
+                offsetPx = listState.firstVisibleItemScrollOffset,
+                firstVisibleIndex = firstVisibleIndex,
+                lastVisibleIndex = lastVisibleIndex
+            )
         }
     }
     val newestKnownDay = remember(allKnownDays, days, prompt?.day) {
@@ -11161,6 +11616,18 @@ fun FeedTab(
         val idx = restoreRowIndex(viewportRestoreAnchor)
         if (idx >= 0) {
             listState.scrollToItem(idx, viewportRestoreAnchor.rowOffsetPx.coerceAtLeast(0))
+            onViewportRestoreResult(
+                viewportRestoreAnchor,
+                rowAnchorAt(
+                    index = idx,
+                    offsetPx = viewportRestoreAnchor.rowOffsetPx.coerceAtLeast(0),
+                    firstVisibleIndex = idx,
+                    lastVisibleIndex = idx
+                ),
+                ""
+            )
+        } else {
+            onViewportRestoreResult(viewportRestoreAnchor, null, "anchor_not_found")
         }
         handledViewportRestoreRequestId = viewportRestoreRequestId
         onViewportRestoreConsumed()
@@ -11236,6 +11703,32 @@ fun FeedTab(
                         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("Heutiger Feed ist gesperrt, bis du einen sichtbaren Beitrag gepostet hast.")
                             Button(onClick = onTakePhoto) { Text("Foto aufnehmen") }
+                        }
+                    }
+                }
+            }
+            if (hasHiddenNewerContent && !hiddenNewerAnchorDay.isNullOrBlank()) {
+                item("hidden-newer-feed") {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFD9F2E6))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("Neue Beitraege verfuegbar", fontWeight = FontWeight.SemiBold, color = Color(0xFF0F5132))
+                                Text(
+                                    "Oberhalb dieses Bereichs gibt es aktualisierte Feed-Inhalte. Deine aktuelle Position bleibt erhalten.",
+                                    color = Color(0xFF0F5132)
+                                )
+                            }
+                            TextButton(onClick = { onShowHiddenNewerContent(hiddenNewerAnchorDay) }) {
+                                Text("Anzeigen")
+                            }
                         }
                     }
                 }
@@ -13826,6 +14319,8 @@ fun ProfileTab(
     showConnectionHealthIndicator: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
+    debugMasterEnabled: Boolean,
+    feedDebugEnabled: Boolean,
     diagnosticsUploadEnabled: Boolean,
     diagnosticsConsentGranted: Boolean,
     debugLogs: List<DebugLogEntry>,
@@ -13886,20 +14381,16 @@ fun ProfileTab(
     onPickCustomNotificationTone: () -> Unit,
     onClearCustomNotificationTone: () -> Unit,
     onTestCustomNotificationTone: () -> Unit,
+    onDebugMasterEnabledChange: (Boolean) -> Unit,
+    onFeedDebugEnabledChange: (Boolean) -> Unit,
     onDiagnosticsUploadEnabledChange: (Boolean) -> Unit,
     onDiagnosticsConsentChange: (Boolean) -> Unit,
     onRefreshDebugLogs: () -> Unit,
     onShareDebugLogs: () -> Unit,
     onNotificationDebugEnabledChange: (Boolean) -> Unit,
-    onRefreshNotificationDebug: () -> Unit,
     onExportNotificationDebug: () -> Unit,
-    onClearNotificationDebugData: () -> Unit,
-    onPostDebugNotifications: () -> Unit,
-    onCaptureNotificationSnapshot: () -> Unit,
-    onNotificationDebugScenario: (String) -> Unit,
-    onClearTrackedNotificationsForDebug: () -> Unit,
-    onClearAllNotificationsForDebug: () -> Unit,
-    onClearTrackedAndAllNotificationsForDebug: () -> Unit,
+    onNotificationDebugPushMatrix: () -> Unit,
+    onNotificationDebugSnapshotAndReset: () -> Unit,
     onRefreshFotomojiTemplates: () -> Unit,
     onCaptureFotomojiTemplate: (String) -> Unit,
     onDeleteFotomojiTemplate: (String) -> Unit,
@@ -15227,49 +15718,107 @@ fun ProfileTab(
                       onExpandedChange = { onProfileSectionExpandedChange("debug_diagnose", it) }
                   ) {
                       SettingsSubsection(
-                          title = "Diagnose",
-                          subtitle = "Nur wenn du Probleme nachvollziehen oder uns Logs schicken willst."
+                          title = "Diagnose-Freigabe",
+                          subtitle = "Rechtliche Freigabe fuer technische Diagnosedaten."
                       ) {
                           SettingsToggleRow(
-                              label = "Freiwillige Datenfreigabe",
+                              label = "Technische Diagnose-Freigabe",
                               checked = diagnosticsConsentGranted,
                               onCheckedChange = onDiagnosticsConsentChange,
-                              supportingText = "Damit duerfen technische Ladezeit- und Fehlerdaten zur Analyse uebermittelt werden. Jederzeit widerrufbar."
+                              supportingText = "Erlaubt die Uebermittlung technischer Fehler- und Diagnosedaten. Jederzeit widerrufbar."
+                          )
+                      }
+                      SettingsSubsection(
+                          title = "Debug-Steuerung",
+                          subtitle = "Erweiterte Diagnose nur bei aktivem Debug-Modus."
+                      ) {
+                          SettingsToggleRow(
+                              label = "Debug-Modus aktivieren",
+                              checked = debugMasterEnabled,
+                              onCheckedChange = onDebugMasterEnabledChange,
+                              supportingText = if (debugMasterEnabled) {
+                                  "Erweiterte Diagnose ist aktiv. Feed- und Notification-Spezialtools koennen jetzt separat zugeschaltet werden."
+                              } else {
+                                  "Standard fuer normale Nutzer. Keine tiefen Feed- oder Notification-Debugsammler."
+                              }
                           )
                           SettingsToggleRow(
-                              label = "Diagnose-Upload aktivieren",
+                              label = "Diagnosedaten automatisch hochladen",
                               checked = diagnosticsUploadEnabled,
                               onCheckedChange = onDiagnosticsUploadEnabledChange,
                               supportingText = if (diagnosticsConsentGranted) {
-                                  "Wenn aktiviert, werden Diagnose-Logs bei App-Start und bei neuen Fehlern automatisch an den Server geschickt."
+                                  "Sendet lokale Diagnose-Logs bei App-Start und bei neuen Fehlern automatisch an den Server."
                               } else {
-                                  "Erfordert zuerst die freiwillige Datenfreigabe."
+                                  "Erfordert zuerst die technische Diagnose-Freigabe."
                               }
                           )
                           SettingsToggleRow(
-                              label = "Notification-Debugmodus",
+                              label = "Feed-Debug aktivieren",
+                              checked = feedDebugEnabled,
+                              onCheckedChange = onFeedDebugEnabledChange,
+                              supportingText = if (debugMasterEnabled) {
+                                  "Protokolliert Anchor, Viewport, Refresh-Entscheidungen, Restore-Verhalten und Sprung-Erkennung fuer den Feed."
+                              } else {
+                                  "Erfordert zuerst den Debug-Modus."
+                              }
+                          )
+                          SettingsToggleRow(
+                              label = "Notification-Debug aktivieren",
                               checked = notificationDebugEnabled,
                               onCheckedChange = onNotificationDebugEnabledChange,
                               supportingText = if (notificationDebugEnabled) {
-                                  "Aktiv bis ${notificationDebugExpiresAt.take(16).ifBlank { "-" }}. Erfasst Push-Pfade, Launch-Intents, aktive Notifications und Clear-Versuche lokal."
+                                  "Aktiv bis ${notificationDebugExpiresAt.take(16).ifBlank { "-" }}. Erfasst Push-Pfade, Payloads, Launch-Intents und aktive Notifications lokal."
                               } else {
-                                  "Optionaler Tiefen-Debug nur fuer Benachrichtigungsprobleme. Standardmaessig aus und ohne Alltagsauswirkung."
+                                  "Erfordert den Debug-Modus und ist nur fuer Push-/Notification-Probleme gedacht."
                               }
                           )
+                      }
+                      SettingsSubsection(
+                          title = "Exporte",
+                          subtitle = "Lokale Diagnose pruefen und gezielt teilen."
+                      ) {
                           Row(
                               modifier = Modifier.fillMaxWidth(),
                               horizontalArrangement = Arrangement.spacedBy(8.dp)
                           ) {
                               Button(onClick = onRefreshDebugLogs, modifier = Modifier.weight(1f)) { Text("Letzte Fehler") }
-                              Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) { Text("Diagnose exportieren") }
+                              Button(onClick = onShareDebugLogs, modifier = Modifier.weight(1f)) { Text("Diagnose-Export") }
                           }
+                          Card(modifier = Modifier.fillMaxWidth()) {
+                              Column(
+                                  modifier = Modifier.padding(10.dp),
+                                  verticalArrangement = Arrangement.spacedBy(6.dp)
+                              ) {
+                                  if (debugLogs.isEmpty()) {
+                                      Text("Keine lokalen Fehlereintraege vorhanden")
+                                  } else {
+                                      debugLogs.take(8).forEach { row ->
+                                          Text("[${row.createdAt.take(16)}] ${row.type}", fontWeight = FontWeight.SemiBold)
+                                          Text(row.message, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                          if (row.meta.isNotBlank()) {
+                                              Text(
+                                                  row.meta,
+                                                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                  maxLines = 1,
+                                                  overflow = TextOverflow.Ellipsis
+                                              )
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      SettingsSubsection(
+                          title = "Notification-Debug",
+                          subtitle = "Vereinfachte Push-Testwerkzeuge fuer reproduzierbare Notification-Faelle."
+                      ) {
                           if (notificationDebugEnabled) {
                               Card(modifier = Modifier.fillMaxWidth()) {
                                   Column(
                                       modifier = Modifier.padding(10.dp),
                                       verticalArrangement = Arrangement.spacedBy(8.dp)
                                   ) {
-                                      Text("Notification-Debugmodus", fontWeight = FontWeight.SemiBold)
+                                      Text("Notification-Debug aktiv", fontWeight = FontWeight.SemiBold)
                                       Text("Umgebung: enabled=${notificationDebugEnvironment.notificationsEnabled}, permission=${notificationDebugEnvironment.postPermissionGranted}, active=${notificationDebugEnvironment.activeCount}, device=${notificationDebugEnvironment.manufacturer} ${notificationDebugEnvironment.model}, sdk=${notificationDebugEnvironment.sdkInt}")
                                       Text(
                                           "Kanaele: ${if (notificationDebugEnvironment.channels.isEmpty()) "-" else notificationDebugEnvironment.channels.take(4).joinToString(" | ") { "${it.id}:${it.importance}" }}",
@@ -15279,46 +15828,13 @@ fun ProfileTab(
                                           modifier = Modifier.fillMaxWidth(),
                                           horizontalArrangement = Arrangement.spacedBy(8.dp)
                                       ) {
-                                          Button(onClick = onRefreshNotificationDebug, modifier = Modifier.weight(1f)) { Text("Aktualisieren") }
-                                          Button(onClick = onExportNotificationDebug, modifier = Modifier.weight(1f)) { Text("Notif-Export") }
+                                          Button(onClick = onNotificationDebugPushMatrix, modifier = Modifier.weight(1f)) { Text("Push-Testmatrix") }
+                                          Button(onClick = onExportNotificationDebug, modifier = Modifier.weight(1f)) { Text("Debug-Export") }
                                       }
-                                      Row(
-                                          modifier = Modifier.fillMaxWidth(),
-                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                      ) {
-                                          Button(onClick = onClearNotificationDebugData, modifier = Modifier.weight(1f)) { Text("Debug reset") }
-                                          Button(onClick = onCaptureNotificationSnapshot, modifier = Modifier.weight(1f)) { Text("Snapshot") }
-                                      }
-                                      Text("Testmatrix", fontWeight = FontWeight.SemiBold)
-                                      Row(
-                                          modifier = Modifier.fillMaxWidth(),
-                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                      ) {
-                                          Button(onClick = onPostDebugNotifications, modifier = Modifier.weight(1f)) { Text("Burst") }
-                                          Button(onClick = { onNotificationDebugScenario("mixed_matrix") }, modifier = Modifier.weight(1f)) { Text("Mixed") }
-                                      }
-                                      Row(
-                                          modifier = Modifier.fillMaxWidth(),
-                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                      ) {
-                                          Button(onClick = { onNotificationDebugScenario("same_id_matrix") }, modifier = Modifier.weight(1f)) { Text("Gleiche IDs") }
-                                          Button(onClick = { onNotificationDebugScenario("feed_matrix") }, modifier = Modifier.weight(1f)) { Text("Feed/Poll") }
-                                      }
-                                      Text("Clear-Labor", fontWeight = FontWeight.SemiBold)
-                                      Row(
-                                          modifier = Modifier.fillMaxWidth(),
-                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                      ) {
-                                          Button(onClick = onClearTrackedNotificationsForDebug, modifier = Modifier.weight(1f)) { Text("Tracked") }
-                                          Button(onClick = onClearAllNotificationsForDebug, modifier = Modifier.weight(1f)) { Text("cancelAll") }
-                                      }
-                                      Row(
-                                          modifier = Modifier.fillMaxWidth(),
-                                          horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                      ) {
-                                          Button(onClick = onClearTrackedAndAllNotificationsForDebug, modifier = Modifier.weight(1f)) { Text("Tracked+All") }
-                                          Button(onClick = { onNotificationDebugScenario("summary_group_matrix") }, modifier = Modifier.weight(1f)) { Text("Group-Test") }
-                                      }
+                                      Button(
+                                          onClick = onNotificationDebugSnapshotAndReset,
+                                          modifier = Modifier.fillMaxWidth()
+                                      ) { Text("Snapshot & Reset") }
                                   }
                               }
                               Card(modifier = Modifier.fillMaxWidth()) {
@@ -15346,7 +15862,7 @@ fun ProfileTab(
                                       if (notificationDebugEvents.isEmpty()) {
                                           Text("Noch keine Notification-Debug-Events")
                                       } else {
-                                          notificationDebugEvents.take(8).forEach { row ->
+                                          notificationDebugEvents.take(6).forEach { row ->
                                               Text("[${row.createdAt.take(16)}] ${row.type}", fontWeight = FontWeight.SemiBold)
                                               Text(row.message, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                               if (row.meta.isNotBlank()) {
@@ -15361,53 +15877,17 @@ fun ProfileTab(
                                       modifier = Modifier.padding(10.dp),
                                       verticalArrangement = Arrangement.spacedBy(6.dp)
                                   ) {
-                                      Text("Launch-Intents", fontWeight = FontWeight.SemiBold)
-                                      if (notificationDebugLaunches.isEmpty()) {
-                                          Text("Noch keine Launch-Intents protokolliert")
+                                      Text("Letzte Payloads / Launches", fontWeight = FontWeight.SemiBold)
+                                      if (notificationDebugPayloads.isEmpty() && notificationDebugLaunches.isEmpty()) {
+                                          Text("Noch keine Notification-Payloads oder Launch-Intents protokolliert")
                                       } else {
-                                          notificationDebugLaunches.take(5).forEach { row ->
-                                              Text("[${row.createdAt.take(16)}] ${row.source}", fontWeight = FontWeight.SemiBold)
-                                              Text("action=${row.action.ifBlank { "-" }} type=${row.type.ifBlank { "-" }} day=${row.day.ifBlank { "-" }} photoId=${row.photoId.ifBlank { "-" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                          }
-                                      }
-                                  }
-                              }
-                              Card(modifier = Modifier.fillMaxWidth()) {
-                                  Column(
-                                      modifier = Modifier.padding(10.dp),
-                                      verticalArrangement = Arrangement.spacedBy(6.dp)
-                                  ) {
-                                      Text("Payloads", fontWeight = FontWeight.SemiBold)
-                                      if (notificationDebugPayloads.isEmpty()) {
-                                          Text("Noch keine Payloads protokolliert")
-                                      } else {
-                                          notificationDebugPayloads.take(5).forEach { row ->
-                                              Text("[${row.createdAt.take(16)}] ${row.source}/${row.type.ifBlank { "unknown" }}", fontWeight = FontWeight.SemiBold)
+                                          notificationDebugPayloads.take(3).forEach { row ->
+                                              Text("[${row.createdAt.take(16)}] payload ${row.source}/${row.type.ifBlank { "unknown" }}", fontWeight = FontWeight.SemiBold)
                                               Text("notification=${row.hasNotificationPayload} data=${row.hasDataPayload} action=${row.action.ifBlank { "-" }} keys=${row.dataKeys.ifBlank { "-" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                              Text("${row.title.ifBlank { "-" }} | ${row.body.ifBlank { "-" }}", color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                           }
-                                      }
-                                  }
-                              }
-                          }
-                          Card(modifier = Modifier.fillMaxWidth()) {
-                              Column(
-                                  modifier = Modifier.padding(10.dp),
-                                  verticalArrangement = Arrangement.spacedBy(6.dp)
-                              ) {
-                                  if (debugLogs.isEmpty()) {
-                                      Text("Keine lokalen Fehlereintraege vorhanden")
-                                  } else {
-                                      debugLogs.take(8).forEach { row ->
-                                          Text("[${row.createdAt.take(16)}] ${row.type}", fontWeight = FontWeight.SemiBold)
-                                          Text(row.message, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                          if (row.meta.isNotBlank()) {
-                                              Text(
-                                                  row.meta,
-                                                  color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                  maxLines = 1,
-                                                  overflow = TextOverflow.Ellipsis
-                                              )
+                                          notificationDebugLaunches.take(3).forEach { row ->
+                                              Text("[${row.createdAt.take(16)}] launch ${row.source}", fontWeight = FontWeight.SemiBold)
+                                              Text("action=${row.action.ifBlank { "-" }} type=${row.type.ifBlank { "-" }} day=${row.day.ifBlank { "-" }} photoId=${row.photoId.ifBlank { "-" }}", maxLines = 2, overflow = TextOverflow.Ellipsis)
                                           }
                                       }
                                   }

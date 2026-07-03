@@ -14,6 +14,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import java.time.LocalDate
 import java.time.LocalTime
 
 class PushMessagingService : FirebaseMessagingService() {
@@ -57,6 +58,21 @@ class PushMessagingService : FirebaseMessagingService() {
             hasDataPayload = message.data.isNotEmpty(),
             dataKeys = message.data.keys
         )
+        if (isFeedRelatedPush(action, type, day, photoId)) {
+            queuePendingFeedInvalidation(
+                context = this,
+                day = day.ifBlank { LocalDate.now().toString() },
+                photoId = photoId.toLongOrNull()?.takeIf { it > 0L },
+                reason = if (type.isBlank()) "feed_push" else type,
+                source = if (action.isBlank()) "push" else action
+            )
+            PushNotificationDiagnostics.recordEvent(
+                this,
+                type = "feed_push_invalidation",
+                message = if (type.isBlank()) "feed_push" else type,
+                meta = "action=${if (action.isBlank()) "-" else action};day=${day.ifBlank { "-" }};photoId=${photoId.ifBlank { "-" }};queued=true"
+            )
+        }
         val prefsSnapshot = PushPreferenceSnapshot(
             masterEnabled = prefs.getBoolean("notifications_master_enabled", true),
             chatEnabled = prefs.getBoolean("chat_push_enabled_local", false),
