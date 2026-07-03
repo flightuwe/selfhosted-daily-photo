@@ -15,6 +15,14 @@ This file is append-only operational history for Forge-side Daily continuity.
 
 ## 2026-07-03
 
+- Released Android patch `v0.6.10` from `main` commit `023571c7e4e8cb351cd3bbfc03734de267aa3cc7`; backend code was unchanged, while GitHub still published the standard server image set for the same commit.
+- Finalized the deep-feed stabilization by keeping visible feed anchors valid even when they fall outside the freshly fetched feed-day index and by avoiding unnecessary auto-refresh jumps back to today.
+- Hardened feed diagnostics semantics so failed viewport restores now degrade the refresh result explicitly instead of reporting a misleading success immediately afterwards.
+- Smoothed repeated manual pull-to-refresh while a feed refresh is already running by merging the request into the active refresh queue instead of spamming duplicate deferred events.
+- Verified locally with `gradle :app:compileDebugKotlin --no-daemon` and `gradle :app:assembleDebug --no-daemon --stacktrace --console=plain`; one transient workstation-only Android resource/Kotlin incremental failure cleared on immediate rerun.
+- Confirmed GitHub Actions success for `CI` run `28654437532`, `Publish Server Images` run `28654437592` and `Release Android APK` run `28654684488`.
+- Confirmed GitHub release `v0.6.10` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.10`.
+
 - Released Android patch `v0.6.9` from `main` commit `18d5f7593626556d9c31a3e0526240652d385f94`; backend code was unchanged, while GitHub still published the standard server image set for the same commit.
 - Fixed the remaining deep-feed auto-refresh jump by clearing stale jump-navigation state after consumption and by preserving the effective viewport anchor even when old focus state still exists.
 - Tightened diagnostics by exporting primarily the current app session and by adding notification-clear verification/retry logging for stubborn active notifications.
