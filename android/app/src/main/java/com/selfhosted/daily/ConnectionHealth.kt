@@ -45,6 +45,8 @@ data class ParsedNetworkSnapshot(
     val upKbps: Int?
 )
 
+private const val TRANSIENT_NETWORK_RECOVERY_GRACE_MS = 12_000L
+
 internal fun parseApiErrorCode(rawBody: String?): String? {
     val raw = rawBody?.trim().orEmpty()
     if (raw.isBlank()) return null
@@ -72,8 +74,22 @@ internal fun parseNetworkSnapshot(snapshot: String): ParsedNetworkSnapshot {
     )
 }
 
+internal fun isMeaningfulNetworkStateChange(
+    before: ParsedNetworkSnapshot,
+    after: ParsedNetworkSnapshot
+): Boolean = before.activeNetwork != after.activeNetwork ||
+    before.internet != after.internet ||
+    before.validated != after.validated ||
+    before.transport != after.transport ||
+    before.metered != after.metered
+
 internal fun evaluateConnectionHealth(inputs: ConnectionHealthInputs): ConnectionHealthSnapshot {
     val network = parseNetworkSnapshot(inputs.networkSnapshot)
+    val transientRecoveryGap = inputs.networkRecoveryActive &&
+        inputs.lastNetworkTransitionAtMs > 0L &&
+        inputs.nowMs - inputs.lastNetworkTransitionAtMs <= TRANSIENT_NETWORK_RECOVERY_GRACE_MS &&
+        inputs.lastApiSuccessAtMs > 0L &&
+        inputs.nowMs - inputs.lastApiSuccessAtMs <= TRANSIENT_NETWORK_RECOVERY_GRACE_MS
     val queue = inputs.uploadQueue
     val pausedQueue = queue.count { it.status == UploadQueueStatus.PAUSED }
     val secureWaiting = queue.count { it.status == UploadQueueStatus.WAITING_FOR_SECURE_NETWORK }
@@ -139,17 +155,35 @@ internal fun evaluateConnectionHealth(inputs: ConnectionHealthInputs): Connectio
     }
 
     if (!network.activeNetwork || !network.internet) {
-        level = ConnectionHealthLevel.RED
-        title = "Keine nutzbare Verbindung"
-        summary = "Es gibt aktuell keine verwendbare Internetverbindung."
-        reasonLines += "Kein aktives Netzwerk mit Internet"
-    } else if (!network.validated) {
-        if (level != ConnectionHealthLevel.RED) {
+        if (transientRecoveryGap) {
+            if (level != ConnectionHealthLevel.RED) {
+                level = ConnectionHealthLevel.YELLOW
+                title = "Verbindung wird wiederhergestellt"
+                summary = "Waehren eines Netzwechsels prueft Daily gerade eine neue Verbindung."
+            }
+            reasonLines += "Kurzzeitige Netzluecke waehrend Recovery"
+        } else {
             level = ConnectionHealthLevel.RED
             title = "Keine nutzbare Verbindung"
-            summary = "Das aktuelle Netzwerk ist nicht als internetfaehig validiert."
+            summary = "Es gibt aktuell keine verwendbare Internetverbindung."
+            reasonLines += "Kein aktives Netzwerk mit Internet"
         }
-        reasonLines += "Netzwerk nicht validiert"
+    } else if (!network.validated) {
+        if (transientRecoveryGap) {
+            if (level != ConnectionHealthLevel.RED) {
+                level = ConnectionHealthLevel.YELLOW
+                title = "Verbindung wird wiederhergestellt"
+                summary = "Das aktuelle Netzwerk ist noch nicht voll validiert."
+            }
+            reasonLines += "Netzwerkvalidierung nach Wechsel noch ausstehend"
+        } else {
+            if (level != ConnectionHealthLevel.RED) {
+                level = ConnectionHealthLevel.RED
+                title = "Keine nutzbare Verbindung"
+                summary = "Das aktuelle Netzwerk ist nicht als internetfaehig validiert."
+            }
+            reasonLines += "Netzwerk nicht validiert"
+        }
     }
 
     if (inputs.networkRecoveryActive && network.activeNetwork && network.internet) {

@@ -6,6 +6,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.Dns
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.InetAddress
@@ -141,6 +142,54 @@ class ConnectionHealthTest {
         )
         assertEquals(ConnectionHealthLevel.YELLOW, snapshot.level)
         assertTrue(snapshot.reasonLines.any { it.contains("Netzwerktyp", ignoreCase = true) })
+    }
+
+    @Test
+    fun evaluateConnectionHealthKeepsRecoveryGapYellowAfterRecentSuccess() {
+        val snapshot = evaluateConnectionHealth(
+            ConnectionHealthInputs(
+                nowMs = 30_000L,
+                startupDone = true,
+                serverConnected = true,
+                lastPingMs = 160L,
+                lastApiSuccessAtMs = 24_500L,
+                lastApiFailureAtMs = 0L,
+                lastApiFailureMessage = "",
+                networkSnapshot = "activeNetwork=false;capabilities=false;reason=no_active_network",
+                refreshCircuitRemainingMs = 0L,
+                lastRefreshFailureClass = "",
+                uploadQueue = emptyList(),
+                networkRecoveryActive = true,
+                networkRecoveryReason = "transport_changed",
+                lastNetworkTransitionAtMs = 24_000L
+            )
+        )
+        assertEquals(ConnectionHealthLevel.YELLOW, snapshot.level)
+        assertTrue(snapshot.reasonLines.any { it.contains("Recovery", ignoreCase = true) })
+    }
+
+    @Test
+    fun meaningfulNetworkStateChangeIgnoresBandwidthOnlyUpdates() {
+        val before = parseNetworkSnapshot(
+            "activeNetwork=true;capabilities=true;internet=true;validated=true;metered=false;transport=wifi;downKbps=100000;upKbps=12000"
+        )
+        val after = parseNetworkSnapshot(
+            "activeNetwork=true;capabilities=true;internet=true;validated=true;metered=false;transport=wifi;downKbps=50000;upKbps=4000"
+        )
+
+        assertFalse(isMeaningfulNetworkStateChange(before, after))
+    }
+
+    @Test
+    fun meaningfulNetworkStateChangeDetectsValidationLoss() {
+        val before = parseNetworkSnapshot(
+            "activeNetwork=true;capabilities=true;internet=true;validated=true;metered=false;transport=wifi;downKbps=100000;upKbps=12000"
+        )
+        val after = parseNetworkSnapshot(
+            "activeNetwork=true;capabilities=true;internet=true;validated=false;metered=false;transport=wifi;downKbps=100000;upKbps=12000"
+        )
+
+        assertTrue(isMeaningfulNetworkStateChange(before, after))
     }
 
     @Test

@@ -5159,6 +5159,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     if (health.ok && repo.token().isNotBlank()) {
                         refreshAll(
                             reason = "network_recovery",
+                            forceFeedReload = true,
                             refreshFeedWindow = true,
                             bypassCooldown = true,
                             showLoading = false,
@@ -5204,6 +5205,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         lastObservedNetworkSnapshot = normalized
         val before = parseNetworkSnapshot(previous)
         val after = parseNetworkSnapshot(normalized)
+        val meaningfulChange = isMeaningfulNetworkStateChange(before, after)
+        if (!meaningfulChange) {
+            state = refreshConnectionHealthState(state.copy(networkSnapshot = normalized))
+            if (networkRecoveryActive && isValidatedNetworkSnapshot(normalized) && networkRecoveryJob == null) {
+                scheduleNetworkRecoveryProbe(networkRecoveryReason.ifBlank { "validated_network" }, source)
+            }
+            return
+        }
         val transportChanged = before.transport != after.transport && after.activeNetwork
         val restored = !before.validated && after.validated && after.activeNetwork && after.internet
         val lost = before.activeNetwork && !after.activeNetwork
@@ -6804,26 +6813,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 }
                 val offscreenStaleDays = staleFeedDays.filter { it !in state.feedDays.toSet() }.distinct().sortedDescending()
                 val visiblePhotoInvalidation = hasVisiblePhotoInvalidation()
-                val shouldFetchVisibleWindow = when {
-                    state.feedDays.isEmpty() -> true
-                    !state.feedDays.contains(preferredAnchor) -> true
-                    forceFeedReload -> true
-                    networkRecoveryActive && reason != "feed_pull" && reason != "feed_push" -> false
-                    visiblePhotoInvalidation -> true
-                    staleFeedDays.any { it in state.feedDays } -> true
-                    else -> false
+                val fetchDecisionReason = when {
+                    state.feedDays.isEmpty() -> "empty_feed"
+                    !state.feedDays.contains(preferredAnchor) -> "missing_anchor"
+                    reason == "network_recovery" -> "network_recovery_refresh"
+                    forceFeedReload -> "visible_window_refresh"
+                    visiblePhotoInvalidation -> "visible_photo_invalidation"
+                    staleFeedDays.any { it in state.feedDays } -> "stale_visible_day"
+                    else -> "cached_today_feed"
                 }
+                val shouldFetchVisibleWindow = fetchDecisionReason != "cached_today_feed"
                 val replaceVisibleDays = state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor) || !preserveVisibleWindow
                 val showJumpLoading = state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor) || !preserveVisibleWindow
                 logFeedDecision(
                     type = "feed_refresh_plan",
                     message = "feed refresh planned",
-                    meta = "reason=$reason;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};preferredAnchor=$preferredAnchor;viewportAnchorBefore=${describeAnchor(viewportAnchorBeforeRefresh)};preserveVisibleWindow=$preserveVisibleWindow;replaceVisibleDays=$replaceVisibleDays;showJumpLoading=$showJumpLoading;offscreenStaleDays=${offscreenStaleDays.joinToString(",").ifBlank { "-" }};visiblePhotoInvalidation=$visiblePhotoInvalidation;willFetch=$shouldFetchVisibleWindow"
+                    meta = "reason=$reason;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};preferredAnchor=$preferredAnchor;viewportAnchorBefore=${describeAnchor(viewportAnchorBeforeRefresh)};preserveVisibleWindow=$preserveVisibleWindow;replaceVisibleDays=$replaceVisibleDays;showJumpLoading=$showJumpLoading;offscreenStaleDays=${offscreenStaleDays.joinToString(",").ifBlank { "-" }};visiblePhotoInvalidation=$visiblePhotoInvalidation;willFetch=$shouldFetchVisibleWindow;decisionReason=$fetchDecisionReason"
                 )
                 logFeedDecision(
                     type = "feed_auto_decision",
                     message = if (shouldFetchVisibleWindow) "feed refresh will fetch" else "feed refresh may reuse cache",
-                    meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};stalePhotoIds=${staleFeedPhotoIds.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=$shouldFetchVisibleWindow;decisionReason=${if (shouldFetchVisibleWindow) "visible_window_refresh" else "cached_today_feed"}"
+                    meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};stalePhotoIds=${staleFeedPhotoIds.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=$shouldFetchVisibleWindow;decisionReason=$fetchDecisionReason"
                 )
                 if (state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor)) {
                     logFeedDecision(
@@ -6843,7 +6853,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         logFeedDecision(
                             type = "visible_fetch",
                             message = "visible feed fetch started",
-                            meta = "reason=$reason;preferredAnchor=$preferredAnchor;forced=$forceFeedReload;replaceVisibleDays=${!preserveVisibleWindow};trigger=visible_window_refresh"
+                            meta = "reason=$reason;preferredAnchor=$preferredAnchor;forced=$forceFeedReload;replaceVisibleDays=${!preserveVisibleWindow};trigger=$fetchDecisionReason"
                         )
                         loadFeedWindow(
                             anchorDay = preferredAnchor,
@@ -6867,7 +6877,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         logFeedDecision(
                             type = "feed_auto_decision",
                             message = "feed refresh resolved to noop",
-                            meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=false;decisionReason=cached_today_feed"
+                            meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=false;decisionReason=$fetchDecisionReason"
                         )
                         0
                     }
