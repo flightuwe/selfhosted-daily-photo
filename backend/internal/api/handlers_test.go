@@ -1408,6 +1408,53 @@ func TestHandlePhotoAttachmentCreateAllowsOlderVisiblePostOfSameDay(t *testing.T
 	}
 }
 
+func TestHandlePhotoAttachmentCreateAcceptsCapturedAtWithoutSeconds(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "owner", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	now := time.Now().UTC()
+	photo := models.Photo{
+		UserID:    user.ID,
+		User:      user,
+		Day:       now.Format("2006-01-02"),
+		FilePath:  "2026-06-18/test.jpg",
+		CreatedAt: now.Add(-time.Minute),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("captured_at", "2026-07-04T18:58+02:00"); err != nil {
+		t.Fatalf("write captured_at: %v", err)
+	}
+	part, err := writer.CreateFormFile("photo", "append.jpg")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write([]byte("append-without-seconds")); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/photos/%d/attachments", photo.ID), &body)
+	ctx.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	ctx.Set("user", user)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoAttachmentCreate(ctx)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("attachment with captured_at without seconds status = %d, want 201, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSendPhotoNotificationUsesOwnAndBookmarkPostNumberFlagsSeparately(t *testing.T) {
 	server := newSearchTestServer(t)
 	sender, ok := server.Notifier.(*recordingSender)

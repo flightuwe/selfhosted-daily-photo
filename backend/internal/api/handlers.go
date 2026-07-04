@@ -10150,12 +10150,18 @@ func (s *Server) parseCapturedAtValue(raw string) (*time.Time, error) {
 	if value == "" {
 		return nil, nil
 	}
-	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		return nil, err
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02T15:04Z07:00",
 	}
-	captured := parsed.In(s.Location)
-	return &captured, nil
+	for _, layout := range layouts {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			captured := parsed.In(s.Location)
+			return &captured, nil
+		}
+	}
+	return nil, errors.New("invalid captured_at")
 }
 
 func photoEffectiveTime(photo models.Photo) time.Time {

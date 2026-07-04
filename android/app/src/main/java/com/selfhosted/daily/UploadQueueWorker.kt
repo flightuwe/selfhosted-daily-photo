@@ -989,7 +989,7 @@ class UploadQueueWorker(
         val frontPart = MultipartBody.Part.createFormData("photo_front", frontFile.name, frontBody)
         val kind = (if (item.isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
         val capturedAtPart = item.capturedAtMs.takeIf { it > 0L }
-            ?.let { OffsetDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault()).toString() }
+            ?.let { formatCapturedAtForApi(OffsetDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault())) }
             ?.toRequestBody("text/plain".toMediaTypeOrNull())
         val uploadClientIdPart = item.uploadClientId.trim().takeIf { it.isNotBlank() }
             ?.toRequestBody("text/plain".toMediaTypeOrNull())
@@ -1142,7 +1142,10 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
         val raw = rawBody.lowercase()
         val errorCode = parseApiErrorCode(rawBody)?.lowercase().orEmpty()
         val reason = when (throwable.code()) {
-            400 -> "invalid_request"
+            400 -> when {
+                raw.contains("invalid captured_at") -> "captured_at_invalid"
+                else -> "invalid_request"
+            }
             401 -> "http_401"
             403 -> when {
                 errorCode == "prompt_inactive" || raw.contains("prompt inactive") -> "prompt_inactive"
@@ -1157,7 +1160,10 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
         }
         val permanent = throwable.code() in 400..499 && throwable.code() !in listOf(401, 408, 429)
         val message = when (throwable.code()) {
-            400 -> "Upload-Daten sind ungueltig. Bitte neu aufnehmen oder erneut versuchen."
+            400 -> when {
+                raw.contains("invalid captured_at") -> "Aufnahmezeit konnte nicht verarbeitet werden. Bitte erneut versuchen."
+                else -> "Upload-Daten sind ungueltig. Bitte neu aufnehmen oder erneut versuchen."
+            }
             401 -> "Sitzung abgelaufen. Bitte App oeffnen und erneut anmelden."
             403 -> when {
                 errorCode == "prompt_inactive" || raw.contains("prompt inactive") -> "Kein aktiver Daily-Moment mehr. Diesen Upload loeschen oder als Extra posten."

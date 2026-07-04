@@ -379,6 +379,12 @@ fun publishForegroundFeedInvalidation(
     )
 }
 
+private val apiCapturedAtFormatter: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
+
+fun formatCapturedAtForApi(value: OffsetDateTime): String =
+    value.withNano(0).format(apiCapturedAtFormatter)
+
 fun isFeedRelatedPush(action: String, type: String, day: String, photoId: String): Boolean {
     val normalizedAction = action.trim().lowercase()
     val normalizedType = type.trim().lowercase()
@@ -3145,7 +3151,7 @@ class AppRepo(
             }
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
-        val capturedAtPart = capturedAt?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val capturedAtPart = capturedAt?.let(::formatCapturedAtForApi)?.toRequestBody("text/plain".toMediaTypeOrNull())
         val uploadClientIdPart = uploadClientId.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
@@ -3316,7 +3322,7 @@ class AppRepo(
             frontBody
         )
         val kind = (if (isPrompt) "prompt" else "extra").toRequestBody("text/plain".toMediaTypeOrNull())
-        val capturedAtPart = capturedAt?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val capturedAtPart = capturedAt?.let(::formatCapturedAtForApi)?.toRequestBody("text/plain".toMediaTypeOrNull())
         val uploadClientIdPart = uploadClientId.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsuleMode = capsule.mode.trim().takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
         val capsulePrivate = if (capsuleMode != null) capsule.privateOnly.toString().toRequestBody("text/plain".toMediaTypeOrNull()) else null
@@ -3443,7 +3449,7 @@ class AppRepo(
                 }
             }
         )
-        val capturedAtPart = capturedAt?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val capturedAtPart = capturedAt?.let(::formatCapturedAtForApi)?.toRequestBody("text/plain".toMediaTypeOrNull())
         val uploadClientIdPart = uploadClientId.toRequestBody("text/plain".toMediaTypeOrNull())
         val locationPayload = if (shareLocation) lastAvailableLocationPayload() else null
         val locationShared = locationPayload?.let { "true".toRequestBody("text/plain".toMediaTypeOrNull()) }
