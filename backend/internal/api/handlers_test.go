@@ -1690,6 +1690,14 @@ func TestHandlePhotoCommentDeduplicatesByClientCommentID(t *testing.T) {
 	if err := server.DB.Create(&photo).Error; err != nil {
 		t.Fatalf("create photo: %v", err)
 	}
+	if err := server.DB.Create(&models.Photo{
+		UserID:    actor.ID,
+		Day:       "2026-07-06",
+		FilePath:  "2026-07-06/actor.jpg",
+		CreatedAt: time.Date(2026, 7, 6, 11, 0, 0, 0, time.UTC),
+	}).Error; err != nil {
+		t.Fatalf("create actor photo: %v", err)
+	}
 
 	body := `{"body":"identisch","clientCommentId":"c_1"}`
 	firstCtx, firstRec := newJSONRequestContext(http.MethodPost, "/api/photos/1/comments", body, actor)
@@ -1733,6 +1741,14 @@ func TestHandlePhotoCommentRejectsConsecutiveDuplicateBody(t *testing.T) {
 	}
 	if err := server.DB.Create(&photo).Error; err != nil {
 		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.DB.Create(&models.Photo{
+		UserID:    actor.ID,
+		Day:       "2026-07-06",
+		FilePath:  "2026-07-06/actor.jpg",
+		CreatedAt: time.Date(2026, 7, 6, 11, 0, 0, 0, time.UTC),
+	}).Error; err != nil {
+		t.Fatalf("create actor photo: %v", err)
 	}
 
 	firstCtx, firstRec := newJSONRequestContext(http.MethodPost, "/api/photos/1/comments", `{"body":"gleich"}`, actor)
@@ -1789,6 +1805,14 @@ func TestHandleDeletePhotoCommentDeletesOwnCommentAndSendsCancel(t *testing.T) {
 	}
 	if err := server.DB.Create(&photo).Error; err != nil {
 		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.DB.Create(&models.Photo{
+		UserID:    actor.ID,
+		Day:       "2026-07-06",
+		FilePath:  "2026-07-06/actor.jpg",
+		CreatedAt: time.Date(2026, 7, 6, 11, 0, 0, 0, time.UTC),
+	}).Error; err != nil {
+		t.Fatalf("create actor photo: %v", err)
 	}
 	if err := server.DB.Create(&models.PhotoBookmark{UserID: bookmarker.ID, PhotoID: photo.ID, Active: true}).Error; err != nil {
 		t.Fatalf("create bookmark: %v", err)
