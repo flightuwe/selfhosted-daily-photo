@@ -46,11 +46,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.Image
@@ -206,7 +203,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.channels.BufferOverflow
@@ -4165,6 +4161,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val networkRecoveryProbeRetryBaseMs = 4_000L
     private val networkRecoveryProbeMaxAttempts = 3
     private val networkRecoverySuccessFreshMs = 15_000L
+    private val deleteFeatureSyncMinIntervalMs = 15_000L
     private var lastRefreshAllStartedAt = 0L
     private var lastLaunchIntentRefreshAtMs = 0L
     private var lastManualRefreshAtMs = 0L
@@ -4180,6 +4177,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var networkRecoveryReason = ""
     private var lastNetworkTransitionAtMs = 0L
     private var lastObservedNetworkSnapshot = "activeNetwork=false;capabilities=false;reason=not_checked"
+    private var deleteFeatureSyncJob: Job? = null
+    private var lastDeleteFeatureSyncAttemptAtMs = 0L
     private var nextFeedScrollRequestId = 1L
     private val pendingFeedMutations = mutableMapOf<Long, PendingFeedMutation>()
     private var queuedRefreshRequest: QueuedRefreshRequest? = null
@@ -5105,6 +5104,52 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (networkRecoveryActive) {
             finishNetworkRecovery(recoveryResult, currentNetworkSnapshot())
         }
+        syncDeleteFeatureSupportIfNeeded(trigger = recoveryResult)
+    }
+
+    private fun syncDeleteFeatureSupportIfNeeded(trigger: String, force: Boolean = false) {
+        if (repo.token().isBlank() || !repo.hasConfiguredApiBaseUrl()) return
+        if (!force && state.chatDeleteSupported && state.commentDeleteSupported) return
+        if (deleteFeatureSyncJob?.isActive == true) return
+        val nowMs = System.currentTimeMillis()
+        if (!force && nowMs - lastDeleteFeatureSyncAttemptAtMs < deleteFeatureSyncMinIntervalMs) return
+        lastDeleteFeatureSyncAttemptAtMs = nowMs
+        deleteFeatureSyncJob = viewModelScope.launch {
+            repo.logDebug(
+                type = "delete_feature_sync_started",
+                message = "delete feature support sync started",
+                meta = "trigger=$trigger;chatDeleteSupported=${state.chatDeleteSupported};commentDeleteSupported=${state.commentDeleteSupported};serverConnected=${state.serverConnected}"
+            )
+            runCatching { repo.health() }
+                .onSuccess { health ->
+                    val beforeChat = state.chatDeleteSupported
+                    val beforeComment = state.commentDeleteSupported
+                    state = refreshConnectionHealthState(
+                        state.copy(
+                            serverConnected = health.ok,
+                            serverVersion = health.version,
+                            pushProvider = health.provider,
+                            chatDeleteSupported = health.features.chatDelete,
+                            commentDeleteSupported = health.features.commentDelete
+                        )
+                    )
+                    repo.logDebug(
+                        type = "delete_feature_sync_succeeded",
+                        message = "delete feature support sync succeeded",
+                        meta = "trigger=$trigger;chatDeleteBefore=$beforeChat;chatDeleteAfter=${health.features.chatDelete};commentDeleteBefore=$beforeComment;commentDeleteAfter=${health.features.commentDelete};serverOk=${health.ok};version=${health.version}"
+                    )
+                }
+                .onFailure { error ->
+                    if (!isBenignCancellation(error)) {
+                        repo.logDebug(
+                            type = "delete_feature_sync_failed",
+                            message = debugFailureMessage(error),
+                            meta = "trigger=$trigger;failureClass=${classifyFailure(error)};chatDeleteSupported=${state.chatDeleteSupported};commentDeleteSupported=${state.commentDeleteSupported};root=${rootCause(error)::class.java.simpleName}"
+                        )
+                    }
+                }
+            deleteFeatureSyncJob = null
+        }
     }
 
     private fun finishNetworkRecovery(result: String, snapshot: String) {
@@ -5286,6 +5331,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     override fun onCleared() {
         networkRecoveryJob?.cancel()
+        deleteFeatureSyncJob?.cancel()
         super.onCleared()
     }
 
@@ -5454,6 +5500,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 invitePreview = null,
                 migrationCanUseSessionShortcut = false
             )
+            syncDeleteFeatureSupportIfNeeded(trigger = "login_success", force = true)
             runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
             refreshAll()
         } catch (t: Throwable) {
@@ -5569,6 +5616,31 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (normalizedId.isBlank()) return
         repo.setProfileSectionExpanded(userId, normalizedId, expanded)
         state = state.copy(profileSectionExpanded = state.profileSectionExpanded + (normalizedId to expanded))
+    }
+
+    fun logDeleteGestureEvent(surface: String, itemId: Long, stage: String, featureEnabled: Boolean, releasedEarly: Boolean? = null) {
+        val normalizedSurface = surface.trim().ifBlank { "unknown" }
+        val meta = buildString {
+            append("surface=").append(normalizedSurface)
+            append(";itemId=").append(itemId)
+            append(";stage=").append(stage)
+            append(";featureEnabled=").append(featureEnabled)
+            append(";chatDeleteSupported=").append(state.chatDeleteSupported)
+            append(";commentDeleteSupported=").append(state.commentDeleteSupported)
+            append(";activeTab=").append(state.activeTab.name.lowercase())
+            releasedEarly?.let { append(";releasedEarly=").append(it) }
+        }
+        repo.logDebug(type = "delete_gesture", message = "delete gesture $stage", meta = meta)
+        if (stage == "blocked") {
+            state = state.copy(
+                message = when (normalizedSurface) {
+                    "chat" -> "Nachrichten-Loeschen ist gerade clientseitig noch nicht freigeschaltet."
+                    "feed_comment" -> "Kommentar-Loeschen ist gerade clientseitig noch nicht freigeschaltet."
+                    else -> "Loeschen ist gerade clientseitig noch nicht freigeschaltet."
+                }
+            )
+            syncDeleteFeatureSupportIfNeeded(trigger = "delete_gesture_blocked", force = true)
+        }
     }
 
     private suspend fun logApiFailure(type: String, endpoint: String, throwable: Throwable, extraMeta: String = "") {
@@ -7871,6 +7943,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     chatHasUnreadMessages = latestOtherChat > seenChat,
                     message = "Nachricht geloescht"
                 )
+                repo.logDebug(
+                    type = "chat_delete_succeeded",
+                    message = "chat delete succeeded",
+                    meta = "chatId=$id;deletedId=$deletedId;remainingMessages=${updatedChat.size}"
+                )
                 true
             }
             .getOrElse {
@@ -7905,6 +7982,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(interactionsLoading = true)
         runCatching { repo.photoInteractions(photoId) }
             .onSuccess {
+                noteApiSuccess()
                 applyPhotoInteractionsToFeedState(photoId, it)
                 upsertPendingFeedMutation(photoId) { pending ->
                     pending.copy(
@@ -8164,6 +8242,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     interactionsLoading = false,
                     photoInteractions = response,
                     message = "Kommentar geloescht"
+                )
+                repo.logDebug(
+                    type = "photo_comment_delete_succeeded",
+                    message = "photo comment delete succeeded",
+                    meta = "photoId=$photoId;commentId=$commentId;remainingComments=${response.comments.size}"
                 )
                 true
             }
@@ -10566,6 +10649,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
                 scope.launch { vm.deletePhotoComment(pid, commentId) }
             },
+            onDeleteGestureEvent = vm::logDeleteGestureEvent,
             onReact = { emoji ->
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
                 scope.launch { vm.reactPhoto(pid, emoji) }
@@ -11096,6 +11180,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onDeleteMessage = { messageId ->
                         scope.launch { vm.deleteChatMessage(messageId) }
                     },
+                    onDeleteGestureEvent = vm::logDeleteGestureEvent,
                     onSend = {
                         val body = chatInput
                         if (body.isNotBlank() && !state.chatSending) {
@@ -14639,6 +14724,7 @@ fun ChatTab(
     onInput: (String) -> Unit,
     onOpenUserProfile: (Long) -> Unit,
     onDeleteMessage: (Long) -> Unit,
+    onDeleteGestureEvent: (String, Long, String, Boolean, Boolean?) -> Unit,
     onSend: () -> Unit,
     onCreatePoll: (String, List<String>, Boolean) -> Unit,
     onVotePoll: (Long, List<Long>) -> Unit,
@@ -14701,30 +14787,22 @@ fun ChatTab(
                     }
                     is ChatRow.MessageItem -> {
                         val item = row.item
-                        val canDelete = chatDeleteSupported && meId != null && item.user.id == meId && item.source == "user"
-                        val holdModifier = if (canDelete) {
-                            Modifier.pointerInput(item.id) {
-                                detectTapGestures(
-                                    onPress = {
-                                        kotlinx.coroutines.coroutineScope {
-                                            var longPressTriggered = false
-                                            val holdJob = launch {
-                                                delay(3000)
-                                                longPressTriggered = true
-                                                deleteCandidate = item
-                                            }
-                                            try {
-                                                tryAwaitRelease()
-                                            } finally {
-                                                holdJob.cancel()
-                                            }
-                                            if (longPressTriggered) {
-                                                return@coroutineScope
-                                            }
-                                        }
+                        val isOwnUserMessage = meId != null && item.user.id == meId && item.source == "user"
+                        val holdModifier = if (isOwnUserMessage) {
+                            Modifier.deleteHoldGesture(
+                                key = "chat-${item.id}-$chatDeleteSupported",
+                                onCompleted = {
+                                    if (chatDeleteSupported) {
+                                        onDeleteGestureEvent("chat", item.id, "dialog_open", true, null)
+                                        deleteCandidate = item
+                                    } else {
+                                        onDeleteGestureEvent("chat", item.id, "blocked", false, null)
                                     }
-                                )
-                            }
+                                },
+                                onCancelled = { releasedEarly ->
+                                    onDeleteGestureEvent("chat", item.id, "cancelled", chatDeleteSupported, releasedEarly)
+                                }
+                            )
                         } else {
                             Modifier
                         }
@@ -17540,6 +17618,31 @@ private fun helpLines(): List<String> = listOf(
 private val viewerReactionEmojis = listOf("\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDE02", "\uD83D\uDD25", "\uD83D\uDE2E")
 private const val viewerFotomojiLiveEmoji = "\u26A1"
 private val viewerFotomojiEmojis = viewerReactionEmojis + viewerFotomojiLiveEmoji
+private const val deleteHoldDurationMs = 3_000L
+
+private fun Modifier.deleteHoldGesture(
+    key: Any,
+    onCompleted: () -> Unit,
+    onCancelled: (releasedEarly: Boolean) -> Unit = {}
+): Modifier = pointerInput(key) {
+    detectTapGestures(
+        onPress = {
+            kotlinx.coroutines.coroutineScope {
+                var completed = false
+                val holdJob = launch {
+                    delay(deleteHoldDurationMs)
+                    completed = true
+                    onCompleted()
+                }
+                val released = tryAwaitRelease()
+                holdJob.cancel()
+                if (!completed) {
+                    onCancelled(released)
+                }
+            }
+        }
+    )
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -17559,6 +17662,7 @@ private fun FullscreenPhotoViewer(
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
     onDeleteComment: (Long) -> Unit,
+    onDeleteGestureEvent: (String, Long, String, Boolean, Boolean?) -> Unit,
     onReact: (String) -> Unit,
     onFotoMojiTap: (String) -> Unit,
     onFotoMojiLongPress: (String) -> Unit,
@@ -17619,6 +17723,7 @@ private fun FullscreenPhotoViewer(
                     onCommentChange = onCommentChange,
                     onCommentSend = onCommentSend,
                     onDeleteComment = onDeleteComment,
+                    onDeleteGestureEvent = onDeleteGestureEvent,
                     onReact = onReact,
                     onFotoMojiTap = onFotoMojiTap,
                     onFotoMojiLongPress = onFotoMojiLongPress,
@@ -17705,6 +17810,7 @@ private fun ViewerInteractionSheet(
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
     onDeleteComment: (Long) -> Unit,
+    onDeleteGestureEvent: (String, Long, String, Boolean, Boolean?) -> Unit,
     onReact: (String) -> Unit,
     onFotoMojiTap: (String) -> Unit,
     onFotoMojiLongPress: (String) -> Unit,
@@ -17835,20 +17941,22 @@ private fun ViewerInteractionSheet(
             Text("Interaktionen werden geladen ...")
         }
         interactions?.comments?.takeLast(40)?.forEach { item ->
-            val canDelete = commentDeleteSupported && meId != null && item.user.id == meId
-            val holdModifier = if (canDelete) {
-                Modifier.pointerInput(item.id) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        val released = withTimeoutOrNull(3000) {
-                            waitForUpOrCancellation()
-                        }
-                        if (released == null) {
+            val isOwnComment = meId != null && item.user.id == meId
+            val holdModifier = if (isOwnComment) {
+                Modifier.deleteHoldGesture(
+                    key = "feed_comment-${item.id}-$commentDeleteSupported",
+                    onCompleted = {
+                        if (commentDeleteSupported) {
+                            onDeleteGestureEvent("feed_comment", item.id, "dialog_open", true, null)
                             deleteCommentCandidate = item
-                            down.consume()
+                        } else {
+                            onDeleteGestureEvent("feed_comment", item.id, "blocked", false, null)
                         }
+                    },
+                    onCancelled = { releasedEarly ->
+                        onDeleteGestureEvent("feed_comment", item.id, "cancelled", commentDeleteSupported, releasedEarly)
                     }
-                }
+                )
             } else {
                 Modifier
             }
