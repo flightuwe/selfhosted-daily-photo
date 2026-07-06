@@ -41,6 +41,7 @@ class PushMessagingService : FirebaseMessagingService() {
         val action = message.data["action"]?.trim().orEmpty()
         val day = message.data["day"]?.trim().orEmpty()
         val photoId = message.data["photoId"]?.trim().orEmpty()
+        val notificationKey = message.data["notificationKey"]?.trim().orEmpty()
         appendFeedTraceLog(
             context = this,
             type = "push_received",
@@ -66,6 +67,26 @@ class PushMessagingService : FirebaseMessagingService() {
             hasDataPayload = message.data.isNotEmpty(),
             dataKeys = message.data.keys
         )
+        if (type == "notification_cancel" || action == "cancel_notification") {
+            if (isFeedRelatedPush("open_feed", "photo_comment", day, photoId)) {
+                queuePendingFeedInvalidation(
+                    context = this,
+                    day = day.ifBlank { LocalDate.now().toString() },
+                    photoId = photoId.toLongOrNull()?.takeIf { it > 0L },
+                    reason = "comment_delete",
+                    source = "push_cancel"
+                )
+                publishForegroundFeedInvalidation(
+                    context = this,
+                    day = day.ifBlank { LocalDate.now().toString() },
+                    photoId = photoId.toLongOrNull()?.takeIf { it > 0L },
+                    reason = "comment_delete",
+                    source = "push_cancel"
+                )
+            }
+            cancelTrackedNotificationByKey(this, notificationKey, "remote_cancel", "real_fcm")
+            return
+        }
         if (isFeedRelatedPush(action, type, day, photoId)) {
             queuePendingFeedInvalidation(
                 context = this,
@@ -105,7 +126,7 @@ class PushMessagingService : FirebaseMessagingService() {
         val tone = toneConfig(prefs)
         val title = message.notification?.title ?: "Daily Moment"
         val body = message.notification?.body ?: message.data["body"] ?: "Zeit fuer deinen taeglichen Moment."
-        postTrackedNotification(this, tone, type, action, day, photoId, title, body, source = "real_fcm")
+        postTrackedNotification(this, tone, notificationKey, type, action, day, photoId, title, body, source = "real_fcm")
     }
 
     companion object {
@@ -163,6 +184,19 @@ class PushMessagingService : FirebaseMessagingService() {
             postClearVerification(context, reason, usedCancelAll = true)
         }
 
+        fun cancelTrackedNotificationByKey(context: Context, notificationKey: String, reason: String, source: String) {
+            val notificationId = PushNotificationRules.notificationIdForKey(notificationKey)
+            if (notificationId == 0) return
+            NotificationManagerCompat.from(context).cancel(notificationId)
+            untrackPushNotificationId(context, notificationId)
+            PushNotificationDiagnostics.recordEvent(
+                context,
+                type = "push_notification_cancelled",
+                message = reason,
+                meta = "source=$source;id=$notificationId;notificationKey=${if (notificationKey.isBlank()) "-" else notificationKey};snapshot=${PushNotificationDiagnostics.activeNotificationsSnapshot(context)}"
+            )
+        }
+
         fun showDebugTrackedNotificationBurst(context: Context) {
             val prefs = context.getSharedPreferences(PUSH_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
             val tone = toneConfig(prefs)
@@ -170,6 +204,7 @@ class PushMessagingService : FirebaseMessagingService() {
                 postTrackedNotification(
                     context = context,
                     tone = tone,
+                    notificationKey = "",
                     type = "chat",
                     action = "open_chat",
                     day = "",
@@ -192,25 +227,25 @@ class PushMessagingService : FirebaseMessagingService() {
             val tone = toneConfig(prefs)
             when (scenarioId.trim().lowercase()) {
                 "mixed_matrix" -> {
-                    postTrackedNotification(context, tone, "chat", "open_chat", "", "", "Debug Chat", "Chat-Matrix 1", "debug_mixed")
-                    postTrackedNotification(context, tone, "chat_poll", "open_chat", "", "", "Debug Poll", "Poll-Matrix 2", "debug_mixed")
-                    postTrackedNotification(context, tone, "post", "open_feed", "2026-07-02", "321", "Debug Feed", "Feed-Matrix 3", "debug_mixed")
-                    postTrackedNotification(context, tone, "special_request", "open_camera", "", "", "Debug Prompt", "Prompt-Matrix 4", "debug_mixed")
+                    postTrackedNotification(context, tone, "", "chat", "open_chat", "", "", "Debug Chat", "Chat-Matrix 1", "debug_mixed")
+                    postTrackedNotification(context, tone, "", "chat_poll", "open_chat", "", "", "Debug Poll", "Poll-Matrix 2", "debug_mixed")
+                    postTrackedNotification(context, tone, "", "post", "open_feed", "2026-07-02", "321", "Debug Feed", "Feed-Matrix 3", "debug_mixed")
+                    postTrackedNotification(context, tone, "", "special_request", "open_camera", "", "", "Debug Prompt", "Prompt-Matrix 4", "debug_mixed")
                 }
                 "same_id_matrix" -> {
                     repeat(3) {
-                        postTrackedNotification(context, tone, "chat", "open_chat", "", "", "Debug Same ID", "Immer gleicher Inhalt", "debug_same_id")
+                        postTrackedNotification(context, tone, "", "chat", "open_chat", "", "", "Debug Same ID", "Immer gleicher Inhalt", "debug_same_id")
                     }
                 }
                 "feed_matrix" -> {
-                    postTrackedNotification(context, tone, "post", "open_feed", "2026-07-02", "501", "Debug Feed", "Feed-Test A", "debug_feed")
-                    postTrackedNotification(context, tone, "photo_comment", "open_feed", "2026-07-01", "502", "Debug Kommentar", "Feed-Test B", "debug_feed")
-                    postTrackedNotification(context, tone, "chat_poll", "open_chat", "", "", "Debug Poll", "Feed/Poll-Test", "debug_feed")
+                    postTrackedNotification(context, tone, "", "post", "open_feed", "2026-07-02", "501", "Debug Feed", "Feed-Test A", "debug_feed")
+                    postTrackedNotification(context, tone, "", "photo_comment", "open_feed", "2026-07-01", "502", "Debug Kommentar", "Feed-Test B", "debug_feed")
+                    postTrackedNotification(context, tone, "", "chat_poll", "open_chat", "", "", "Debug Poll", "Feed/Poll-Test", "debug_feed")
                 }
                 "summary_group_matrix" -> {
-                    postTrackedNotification(context, tone, "chat", "open_chat", "", "", "Group Chat 1", "Gruppen-Test 1", "debug_group")
-                    postTrackedNotification(context, tone, "chat_poll", "open_chat", "", "", "Group Chat 2", "Gruppen-Test 2", "debug_group")
-                    postTrackedNotification(context, tone, "chat_message", "open_chat", "", "", "Group Chat 3", "Gruppen-Test 3", "debug_group")
+                    postTrackedNotification(context, tone, "", "chat", "open_chat", "", "", "Group Chat 1", "Gruppen-Test 1", "debug_group")
+                    postTrackedNotification(context, tone, "", "chat_poll", "open_chat", "", "", "Group Chat 2", "Gruppen-Test 2", "debug_group")
+                    postTrackedNotification(context, tone, "", "chat_message", "open_chat", "", "", "Group Chat 3", "Gruppen-Test 3", "debug_group")
                 }
                 else -> showDebugTrackedNotificationBurst(context)
             }
@@ -301,6 +336,7 @@ class PushMessagingService : FirebaseMessagingService() {
         private fun postTrackedNotification(
             context: Context,
             tone: ToneConfig,
+            notificationKey: String,
             type: String,
             action: String,
             day: String,
@@ -310,7 +346,7 @@ class PushMessagingService : FirebaseMessagingService() {
             source: String
         ) {
             val channelId = ensurePromptChannel(context, tone)
-            val notificationId = PushNotificationRules.notificationId(type, action, day, photoId, title, body)
+            val notificationId = PushNotificationRules.notificationId(notificationKey, type, action, day, photoId, title, body)
             val intent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 putExtra(EXTRA_LAUNCH_ACTION, action)
@@ -355,7 +391,7 @@ class PushMessagingService : FirebaseMessagingService() {
                 body = body,
                 hasNotificationPayload = true,
                 hasDataPayload = true,
-                dataKeys = listOf("type", "action", "day", "photoId", "body")
+                dataKeys = listOf("type", "action", "day", "photoId", "body", "notificationKey")
             )
             PushNotificationDiagnostics.recordEvent(
                 context,
@@ -373,6 +409,13 @@ class PushMessagingService : FirebaseMessagingService() {
             if (!prefs.edit().putStringSet(PUSH_NOTIFICATION_IDS_KEY, trimmed).commit()) {
                 Log.w("PushMessagingService", "Failed to persist tracked push notification id")
             }
+        }
+
+        private fun untrackPushNotificationId(context: Context, notificationId: Int) {
+            val prefs = context.getSharedPreferences(PUSH_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+            val stored = prefs.getStringSet(PUSH_NOTIFICATION_IDS_KEY, emptySet()).orEmpty().toMutableSet()
+            stored.remove(notificationId.toString())
+            prefs.edit().putStringSet(PUSH_NOTIFICATION_IDS_KEY, stored).apply()
         }
 
         private fun toneConfig(prefs: android.content.SharedPreferences): ToneConfig {

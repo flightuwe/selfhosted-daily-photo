@@ -320,6 +320,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.POST("/photos/:id/fotomojis", s.handlePhotoFotomojiFromTemplate)
 			protected.POST("/photos/:id/fotomojis/upload", s.handlePhotoFotomojiUpload)
 			protected.POST("/photos/:id/comments", s.handlePhotoComment)
+			protected.DELETE("/photos/:photoId/comments/:commentId", s.handleDeletePhotoComment)
 			protected.POST("/photos/:id/attachments", s.handlePhotoAttachmentCreate)
 		}
 
@@ -8704,7 +8705,8 @@ func (s *Server) handleHealth(c *gin.Context) {
 		"version":  s.Config.AppVersion,
 		"provider": s.Notifier.Name(),
 		"features": gin.H{
-			"chatDelete": true,
+			"chatDelete":    true,
+			"commentDelete": true,
 		},
 	})
 }
@@ -9877,7 +9879,8 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Body string `json:"body" binding:"required,max=500"`
+		Body            string `json:"body" binding:"required,max=500"`
+		ClientCommentID string `json:"clientCommentId" binding:"omitempty,max=64"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
@@ -9899,54 +9902,191 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 		return
 	}
 
-	comment := models.PhotoComment{
-		PhotoID: photoID,
-		UserID:  user.ID,
-		Body:    body,
+	clientCommentID := strings.TrimSpace(req.ClientCommentID)
+	if existing, ok, err := s.findPhotoCommentByClientID(user.ID, clientCommentID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "comment dedupe lookup failed"})
+		return
+	} else if ok {
+		out, payloadErr := s.photoCommentMutationPayload(photo, user.ID, "comment_created", &existing, 0, true)
+		if payloadErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+		c.JSON(http.StatusOK, out)
+		return
 	}
+
+	var (
+		comment      models.PhotoComment
+		deduplicated bool
+	)
 	createStart := time.Now()
-	if err := s.DB.Create(&comment).Error; err != nil {
+	err = s.DB.Transaction(func(tx *gorm.DB) error {
+		if clientCommentID != "" {
+			var existing models.PhotoComment
+			err := tx.Preload("User").
+				Where("user_id = ? AND client_comment_id = ?", user.ID, clientCommentID).
+				First(&existing).Error
+			if err == nil {
+				comment = existing
+				deduplicated = true
+				return nil
+			}
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
+
+		var last models.PhotoComment
+		err := tx.Where("photo_id = ?", photoID).
+			Order("created_at desc, id desc").
+			First(&last).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err == nil &&
+			last.UserID == user.ID &&
+			normalizePhotoCommentBodyForDedupe(last.Body) == body {
+			preloadErr := tx.Preload("User").First(&last, last.ID).Error
+			if preloadErr != nil {
+				return preloadErr
+			}
+			comment = last
+			return errors.New("duplicate_consecutive_comment")
+		}
+
+		comment = models.PhotoComment{
+			PhotoID: photoID,
+			UserID:  user.ID,
+			Body:    body,
+		}
+		if clientCommentID != "" {
+			comment.ClientCommentID = &clientCommentID
+		}
+		if err := tx.Create(&comment).Error; err != nil {
+			if clientCommentID != "" {
+				var existing models.PhotoComment
+				findErr := tx.Preload("User").
+					Where("user_id = ? AND client_comment_id = ?", user.ID, clientCommentID).
+					First(&existing).Error
+				if findErr == nil {
+					comment = existing
+					deduplicated = true
+					return nil
+				}
+			}
+			return err
+		}
+		return tx.Preload("User").First(&comment, comment.ID).Error
+	})
+	if err != nil {
+		if err.Error() == "duplicate_consecutive_comment" {
+			out, payloadErr := s.photoCommentMutationPayload(photo, user.ID, "comment_created", &comment, 0, true)
+			if payloadErr != nil {
+				c.JSON(http.StatusConflict, gin.H{"error": "duplicate consecutive comment", "errorCode": "duplicate_consecutive_comment"})
+				return
+			}
+			out["error"] = "duplicate consecutive comment"
+			out["errorCode"] = "duplicate_consecutive_comment"
+			c.JSON(http.StatusConflict, out)
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "comment create failed"})
 		return
 	}
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/photos/:id/comments", "photo_comment_insert", time.Since(createStart))
 	}
-	if err := s.handlePhotoInteractionSubscription(photo, user.ID, "comment", time.Now().UTC()); err != nil {
-		_ = s.DB.Delete(&comment).Error
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
+	if !deduplicated {
+		if err := s.handlePhotoInteractionSubscription(photo, user.ID, "comment", time.Now().UTC()); err != nil {
+			_ = s.DB.Delete(&comment).Error
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark sync failed"})
+			return
+		}
+	}
+	if err := s.refreshPhotoSearchDocument(photo.ID); err != nil {
+		if !deduplicated {
+			_ = s.DB.Delete(&comment).Error
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "search index failed"})
 		return
 	}
-	fullResponse := parseQueryBool(c.Query("full"), false)
-	var (
-		out        gin.H
-		payloadErr error
-	)
 	payloadStart := time.Now()
-	if fullResponse {
-		out, payloadErr = s.photoInteractionsPayload(photo, user.ID)
-	} else {
-		out, payloadErr = s.photoInteractionsLightPayload(photo, user)
-	}
+	out, payloadErr := s.photoCommentMutationPayload(photo, user.ID, "comment_created", &comment, 0, deduplicated)
 	if s.Monitor != nil {
-		queryGroup := "photo_comment_light_payload"
-		if fullResponse {
-			queryGroup = "photo_comment_full_payload"
-		}
-		s.Monitor.RecordDBQuery("/api/photos/:id/comments", queryGroup, time.Since(payloadStart))
+		s.Monitor.RecordDBQuery("/api/photos/:id/comments", "photo_comment_mutation_payload", time.Since(payloadStart))
 	}
 	if payloadErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
+	if !deduplicated {
+		s.notifyPhotoComment(user, photo, comment)
+		c.JSON(http.StatusCreated, out)
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (s *Server) handleDeletePhotoComment(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photoID, err := parseUintParam(c.Param("photoId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+	commentID, err := parseUintParam(c.Param("commentId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid comment id"})
+		return
+	}
+
+	photo, err := s.loadPhotoForInteraction(photoID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+		return
+	}
+	if ok, lockErr := s.ensurePhotoVisibleToUser(user.ID, photo); !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": lockErr})
+		return
+	}
+
+	var comment models.PhotoComment
+	if err := s.DB.Preload("User").
+		Where("id = ? AND photo_id = ?", commentID, photoID).
+		First(&comment).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "comment not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if comment.UserID != user.ID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not allowed"})
+		return
+	}
+	if err := s.DB.Delete(&comment).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
 	if err := s.refreshPhotoSearchDocument(photo.ID); err != nil {
-		_ = s.DB.Delete(&comment).Error
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "search index failed"})
 		return
 	}
+	payloadStart := time.Now()
+	out, payloadErr := s.photoCommentMutationPayload(photo, user.ID, "comment_deleted", nil, comment.ID, false)
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/photos/:photoId/comments/:commentId", "photo_comment_delete_payload", time.Since(payloadStart))
+	}
+	if payloadErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
 	s.invalidateFeedDayCache(photo.Day)
-	s.notifyPhotoComment(user, photo)
-	c.JSON(http.StatusCreated, out)
+	s.cancelPhotoCommentNotification(photo, comment)
+	c.JSON(http.StatusOK, out)
 }
 
 type monthReliableRow struct {
@@ -12017,6 +12157,77 @@ func (s *Server) photoInteractionsLightPayload(photo models.Photo, commenter mod
 	}, nil
 }
 
+func (s *Server) photoCommentJSON(comment models.PhotoComment) gin.H {
+	return gin.H{
+		"id":        comment.ID,
+		"body":      comment.Body,
+		"createdAt": comment.CreatedAt,
+		"user": gin.H{
+			"id":            comment.User.ID,
+			"username":      comment.User.Username,
+			"favoriteColor": defaultColor(comment.User.FavoriteColor),
+		},
+	}
+}
+
+func normalizePhotoCommentBodyForDedupe(v string) string {
+	return strings.TrimSpace(v)
+}
+
+func (s *Server) findPhotoCommentByClientID(userID uint, clientCommentID string) (models.PhotoComment, bool, error) {
+	clientCommentID = strings.TrimSpace(clientCommentID)
+	if clientCommentID == "" {
+		return models.PhotoComment{}, false, nil
+	}
+	var existing models.PhotoComment
+	err := s.DB.Preload("User").
+		Where("user_id = ? AND client_comment_id = ?", userID, clientCommentID).
+		First(&existing).Error
+	if err == nil {
+		return existing, true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.PhotoComment{}, false, nil
+	}
+	return models.PhotoComment{}, false, err
+}
+
+func (s *Server) photoCommentMutationPayload(photo models.Photo, viewerID uint, mutationType string, comment *models.PhotoComment, deletedCommentID uint, deduplicated bool) (gin.H, error) {
+	out, err := s.photoInteractionsPayload(photo, viewerID)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		commentCount   int64
+		reactionCount  int64
+		photoMojiCount int64
+	)
+	if err := s.DB.Model(&models.PhotoComment{}).Where("photo_id = ?", photo.ID).Count(&commentCount).Error; err != nil {
+		return nil, err
+	}
+	if err := s.DB.Model(&models.PhotoReaction{}).Where("photo_id = ?", photo.ID).Count(&reactionCount).Error; err != nil {
+		return nil, err
+	}
+	if err := s.DB.Model(&models.PhotoFotomoji{}).Where("photo_id = ?", photo.ID).Count(&photoMojiCount).Error; err != nil {
+		return nil, err
+	}
+	out["counts"] = gin.H{
+		"comments":   commentCount,
+		"reactions":  reactionCount,
+		"photoMojis": photoMojiCount,
+	}
+	out["full"] = true
+	out["deletedCommentId"] = deletedCommentID
+	if comment != nil {
+		out["comment"] = s.photoCommentJSON(*comment)
+	}
+	out["mutation"] = gin.H{
+		"type":         mutationType,
+		"deduplicated": deduplicated,
+	}
+	return out, nil
+}
+
 func (s *Server) ensurePromptForPostingDay(day string) (models.DailyPrompt, error) {
 	var prompt models.DailyPrompt
 	err := s.DB.Where("day = ?", day).First(&prompt).Error
@@ -12270,7 +12481,7 @@ func (s *Server) bookmarkedPostChangeNotificationRecipients(photoID, ownerID, ac
 	return recipients
 }
 
-func (s *Server) sendPhotoNotification(recipients []notificationRecipient, title string, baseBody string, messageType string, photo models.Photo) {
+func (s *Server) sendPhotoNotification(recipients []notificationRecipient, title string, baseBody string, messageType string, photo models.Photo, notificationKey string) {
 	if len(recipients) == 0 {
 		return
 	}
@@ -12292,12 +12503,13 @@ func (s *Server) sendPhotoNotification(recipients []notificationRecipient, title
 			return
 		}
 		sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
-			Title:   title,
-			Body:    body,
-			Type:    messageType,
-			Action:  "open_feed",
-			Day:     photo.Day,
-			PhotoID: int64(photo.ID),
+			Title:           title,
+			Body:            body,
+			Type:            messageType,
+			Action:          "open_feed",
+			Day:             photo.Day,
+			PhotoID:         int64(photo.ID),
+			NotificationKey: notificationKey,
 		})
 		s.recordPushResult(sendResult, sendErr)
 		s.removeInvalidTokens(sendResult.InvalidTokens)
@@ -12308,6 +12520,13 @@ func (s *Server) sendPhotoNotification(recipients []notificationRecipient, title
 	}
 }
 
+func photoCommentNotificationKey(commentID uint) string {
+	if commentID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("comment:%d", commentID)
+}
+
 func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
 	now := time.Now().In(s.Location)
 	if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) {
@@ -12316,11 +12535,11 @@ func (s *Server) notifyPhotoReaction(actor models.User, photo models.Photo) {
 	if photo.UserID != 0 && photo.UserID != actor.ID {
 		body := fmt.Sprintf("%s hat auf deinen Beitrag reagiert", actor.Username)
 		recipients := s.reactionNotificationRecipients(photo.UserID, actor.ID)
-		s.sendPhotoNotification(recipients, "Neue Reaktion", body, "photo_reaction", photo)
+		s.sendPhotoNotification(recipients, "Neue Reaktion", body, "photo_reaction", photo, "")
 	}
 	body := fmt.Sprintf("%s hat auf einen gemerkten Beitrag reagiert", actor.Username)
 	bookmarkRecipients := s.bookmarkedPhotoNotificationRecipients(photo.ID, photo.UserID, actor.ID)
-	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_reaction", photo)
+	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_reaction", photo, "")
 }
 
 func (s *Server) notifyPhotoFotomoji(actor models.User, photo models.Photo) {
@@ -12331,54 +12550,87 @@ func (s *Server) notifyPhotoFotomoji(actor models.User, photo models.Photo) {
 	if photo.UserID != 0 && photo.UserID != actor.ID {
 		body := fmt.Sprintf("%s hat mit einem Foto auf deinen Beitrag reagiert", actor.Username)
 		recipients := s.fotomojiNotificationRecipients(photo.UserID, actor.ID)
-		s.sendPhotoNotification(recipients, "Neue FotoMoji", body, "photo_fotomoji", photo)
+		s.sendPhotoNotification(recipients, "Neue FotoMoji", body, "photo_fotomoji", photo, "")
 	}
 	body := fmt.Sprintf("%s hat mit einem Foto auf einen gemerkten Beitrag reagiert", actor.Username)
 	bookmarkRecipients := s.bookmarkedPhotoNotificationRecipients(photo.ID, photo.UserID, actor.ID)
-	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_fotomoji", photo)
+	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_fotomoji", photo, "")
 }
 
-func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo) {
+func (s *Server) notifyPhotoComment(actor models.User, photo models.Photo, comment models.PhotoComment) {
 	now := time.Now().In(s.Location)
 	if photo.CapsuleVisibleAt != nil && now.Before(*photo.CapsuleVisibleAt) {
 		return
 	}
+	notificationKey := photoCommentNotificationKey(comment.ID)
 	if photo.UserID != 0 && photo.UserID != actor.ID {
 		body := fmt.Sprintf("%s hat deinen Beitrag kommentiert", actor.Username)
 		recipients := s.commentNotificationRecipients(photo.UserID, actor.ID)
-		s.sendPhotoNotification(recipients, "Neuer Kommentar", body, "photo_comment", photo)
+		s.sendPhotoNotification(recipients, "Neuer Kommentar", body, "photo_comment", photo, notificationKey)
 	}
 	body := fmt.Sprintf("%s hat einen gemerkten Beitrag kommentiert", actor.Username)
 	bookmarkRecipients := s.bookmarkedPhotoNotificationRecipients(photo.ID, photo.UserID, actor.ID)
-	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_comment", photo)
+	s.sendPhotoNotification(bookmarkRecipients, "Aktivitaet auf gemerktem Beitrag", body, "bookmarked_photo_comment", photo, notificationKey)
+}
+
+func (s *Server) cancelPhotoCommentNotification(photo models.Photo, comment models.PhotoComment) {
+	notificationKey := photoCommentNotificationKey(comment.ID)
+	if notificationKey == "" {
+		return
+	}
+	sendCancel := func(recipients []notificationRecipient) {
+		tokens := make([]string, 0, len(recipients))
+		for _, recipient := range recipients {
+			if strings.TrimSpace(recipient.Token) == "" {
+				continue
+			}
+			tokens = append(tokens, recipient.Token)
+		}
+		if len(tokens) == 0 {
+			return
+		}
+		sendResult, sendErr := s.Notifier.Send(tokens, notify.Message{
+			Type:            "notification_cancel",
+			Action:          "cancel_notification",
+			Day:             photo.Day,
+			PhotoID:         int64(photo.ID),
+			NotificationKey: notificationKey,
+		})
+		s.recordPushResult(sendResult, sendErr)
+		s.removeInvalidTokens(sendResult.InvalidTokens)
+	}
+	if photo.UserID != 0 && photo.UserID != comment.UserID {
+		sendCancel(s.commentNotificationRecipients(photo.UserID, comment.UserID))
+	}
+	sendCancel(s.bookmarkedPhotoNotificationRecipients(photo.ID, photo.UserID, comment.UserID))
 }
 
 func (s *Server) notifyPhotoAttachmentAppended(actor models.User, photo models.Photo) {
 	body := fmt.Sprintf("%s hat einem gemerkten Beitrag ein weiteres Bild hinzugefuegt", actor.Username)
 	recipients := s.bookmarkedPostChangeNotificationRecipients(photo.ID, photo.UserID, actor.ID)
-	s.sendPhotoNotification(recipients, "Aenderung an gemerktem Beitrag", body, "bookmarked_photo_media_appended", photo)
+	s.sendPhotoNotification(recipients, "Aenderung an gemerktem Beitrag", body, "bookmarked_photo_media_appended", photo, "")
 }
 
 func (s *Server) notifyPhotoNsfwMarked(actor models.User, photo models.Photo) {
 	if photo.UserID != 0 && photo.UserID != actor.ID {
 		body := fmt.Sprintf("%s hat deinen Beitrag als NSFW markiert", actor.Username)
 		recipients := s.ownPostChangeNotificationRecipients(photo.UserID, actor.ID)
-		s.sendPhotoNotification(recipients, "NSFW-Hinweis gesetzt", body, "photo_nsfw_marked", photo)
+		s.sendPhotoNotification(recipients, "NSFW-Hinweis gesetzt", body, "photo_nsfw_marked", photo, "")
 	}
 	body := fmt.Sprintf("%s hat einen gemerkten Beitrag als NSFW markiert", actor.Username)
 	recipients := s.bookmarkedPostChangeNotificationRecipients(photo.ID, photo.UserID, actor.ID)
-	s.sendPhotoNotification(recipients, "Aenderung an gemerktem Beitrag", body, "bookmarked_photo_nsfw_marked", photo)
+	s.sendPhotoNotification(recipients, "Aenderung an gemerktem Beitrag", body, "bookmarked_photo_nsfw_marked", photo, "")
 }
 
 func (s *Server) notifyPhotoNsfwUnmarked(actor models.User, photo models.Photo) {
 	if photo.UserID != 0 && photo.UserID != actor.ID {
 		body := fmt.Sprintf("%s hat den NSFW-Hinweis von deinem Beitrag entfernt", actor.Username)
 		recipients := s.ownPostChangeNotificationRecipients(photo.UserID, actor.ID)
-		s.sendPhotoNotification(recipients, "NSFW-Hinweis entfernt", body, "photo_nsfw_unmarked", photo)
+		s.sendPhotoNotification(recipients, "NSFW-Hinweis entfernt", body, "photo_nsfw_unmarked", photo, "")
 	}
 	body := fmt.Sprintf("%s hat den NSFW-Hinweis von einem gemerkten Beitrag entfernt", actor.Username)
 	recipients := s.bookmarkedPostChangeNotificationRecipients(photo.ID, photo.UserID, actor.ID)
-	s.sendPhotoNotification(recipients, "Aenderung an gemerktem Beitrag", body, "bookmarked_photo_nsfw_unmarked", photo)
+	s.sendPhotoNotification(recipients, "Aenderung an gemerktem Beitrag", body, "bookmarked_photo_nsfw_unmarked", photo, "")
 }
 
 func (s *Server) removeInvalidTokens(tokens []string) int64 {

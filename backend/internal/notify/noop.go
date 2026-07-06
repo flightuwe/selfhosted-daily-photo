@@ -3,25 +3,26 @@ package notify
 import "log"
 
 type SendResult struct {
-    Requested     int
-    Sent          int
-    Failed        int
-    InvalidTokens []string
+	Requested     int
+	Sent          int
+	Failed        int
+	InvalidTokens []string
 }
 
 type Message struct {
-    Title   string
-    Body    string
-    Type    string
-    Action  string
-    Day     string
-    PhotoID int64
+	Title           string
+	Body            string
+	Type            string
+	Action          string
+	Day             string
+	PhotoID         int64
+	NotificationKey string
 }
 
 type Sender interface {
-    Send(tokens []string, message Message) (SendResult, error)
-    SendDailyPrompt(tokens []string, body string) (SendResult, error)
-    Name() string
+	Send(tokens []string, message Message) (SendResult, error)
+	SendDailyPrompt(tokens []string, body string) (SendResult, error)
+	Name() string
 }
 
 type NoopSender struct{}
@@ -29,20 +30,20 @@ type NoopSender struct{}
 func NewNoop() *NoopSender { return &NoopSender{} }
 
 func (n *NoopSender) Send(tokens []string, message Message) (SendResult, error) {
-    log.Printf("noop notify: %d tokens, type=%q action=%q day=%q photoId=%d title=%q body=%q", len(tokens), message.Type, message.Action, message.Day, message.PhotoID, message.Title, message.Body)
-    return SendResult{
-        Requested: len(tokens),
-        Sent:      len(tokens),
-    }, nil
+	log.Printf("noop notify: %d tokens, type=%q action=%q day=%q photoId=%d notificationKey=%q title=%q body=%q", len(tokens), message.Type, message.Action, message.Day, message.PhotoID, message.NotificationKey, message.Title, message.Body)
+	return SendResult{
+		Requested: len(tokens),
+		Sent:      len(tokens),
+	}, nil
 }
 
 func (n *NoopSender) SendDailyPrompt(tokens []string, body string) (SendResult, error) {
-    return n.Send(tokens, Message{
-        Title:  "Daily Moment",
-        Body:   body,
-        Type:   "daily_prompt",
-        Action: "open_camera",
-    })
+	return n.Send(tokens, Message{
+		Title:  "Daily Moment",
+		Body:   body,
+		Type:   "daily_prompt",
+		Action: "open_camera",
+	})
 }
 
 func (n *NoopSender) Name() string { return "noop" }

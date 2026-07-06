@@ -17,9 +17,17 @@ data class PushPreferenceSnapshot(
 object PushNotificationRules {
     fun normalizeType(rawType: String?): String = rawType?.trim()?.lowercase().orEmpty()
 
+    fun notificationIdForKey(rawKey: String?): Int {
+        val key = rawKey?.trim().orEmpty()
+        if (key.isBlank()) return 0
+        val hash = "key|$key".hashCode()
+        return if (hash == Int.MIN_VALUE) 0 else abs(hash)
+    }
+
     fun shouldDisplay(rawType: String?, prefs: PushPreferenceSnapshot): Boolean {
         if (!prefs.masterEnabled) return false
         return when (normalizeType(rawType)) {
+            "notification_cancel" -> false
             "chat", "chat_message" -> prefs.chatEnabled
             "chat_poll" -> prefs.pollEnabled
             "feed_post", "post", "extra_post" -> prefs.feedEnabled
@@ -38,6 +46,7 @@ object PushNotificationRules {
     }
 
     fun notificationId(
+        notificationKey: String?,
         rawType: String?,
         rawAction: String?,
         rawDay: String?,
@@ -45,6 +54,7 @@ object PushNotificationRules {
         title: String,
         body: String,
     ): Int {
+        notificationIdForKey(notificationKey).takeIf { it != 0 }?.let { return it }
         val seed = listOf(
             normalizeType(rawType),
             rawAction?.trim().orEmpty(),

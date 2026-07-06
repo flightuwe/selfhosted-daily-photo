@@ -612,6 +612,17 @@ func TestHandleUploadDeduplicatesByUploadClientIDOnRetry(t *testing.T) {
 	}
 }
 
+func newJSONRequestContext(method, target string, body string, user models.User) (*gin.Context, *httptest.ResponseRecorder) {
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(method, target, strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	if user.ID != 0 {
+		ctx.Set("user", user)
+	}
+	return ctx, rec
+}
+
 func TestHandleUploadReturnsUploadWindowClosedErrorCode(t *testing.T) {
 	server := newSearchTestServer(t)
 	now := time.Now().UTC()
@@ -1467,7 +1478,7 @@ func TestSendPhotoNotificationUsesOwnAndBookmarkPostNumberFlagsSeparately(t *tes
 	server.sendPhotoNotification([]notificationRecipient{
 		{Token: "own-off", PostNumberInPushEnabled: false},
 		{Token: "own-on", PostNumberInPushEnabled: true},
-	}, "Neue Reaktion", "alice hat auf deinen Beitrag reagiert", "photo_reaction", photo)
+	}, "Neue Reaktion", "alice hat auf deinen Beitrag reagiert", "photo_reaction", photo, "")
 
 	if len(sender.messages) != 2 {
 		t.Fatalf("messages = %d, want 2", len(sender.messages))
@@ -1483,7 +1494,7 @@ func TestSendPhotoNotificationUsesOwnAndBookmarkPostNumberFlagsSeparately(t *tes
 	server.sendPhotoNotification([]notificationRecipient{
 		{Token: "bookmark-off", PostNumberInPushEnabled: false},
 		{Token: "bookmark-on", PostNumberInPushEnabled: true},
-	}, "Aktivitaet auf gemerktem Beitrag", "bob hat einen gemerkten Beitrag kommentiert", "bookmarked_photo_comment", photo)
+	}, "Aktivitaet auf gemerktem Beitrag", "bob hat einen gemerkten Beitrag kommentiert", "bookmarked_photo_comment", photo, "")
 
 	if len(sender.messages) != 2 {
 		t.Fatalf("bookmark messages = %d, want 2", len(sender.messages))
@@ -1657,6 +1668,174 @@ func TestSearchPhotoHitsUsesCaptionAndComments(t *testing.T) {
 	}
 	if len(hits) != 1 || len(hits[0].MatchedComments) == 0 {
 		t.Fatalf("searchPhotoHits() comment matches = %+v, want comment excerpt", hits)
+	}
+}
+
+func TestHandlePhotoCommentDeduplicatesByClientCommentID(t *testing.T) {
+	server := newSearchTestServer(t)
+	actor := models.User{Username: "actor", PasswordHash: "x"}
+	owner := models.User{Username: "owner", PasswordHash: "x"}
+	if err := server.DB.Create(&actor).Error; err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	if err := server.DB.Create(&owner).Error; err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	photo := models.Photo{
+		UserID:    owner.ID,
+		Day:       "2026-07-06",
+		FilePath:  "2026-07-06/test.jpg",
+		CreatedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	body := `{"body":"identisch","clientCommentId":"c_1"}`
+	firstCtx, firstRec := newJSONRequestContext(http.MethodPost, "/api/photos/1/comments", body, actor)
+	firstCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoComment(firstCtx)
+	if firstRec.Code != http.StatusCreated {
+		t.Fatalf("first comment status = %d, want 201, body=%s", firstRec.Code, firstRec.Body.String())
+	}
+
+	secondCtx, secondRec := newJSONRequestContext(http.MethodPost, "/api/photos/1/comments", body, actor)
+	secondCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoComment(secondCtx)
+	if secondRec.Code != http.StatusOK {
+		t.Fatalf("retry comment status = %d, want 200, body=%s", secondRec.Code, secondRec.Body.String())
+	}
+
+	var count int64
+	if err := server.DB.Model(&models.PhotoComment{}).Where("photo_id = ?", photo.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count comments: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("comment count = %d, want 1", count)
+	}
+}
+
+func TestHandlePhotoCommentRejectsConsecutiveDuplicateBody(t *testing.T) {
+	server := newSearchTestServer(t)
+	actor := models.User{Username: "actor", PasswordHash: "x"}
+	owner := models.User{Username: "owner", PasswordHash: "x"}
+	if err := server.DB.Create(&actor).Error; err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	if err := server.DB.Create(&owner).Error; err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	photo := models.Photo{
+		UserID:    owner.ID,
+		Day:       "2026-07-06",
+		FilePath:  "2026-07-06/test.jpg",
+		CreatedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	firstCtx, firstRec := newJSONRequestContext(http.MethodPost, "/api/photos/1/comments", `{"body":"gleich"}`, actor)
+	firstCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoComment(firstCtx)
+	if firstRec.Code != http.StatusCreated {
+		t.Fatalf("first comment status = %d, want 201, body=%s", firstRec.Code, firstRec.Body.String())
+	}
+
+	secondCtx, secondRec := newJSONRequestContext(http.MethodPost, "/api/photos/1/comments", `{"body":"gleich"}`, actor)
+	secondCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoComment(secondCtx)
+	if secondRec.Code != http.StatusConflict {
+		t.Fatalf("duplicate comment status = %d, want 409, body=%s", secondRec.Code, secondRec.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(secondRec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode duplicate response: %v", err)
+	}
+	if got := response["errorCode"]; got != "duplicate_consecutive_comment" {
+		t.Fatalf("errorCode = %#v, want duplicate_consecutive_comment", got)
+	}
+}
+
+func TestHandleDeletePhotoCommentDeletesOwnCommentAndSendsCancel(t *testing.T) {
+	server := newSearchTestServer(t)
+	sender, ok := server.Notifier.(*recordingSender)
+	if !ok {
+		t.Fatal("recording sender missing")
+	}
+	actor := models.User{Username: "actor", PasswordHash: "x"}
+	owner := models.User{Username: "owner", PasswordHash: "x", PhotoCommentPushEnabled: true}
+	bookmarker := models.User{Username: "bookmarker", PasswordHash: "x", BookmarkedPhotoPushEnabled: true}
+	if err := server.DB.Create(&actor).Error; err != nil {
+		t.Fatalf("create actor: %v", err)
+	}
+	if err := server.DB.Create(&owner).Error; err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	if err := server.DB.Create(&bookmarker).Error; err != nil {
+		t.Fatalf("create bookmarker: %v", err)
+	}
+	if err := server.DB.Create(&models.DeviceToken{UserID: owner.ID, Token: "owner_token"}).Error; err != nil {
+		t.Fatalf("create owner token: %v", err)
+	}
+	if err := server.DB.Create(&models.DeviceToken{UserID: bookmarker.ID, Token: "bookmarker_token"}).Error; err != nil {
+		t.Fatalf("create bookmarker token: %v", err)
+	}
+	photo := models.Photo{
+		UserID:    owner.ID,
+		Day:       "2026-07-06",
+		FilePath:  "2026-07-06/test.jpg",
+		CreatedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoBookmark{UserID: bookmarker.ID, PhotoID: photo.ID, Active: true}).Error; err != nil {
+		t.Fatalf("create bookmark: %v", err)
+	}
+	clientCommentID := "c_delete"
+	comment := models.PhotoComment{
+		PhotoID:         photo.ID,
+		UserID:          actor.ID,
+		Body:            "loesch mich",
+		ClientCommentID: &clientCommentID,
+	}
+	if err := server.DB.Create(&comment).Error; err != nil {
+		t.Fatalf("create comment: %v", err)
+	}
+	if err := server.DB.Preload("User").First(&comment, comment.ID).Error; err != nil {
+		t.Fatalf("reload comment: %v", err)
+	}
+
+	server.notifyPhotoComment(actor, photo, comment)
+	beforeCancel := len(sender.messages)
+
+	ctx, rec := newJSONRequestContext(http.MethodDelete, "/api/photos/1/comments/1", "", actor)
+	ctx.Params = gin.Params{
+		{Key: "photoId", Value: fmt.Sprintf("%d", photo.ID)},
+		{Key: "commentId", Value: fmt.Sprintf("%d", comment.ID)},
+	}
+	server.handleDeletePhotoComment(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete comment status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var remaining int64
+	if err := server.DB.Model(&models.PhotoComment{}).Where("id = ?", comment.ID).Count(&remaining).Error; err != nil {
+		t.Fatalf("count deleted comment: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining deleted comment rows = %d, want 0", remaining)
+	}
+	if len(sender.messages) <= beforeCancel {
+		t.Fatalf("notification count = %d, want cancel message after %d", len(sender.messages), beforeCancel)
+	}
+	last := sender.messages[len(sender.messages)-1]
+	if last.Type != "notification_cancel" {
+		t.Fatalf("last notification type = %q, want notification_cancel", last.Type)
+	}
+	if last.NotificationKey != photoCommentNotificationKey(comment.ID) {
+		t.Fatalf("last notification key = %q, want %q", last.NotificationKey, photoCommentNotificationKey(comment.ID))
 	}
 }
 

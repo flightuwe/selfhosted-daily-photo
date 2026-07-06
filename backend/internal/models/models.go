@@ -405,12 +405,13 @@ type UserFotomojiTemplateVersion struct {
 }
 
 type PhotoComment struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	PhotoID   uint      `gorm:"index;not null" json:"photoId"`
-	UserID    uint      `gorm:"index;not null" json:"userId"`
-	User      User      `json:"user"`
-	Body      string    `gorm:"size:500;not null" json:"body"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID              uint      `gorm:"primaryKey" json:"id"`
+	PhotoID         uint      `gorm:"index;not null" json:"photoId"`
+	UserID          uint      `gorm:"index;uniqueIndex:idx_photo_comment_user_client,priority:1;not null" json:"userId"`
+	User            User      `json:"user"`
+	Body            string    `gorm:"size:500;not null" json:"body"`
+	ClientCommentID *string   `gorm:"size:64;uniqueIndex:idx_photo_comment_user_client,priority:2" json:"-"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 type ChatMessage struct {

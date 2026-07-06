@@ -84,6 +84,7 @@ func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
 	}
 	day := strings.TrimSpace(message.Day)
 	photoID := message.PhotoID
+	notificationKey := strings.TrimSpace(message.NotificationKey)
 	workers := 8
 	if len(cleaned) < workers {
 		workers = len(cleaned)
@@ -105,6 +106,9 @@ func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
 		if photoID > 0 {
 			data["photoId"] = fmt.Sprintf("%d", photoID)
 		}
+		if notificationKey != "" {
+			data["notificationKey"] = notificationKey
+		}
 		payload := map[string]any{
 			"message": map[string]any{
 				"token": t,
@@ -112,7 +116,7 @@ func (s *FCMSender) Send(tokens []string, message Message) (SendResult, error) {
 					"title": title,
 					"body":  body,
 				},
-				"data":   data,
+				"data": data,
 				"android": map[string]any{
 					"priority": "HIGH",
 				},

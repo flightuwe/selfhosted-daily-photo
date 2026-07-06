@@ -45,6 +45,7 @@ class PushNotificationRulesTest {
     @Test
     fun `notification id is stable for same payload`() {
         val first = PushNotificationRules.notificationId(
+            notificationKey = "",
             rawType = "chat",
             rawAction = "open_chat",
             rawDay = "",
@@ -53,6 +54,7 @@ class PushNotificationRulesTest {
             body = "Neue Chat-Nachricht von ferb",
         )
         val second = PushNotificationRules.notificationId(
+            notificationKey = "",
             rawType = "chat",
             rawAction = "open_chat",
             rawDay = "",
@@ -67,6 +69,7 @@ class PushNotificationRulesTest {
     @Test
     fun `notification id changes for different payload`() {
         val first = PushNotificationRules.notificationId(
+            notificationKey = "",
             rawType = "chat",
             rawAction = "open_chat",
             rawDay = "",
@@ -75,6 +78,7 @@ class PushNotificationRulesTest {
             body = "Neue Chat-Nachricht von ferb",
         )
         val second = PushNotificationRules.notificationId(
+            notificationKey = "",
             rawType = "chat_poll",
             rawAction = "open_chat",
             rawDay = "",
@@ -91,5 +95,14 @@ class PushNotificationRulesTest {
         assertEquals("daily.chat", PushNotificationRules.groupKey("chat", "open_chat"))
         assertEquals("daily.chat", PushNotificationRules.groupKey("chat_poll", "open_chat"))
         assertEquals("daily.feed", PushNotificationRules.groupKey("photo_comment", "open_feed"))
+    }
+
+    @Test
+    fun `notification key produces stable id`() {
+        val first = PushNotificationRules.notificationIdForKey("comment:42")
+        val second = PushNotificationRules.notificationIdForKey("comment:42")
+
+        assertEquals(first, second)
+        assertNotEquals(0, first)
     }
 }

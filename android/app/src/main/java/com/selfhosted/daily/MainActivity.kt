@@ -46,8 +46,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.Image
@@ -203,6 +206,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.channels.BufferOverflow
@@ -975,6 +979,15 @@ data class ChatItem(
 data class ChatResponse(val items: List<ChatItem>)
 data class ReactionCount(val emoji: String, val count: Long)
 data class PhotoCommentItem(val id: Long, val body: String, val createdAt: String, val user: User)
+data class InteractionCounts(
+    val reactions: Int = 0,
+    val photoMojis: Int = 0,
+    val comments: Int = 0
+)
+data class PhotoInteractionMutation(
+    val type: String = "",
+    val deduplicated: Boolean = false
+)
 data class PhotoInteractionsResponse(
     val photoId: Long,
     val reactions: List<ReactionCount> = emptyList(),
@@ -982,11 +995,16 @@ data class PhotoInteractionsResponse(
     val photoMojis: List<PhotoMojiItem> = emptyList(),
     val myPhotoMoji: MyPhotoMoji? = null,
     val comments: List<PhotoCommentItem> = emptyList(),
-    val canDownload: Boolean = false
+    val canDownload: Boolean = false,
+    val counts: InteractionCounts = InteractionCounts(),
+    val comment: PhotoCommentItem? = null,
+    val deletedCommentId: Long? = null,
+    val mutation: PhotoInteractionMutation? = null,
+    val full: Boolean = true
 )
 data class PhotoReactionRequest(val emoji: String)
 data class PhotoFotomojiRequest(val emoji: String)
-data class PhotoCommentRequest(val body: String)
+data class PhotoCommentRequest(val body: String, val clientCommentId: String? = null)
 data class SpecialMomentStatus(
     val canRequest: Boolean,
     val requestedThisWeek: Boolean,
@@ -995,7 +1013,7 @@ data class SpecialMomentStatus(
     val lastRequestedAt: String? = null
 )
 data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
-data class HealthFeatures(val chatDelete: Boolean = false)
+data class HealthFeatures(val chatDelete: Boolean = false, val commentDelete: Boolean = false)
 data class HealthResponse(
     val ok: Boolean,
     val version: String = "unknown",
@@ -1563,8 +1581,15 @@ interface Api {
     suspend fun commentPhoto(
         @Header("Authorization") token: String,
         @Path("id") id: Long,
-        @Query("full") full: Int = 0,
+        @Query("full") full: Int = 1,
         @Body body: PhotoCommentRequest
+    ): PhotoInteractionsResponse
+
+    @DELETE("photos/{photoId}/comments/{commentId}")
+    suspend fun deletePhotoComment(
+        @Header("Authorization") token: String,
+        @Path("photoId") photoId: Long,
+        @Path("commentId") commentId: Long
     ): PhotoInteractionsResponse
 }
 
@@ -2981,8 +3006,15 @@ class AppRepo(
         }
     }
 
-    suspend fun commentPhoto(photoId: Long, body: String): PhotoInteractionsResponse =
-        authorizedCall("/api/photos/:id/comments") { token -> api.commentPhoto(token, photoId, 0, PhotoCommentRequest(body)) }
+    suspend fun commentPhoto(photoId: Long, body: String, clientCommentId: String): PhotoInteractionsResponse =
+        authorizedCall("/api/photos/:id/comments") { token ->
+            api.commentPhoto(token, photoId, 1, PhotoCommentRequest(body, clientCommentId))
+        }
+
+    suspend fun deletePhotoComment(photoId: Long, commentId: Long): PhotoInteractionsResponse =
+        authorizedCall("/api/photos/:photoId/comments/:commentId") { token ->
+            api.deletePhotoComment(token, photoId, commentId)
+        }
 
     suspend fun changePassword(currentPassword: String, newPassword: String) {
         authorizedCall("/api/me/password") { token -> api.changePassword(token, PasswordChangeRequest(currentPassword, newPassword)) }
@@ -3928,6 +3960,7 @@ data class UiState(
     val viewedProfile: UserProfileResponse? = null,
     val viewedProfileLoading: Boolean = false,
     val interactionsLoading: Boolean = false,
+    val commentSubmittingPhotoId: Long? = null,
     val chatSending: Boolean = false,
     val loading: Boolean = false,
     val message: String = "",
@@ -3940,6 +3973,7 @@ data class UiState(
     val serverVersion: String = "unbekannt",
     val pushProvider: String = "unknown",
     val chatDeleteSupported: Boolean = false,
+    val commentDeleteSupported: Boolean = false,
     val lastPingMs: Long? = null,
     val activeApiBaseUrl: String = BuildConfig.API_BASE_URL,
     val apiBaseUrlOverride: String = "",
@@ -5147,6 +5181,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                             serverVersion = health.version,
                             pushProvider = health.provider,
                             chatDeleteSupported = health.features.chatDelete,
+                            commentDeleteSupported = health.features.commentDelete,
                             lastPingMs = pingMs,
                             message = if (health.ok) state.message else "Server nicht erreichbar"
                         )
@@ -5324,7 +5359,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 serverConnected = true,
                 serverVersion = health?.version ?: "nicht erreichbar",
                 pushProvider = health?.provider ?: "unknown",
-                chatDeleteSupported = health?.features?.chatDelete == true
+                chatDeleteSupported = health?.features?.chatDelete == true,
+                commentDeleteSupported = health?.features?.commentDelete == true
             ))
             delay(1300)
         } else if (!healthOk) {
@@ -5338,6 +5374,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverVersion = health?.version ?: "nicht erreichbar",
             pushProvider = health?.provider ?: "unknown",
             chatDeleteSupported = health?.features?.chatDelete == true,
+            commentDeleteSupported = health?.features?.commentDelete == true,
             showChangelogDialog = showChangelog,
             changelogLines = changelogLines,
             uploadQueue = repo.uploadQueue(),
@@ -8002,63 +8039,106 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
-    suspend fun commentPhoto(photoId: Long, body: String) {
+    suspend fun commentPhoto(photoId: Long, body: String): Boolean {
         val trimmed = body.trim()
-        if (photoId <= 0 || trimmed.isBlank()) return
+        if (photoId <= 0 || trimmed.isBlank()) return false
+        if (state.commentSubmittingPhotoId == photoId) return false
         val startedAt = System.currentTimeMillis()
-        state = state.copy(interactionsLoading = true)
+        val clientCommentId = UUID.randomUUID().toString()
+        state = state.copy(interactionsLoading = true, commentSubmittingPhotoId = photoId)
         try {
-            val response = repo.commentPhoto(photoId, trimmed)
+            val response = repo.commentPhoto(photoId, trimmed, clientCommentId)
             val touchedDay = state.feedByDay.entries.firstOrNull { (_, items) ->
                 items.any { feedItem -> feedItem.photo.id == photoId }
             }?.key
             if (!touchedDay.isNullOrBlank()) {
                 staleFeedDays.add(touchedDay)
             }
-            val needsFullReload = response.comments.isEmpty()
-            val commentPatch = if (response.comments.isNotEmpty()) {
-                response.comments
-            } else {
-                (state.photoInteractions?.takeIf { it.photoId == photoId }?.comments.orEmpty() + PhotoCommentItem(
-                    id = -System.currentTimeMillis(),
-                    body = trimmed,
-                    createdAt = OffsetDateTime.now().toString(),
-                    user = state.user ?: User(id = -1, username = "du", isAdmin = false)
-                )).takeLast(40)
-            }
             patchFeedItemState(photoId) { item ->
                 item.copy(
-                    reactions = response.reactions.ifEmpty { item.reactions.orEmpty() },
-                    photoMojis = response.photoMojis.ifEmpty { item.photoMojis.orEmpty() },
-                    comments = commentPatch
+                    reactions = response.reactions,
+                    photoMojis = response.photoMojis,
+                    comments = response.comments
                 )
             }
             upsertPendingFeedMutation(photoId) {
                 it.copy(
-                    commentsOverride = commentPatch,
-                    reactionsOverride = response.reactions.takeIf { reactions -> reactions.isNotEmpty() },
-                    photoMojisOverride = response.photoMojis.takeIf { photoMojis -> photoMojis.isNotEmpty() }
+                    commentsOverride = response.comments,
+                    reactionsOverride = response.reactions,
+                    photoMojisOverride = response.photoMojis
                 )
             }
-            state = state.copy(interactionsLoading = false, photoInteractions = response)
-            if (needsFullReload) {
-                loadPhotoInteractions(photoId)
-            }
+            state = state.copy(
+                interactionsLoading = false,
+                commentSubmittingPhotoId = null,
+                photoInteractions = response,
+                message = if (response.mutation?.deduplicated == true) "Kommentar war bereits vorhanden" else state.message
+            )
             logPerfEvent(
                 event = "comment_submit",
                 durationMs = System.currentTimeMillis() - startedAt,
                 success = true,
-                extra = "photoId=$photoId;bodyLen=${trimmed.length}"
+                extra = "photoId=$photoId;bodyLen=${trimmed.length};deduplicated=${response.mutation?.deduplicated == true}"
             )
+            return true
         } catch (t: Throwable) {
-            state = state.copy(interactionsLoading = false, message = apiError(t, "Kommentar fehlgeschlagen"))
+            state = state.copy(
+                interactionsLoading = false,
+                commentSubmittingPhotoId = null,
+                message = apiError(t, "Kommentar fehlgeschlagen")
+            )
             logPerfEvent(
                 event = "comment_submit",
                 durationMs = System.currentTimeMillis() - startedAt,
                 success = false,
                 extra = "photoId=$photoId;error=${t::class.java.simpleName}"
             )
+            return false
         }
+    }
+
+    suspend fun deletePhotoComment(photoId: Long, commentId: Long): Boolean {
+        if (photoId <= 0 || commentId <= 0) return false
+        state = state.copy(interactionsLoading = true)
+        return runCatching { repo.deletePhotoComment(photoId, commentId) }
+            .map { response ->
+                val touchedDay = state.feedByDay.entries.firstOrNull { (_, items) ->
+                    items.any { feedItem -> feedItem.photo.id == photoId }
+                }?.key
+                if (!touchedDay.isNullOrBlank()) {
+                    staleFeedDays.add(touchedDay)
+                }
+                patchFeedItemState(photoId) { item ->
+                    item.copy(
+                        reactions = response.reactions,
+                        photoMojis = response.photoMojis,
+                        comments = response.comments
+                    )
+                }
+                upsertPendingFeedMutation(photoId) {
+                    it.copy(
+                        commentsOverride = response.comments,
+                        reactionsOverride = response.reactions,
+                        photoMojisOverride = response.photoMojis
+                    )
+                }
+                state = state.copy(
+                    interactionsLoading = false,
+                    photoInteractions = response,
+                    message = "Kommentar geloescht"
+                )
+                true
+            }
+            .getOrElse {
+                val httpCode = (it as? HttpException)?.code()
+                val message = if (httpCode == 404) {
+                    "Kommentar-Loeschen wird vom Server noch nicht unterstuetzt"
+                } else {
+                    apiError(it, "Kommentar loeschen fehlgeschlagen")
+                }
+                state = state.copy(interactionsLoading = false, message = message)
+                false
+            }
     }
 
     fun feedAutoRefreshIntervalMs(): Long = feedAutoRefreshBaseMs + Random.nextLong(feedAutoRefreshJitterMs + 1L)
@@ -8100,7 +8180,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun clearPhotoInteractions() {
-        state = state.copy(photoInteractions = null, interactionsLoading = false)
+        state = state.copy(photoInteractions = null, interactionsLoading = false, commentSubmittingPhotoId = null)
     }
 
     suspend fun changePassword(current: String, next: String) {
@@ -8166,6 +8246,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     serverVersion = health.version,
                     pushProvider = health.provider,
                     chatDeleteSupported = health.features.chatDelete,
+                    commentDeleteSupported = health.features.commentDelete,
                     lastPingMs = pingMs,
                     message = if (health.ok) "Verbindung erfolgreich geprueft" else "Server nicht erreichbar"
                 ))
@@ -8177,6 +8258,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     loading = false,
                     serverConnected = false,
                     chatDeleteSupported = false,
+                    commentDeleteSupported = false,
                     lastPingMs = null,
                     message = lastApiFailureMessage
                 ))
@@ -10398,20 +10480,29 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             initialIndex = viewerIndex,
             photoId = viewerPhotoId,
             locationMapsUrl = viewerLocationMapsUrl,
+            meId = state.user?.id,
             comment = viewerComment,
             interactions = state.photoInteractions,
             interactionsLoading = state.interactionsLoading,
+            commentSubmitting = state.commentSubmittingPhotoId == viewerPhotoId,
+            commentDeleteSupported = state.commentDeleteSupported,
             ownDownloadFallback = viewerOwnDownloadFallback,
             useFotomojiReactions = state.useFotomojiReactions,
             onCommentChange = { viewerComment = it },
             onCommentSend = {
                 val body = viewerComment
-                if (body.isNotBlank()) {
+                if (body.isNotBlank() && state.commentSubmittingPhotoId != viewerPhotoId) {
                     scope.launch {
-                        vm.commentPhoto(viewerPhotoId ?: 0L, body)
-                        viewerComment = ""
+                        val ok = vm.commentPhoto(viewerPhotoId ?: 0L, body)
+                        if (ok) {
+                            viewerComment = ""
+                        }
                     }
                 }
+            },
+            onDeleteComment = { commentId ->
+                val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
+                scope.launch { vm.deletePhotoComment(pid, commentId) }
             },
             onReact = { emoji ->
                 val pid = viewerPhotoId ?: return@FullscreenPhotoViewer
@@ -17266,6 +17357,7 @@ private fun apiError(t: Throwable, fallback: String, httpErrorRawOverride: Strin
             }
             409 -> when {
                 raw.contains("username exists") -> "Benutzername ist bereits vergeben."
+                errorCode == "duplicate_consecutive_comment" || raw.contains("duplicate consecutive comment") -> "Derselbe Kommentar wurde gerade bereits gepostet."
                 else -> "Du hast heute bereits gepostet"
             }
             423 -> when {
@@ -17379,13 +17471,17 @@ private fun FullscreenPhotoViewer(
     initialIndex: Int,
     photoId: Long?,
     locationMapsUrl: String?,
+    meId: Long?,
     comment: String,
     interactions: PhotoInteractionsResponse?,
     interactionsLoading: Boolean,
+    commentSubmitting: Boolean,
+    commentDeleteSupported: Boolean,
     ownDownloadFallback: Boolean,
     useFotomojiReactions: Boolean,
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
+    onDeleteComment: (Long) -> Unit,
     onReact: (String) -> Unit,
     onFotoMojiTap: (String) -> Unit,
     onFotoMojiLongPress: (String) -> Unit,
@@ -17435,13 +17531,17 @@ private fun FullscreenPhotoViewer(
                     photoId = photoId,
                     locationMapsUrl = locationMapsUrl,
                     currentImageUrl = urls.getOrNull(pagerState.currentPage).orEmpty(),
+                    meId = meId,
                     comment = comment,
                     interactions = interactions,
                     interactionsLoading = interactionsLoading,
+                    commentSubmitting = commentSubmitting,
+                    commentDeleteSupported = commentDeleteSupported,
                     ownDownloadFallback = ownDownloadFallback,
                     useFotomojiReactions = useFotomojiReactions,
                     onCommentChange = onCommentChange,
                     onCommentSend = onCommentSend,
+                    onDeleteComment = onDeleteComment,
                     onReact = onReact,
                     onFotoMojiTap = onFotoMojiTap,
                     onFotoMojiLongPress = onFotoMojiLongPress,
@@ -17517,13 +17617,17 @@ private fun ViewerInteractionSheet(
     photoId: Long?,
     locationMapsUrl: String?,
     currentImageUrl: String,
+    meId: Long?,
     comment: String,
     interactions: PhotoInteractionsResponse?,
     interactionsLoading: Boolean,
+    commentSubmitting: Boolean,
+    commentDeleteSupported: Boolean,
     ownDownloadFallback: Boolean,
     useFotomojiReactions: Boolean,
     onCommentChange: (String) -> Unit,
     onCommentSend: () -> Unit,
+    onDeleteComment: (Long) -> Unit,
     onReact: (String) -> Unit,
     onFotoMojiTap: (String) -> Unit,
     onFotoMojiLongPress: (String) -> Unit,
@@ -17532,6 +17636,7 @@ private fun ViewerInteractionSheet(
     onOpenHashtagSearch: (String) -> Unit
 ) {
     var selectedFotoMoji by remember { mutableStateOf<PhotoMojiItem?>(null) }
+    var deleteCommentCandidate by remember { mutableStateOf<PhotoCommentItem?>(null) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -17641,18 +17746,36 @@ private fun ViewerInteractionSheet(
             value = comment,
             onValueChange = onCommentChange,
             label = { Text("Kommentar") },
+            enabled = !commentSubmitting,
             modifier = Modifier.fillMaxWidth()
         )
         Button(
             onClick = onCommentSend,
-            enabled = comment.isNotBlank(),
+            enabled = comment.isNotBlank() && !commentSubmitting,
             modifier = Modifier.fillMaxWidth()
-        ) { Text("Kommentieren") }
+        ) { Text(if (commentSubmitting) "Wird gesendet ..." else "Kommentieren") }
         if (interactionsLoading) {
             Text("Interaktionen werden geladen ...")
         }
         interactions?.comments?.takeLast(40)?.forEach { item ->
-            Card {
+            val canDelete = commentDeleteSupported && meId != null && item.user.id == meId
+            val holdModifier = if (canDelete) {
+                Modifier.pointerInput(item.id) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val released = withTimeoutOrNull(3000) {
+                            waitForUpOrCancellation()
+                        }
+                        if (released == null) {
+                            deleteCommentCandidate = item
+                            down.consume()
+                        }
+                    }
+                }
+            } else {
+                Modifier
+            }
+            Card(modifier = holdModifier) {
                 Column(modifier = Modifier.padding(8.dp)) {
                     Text(
                         item.user.username,
@@ -17667,6 +17790,28 @@ private fun ViewerInteractionSheet(
                 }
             }
         }
+    }
+    deleteCommentCandidate?.let { candidate ->
+        AlertDialog(
+            onDismissRequest = { deleteCommentCandidate = null },
+            title = { Text("Kommentar loeschen?") },
+            text = { Text("Willst du diesen Kommentar wirklich loeschen?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleteCommentCandidate = null
+                        onDeleteComment(candidate.id)
+                    }
+                ) {
+                    Text("Loeschen")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteCommentCandidate = null }) {
+                    Text("Abbrechen")
+                }
+            }
+        )
     }
     selectedFotoMoji?.let { item ->
         Dialog(

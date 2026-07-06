@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.14",
+  "title": "Robustere Kommentare, Sofort-Update und verstecktes Kommentar-Loeschen",
+  "items": [
+    "Doppelte Kommentare durch mehrfaches Tippen auf Kommentieren werden jetzt deutlich robuster verhindert: die App sperrt laufende Kommentar-Submits pro Beitrag, und das Backend behandelt Kommentar-Retries idempotent.",
+    "Kommentar-Antworten liefern jetzt direkt den kanonischen Vollzustand der Interaktionen zurueck, damit neue Kommentare sofort sichtbar sind und kein verwirrender Leerzustand mit nachtraeglichem Reload mehr entsteht.",
+    "Eigene Kommentare koennen jetzt als verstecktes Feature durch 3 Sekunden langes Gedrueckthalten mit Bestaetigungsdialog geloescht werden.",
+    "Neue App-Versionen koennen beim Loeschen eines Kommentars zugehoerige Kommentar-Pushes best effort wieder aus der lokalen Notification-Liste entfernen."
+  ]
+}
