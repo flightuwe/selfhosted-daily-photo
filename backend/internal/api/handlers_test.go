@@ -505,7 +505,11 @@ func newSearchTestServer(t *testing.T) *Server {
 		Store:    store,
 		Notifier: &recordingSender{},
 		Auth:     auth.NewManager("test-secret", time.Hour),
-		Config:   config.Config{PublicBaseURL: "https://daily.example", UploadDir: uploadDir},
+		Config: config.Config{
+			AllowedOrigins: []string{"https://daily.example"},
+			PublicBaseURL:  "https://daily.example",
+			UploadDir:      uploadDir,
+		},
 		Location: time.UTC,
 	}
 }
