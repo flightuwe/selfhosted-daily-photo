@@ -320,7 +320,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.POST("/photos/:id/fotomojis", s.handlePhotoFotomojiFromTemplate)
 			protected.POST("/photos/:id/fotomojis/upload", s.handlePhotoFotomojiUpload)
 			protected.POST("/photos/:id/comments", s.handlePhotoComment)
-			protected.DELETE("/photos/:photoId/comments/:commentId", s.handleDeletePhotoComment)
+			protected.DELETE("/photos/:id/comments/:commentId", s.handleDeletePhotoComment)
 			protected.POST("/photos/:id/attachments", s.handlePhotoAttachmentCreate)
 		}
 
@@ -10031,7 +10031,7 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 
 func (s *Server) handleDeletePhotoComment(c *gin.Context) {
 	user, _ := userFromContext(c)
-	photoID, err := parseUintParam(c.Param("photoId"))
+	photoID, err := parseUintParam(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
 		return
@@ -10078,7 +10078,7 @@ func (s *Server) handleDeletePhotoComment(c *gin.Context) {
 	payloadStart := time.Now()
 	out, payloadErr := s.photoCommentMutationPayload(photo, user.ID, "comment_deleted", nil, comment.ID, false)
 	if s.Monitor != nil {
-		s.Monitor.RecordDBQuery("/api/photos/:photoId/comments/:commentId", "photo_comment_delete_payload", time.Since(payloadStart))
+		s.Monitor.RecordDBQuery("/api/photos/:id/comments/:commentId", "photo_comment_delete_payload", time.Since(payloadStart))
 	}
 	if payloadErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})

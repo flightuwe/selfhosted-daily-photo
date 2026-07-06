@@ -510,6 +510,20 @@ func newSearchTestServer(t *testing.T) *Server {
 	}
 }
 
+func TestRouterBuildsWithoutPhotoCommentRouteConflict(t *testing.T) {
+	server := newSearchTestServer(t)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("server.Router() panicked: %v", recovered)
+		}
+	}()
+
+	router := server.Router()
+	if router == nil {
+		t.Fatal("server.Router() returned nil")
+	}
+}
+
 func TestHandleAuthRefreshReturnsSessionRevokedErrorCodeForUnknownToken(t *testing.T) {
 	server := newSearchTestServer(t)
 	rec := httptest.NewRecorder()
@@ -1836,7 +1850,7 @@ func TestHandleDeletePhotoCommentDeletesOwnCommentAndSendsCancel(t *testing.T) {
 
 	ctx, rec := newJSONRequestContext(http.MethodDelete, "/api/photos/1/comments/1", "", actor)
 	ctx.Params = gin.Params{
-		{Key: "photoId", Value: fmt.Sprintf("%d", photo.ID)},
+		{Key: "id", Value: fmt.Sprintf("%d", photo.ID)},
 		{Key: "commentId", Value: fmt.Sprintf("%d", comment.ID)},
 	}
 	server.handleDeletePhotoComment(ctx)
