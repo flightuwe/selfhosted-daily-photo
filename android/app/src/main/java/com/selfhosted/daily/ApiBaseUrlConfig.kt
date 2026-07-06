@@ -15,6 +15,19 @@ import java.util.concurrent.TimeUnit
 private const val PREF_NAME = "app"
 private const val PREF_KEY_SERVER_BASE_URL_OVERRIDE = "server_base_url_override"
 private const val PREF_KEY_ALLOW_INSECURE_HTTP = "allow_insecure_http_server_override"
+private val PLACEHOLDER_API_HOST_SUFFIXES = listOf(
+    ".example.com",
+    ".example.org",
+    ".example.net",
+    ".example.tld",
+    ".example"
+)
+private val PLACEHOLDER_API_HOSTS = setOf(
+    "example.com",
+    "example.org",
+    "example.net",
+    "daily.example.tld"
+)
 
 data class HttpTimeoutProfile(
     val connectTimeoutSeconds: Long,
@@ -86,6 +99,21 @@ fun resolveApiBaseUrl(context: Context): String {
     val normalizedOverride = normalizeApiBaseUrl(overrideRaw)
     return normalizedOverride ?: normalizeApiBaseUrl(BuildConfig.API_BASE_URL).orEmpty()
 }
+
+fun configuredApiBaseUrlOrNull(context: Context): String? {
+    val overrideRaw = currentApiBaseUrlOverride(context)
+    val normalizedOverride = normalizeApiBaseUrl(overrideRaw)
+    if (normalizedOverride != null) return normalizedOverride
+    val normalizedDefault = normalizeApiBaseUrl(BuildConfig.API_BASE_URL)
+    if (normalizedDefault == null || isPlaceholderApiBaseUrl(normalizedDefault)) {
+        return null
+    }
+    return normalizedDefault
+}
+
+fun hasConfiguredApiBaseUrl(context: Context): Boolean = configuredApiBaseUrlOrNull(context) != null
+
+fun displayApiBaseUrl(context: Context): String = configuredApiBaseUrlOrNull(context) ?: "nicht konfiguriert"
 
 fun currentApiBaseUrlOverride(context: Context): String {
     val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -159,6 +187,15 @@ fun normalizeApiBaseUrl(raw: String): String? {
         }
         "$scheme://$host$portPart$normalizedPath"
     }.getOrNull()
+}
+
+fun isPlaceholderApiBaseUrl(raw: String): Boolean {
+    val normalized = normalizeApiBaseUrl(raw) ?: return false
+    return runCatching {
+        val host = java.net.URI(normalized).host?.trim()?.lowercase().orEmpty()
+        if (host.isBlank()) return false
+        host in PLACEHOLDER_API_HOSTS || PLACEHOLDER_API_HOST_SUFFIXES.any { host.endsWith(it) }
+    }.getOrDefault(false)
 }
 
 fun buildApiService(baseUrl: String, httpClient: OkHttpClient): Api {

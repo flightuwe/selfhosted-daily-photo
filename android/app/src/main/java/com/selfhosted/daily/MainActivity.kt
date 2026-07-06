@@ -1627,6 +1627,10 @@ class AppRepo(
 
     fun resolvedApiBaseUrl(): String = resolveApiBaseUrl(context)
 
+    fun displayApiBaseUrl(): String = com.selfhosted.daily.displayApiBaseUrl(context)
+
+    fun hasConfiguredApiBaseUrl(): Boolean = com.selfhosted.daily.hasConfiguredApiBaseUrl(context)
+
     fun apiBaseUrlOverrideRaw(): String = currentApiBaseUrlOverride(context)
 
     fun isApiBaseUrlOverrideActive(): Boolean = com.selfhosted.daily.isApiBaseUrlOverrideActive(context)
@@ -3972,6 +3976,7 @@ data class UiState(
     val serverConnected: Boolean = false,
     val serverVersion: String = "unbekannt",
     val pushProvider: String = "unknown",
+    val serverSetupRequired: Boolean = false,
     val chatDeleteSupported: Boolean = false,
     val commentDeleteSupported: Boolean = false,
     val lastPingMs: Long? = null,
@@ -4274,9 +4279,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedDebugEnabled = repo.feedDebugEnabled(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
             diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
-            activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+            activeApiBaseUrl = repo.displayApiBaseUrl(),
             apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
             allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
+            serverSetupRequired = !repo.hasConfiguredApiBaseUrl(),
             debugLogs = repo.recentDebugLogs()
         ).let(::withNotificationDebugState)
     )
@@ -5332,6 +5338,23 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val perfStartedAt = System.currentTimeMillis()
         profileSetupPromptShownInSession = false
         state = refreshConnectionHealthState(state.copy(startupDone = false, startupQuote = ""))
+        if (!repo.hasConfiguredApiBaseUrl()) {
+            state = refreshConnectionHealthState(state.copy(
+                startupDone = true,
+                startupQuote = "",
+                serverConnected = false,
+                serverVersion = "nicht konfiguriert",
+                pushProvider = "unknown",
+                serverSetupRequired = true,
+                chatDeleteSupported = false,
+                commentDeleteSupported = false,
+                activeApiBaseUrl = repo.displayApiBaseUrl(),
+                apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
+                allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
+                message = "Bitte zuerst eine Server-URL eintragen."
+            ))
+            return
+        }
         repo.syncAutoUpdateScheduler()
         repo.syncUploadQueueScheduler()
         val started = System.currentTimeMillis()
@@ -5359,6 +5382,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 serverConnected = true,
                 serverVersion = health?.version ?: "nicht erreichbar",
                 pushProvider = health?.provider ?: "unknown",
+                serverSetupRequired = false,
                 chatDeleteSupported = health?.features?.chatDelete == true,
                 commentDeleteSupported = health?.features?.commentDelete == true
             ))
@@ -5373,6 +5397,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverConnected = healthOk,
             serverVersion = health?.version ?: "nicht erreichbar",
             pushProvider = health?.provider ?: "unknown",
+            serverSetupRequired = false,
             chatDeleteSupported = health?.features?.chatDelete == true,
             commentDeleteSupported = health?.features?.commentDelete == true,
             showChangelogDialog = showChangelog,
@@ -5414,6 +5439,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun login(username: String, password: String) {
+        if (!repo.hasConfiguredApiBaseUrl()) {
+            state = state.copy(message = "Bitte zuerst eine Server-URL eintragen.", serverSetupRequired = true)
+            return
+        }
         state = state.copy(loading = true, message = "")
         try {
             val user = repo.login(username, password)
@@ -5438,6 +5467,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun previewInvite(inviteCode: String) {
+        if (!repo.hasConfiguredApiBaseUrl()) {
+            state = state.copy(loading = false, message = "Bitte zuerst eine Server-URL eintragen.", serverSetupRequired = true)
+            return
+        }
         state = state.copy(loading = true, message = "")
         runCatching { repo.previewInvite(inviteCode) }
             .onSuccess {
@@ -5453,6 +5486,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun registerWithInvite(inviteCode: String, username: String, password: String) {
+        if (!repo.hasConfiguredApiBaseUrl()) {
+            state = state.copy(loading = false, message = "Bitte zuerst eine Server-URL eintragen.", serverSetupRequired = true)
+            return
+        }
         state = state.copy(loading = true, message = "")
         runCatching { repo.registerWithInvite(inviteCode, username, password) }
             .onSuccess { user ->
@@ -5516,9 +5553,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
             diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
-            activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+            activeApiBaseUrl = repo.displayApiBaseUrl(),
             apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
             allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
+            serverSetupRequired = !repo.hasConfiguredApiBaseUrl(),
             debugLogs = repo.recentDebugLogs(),
             invitePreview = null
         )
@@ -8234,6 +8272,20 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun checkConnection() {
+        if (!repo.hasConfiguredApiBaseUrl()) {
+            state = refreshConnectionHealthState(state.copy(
+                loading = false,
+                serverConnected = false,
+                serverVersion = "nicht konfiguriert",
+                pushProvider = "unknown",
+                serverSetupRequired = true,
+                chatDeleteSupported = false,
+                commentDeleteSupported = false,
+                lastPingMs = null,
+                message = "Bitte zuerst eine Server-URL eintragen."
+            ))
+            return
+        }
         state = refreshConnectionHealthState(state.copy(loading = true))
         val startedAt = System.currentTimeMillis()
         runCatching { repo.health() }
@@ -8245,6 +8297,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     serverConnected = health.ok,
                     serverVersion = health.version,
                     pushProvider = health.provider,
+                    serverSetupRequired = false,
                     chatDeleteSupported = health.features.chatDelete,
                     commentDeleteSupported = health.features.commentDelete,
                     lastPingMs = pingMs,
@@ -8257,6 +8310,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state = refreshConnectionHealthState(state.copy(
                     loading = false,
                     serverConnected = false,
+                    serverSetupRequired = false,
                     chatDeleteSupported = false,
                     commentDeleteSupported = false,
                     lastPingMs = null,
@@ -8266,8 +8320,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun refreshPublicMigrationInfo() {
+        if (!repo.hasConfiguredApiBaseUrl()) {
+            state = state.copy(migrationInfo = null, serverSetupRequired = true)
+            return
+        }
         val info = runCatching { repo.migrationInfoPublic() }.getOrNull()
-        state = state.copy(migrationInfo = info)
+        state = state.copy(migrationInfo = info, serverSetupRequired = false)
     }
 
     private suspend fun handleMigrationRequiredState(message: String = "Diese Instanz ist im Migrationsmodus. Bitte Zielserver eintragen und neu anmelden.") {
@@ -8306,9 +8364,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
             diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
-            activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+            activeApiBaseUrl = repo.displayApiBaseUrl(),
             apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
             allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
+            serverSetupRequired = !repo.hasConfiguredApiBaseUrl(),
             debugLogs = repo.recentDebugLogs(),
             message = message
         )
@@ -8363,6 +8422,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             serverConnected = false,
             serverVersion = "unbekannt",
             pushProvider = "unknown",
+            serverSetupRequired = !repo.hasConfiguredApiBaseUrl(),
             migrationCanUseSessionShortcut = false,
             darkMode = state.darkMode,
             oledMode = state.oledMode,
@@ -8388,13 +8448,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             customNotificationToneUri = repo.customNotificationToneUri(),
             diagnosticsUploadEnabled = repo.diagnosticsUploadEnabled() && repo.diagnosticsConsentGrantedLocal(),
             diagnosticsConsentGranted = repo.diagnosticsConsentGrantedLocal(),
-            activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+            activeApiBaseUrl = repo.displayApiBaseUrl(),
             apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
             allowInsecureHttpOverride = repo.allowInsecureHttpOverride(),
             applyServerOverrideInFlight = false,
             debugLogs = repo.recentDebugLogs(),
             message = if (normalized.isNullOrBlank()) {
-                "Custom-Server entfernt. Bitte neu anmelden."
+                if (repo.hasConfiguredApiBaseUrl()) "Custom-Server entfernt. Bitte neu anmelden."
+                else "Server-URL entfernt. Bitte Zielserver eintragen."
             } else {
                 "Custom-Server gespeichert. Bitte neu anmelden."
             }
@@ -8441,8 +8502,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 token = repo.token(),
                 migrationInfo = null,
                 migrationCanUseSessionShortcut = false,
-                activeApiBaseUrl = repo.resolvedApiBaseUrl(),
+                activeApiBaseUrl = repo.displayApiBaseUrl(),
                 apiBaseUrlOverride = repo.apiBaseUrlOverrideRaw(),
+                serverSetupRequired = false,
                 serverConnected = true,
                 serverVersion = "verbunden",
                 message = "Migration abgeschlossen. Verbunden mit $finalTarget"
@@ -10559,7 +10621,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     if (state.token.isBlank()) {
         var loginPasswordVisible by rememberSaveable { mutableStateOf(false) }
         var registerPasswordVisible by rememberSaveable { mutableStateOf(false) }
-        var showServerEditor by rememberSaveable { mutableStateOf(false) }
+        var showServerEditor by rememberSaveable(state.serverSetupRequired, state.apiBaseUrlOverride) {
+            mutableStateOf(state.serverSetupRequired || state.apiBaseUrlOverride.isNotBlank())
+        }
         var serverOverrideInput by rememberSaveable(state.apiBaseUrlOverride) { mutableStateOf(state.apiBaseUrlOverride) }
         val localContext = LocalContext.current
         Column(
@@ -10629,6 +10693,12 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Server", fontWeight = FontWeight.SemiBold)
                     Text("Aktiv: ${state.activeApiBaseUrl}")
+                    if (state.serverSetupRequired) {
+                        Text(
+                            "Diese APK ist generisch. Bitte zuerst deine eigene Daily-Server-URL eintragen.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     TextButton(onClick = { showServerEditor = !showServerEditor }) {
                         Text(if (showServerEditor) "Server-Eingabe ausblenden" else "Server-URL eingeben")
                     }
@@ -10636,14 +10706,14 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         OutlinedTextField(
                             value = serverOverrideInput,
                             onValueChange = { serverOverrideInput = it },
-                            label = { Text("Server-URL (leer = Standard)") },
+                            label = { Text(if (state.serverSetupRequired) "Server-URL" else "Server-URL (leer = Standard)") },
                             modifier = Modifier.fillMaxWidth()
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             OutlinedButton(
                                 onClick = { serverOverrideInput = "" },
                                 modifier = Modifier.weight(1f)
-                            ) { Text("Standard") }
+                            ) { Text(if (state.serverSetupRequired) "Leeren" else "Standard") }
                             Button(
                                 onClick = { scope.launch { vm.applyServerBaseUrlOverride(serverOverrideInput) } },
                                 modifier = Modifier.weight(1f),
@@ -11069,6 +11139,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     allowInsecureHttpOverride = state.allowInsecureHttpOverride,
                     applyServerOverrideInFlight = state.applyServerOverrideInFlight,
                     serverConnected = state.serverConnected,
+                    serverSetupRequired = state.serverSetupRequired,
                     lastPingMs = state.lastPingMs,
                     uploadQuality = state.uploadQuality,
                     fotomojiUploadQuality = state.fotomojiUploadQuality,
@@ -14959,6 +15030,7 @@ fun ProfileTab(
     allowInsecureHttpOverride: Boolean,
     applyServerOverrideInFlight: Boolean,
     serverConnected: Boolean,
+    serverSetupRequired: Boolean,
     lastPingMs: Long?,
     uploadQuality: Int,
     fotomojiUploadQuality: Int,
@@ -16292,7 +16364,8 @@ fun ProfileTab(
                               Text("Letzter Ping: ${lastPingMs?.let { "${it} ms" } ?: "-"}")
                               Text("API: $apiBaseUrl")
                               Text(
-                                  if (apiBaseUrlOverride.isBlank()) "Custom Server: aus"
+                                  if (serverSetupRequired && apiBaseUrlOverride.isBlank()) "Standard-Server: nicht konfiguriert"
+                                  else if (apiBaseUrlOverride.isBlank()) "Custom Server: aus"
                                   else "Custom Server: aktiv"
                               )
                               Spacer(modifier = Modifier.height(6.dp))
@@ -16301,7 +16374,7 @@ fun ProfileTab(
                               OutlinedTextField(
                                   value = serverOverrideInput,
                                   onValueChange = { serverOverrideInput = it },
-                                  label = { Text("Server-Override (optional)") },
+                                  label = { Text(if (serverSetupRequired) "Server-URL" else "Server-Override (optional)") },
                                   placeholder = { Text("https://daily.example.com") },
                                   modifier = Modifier.fillMaxWidth(),
                                   singleLine = true
@@ -16328,10 +16401,14 @@ fun ProfileTab(
                                       },
                                       enabled = !applyServerOverrideInFlight,
                                       modifier = Modifier.weight(1f)
-                                  ) { Text("Reset auf Standard") }
+                                  ) { Text(if (serverSetupRequired) "Leeren" else "Reset auf Standard") }
                               }
                               Text(
-                                  "Beim Wechsel wird die Session beendet und ein neuer Login am Zielserver gestartet.",
+                                  if (serverSetupRequired) {
+                                      "Ohne eingetragene Server-URL kann sich die App nicht verbinden."
+                                  } else {
+                                      "Beim Wechsel wird die Session beendet und ein neuer Login am Zielserver gestartet."
+                                  },
                                   color = MaterialTheme.colorScheme.onSurfaceVariant
                               )
                           }
