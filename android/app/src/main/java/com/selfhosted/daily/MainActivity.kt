@@ -3940,6 +3940,7 @@ data class UiState(
     val feedVisibleAnchorDay: String? = null,
     val feedViewportAnchor: FeedViewportAnchor = FeedViewportAnchor(),
     val feedScrollRequestId: Long = 0L,
+    val feedScrollToTopRequestId: Long = 0L,
     val feedViewportRestoreAnchor: FeedViewportAnchor = FeedViewportAnchor(),
     val feedViewportRestoreRequestId: Long = 0L,
     val feedPaging: Boolean = false,
@@ -4430,9 +4431,26 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         )
     }
 
+    private fun requestFeedScrollToTop(reason: String) {
+        val before = state.feedViewportAnchor
+        lastFeedJumpAnchorBefore = before
+        state = state.copy(feedScrollToTopRequestId = issueFeedScrollRequestId())
+        logFeedDecision(
+            type = "feed_scroll_top_requested",
+            message = "feed scroll to top requested",
+            meta = "reason=$reason;anchorBefore=${describeAnchor(before)}"
+        )
+    }
+
     fun consumeFeedViewportRestore() {
         if (state.feedViewportRestoreRequestId != 0L) {
             state = state.copy(feedViewportRestoreRequestId = 0L)
+        }
+    }
+
+    fun consumeFeedScrollToTopRequest() {
+        if (state.feedScrollToTopRequestId != 0L) {
+            state = state.copy(feedScrollToTopRequestId = 0L)
         }
     }
 
@@ -4459,6 +4477,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         pendingFeedRestoreFailureReason = ""
         pendingFeedRestoreFailureAnchor = ""
+        if (failureReason.isNotBlank()) {
+            logFeedDecision(
+                type = "feed_viewport_restore_fallback",
+                message = "viewport restore fallback applied",
+                meta = "requestedAnchor=${describeAnchor(requested)};resolvedRowIndex=${resolved.rowIndex};resolvedRowType=${resolved.kind.name.lowercase()};resolvedDay=${resolved.day ?: "-"};resolvedPhotoId=${resolved.photoId ?: -1L};failureReason=$failureReason"
+            )
+        }
         logFeedDecision(
             type = "feed_viewport_restore_applied",
             message = "viewport restore applied",
@@ -6940,17 +6965,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             applyPendingLaunchNavigation(prompt, calendarDays)
             maybeShowProfileSetupPrompt(me)
             if (refreshFeedWindow) {
+                val isModeSwitchRefresh = reason == "feed_mode_switch"
+                val isDiscoverMode = state.feedOrderMode != FeedOrderMode.CHRONO
                 val viewportAnchor = viewportAnchorBeforeRefresh ?: state.feedViewportAnchor
                 val focus = state.feedFocusDay.takeIf { hasPendingFeedNavigation() }
                 val visibleDaySet = state.feedDays.toSet()
                 val cachedDaySet = state.feedByDay.keys
                 val preferredAnchor = when {
-                    !viewportAnchor.day.isNullOrBlank() &&
+                    isModeSwitchRefresh && !isDiscoverMode -> prompt.day
+                    !isModeSwitchRefresh &&
+                        !viewportAnchor.day.isNullOrBlank() &&
                         (viewportAnchor.day in visibleDaySet || viewportAnchor.day in cachedDaySet) -> viewportAnchor.day
-                    !focus.isNullOrBlank() && calendarDays.contains(focus) -> focus
+                    !isModeSwitchRefresh && !focus.isNullOrBlank() && calendarDays.contains(focus) -> focus
                     else -> prompt.day
                 }
-                val preserveVisibleWindow = viewportAnchorBeforeRefresh != null &&
+                val preserveVisibleWindow = !isModeSwitchRefresh &&
+                    viewportAnchorBeforeRefresh != null &&
                     state.feedDays.isNotEmpty() &&
                     state.feedDays.contains(preferredAnchor)
                 val newestCalendarDay = calendarDays.firstOrNull()
@@ -6961,6 +6991,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 val offscreenStaleDays = staleFeedDays.filter { it !in state.feedDays.toSet() }.distinct().sortedDescending()
                 val visiblePhotoInvalidation = hasVisiblePhotoInvalidation()
                 val fetchDecisionReason = when {
+                    isModeSwitchRefresh -> "mode_switch_reset_to_top"
                     state.feedDays.isEmpty() -> "empty_feed"
                     !state.feedDays.contains(preferredAnchor) -> "missing_anchor"
                     reason == "network_recovery" -> "network_recovery_refresh"
@@ -6970,31 +7001,81 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     else -> "cached_today_feed"
                 }
                 val shouldFetchVisibleWindow = fetchDecisionReason != "cached_today_feed"
-                val replaceVisibleDays = state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor) || !preserveVisibleWindow
-                val showJumpLoading = state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor) || !preserveVisibleWindow
+                val replaceVisibleDays = isModeSwitchRefresh ||
+                    state.feedDays.isEmpty() ||
+                    !state.feedDays.contains(preferredAnchor) ||
+                    !preserveVisibleWindow
+                val showJumpLoading = replaceVisibleDays
                 logFeedDecision(
                     type = "feed_refresh_plan",
                     message = "feed refresh planned",
-                    meta = "reason=$reason;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};preferredAnchor=$preferredAnchor;viewportAnchorBefore=${describeAnchor(viewportAnchorBeforeRefresh)};preserveVisibleWindow=$preserveVisibleWindow;replaceVisibleDays=$replaceVisibleDays;showJumpLoading=$showJumpLoading;offscreenStaleDays=${offscreenStaleDays.joinToString(",").ifBlank { "-" }};visiblePhotoInvalidation=$visiblePhotoInvalidation;willFetch=$shouldFetchVisibleWindow;decisionReason=$fetchDecisionReason"
+                    meta = "reason=$reason;refreshMode=${if (refreshFeedWindow) "feed_window" else "silent"};preferredAnchor=$preferredAnchor;viewportAnchorBefore=${describeAnchor(viewportAnchorBeforeRefresh)};preserveVisibleWindow=$preserveVisibleWindow;replaceVisibleDays=$replaceVisibleDays;showJumpLoading=$showJumpLoading;offscreenStaleDays=${offscreenStaleDays.joinToString(",").ifBlank { "-" }};visiblePhotoInvalidation=$visiblePhotoInvalidation;willFetch=$shouldFetchVisibleWindow;decisionReason=$fetchDecisionReason;modeSwitchResetToTop=$isModeSwitchRefresh"
                 )
                 logFeedDecision(
                     type = "feed_auto_decision",
                     message = if (shouldFetchVisibleWindow) "feed refresh will fetch" else "feed refresh may reuse cache",
-                    meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};stalePhotoIds=${staleFeedPhotoIds.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=$shouldFetchVisibleWindow;decisionReason=$fetchDecisionReason"
+                    meta = "reason=$reason;activeTab=${state.activeTab.name.lowercase()};feedRefreshing=${state.feedRefreshing};loading=${state.loading};hasPendingNavigation=${hasPendingFeedNavigation()};staleFeedDays=${staleFeedDays.joinToString(",").ifBlank { "-" }};stalePhotoIds=${staleFeedPhotoIds.joinToString(",").ifBlank { "-" }};forceFeedReload=$forceFeedReload;willFetch=$shouldFetchVisibleWindow;decisionReason=$fetchDecisionReason;modeSwitchResetToTop=$isModeSwitchRefresh"
                 )
-                if (state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor)) {
+                if (isModeSwitchRefresh) {
+                    state = state.copy(
+                        feedFocusDay = null,
+                        feedFocusPhotoId = null,
+                        feedFocusBoundary = null,
+                        feedScrollRequestId = 0L,
+                        feedViewportRestoreRequestId = 0L
+                    )
+                    refreshedFeedDays = if (isDiscoverMode) {
+                        logFeedDecision(
+                            type = "visible_fetch",
+                            message = "visible feed fetch started",
+                            meta = "reason=$reason;preferredAnchor=-;forced=true;replaceVisibleDays=true;trigger=mode_switch_reset_to_top"
+                        )
+                        loadDiscoverFeed(
+                            offset = 0,
+                            limitDays = 5,
+                            appendOlder = false,
+                            anchorDay = null,
+                            focusPhotoId = null,
+                            replaceVisibleDays = true,
+                            showJumpLoading = true
+                        )
+                    } else {
+                        val anchorDay = preferredAnchor
+                        if (anchorDay.isBlank()) {
+                            0
+                        } else {
+                            logFeedDecision(
+                                type = "visible_fetch",
+                                message = "visible feed fetch started",
+                                meta = "reason=$reason;preferredAnchor=$anchorDay;forced=true;replaceVisibleDays=true;trigger=mode_switch_reset_to_top"
+                            )
+                            loadFeedWindow(
+                                anchorDay = anchorDay,
+                                around = 1,
+                                forceReload = true,
+                                replaceVisibleDays = true,
+                                showJumpLoading = true
+                            )
+                        }
+                    }
+                } else if (state.feedDays.isEmpty() || !state.feedDays.contains(preferredAnchor)) {
                     logFeedDecision(
                         type = "visible_fetch",
                         message = "visible feed fetch started",
                         meta = "reason=$reason;preferredAnchor=$preferredAnchor;forced=$forceFeedReload;replaceVisibleDays=true;trigger=missing_anchor"
                     )
-                    refreshedFeedDays = loadFeedWindow(
-                        anchorDay = preferredAnchor,
-                        around = 1,
-                        forceReload = forceFeedReload,
-                        replaceVisibleDays = true,
-                        showJumpLoading = true
-                    )
+                    val anchorDay = preferredAnchor
+                    refreshedFeedDays = if (anchorDay.isBlank()) {
+                        0
+                    } else {
+                        loadFeedWindow(
+                            anchorDay = anchorDay,
+                            around = 1,
+                            forceReload = forceFeedReload,
+                            replaceVisibleDays = true,
+                            showJumpLoading = true
+                        )
+                    }
                 } else {
                     refreshedFeedDays = if (shouldFetchVisibleWindow) {
                         logFeedDecision(
@@ -7029,11 +7110,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         0
                     }
                 }
-                val partialRefreshDays = refreshOffscreenStaleDays(reason)
-                if (partialRefreshDays > 0) {
-                    refreshedFeedDays += partialRefreshDays
+                if (!isModeSwitchRefresh) {
+                    val partialRefreshDays = refreshOffscreenStaleDays(reason)
+                    if (partialRefreshDays > 0) {
+                        refreshedFeedDays += partialRefreshDays
+                    }
                 }
-                if (viewportAnchorBeforeRefresh != null && refreshedFeedDays > 0) {
+                if (isModeSwitchRefresh && refreshedFeedDays > 0) {
+                    requestFeedScrollToTop(reason)
+                } else if (viewportAnchorBeforeRefresh != null && refreshedFeedDays > 0) {
                     requestFeedViewportRestore(viewportAnchorBeforeRefresh)
                 }
             } else {
@@ -7239,6 +7324,36 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
             if (elapsed < 700) delay(700 - elapsed)
             state = state.copy(feedRefreshing = false)
+        }
+    }
+
+    suspend fun jumpToFeedTop() {
+        if (state.feedOrderMode == FeedOrderMode.CHRONO) {
+            val targetDay = state.prompt?.day ?: state.calendarDays.firstOrNull() ?: state.feedDays.firstOrNull()
+            if (!targetDay.isNullOrBlank()) {
+                jumpToDayBoundary(targetDay, FeedJumpBoundary.START)
+                return
+            }
+        }
+        var canScrollToTop = true
+        if (state.feedOrderMode != FeedOrderMode.CHRONO && state.feedIndexHasNewer) {
+            runCatching {
+                loadDiscoverFeed(
+                    offset = 0,
+                    limitDays = maxOf(state.feedDays.size, 5),
+                    appendOlder = false,
+                    anchorDay = null,
+                    focusPhotoId = null,
+                    replaceVisibleDays = true,
+                    showJumpLoading = true
+                )
+            }.onFailure {
+                canScrollToTop = false
+                state = state.copy(message = apiError(it, "Zum Feed-Anfang springen fehlgeschlagen"))
+            }
+        }
+        if (canScrollToTop) {
+            requestFeedScrollToTop(reason = "quick_action_top")
         }
     }
 
@@ -11085,6 +11200,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     focusPhotoId = state.feedFocusPhotoId,
                     focusBoundary = state.feedFocusBoundary,
                     scrollRequestId = state.feedScrollRequestId,
+                    scrollToTopRequestId = state.feedScrollToTopRequestId,
                     viewportRestoreAnchor = state.feedViewportRestoreAnchor,
                     viewportRestoreRequestId = state.feedViewportRestoreRequestId,
                     jumpLoadingDay = state.feedJumpLoadingDay,
@@ -11104,11 +11220,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
                     onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
                     onViewportAnchorChanged = vm::updateFeedViewportAnchor,
+                    onJumpToTop = { scope.launch { vm.jumpToFeedTop() } },
                     onJumpToDay = { day -> scope.launch { vm.jumpToDay(day) } },
                     onJumpToBoundary = { day, boundary -> scope.launch { vm.jumpToDayBoundary(day, boundary) } },
                     onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
                     onShowHiddenNewerContent = { day -> scope.launch { vm.jumpToDay(day) } },
                     onScrollRequestConsumed = vm::consumeFeedScrollRequest,
+                    onScrollToTopConsumed = vm::consumeFeedScrollToTopRequest,
                     onViewportRestoreConsumed = vm::consumeFeedViewportRestore,
                     onViewportRestoreResult = vm::reportFeedViewportRestoreResult,
                     onOpenUserProfile = { userId -> scope.launch { vm.loadUserProfile(userId) } },
@@ -12203,6 +12321,7 @@ fun FeedTab(
     focusPhotoId: Long?,
     focusBoundary: FeedJumpBoundary?,
     scrollRequestId: Long,
+    scrollToTopRequestId: Long,
     viewportRestoreAnchor: FeedViewportAnchor,
     viewportRestoreRequestId: Long,
     jumpLoadingDay: String?,
@@ -12222,11 +12341,13 @@ fun FeedTab(
     onLoadOlder: () -> Unit,
     onLoadNewer: () -> Unit,
     onViewportAnchorChanged: (FeedViewportAnchor) -> Unit,
+    onJumpToTop: () -> Unit,
     onJumpToDay: (String) -> Unit,
     onJumpToBoundary: (String, FeedJumpBoundary) -> Unit,
     onJumpToCapsule: (day: String, photoId: Long) -> Unit,
     onShowHiddenNewerContent: (String) -> Unit,
     onScrollRequestConsumed: () -> Unit,
+    onScrollToTopConsumed: () -> Unit,
     onViewportRestoreConsumed: () -> Unit,
     onViewportRestoreResult: (FeedViewportAnchor, FeedViewportAnchor?, String) -> Unit,
     onOpenUserProfile: (Long) -> Unit,
@@ -12351,8 +12472,10 @@ fun FeedTab(
             .distinct()
             .toList()
     }
-    val currentAnchorDay = remember(focusDay, prompt?.day, days) {
+    val isChronoMode = feedOrderMode == FeedOrderMode.CHRONO
+    val currentAnchorDay = remember(feedOrderMode, focusDay, prompt?.day, days) {
         when {
+            !isChronoMode -> null
             !focusDay.isNullOrBlank() -> focusDay
             !prompt?.day.isNullOrBlank() -> prompt?.day
             else -> days.firstOrNull()
@@ -12394,27 +12517,38 @@ fun FeedTab(
     }
     val loadedNewestDay = remember(days) { days.firstOrNull() }
     val loadedOldestDay = remember(days) { days.lastOrNull() }
-    val showScrollTop by remember(newestKnownDay, loadedNewestDay) {
+    val showScrollTop by remember(feedOrderMode, newestKnownDay, loadedNewestDay) {
         derivedStateOf {
-            rows.isNotEmpty() && (firstVisibleIndex > 2 || (!newestKnownDay.isNullOrBlank() && newestKnownDay != loadedNewestDay))
+            if (rows.isEmpty()) {
+                false
+            } else if (!isChronoMode) {
+                firstVisibleIndex > 0
+            } else {
+                firstVisibleIndex > 2 || (!newestKnownDay.isNullOrBlank() && newestKnownDay != loadedNewestDay)
+            }
         }
     }
-    val showScrollBottom by remember(oldestKnownDay, loadedOldestDay) {
+    val showScrollBottom by remember(feedOrderMode, oldestKnownDay, loadedOldestDay) {
         derivedStateOf {
-            rows.isNotEmpty() && (
+            if (rows.isEmpty()) {
+                false
+            } else if (!isChronoMode) {
+                lastVisibleIndex in 0 until rows.lastIndex
+            } else {
                 lastVisibleIndex in 0 until rows.lastIndex - 1 ||
                     (!oldestKnownDay.isNullOrBlank() && oldestKnownDay != loadedOldestDay)
-                )
+            }
         }
     }
-    val currentAnchorVisible by remember(currentAnchorDay, dayHeaderIndexByDay) {
+    val currentAnchorVisible by remember(feedOrderMode, currentAnchorDay, dayHeaderIndexByDay) {
         derivedStateOf {
+            if (!isChronoMode) return@derivedStateOf true
             val anchorIndex = currentAnchorDay?.let(dayHeaderIndexByDay::get) ?: return@derivedStateOf true
             anchorIndex in firstVisibleIndex..lastVisibleIndex
         }
     }
-    val showJumpToCurrentAnchor by remember(currentAnchorDay) {
-        derivedStateOf { !currentAnchorDay.isNullOrBlank() && !currentAnchorVisible }
+    val showJumpToCurrentAnchor by remember(feedOrderMode, currentAnchorDay) {
+        derivedStateOf { isChronoMode && !currentAnchorDay.isNullOrBlank() && !currentAnchorVisible }
     }
 
     var handledScrollRequestId by remember { mutableLongStateOf(0L) }
@@ -12437,6 +12571,20 @@ fun FeedTab(
         highlightedDay = focusDay ?: rowDayAt(idx)
         onScrollRequestConsumed()
     }
+    var handledScrollToTopRequestId by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(scrollToTopRequestId, rows.size) {
+        if (scrollToTopRequestId <= 0L || scrollToTopRequestId == handledScrollToTopRequestId) return@LaunchedEffect
+        if (rows.isEmpty()) return@LaunchedEffect
+        val distance = if (firstVisibleIndex >= 0) kotlin.math.abs(firstVisibleIndex) else Int.MAX_VALUE
+        if (distance <= 6) {
+            listState.animateScrollToItem(0)
+        } else {
+            listState.scrollToItem(0)
+        }
+        handledScrollToTopRequestId = scrollToTopRequestId
+        highlightedDay = rowDayAt(0)
+        onScrollToTopConsumed()
+    }
     var handledViewportRestoreRequestId by remember { mutableLongStateOf(0L) }
     LaunchedEffect(viewportRestoreRequestId, rows.size) {
         if (viewportRestoreRequestId <= 0L || viewportRestoreRequestId == handledViewportRestoreRequestId) return@LaunchedEffect
@@ -12454,7 +12602,22 @@ fun FeedTab(
                 ""
             )
         } else {
-            onViewportRestoreResult(viewportRestoreAnchor, null, "anchor_not_found")
+            if (!isChronoMode && rows.isNotEmpty()) {
+                listState.scrollToItem(0)
+                highlightedDay = rowDayAt(0)
+                onViewportRestoreResult(
+                    viewportRestoreAnchor,
+                    rowAnchorAt(
+                        index = 0,
+                        offsetPx = 0,
+                        firstVisibleIndex = 0,
+                        lastVisibleIndex = 0
+                    ),
+                    "anchor_not_found_fallback_top"
+                )
+            } else {
+                onViewportRestoreResult(viewportRestoreAnchor, null, "anchor_not_found")
+            }
         }
         handledViewportRestoreRequestId = viewportRestoreRequestId
         onViewportRestoreConsumed()
@@ -12704,22 +12867,19 @@ fun FeedTab(
             showAnchor = showJumpToCurrentAnchor,
             anchorLabel = if (currentAnchorDay == prompt?.day) "Heute" else "Zum Tag",
             onTopClick = {
-                scope.launch {
-                    val targetDay = newestKnownDay
-                    if (!targetDay.isNullOrBlank() && targetDay != loadedNewestDay) {
-                        onJumpToBoundary(targetDay, FeedJumpBoundary.START)
-                    } else if (rows.isNotEmpty()) {
-                        listState.animateScrollToItem(0)
-                    }
-                }
+                onJumpToTop()
             },
             onBottomClick = {
                 scope.launch {
                     val targetDay = oldestKnownDay
-                    if (!targetDay.isNullOrBlank() && targetDay != loadedOldestDay) {
+                    if (isChronoMode && !targetDay.isNullOrBlank() && targetDay != loadedOldestDay) {
                         onJumpToBoundary(targetDay, FeedJumpBoundary.END)
                     } else if (rows.isNotEmpty()) {
-                        val boundaryIndex = targetDay?.let { boundaryRowIndex(it, FeedJumpBoundary.END) } ?: rows.lastIndex
+                        val boundaryIndex = if (isChronoMode) {
+                            targetDay?.let { boundaryRowIndex(it, FeedJumpBoundary.END) } ?: rows.lastIndex
+                        } else {
+                            rows.lastIndex
+                        }
                         listState.animateScrollToItem(boundaryIndex.coerceAtLeast(0))
                     }
                 }
