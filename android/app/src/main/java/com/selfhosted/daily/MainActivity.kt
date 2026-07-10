@@ -401,6 +401,7 @@ fun isFeedRelatedPush(action: String, type: String, day: String, photoId: String
 enum class AppTab { CAMERA, FEED, CALENDAR, CHAT, PROFILE }
 enum class AuthMode { LOGIN, REGISTER }
 enum class CalendarMode { PUBLIC, BOOKMARKS, SEARCH, TIME_CAPSULES }
+enum class HubSection { DASHBOARD, TIMELINE, CALENDAR, TIME_CAPSULES, SEARCH, BOOKMARKS }
 enum class FeedOrderMode { CHRONO, TREND, RANDOM }
 enum class TimeCapsuleFilter { ALL, RELEASED, LOCKED }
 enum class BookmarkCalendarFilter { MINE, ALL }
@@ -1075,6 +1076,79 @@ data class DashboardBootstrapResponse(
     val communityStats: CommunityStatsResponse? = null
 )
 
+data class HubTarget(
+    val tab: String = "feed",
+    val day: String = "",
+    val photoId: Long = 0,
+    val commentId: Long = 0,
+    val photoMojiId: Long = 0,
+    val reactionEmoji: String = ""
+)
+
+data class HubTimelineItem(
+    val id: String,
+    val type: String = "",
+    val group: String = "",
+    val system: Boolean = false,
+    val accent: String = "",
+    val title: String = "",
+    val body: String = "",
+    val occurredAt: String? = null,
+    val day: String = "",
+    val unread: Boolean = false,
+    val celebrate: Boolean = false,
+    val bookmarkContext: Boolean = false,
+    val actor: User? = null,
+    val photoUser: User? = null,
+    val photo: PromptPhoto? = null,
+    val comment: PhotoCommentItem? = null,
+    val photoMoji: PhotoMojiItem? = null,
+    val target: HubTarget = HubTarget(),
+    val targetUrl: String = ""
+)
+
+data class HubTimeCapsuleEntry(
+    val photo: PromptPhoto,
+    val user: User,
+    val day: String = "",
+    val photoId: Long = 0,
+    val visibleAt: String? = null,
+    val countdownSecs: Long = 0,
+    val target: HubTarget = HubTarget()
+)
+
+data class HubTimeCapsulesResponse(
+    val schemaVersion: String = "hub_time_capsules_v1",
+    val serverNow: String? = null,
+    val lockedCount: Int = 0,
+    val releasedCount: Int = 0,
+    val locked: List<HubTimeCapsuleEntry> = emptyList(),
+    val released: List<HubTimeCapsuleEntry> = emptyList()
+)
+
+data class HubTimelineResponse(
+    val schemaVersion: String = "hub_timeline_v1",
+    val serverNow: String? = null,
+    val windowDays: Int = 7,
+    val unreadCount: Int = 0,
+    val clearedAt: String? = null,
+    val viewedAt: String? = null,
+    val items: List<HubTimelineItem> = emptyList()
+)
+
+data class HubDashboardPreview(
+    val calendarPreview: List<DayStatItem> = emptyList(),
+    val feedPreview: List<FeedItem> = emptyList()
+)
+
+data class HubBootstrapResponse(
+    val schemaVersion: String = "hub_bootstrap_v1",
+    val serverNow: String? = null,
+    val timeline: HubTimelineResponse = HubTimelineResponse(),
+    val timeCapsules: HubTimeCapsulesResponse = HubTimeCapsulesResponse(),
+    val dashboard: HubDashboardPreview = HubDashboardPreview()
+)
+
 data class ClientDebugLogUploadRequest(
     val type: String,
     val message: String,
@@ -1292,6 +1366,21 @@ interface Api {
         @Query("includePhotos") includePhotos: Boolean = true,
         @Query("includeCommunity") includeCommunity: Boolean = true
     ): DashboardBootstrapResponse
+
+    @GET("hub/bootstrap")
+    suspend fun hubBootstrap(@Header("Authorization") token: String): HubBootstrapResponse
+
+    @GET("hub/timeline")
+    suspend fun hubTimeline(
+        @Header("Authorization") token: String,
+        @Query("limit") limit: Int = 80
+    ): HubTimelineResponse
+
+    @POST("hub/timeline/clear")
+    suspend fun clearHubTimeline(@Header("Authorization") token: String)
+
+    @GET("hub/time-capsules")
+    suspend fun hubTimeCapsules(@Header("Authorization") token: String): HubTimeCapsulesResponse
 
     @GET("moment/special/status")
     suspend fun specialMomentStatus(@Header("Authorization") token: String): SpecialMomentStatus
@@ -2829,6 +2918,15 @@ class AppRepo(
             includeCommunity = includeCommunity
         )
     }
+    suspend fun hubBootstrap(): HubBootstrapResponse =
+        authorizedCall("/api/hub/bootstrap") { token -> api.hubBootstrap(token) }
+    suspend fun hubTimeline(limit: Int = 80): HubTimelineResponse =
+        authorizedCall("/api/hub/timeline") { token -> api.hubTimeline(token, limit) }
+    suspend fun clearHubTimeline() {
+        authorizedCall("/api/hub/timeline/clear") { token -> api.clearHubTimeline(token) }
+    }
+    suspend fun hubTimeCapsules(): HubTimeCapsulesResponse =
+        authorizedCall("/api/hub/time-capsules") { token -> api.hubTimeCapsules(token) }
     suspend fun specialMomentStatus(): SpecialMomentStatus =
         authorizedCall("/api/moment/special/status") { token -> api.specialMomentStatus(token) }
     suspend fun requestSpecialMoment() {
@@ -3929,6 +4027,16 @@ data class UiState(
     val calendarTimeCapsulesData: CalendarDataset = CalendarDataset(),
     val calendarSearchData: CalendarSearchDataset = CalendarSearchDataset(),
     val calendarSearchQuery: String = "",
+    val hubSection: HubSection = HubSection.DASHBOARD,
+    val hubBootstrap: HubBootstrapResponse? = null,
+    val hubTimelineItems: List<HubTimelineItem> = emptyList(),
+    val hubTimelineUnreadCount: Int = 0,
+    val hubTimelineLoading: Boolean = false,
+    val hubTimelineClearedAt: String? = null,
+    val hubTimelineViewedAt: String? = null,
+    val hubTimeCapsulesLocked: List<HubTimeCapsuleEntry> = emptyList(),
+    val hubTimeCapsulesReleased: List<HubTimeCapsuleEntry> = emptyList(),
+    val hubTimeCapsulesLoading: Boolean = false,
     val calendarBookmarksFilter: BookmarkCalendarFilter = BookmarkCalendarFilter.MINE,
     val calendarTimeCapsuleFilter: TimeCapsuleFilter = TimeCapsuleFilter.ALL,
     val calendarLoading: Boolean = false,
@@ -3936,6 +4044,9 @@ data class UiState(
     val communityStatsLoading: Boolean = false,
     val feedFocusDay: String? = null,
     val feedFocusPhotoId: Long? = null,
+    val feedFocusCommentId: Long? = null,
+    val feedFocusPhotoMojiId: Long? = null,
+    val feedFocusReactionEmoji: String? = null,
     val feedFocusBoundary: FeedJumpBoundary? = null,
     val feedVisibleAnchorDay: String? = null,
     val feedViewportAnchor: FeedViewportAnchor = FeedViewportAnchor(),
@@ -6090,10 +6201,111 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         if (tab == AppTab.CALENDAR) {
             state = state.copy(activeTab = tab)
-            viewModelScope.launch { ensureCalendarModeLoaded(state.calendarMode, force = false) }
+            viewModelScope.launch {
+                ensureCalendarModeLoaded(state.calendarMode, force = false)
+                refreshHubBootstrap(force = false)
+            }
             return
         }
         state = state.copy(activeTab = tab)
+    }
+
+    fun setHubSection(section: HubSection) {
+        state = state.copy(
+            hubSection = section,
+            calendarMode = when (section) {
+                HubSection.CALENDAR -> CalendarMode.PUBLIC
+                HubSection.SEARCH -> CalendarMode.SEARCH
+                HubSection.BOOKMARKS -> CalendarMode.BOOKMARKS
+                else -> state.calendarMode
+            }
+        )
+        viewModelScope.launch {
+            when (section) {
+                HubSection.DASHBOARD -> refreshHubBootstrap(force = false)
+                HubSection.TIMELINE -> refreshHubTimeline(force = false)
+                HubSection.TIME_CAPSULES -> refreshHubTimeCapsules(force = false)
+                HubSection.CALENDAR -> ensureCalendarModeLoaded(CalendarMode.PUBLIC, force = false)
+                HubSection.SEARCH -> ensureCalendarModeLoaded(CalendarMode.SEARCH, force = false)
+                HubSection.BOOKMARKS -> ensureCalendarModeLoaded(CalendarMode.BOOKMARKS, force = false)
+            }
+        }
+    }
+
+    suspend fun refreshHubBootstrap(force: Boolean = true) {
+        if (!force && state.hubBootstrap != null) return
+        state = state.copy(hubTimelineLoading = true, hubTimeCapsulesLoading = true)
+        runCatching { repo.hubBootstrap() }
+            .onSuccess { bootstrap ->
+                state = state.copy(
+                    hubBootstrap = bootstrap,
+                    hubTimelineItems = bootstrap.timeline.items,
+                    hubTimelineUnreadCount = bootstrap.timeline.unreadCount,
+                    hubTimelineClearedAt = bootstrap.timeline.clearedAt,
+                    hubTimelineViewedAt = bootstrap.timeline.viewedAt,
+                    hubTimeCapsulesLocked = bootstrap.timeCapsules.locked,
+                    hubTimeCapsulesReleased = bootstrap.timeCapsules.released,
+                    hubTimelineLoading = false,
+                    hubTimeCapsulesLoading = false
+                )
+            }
+            .onFailure {
+                state = state.copy(
+                    hubTimelineLoading = false,
+                    hubTimeCapsulesLoading = false,
+                    message = apiError(it, "Hub laden fehlgeschlagen")
+                )
+            }
+    }
+
+    suspend fun refreshHubTimeline(force: Boolean = true) {
+        if (!force && state.hubTimelineItems.isNotEmpty()) return
+        state = state.copy(hubTimelineLoading = true)
+        runCatching { repo.hubTimeline() }
+            .onSuccess { response ->
+                state = state.copy(
+                    hubTimelineItems = response.items,
+                    hubTimelineUnreadCount = response.unreadCount,
+                    hubTimelineClearedAt = response.clearedAt,
+                    hubTimelineViewedAt = response.viewedAt,
+                    hubTimelineLoading = false
+                )
+            }
+            .onFailure {
+                state = state.copy(hubTimelineLoading = false, message = apiError(it, "Timeline laden fehlgeschlagen"))
+            }
+    }
+
+    suspend fun refreshHubTimeCapsules(force: Boolean = true) {
+        if (!force && (state.hubTimeCapsulesLocked.isNotEmpty() || state.hubTimeCapsulesReleased.isNotEmpty())) return
+        state = state.copy(hubTimeCapsulesLoading = true)
+        runCatching { repo.hubTimeCapsules() }
+            .onSuccess { response ->
+                state = state.copy(
+                    hubTimeCapsulesLocked = response.locked,
+                    hubTimeCapsulesReleased = response.released,
+                    hubTimeCapsulesLoading = false
+                )
+            }
+            .onFailure {
+                state = state.copy(hubTimeCapsulesLoading = false, message = apiError(it, "Timecapsules laden fehlgeschlagen"))
+            }
+    }
+
+    suspend fun clearHubTimeline() {
+        state = state.copy(hubTimelineLoading = true)
+        runCatching { repo.clearHubTimeline() }
+            .onSuccess {
+                state = state.copy(
+                    hubTimelineItems = emptyList(),
+                    hubTimelineUnreadCount = 0,
+                    hubTimelineLoading = false
+                )
+                refreshHubBootstrap(force = true)
+            }
+            .onFailure {
+                state = state.copy(hubTimelineLoading = false, message = apiError(it, "Timeline aufraeumen fehlgeschlagen"))
+            }
     }
 
     fun setCalendarPickerExpanded(expanded: Boolean) {
@@ -6349,10 +6561,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun clearFeedPhotoFocus() {
-        if (state.feedFocusPhotoId != null || state.feedFocusDay != null || state.feedFocusBoundary != null) {
+        if (state.feedFocusPhotoId != null || state.feedFocusDay != null || state.feedFocusBoundary != null || state.feedFocusCommentId != null || state.feedFocusPhotoMojiId != null || !state.feedFocusReactionEmoji.isNullOrBlank()) {
             state = state.copy(
                 feedFocusPhotoId = null,
                 feedFocusDay = null,
+                feedFocusCommentId = null,
+                feedFocusPhotoMojiId = null,
+                feedFocusReactionEmoji = null,
                 feedFocusBoundary = null
             )
         }
@@ -6362,6 +6577,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         updateFeedViewportAnchor(FeedViewportAnchor(day = day))
     }
 
+    fun clearFeedInteractionFocus() {
+        if (state.feedFocusCommentId != null || state.feedFocusPhotoMojiId != null || !state.feedFocusReactionEmoji.isNullOrBlank()) {
+            state = state.copy(
+                feedFocusCommentId = null,
+                feedFocusPhotoMojiId = null,
+                feedFocusReactionEmoji = null
+            )
+        }
+    }
+
     suspend fun jumpToDay(day: String) {
         clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
@@ -6369,6 +6594,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = null,
+            feedFocusCommentId = null,
+            feedFocusPhotoMojiId = null,
+            feedFocusReactionEmoji = null,
             feedFocusBoundary = FeedJumpBoundary.START,
             feedScrollRequestId = scrollRequestId
         )
@@ -6379,12 +6607,25 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun jumpToPhoto(day: String, photoId: Long) {
+        jumpToPhotoTarget(day, photoId)
+    }
+
+    suspend fun jumpToPhotoTarget(
+        day: String,
+        photoId: Long,
+        commentId: Long? = null,
+        photoMojiId: Long? = null,
+        reactionEmoji: String? = null
+    ) {
         clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
         state = state.copy(
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = photoId,
+            feedFocusCommentId = commentId?.takeIf { it > 0L },
+            feedFocusPhotoMojiId = photoMojiId?.takeIf { it > 0L },
+            feedFocusReactionEmoji = reactionEmoji?.trim()?.takeIf { it.isNotBlank() },
             feedFocusBoundary = null,
             feedScrollRequestId = scrollRequestId
         )
@@ -6401,6 +6642,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = null,
+            feedFocusCommentId = null,
+            feedFocusPhotoMojiId = null,
+            feedFocusReactionEmoji = null,
             feedFocusBoundary = boundary,
             feedScrollRequestId = scrollRequestId
         )
@@ -6415,6 +6659,25 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (targetDay.isBlank()) return
         if (state.feedHiddenNewerAnchorDay == targetDay || targetDay == state.feedDays.firstOrNull()) {
             state = state.copy(feedHasHiddenNewerContent = false, feedHiddenNewerAnchorDay = null)
+        }
+    }
+
+    suspend fun jumpToHubTarget(target: HubTarget) {
+        val day = target.day.trim()
+        if (day.isBlank()) {
+            state = state.copy(message = "Ziel im Feed konnte nicht aufgeloest werden.")
+            return
+        }
+        if (target.photoId > 0L) {
+            jumpToPhotoTarget(
+                day = day,
+                photoId = target.photoId,
+                commentId = target.commentId.takeIf { it > 0L },
+                photoMojiId = target.photoMojiId.takeIf { it > 0L },
+                reactionEmoji = target.reactionEmoji.takeIf { it.isNotBlank() }
+            )
+        } else {
+            jumpToDay(day)
         }
     }
 
@@ -11080,7 +11343,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onClick = { vm.setTab(AppTab.FEED) },
                     onLongClick = { feedModePickerVisible = true }
                 )
-                NavigationBarItem(selected = state.activeTab == AppTab.CALENDAR, onClick = { vm.setTab(AppTab.CALENDAR) }, label = { Text("Kalender") }, icon = { Text("G") })
+                NavigationBarItem(selected = state.activeTab == AppTab.CALENDAR, onClick = { vm.setTab(AppTab.CALENDAR) }, label = { Text("Hub") }, icon = { Text("H") })
                 NavigationBarItem(
                     selected = state.activeTab == AppTab.CHAT,
                     onClick = { vm.setTab(AppTab.CHAT) },
@@ -11198,6 +11461,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     promptMetaByDay = state.promptMetaByDay,
                     focusDay = state.feedFocusDay,
                     focusPhotoId = state.feedFocusPhotoId,
+                    focusCommentId = state.feedFocusCommentId,
+                    focusPhotoMojiId = state.feedFocusPhotoMojiId,
+                    focusReactionEmoji = state.feedFocusReactionEmoji,
                     focusBoundary = state.feedFocusBoundary,
                     scrollRequestId = state.feedScrollRequestId,
                     scrollToTopRequestId = state.feedScrollToTopRequestId,
@@ -11225,6 +11491,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onJumpToBoundary = { day, boundary -> scope.launch { vm.jumpToDayBoundary(day, boundary) } },
                     onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
                     onShowHiddenNewerContent = { day -> scope.launch { vm.jumpToDay(day) } },
+                    onInteractionFocusConsumed = vm::clearFeedInteractionFocus,
                     onScrollRequestConsumed = vm::consumeFeedScrollRequest,
                     onScrollToTopConsumed = vm::consumeFeedScrollToTopRequest,
                     onViewportRestoreConsumed = vm::consumeFeedViewportRestore,
@@ -11250,8 +11517,16 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     }
                 )
 
-                AppTab.CALENDAR -> CalendarTab(
-                    mode = state.calendarMode,
+                AppTab.CALENDAR -> HubTab(
+                    section = state.hubSection,
+                    bootstrap = state.hubBootstrap,
+                    timelineItems = state.hubTimelineItems,
+                    timelineUnreadCount = state.hubTimelineUnreadCount,
+                    timelineLoading = state.hubTimelineLoading,
+                    timeCapsulesLocked = state.hubTimeCapsulesLocked,
+                    timeCapsulesReleased = state.hubTimeCapsulesReleased,
+                    timeCapsulesLoading = state.hubTimeCapsulesLoading,
+                    calendarMode = state.calendarMode,
                     days = state.calendarDays,
                     dayStats = state.calendarDayStats,
                     photosByDay = when (state.calendarMode) {
@@ -11270,8 +11545,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     searchResults = state.calendarSearchData.flatMatches,
                     selected = state.calendarSelectedDay ?: state.prompt?.day.orEmpty(),
                     pickerExpanded = state.calendarPickerExpanded,
-                    loading = state.calendarLoading,
+                    calendarLoading = state.calendarLoading,
                     showPublicPostNumbers = state.showPublicPostNumbers,
+                    onSectionChange = vm::setHubSection,
+                    onRefreshHub = { scope.launch { vm.refreshHubBootstrap(force = true) } },
+                    onRefreshTimeline = { scope.launch { vm.refreshHubTimeline(force = true) } },
+                    onClearTimeline = { scope.launch { vm.clearHubTimeline() } },
+                    onRefreshTimeCapsules = { scope.launch { vm.refreshHubTimeCapsules(force = true) } },
                     onPickerExpandedChange = { vm.setCalendarPickerExpanded(it) },
                     onModeChange = { vm.setCalendarMode(it) },
                     onBookmarkFilterChange = { vm.setCalendarBookmarksFilter(it) },
@@ -11281,7 +11561,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onOpenHashtagSearch = { vm.openCalendarSearch(it) },
                     onSelect = { day -> vm.selectCalendarDay(day) },
                     onOpenDayInFeed = { day -> scope.launch { vm.jumpToDay(day) } },
-                    onOpenPhotoInFeed = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } }
+                    onOpenPhotoInFeed = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
+                    onOpenHubTarget = { target -> scope.launch { vm.jumpToHubTarget(target) } }
                 )
 
                 AppTab.CHAT -> ChatTab(
@@ -12319,6 +12600,9 @@ fun FeedTab(
     promptMetaByDay: Map<String, PromptMeta>,
     focusDay: String?,
     focusPhotoId: Long?,
+    focusCommentId: Long?,
+    focusPhotoMojiId: Long?,
+    focusReactionEmoji: String?,
     focusBoundary: FeedJumpBoundary?,
     scrollRequestId: Long,
     scrollToTopRequestId: Long,
@@ -12346,6 +12630,7 @@ fun FeedTab(
     onJumpToBoundary: (String, FeedJumpBoundary) -> Unit,
     onJumpToCapsule: (day: String, photoId: Long) -> Unit,
     onShowHiddenNewerContent: (String) -> Unit,
+    onInteractionFocusConsumed: () -> Unit,
     onScrollRequestConsumed: () -> Unit,
     onScrollToTopConsumed: () -> Unit,
     onViewportRestoreConsumed: () -> Unit,
@@ -12489,6 +12774,10 @@ fun FeedTab(
         }
     }
     var highlightedDay by remember { mutableStateOf<String?>(null) }
+    var highlightedPhotoId by remember { mutableStateOf<Long?>(null) }
+    var highlightedCommentId by remember { mutableStateOf<Long?>(null) }
+    var highlightedPhotoMojiId by remember { mutableStateOf<Long?>(null) }
+    var highlightedReactionEmoji by remember { mutableStateOf<String?>(null) }
     val visibleRange = remember(listState) {
         derivedStateOf {
             val visible = listState.layoutInfo.visibleItemsInfo
@@ -12569,6 +12858,10 @@ fun FeedTab(
         }
         handledScrollRequestId = scrollRequestId
         highlightedDay = focusDay ?: rowDayAt(idx)
+        highlightedPhotoId = focusPhotoId
+        highlightedCommentId = focusCommentId
+        highlightedPhotoMojiId = focusPhotoMojiId
+        highlightedReactionEmoji = focusReactionEmoji
         onScrollRequestConsumed()
     }
     var handledScrollToTopRequestId by remember { mutableLongStateOf(0L) }
@@ -12626,6 +12919,16 @@ fun FeedTab(
         if (highlightedDay != null) {
             delay(1800)
             highlightedDay = null
+        }
+    }
+    LaunchedEffect(highlightedPhotoId, highlightedCommentId, highlightedPhotoMojiId, highlightedReactionEmoji) {
+        if (highlightedPhotoId != null || highlightedCommentId != null || highlightedPhotoMojiId != null || !highlightedReactionEmoji.isNullOrBlank()) {
+            delay(3200)
+            highlightedPhotoId = null
+            highlightedCommentId = null
+            highlightedPhotoMojiId = null
+            highlightedReactionEmoji = null
+            onInteractionFocusConsumed()
         }
     }
 
@@ -12796,6 +13099,9 @@ fun FeedTab(
                         preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
                         showNsfwByDefault = showNsfwByDefault,
                         nsfwRevealed = revealedNsfwPhotoIds.contains(item.photo.id),
+                        highlightedCommentId = if (highlightedPhotoId == item.photo.id) highlightedCommentId else null,
+                        highlightedPhotoMojiId = if (highlightedPhotoId == item.photo.id) highlightedPhotoMojiId else null,
+                        highlightedReactionEmoji = if (highlightedPhotoId == item.photo.id) highlightedReactionEmoji else null,
                         isMomentWindowPost = isMomentWindowPost,
                         postMomentKind = postMomentKind,
                         requestedByUser = requestedByUser,
@@ -13041,6 +13347,9 @@ private fun FeedPostCard(
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
     nsfwRevealed: Boolean,
+    highlightedCommentId: Long?,
+    highlightedPhotoMojiId: Long?,
+    highlightedReactionEmoji: String?,
     isMomentWindowPost: Boolean,
     postMomentKind: String?,
     requestedByUser: String?,
@@ -13069,6 +13378,9 @@ private fun FeedPostCard(
         preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
         showNsfwByDefault = showNsfwByDefault,
         nsfwRevealed = nsfwRevealed,
+        highlightedCommentId = highlightedCommentId,
+        highlightedPhotoMojiId = highlightedPhotoMojiId,
+        highlightedReactionEmoji = highlightedReactionEmoji,
         isMomentWindowPost = isMomentWindowPost,
         postMomentKind = postMomentKind,
         requestedByUser = requestedByUser,
@@ -13195,6 +13507,9 @@ private fun PostCanvasCard(
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
     nsfwRevealed: Boolean,
+    highlightedCommentId: Long?,
+    highlightedPhotoMojiId: Long?,
+    highlightedReactionEmoji: String?,
     isMomentWindowPost: Boolean,
     postMomentKind: String?,
     requestedByUser: String?,
@@ -13443,10 +13758,17 @@ private fun PostCanvasCard(
                 }
 
                 if (reactions.isNotEmpty()) {
+                    val reactionLineModifier = if (!highlightedReactionEmoji.isNullOrBlank() && reactions.any { it.emoji == highlightedReactionEmoji }) {
+                        Modifier
+                            .background(Color(0x331F5FBF), MaterialTheme.shapes.small)
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                    } else {
+                        Modifier
+                    }
                     Text(
                         reactions.joinToString("  ") { "${it.emoji} ${it.count}" },
                         color = primaryTextColor,
-                        modifier = obscuredModifier
+                        modifier = obscuredModifier.then(reactionLineModifier)
                     )
                 }
                 if (photoMojis.isNotEmpty()) {
@@ -13454,7 +13776,10 @@ private fun PostCanvasCard(
                         items(photoMojis) { foto ->
                             Row(
                                 modifier = Modifier
-                                    .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.large)
+                                    .background(
+                                        if (highlightedPhotoMojiId == foto.id) Color(0x331F5FBF) else MaterialTheme.colorScheme.surfaceVariant,
+                                        MaterialTheme.shapes.large
+                                    )
                                     .then(if (onOpenViewer != null) Modifier.clickable { onOpenViewer(listOf(foto.url), null) } else Modifier)
                                     .padding(horizontal = 8.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -13481,6 +13806,7 @@ private fun PostCanvasCard(
                                 usernameColor = parseUserColor(item.user.favoriteColor),
                                 body = item.photo.caption.orEmpty(),
                                 bodyColor = secondaryTextColor,
+                                highlighted = false,
                                 onOpenHashtagSearch = onOpenHashtagSearch
                             )
                         }
@@ -13490,6 +13816,7 @@ private fun PostCanvasCard(
                                 usernameColor = parseUserColor(comment.user.favoriteColor),
                                 body = comment.body,
                                 bodyColor = secondaryTextColor,
+                                highlighted = highlightedCommentId == comment.id,
                                 onOpenHashtagSearch = onOpenHashtagSearch
                             )
                         }
@@ -13566,9 +13893,20 @@ private fun CompactCommentLine(
     usernameColor: Color,
     body: String,
     bodyColor: Color,
+    highlighted: Boolean,
     onOpenHashtagSearch: (String) -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxWidth()) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (highlighted) Modifier
+                    .background(Color(0x331F5FBF), MaterialTheme.shapes.medium)
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                else Modifier
+            )
+    ) {
         Text(
             "$username:",
             color = usernameColor,
@@ -13906,6 +14244,9 @@ private fun PhotoPaintEditorDialog(
                                         postMomentKind = target.postMomentKind,
                                         requestedByUser = target.requestedByUser,
                                         requestedByUserColor = target.requestedByUserColor,
+                                        highlightedCommentId = null,
+                                        highlightedPhotoMojiId = null,
+                                        highlightedReactionEmoji = null,
                                         onOpenUserProfile = null,
                                         onOpenViewer = null,
                                         onOpenExternalUrl = null,
@@ -14206,6 +14547,377 @@ private fun MonthlyRecapCard(recap: MonthlyRecap) {
                 }
             }
         }
+    }
+}
+
+@Composable
+fun HubTab(
+    section: HubSection,
+    bootstrap: HubBootstrapResponse?,
+    timelineItems: List<HubTimelineItem>,
+    timelineUnreadCount: Int,
+    timelineLoading: Boolean,
+    timeCapsulesLocked: List<HubTimeCapsuleEntry>,
+    timeCapsulesReleased: List<HubTimeCapsuleEntry>,
+    timeCapsulesLoading: Boolean,
+    calendarMode: CalendarMode,
+    days: List<String>,
+    dayStats: Map<String, DayStatItem>,
+    photosByDay: Map<String, List<CalendarPhotoItem>>,
+    bookmarkItems: List<FeedItem>,
+    bookmarkFilter: BookmarkCalendarFilter,
+    timeCapsuleItems: List<FeedItem>,
+    timeCapsuleFilter: TimeCapsuleFilter,
+    timeCapsuleLockedCount: Int,
+    timeCapsuleReleasedCount: Int,
+    searchQuery: String,
+    searchResults: List<CalendarSearchMatchItem>,
+    selected: String,
+    pickerExpanded: Boolean,
+    calendarLoading: Boolean,
+    showPublicPostNumbers: Boolean,
+    onSectionChange: (HubSection) -> Unit,
+    onRefreshHub: () -> Unit,
+    onRefreshTimeline: () -> Unit,
+    onClearTimeline: () -> Unit,
+    onRefreshTimeCapsules: () -> Unit,
+    onPickerExpandedChange: (Boolean) -> Unit,
+    onModeChange: (CalendarMode) -> Unit,
+    onBookmarkFilterChange: (BookmarkCalendarFilter) -> Unit,
+    onTimeCapsuleFilterChange: (TimeCapsuleFilter) -> Unit,
+    onSearchQueryChange: (String) -> Unit,
+    onSearchSubmit: () -> Unit,
+    onOpenHashtagSearch: (String) -> Unit,
+    onSelect: (String) -> Unit,
+    onOpenDayInFeed: (String) -> Unit,
+    onOpenPhotoInFeed: (String, Long) -> Unit,
+    onOpenHubTarget: (HubTarget) -> Unit
+) {
+    val sectionLabel = when (section) {
+        HubSection.DASHBOARD -> "Dashboard"
+        HubSection.TIMELINE -> if (timelineUnreadCount > 0) "Timeline $timelineUnreadCount" else "Timeline"
+        HubSection.CALENDAR -> "Kalender"
+        HubSection.TIME_CAPSULES -> "Timecapsules"
+        HubSection.SEARCH -> "Suche"
+        HubSection.BOOKMARKS -> "Gemerkt"
+    }
+    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("Hub", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            when (section) {
+                                HubSection.DASHBOARD -> "Dashboard mit Schnellwahl, echten Vorschauen und Sprungpunkten in den Feed"
+                                HubSection.TIMELINE -> "Personalisierte Aktivitaeten der letzten 7 Tage"
+                                HubSection.TIME_CAPSULES -> "Gesperrte Capsules zuerst, freigeschaltete danach"
+                                HubSection.CALENDAR -> "Kalenderansicht fuer sichtbare Beitraege"
+                                HubSection.SEARCH -> "Suche nach Caption, Hashtags und Kommentaren"
+                                HubSection.BOOKMARKS -> "Deine gemerkten Beitraege als eigener Hub-Bereich"
+                            },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(sectionLabel, color = Color(0xFF1F5FBF), fontWeight = FontWeight.SemiBold)
+                }
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    items(HubSection.entries) { entry ->
+                        FilterChip(
+                            selected = section == entry,
+                            onClick = { onSectionChange(entry) },
+                            label = {
+                                Text(
+                                    when (entry) {
+                                        HubSection.DASHBOARD -> "Dashboard"
+                                        HubSection.TIMELINE -> "Timeline"
+                                        HubSection.CALENDAR -> "Kalender"
+                                        HubSection.TIME_CAPSULES -> "Timecapsules"
+                                        HubSection.SEARCH -> "Suche"
+                                        HubSection.BOOKMARKS -> "Gemerkt"
+                                    }
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        when (section) {
+            HubSection.DASHBOARD -> {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
+                    item("hub-dashboard-actions") {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Button(onClick = onRefreshHub, modifier = Modifier.weight(1f)) { Text("Hub aktualisieren") }
+                            OutlinedButton(onClick = { onSectionChange(HubSection.TIMELINE) }, modifier = Modifier.weight(1f)) { Text("Zur Timeline") }
+                        }
+                    }
+                    item("hub-dashboard-timeline") {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Neueste Aktivitaet", fontWeight = FontWeight.Bold)
+                                    TextButton(onClick = { onSectionChange(HubSection.TIMELINE) }) { Text("Mehr") }
+                                }
+                                if (timelineItems.isEmpty()) {
+                                    Text("Noch keine Aktivitaeten fuer deine Timeline gefunden.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                } else {
+                                    timelineItems.take(4).forEach { item ->
+                                        HubTimelineRow(item = item, onOpenHubTarget = onOpenHubTarget, onOpenDayInFeed = onOpenDayInFeed)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    item("hub-dashboard-capsules") {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Timecapsules", fontWeight = FontWeight.Bold)
+                                    TextButton(onClick = { onSectionChange(HubSection.TIME_CAPSULES) }) { Text("Mehr") }
+                                }
+                                val combined = (timeCapsulesLocked.take(2) + timeCapsulesReleased.take(2)).take(4)
+                                if (combined.isEmpty()) {
+                                    Text("Keine Timecapsules verfuegbar.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                } else {
+                                    combined.forEach { item ->
+                                        HubTimeCapsuleRow(item = item, locked = item.countdownSecs > 0, onOpenPhotoInFeed = onOpenPhotoInFeed)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    item("hub-dashboard-calendar") {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    Text("Kalender-Vorschau", fontWeight = FontWeight.Bold)
+                                    TextButton(onClick = { onSectionChange(HubSection.CALENDAR) }) { Text("Oeffnen") }
+                                }
+                                val previewStats = bootstrap?.dashboard?.calendarPreview.orEmpty().take(4)
+                                if (previewStats.isEmpty()) {
+                                    Text("Noch keine Kalender-Vorschau geladen.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                } else {
+                                    previewStats.forEach { stat ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    stat.featuredPhoto?.photoId?.let { onOpenPhotoInFeed(stat.day, it) } ?: onOpenDayInFeed(stat.day)
+                                                },
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                Text(formatDayLabel(stat.day), fontWeight = FontWeight.SemiBold)
+                                                Text("${stat.postCount} Posts · ${stat.participantCount} Personen", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                                            }
+                                            stat.featuredPhoto?.url?.takeIf { it.isNotBlank() }?.let { url ->
+                                                AsyncImage(model = url, contentDescription = "Kalender-Vorschau", modifier = Modifier.size(52.dp), contentScale = ContentScale.Crop)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            HubSection.TIMELINE -> {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
+                    item("hub-timeline-actions") {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Button(onClick = onRefreshTimeline, modifier = Modifier.weight(1f), enabled = !timelineLoading) {
+                                Text(if (timelineLoading) "Laedt..." else "Aktualisieren")
+                            }
+                            OutlinedButton(onClick = onClearTimeline, modifier = Modifier.weight(1f), enabled = !timelineLoading) {
+                                Text("Aufraeumen")
+                            }
+                        }
+                    }
+                    if (timelineItems.isEmpty()) {
+                        item("hub-timeline-empty") {
+                            Card(modifier = Modifier.fillMaxWidth()) {
+                                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("Timeline leer", fontWeight = FontWeight.Bold)
+                                    Text("Hier erscheinen die letzten 7 Tage mit persoenlichen Aktivitaeten und Sprungpunkten in den Feed.")
+                                }
+                            }
+                        }
+                    } else {
+                        items(timelineItems, key = { it.id }) { item ->
+                            HubTimelineRow(item = item, onOpenHubTarget = onOpenHubTarget, onOpenDayInFeed = onOpenDayInFeed)
+                        }
+                    }
+                }
+            }
+            HubSection.TIME_CAPSULES -> {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
+                    item("hub-capsule-actions") {
+                        Button(onClick = onRefreshTimeCapsules, enabled = !timeCapsulesLoading, modifier = Modifier.fillMaxWidth()) {
+                            Text(if (timeCapsulesLoading) "Laedt..." else "Timecapsules aktualisieren")
+                        }
+                    }
+                    items(timeCapsulesLocked, key = { "locked-${it.photoId}" }) { item ->
+                        HubTimeCapsuleRow(item = item, locked = true, onOpenPhotoInFeed = onOpenPhotoInFeed)
+                    }
+                    items(timeCapsulesReleased, key = { "released-${it.photoId}" }) { item ->
+                        HubTimeCapsuleRow(item = item, locked = false, onOpenPhotoInFeed = onOpenPhotoInFeed)
+                    }
+                }
+            }
+            HubSection.CALENDAR, HubSection.SEARCH, HubSection.BOOKMARKS -> {
+                CalendarTab(
+                    mode = calendarMode,
+                    days = days,
+                    dayStats = dayStats,
+                    photosByDay = photosByDay,
+                    bookmarkItems = bookmarkItems,
+                    bookmarkFilter = bookmarkFilter,
+                    timeCapsuleItems = timeCapsuleItems,
+                    timeCapsuleFilter = timeCapsuleFilter,
+                    timeCapsuleLockedCount = timeCapsuleLockedCount,
+                    timeCapsuleReleasedCount = timeCapsuleReleasedCount,
+                    searchQuery = searchQuery,
+                    searchResults = searchResults,
+                    selected = selected,
+                    pickerExpanded = pickerExpanded,
+                    loading = calendarLoading,
+                    showPublicPostNumbers = showPublicPostNumbers,
+                    onPickerExpandedChange = onPickerExpandedChange,
+                    onModeChange = onModeChange,
+                    onBookmarkFilterChange = onBookmarkFilterChange,
+                    onTimeCapsuleFilterChange = onTimeCapsuleFilterChange,
+                    onSearchQueryChange = onSearchQueryChange,
+                    onSearchSubmit = onSearchSubmit,
+                    onOpenHashtagSearch = onOpenHashtagSearch,
+                    onSelect = onSelect,
+                    onOpenDayInFeed = onOpenDayInFeed,
+                    onOpenPhotoInFeed = onOpenPhotoInFeed
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HubTimelineRow(
+    item: HubTimelineItem,
+    onOpenHubTarget: (HubTarget) -> Unit,
+    onOpenDayInFeed: (String) -> Unit
+) {
+    val accentColor = when (item.accent) {
+        "capsule" -> Color(0xFFB63A14)
+        "system" -> Color(0xFF0A5C7A)
+        "comment" -> Color(0xFF1F5FBF)
+        "reaction" -> Color(0xFF2E7D32)
+        "fotomoji" -> Color(0xFF8A1C1C)
+        "bookmark" -> Color(0xFF7A4D00)
+        else -> MaterialTheme.colorScheme.primary
+    }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                val target = item.target
+                when {
+                    target.photoId > 0L && target.day.isNotBlank() -> onOpenHubTarget(target)
+                    target.day.isNotBlank() -> onOpenDayInFeed(target.day)
+                }
+            },
+        colors = CardDefaults.cardColors(
+            containerColor = if (item.unread) accentColor.copy(alpha = 0.10f) else MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            item.photo?.url?.takeIf { it.isNotBlank() }?.let { url ->
+                AsyncImage(model = url, contentDescription = "Hub-Ereignisbild", modifier = Modifier.size(68.dp), contentScale = ContentScale.Crop)
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(item.title.ifBlank { "Aktivitaet" }, fontWeight = FontWeight.Bold)
+                    if (item.unread) {
+                        Text("Neu", color = accentColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                item.actor?.let { actor ->
+                    Text("@${actor.username}", color = parseUserColor(actor.favoriteColor), style = MaterialTheme.typography.labelLarge)
+                }
+                if (item.body.isNotBlank()) {
+                    Text(item.body, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                item.occurredAt?.takeIf { it.isNotBlank() }?.let {
+                    Text(formatMomentTime(it), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HubTimeCapsuleRow(
+    item: HubTimeCapsuleEntry,
+    locked: Boolean,
+    onOpenPhotoInFeed: (String, Long) -> Unit
+) {
+    val capsuleColors = if (locked) {
+        listOf(Color(0xFF0C5A6B), Color(0xFF357266), Color(0xFF7A4DFF))
+    } else {
+        listOf(Color(0xFFDA7A14), Color(0xFFB63A14), Color(0xFF8A1C1C))
+    }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (!locked && item.photoId > 0L && item.day.isNotBlank()) Modifier.clickable { onOpenPhotoInFeed(item.day, item.photoId) } else Modifier)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Brush.horizontalGradient(capsuleColors))
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AsyncImage(
+                model = item.photo.capsulePreviewUrl?.takeIf { it.isNotBlank() } ?: item.photo.url,
+                contentDescription = "Timecapsule-Vorschau",
+                modifier = Modifier.size(74.dp),
+                contentScale = ContentScale.Crop
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(if (locked) "Timecapsule gesperrt" else "Timecapsule offen", color = Color.White, fontWeight = FontWeight.Bold)
+                Text("@${item.user.username}", color = Color.White.copy(alpha = 0.92f))
+                Text(
+                    if (locked) "Oeffnet ${formatCapsuleOpenAt(item.visibleAt)} · ${formatCountdownLabel(item.countdownSecs)}"
+                    else "Freigeschaltet ${formatCapsuleOpenAt(item.visibleAt)}",
+                    color = Color.White.copy(alpha = 0.92f),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+    }
+}
+
+private fun formatCountdownLabel(totalSeconds: Long): String {
+    if (totalSeconds <= 0L) return "jetzt"
+    val days = totalSeconds / 86_400L
+    val hours = (totalSeconds % 86_400L) / 3_600L
+    return when {
+        days > 0L -> "in ${days}d ${hours}h"
+        hours > 0L -> "in ${hours}h"
+        else -> "in ${maxOf(1L, totalSeconds / 60L)}m"
     }
 }
 

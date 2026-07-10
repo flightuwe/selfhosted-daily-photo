@@ -39,6 +39,8 @@ type User struct {
 	QuietHoursEnabled                   bool       `gorm:"default:false" json:"quietHoursEnabled"`
 	QuietHoursStart                     string     `gorm:"size:5;default:'22:00'" json:"quietHoursStart"`
 	QuietHoursEnd                       string     `gorm:"size:5;default:'07:00'" json:"quietHoursEnd"`
+	HubTimelineClearedAt                *time.Time `gorm:"index" json:"-"`
+	HubTimelineLastViewedAt             *time.Time `gorm:"index" json:"-"`
 	DiagnosticsConsentGranted           bool       `gorm:"default:false" json:"diagnosticsConsentGranted"`
 	DiagnosticsConsentUpdatedAt         *time.Time `json:"diagnosticsConsentUpdatedAt"`
 	DiagnosticsConsentSource            string     `gorm:"size:32" json:"diagnosticsConsentSource"`
@@ -468,6 +470,19 @@ type SpecialMomentRequest struct {
 	User        User      `json:"user"`
 	RequestedAt time.Time `gorm:"index;not null" json:"requestedAt"`
 	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type HubSystemEvent struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	EventType  string    `gorm:"size:48;index;not null" json:"eventType"`
+	Scope      string    `gorm:"size:24;index;not null;default:'global'" json:"scope"`
+	Title      string    `gorm:"size:160;not null" json:"title"`
+	Body       string    `gorm:"size:500" json:"body"`
+	TargetURL  string    `gorm:"size:500" json:"targetUrl"`
+	MetaJSON   string    `gorm:"type:text" json:"metaJson"`
+	OccurredAt time.Time `gorm:"index;not null" json:"occurredAt"`
+	CreatedAt  time.Time `gorm:"index" json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 type ClientDebugLog struct {

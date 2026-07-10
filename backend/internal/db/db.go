@@ -57,6 +57,7 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.ChatPollVote{},
 		&models.ChatCommand{},
 		&models.SpecialMomentRequest{},
+		&models.HubSystemEvent{},
 		&models.ClientDebugLog{},
 		&models.UserReport{},
 	); err != nil {
