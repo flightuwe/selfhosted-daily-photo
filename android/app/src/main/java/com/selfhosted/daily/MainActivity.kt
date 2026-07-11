@@ -85,8 +85,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.AccessTime
-import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Bookmark
@@ -14625,6 +14625,7 @@ fun HubTab(
     val palette = rememberHubPalette()
     val totalHighlights = timelineUnreadCount + timeCapsulesLocked.size
     val quickSections = listOf(
+        HubSection.DASHBOARD,
         HubSection.TIMELINE,
         HubSection.TIME_CAPSULES,
         HubSection.CALENDAR,
@@ -14636,83 +14637,43 @@ fun HubTab(
             colors = CardDefaults.cardColors(containerColor = Color.Transparent),
             modifier = Modifier
                 .fillMaxWidth()
-                .border(1.dp, palette.heroOutline, RoundedCornerShape(28.dp))
+                .border(1.dp, palette.heroOutline, RoundedCornerShape(22.dp))
         ) {
-            Column(
+            Row(
                 modifier = Modifier
                     .background(palette.heroBrush)
-                    .padding(horizontal = 18.dp, vertical = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text("Hub", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.headlineSmall)
-                        Text(
-                            when (section) {
-                                HubSection.DASHBOARD -> "Alles Wichtige kompakt: Aktivitaet, Capsules und direkte Spruenge in den Feed."
-                                HubSection.TIMELINE -> "Deine persoenlichen Ereignisse der letzten 7 Tage in sauberer Chronologie."
-                                HubSection.TIME_CAPSULES -> "Gesperrte Capsules zuerst, Freischaltungen direkt darunter."
-                                HubSection.CALENDAR -> "Sichtbare Beitraege mit schnellem Ruecksprung in den Feed."
-                                HubSection.SEARCH -> "Finde Captions, Hashtags und Kommentare ohne Umwege."
-                                HubSection.BOOKMARKS -> "Deine gemerkten Beitraege als fokussierter Hub-Bereich."
-                            },
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        HubHeroBadge(
-                            label = if (totalHighlights > 0) "$totalHighlights neu" else "ruhig",
-                            accent = if (totalHighlights > 0) palette.primaryAccent else MaterialTheme.colorScheme.outline
-                        )
-                        IconButton(
-                            onClick = onRefreshHub,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(palette.actionBg)
-                        ) {
-                            Icon(Icons.Filled.Refresh, contentDescription = "Hub aktualisieren", tint = palette.primaryAccent)
-                        }
-                    }
-                }
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     items(quickSections, key = { it.name }) { entry ->
-                        HubQuickLinkCard(
+                        HubAeroSectionChip(
                             title = hubSectionTitle(entry),
-                            subtitle = hubSectionSubtitle(entry, timelineUnreadCount, timeCapsulesLocked.size),
+                            meta = hubSectionMeta(entry, timelineUnreadCount, timeCapsulesLocked.size),
                             icon = hubSectionIcon(entry),
                             selected = section == entry,
                             onClick = { onSectionChange(entry) }
                         )
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    HubMetricPill(
-                        label = "Timeline",
-                        value = if (timelineUnreadCount > 0) "$timelineUnreadCount neu" else "ruhig",
-                        accent = palette.primaryAccent,
-                        modifier = Modifier.weight(1f)
+                if (totalHighlights > 0) {
+                    HubHeroBadge(
+                        label = totalHighlights.toString(),
+                        accent = palette.primaryAccent
                     )
-                    HubMetricPill(
-                        label = "Capsules",
-                        value = if (timeCapsulesLocked.isNotEmpty()) "${timeCapsulesLocked.size} gesperrt" else "offen",
-                        accent = palette.capsuleAccent,
-                        modifier = Modifier.weight(1f)
-                    )
-                    HubMetricPill(
-                        label = "Kalender",
-                        value = "${bootstrap?.dashboard?.calendarPreview?.size ?: 0} Tage",
-                        accent = palette.calendarAccent,
-                        modifier = Modifier.weight(1f)
-                    )
+                }
+                IconButton(
+                    onClick = onRefreshHub,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(palette.actionBg)
+                        .border(1.dp, palette.heroOutline, RoundedCornerShape(14.dp))
+                ) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "Hub aktualisieren", tint = palette.primaryAccent)
                 }
             }
         }
@@ -14957,65 +14918,80 @@ private fun HubHeroBadge(label: String, accent: Color) {
 }
 
 @Composable
-private fun HubMetricPill(
-    label: String,
-    value: String,
-    accent: Color,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(accent.copy(alpha = 0.10f))
-            .border(1.dp, accent.copy(alpha = 0.18f), RoundedCornerShape(18.dp))
-            .padding(horizontal = 10.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp)
-    ) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = accent)
-    }
-}
-
-@Composable
-private fun HubQuickLinkCard(
+private fun HubAeroSectionChip(
     title: String,
-    subtitle: String,
+    meta: String,
     icon: ImageVector,
     selected: Boolean,
     onClick: () -> Unit
 ) {
     val palette = rememberHubPalette()
+    val accent = when (title) {
+        "Timeline" -> palette.primaryAccent
+        "Capsules" -> palette.capsuleAccent
+        "Kalender" -> palette.calendarAccent
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
     Card(
         modifier = Modifier
-            .width(138.dp)
+            .widthIn(min = 96.dp)
             .clickable(onClick = onClick),
         colors = CardDefaults.cardColors(
-            containerColor = if (selected) palette.primaryAccent.copy(alpha = 0.14f) else palette.sectionAltBg
+            containerColor = if (selected) accent.copy(alpha = 0.14f) else palette.sectionAltBg.copy(alpha = 0.78f)
         )
     ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (selected) palette.primaryAccent.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)),
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (selected) accent.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(icon, contentDescription = title, tint = if (selected) palette.primaryAccent else MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(icon, contentDescription = title, tint = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(title, fontWeight = FontWeight.SemiBold)
-            Text(
-                subtitle,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(title, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelLarge)
+                if (meta.isNotBlank()) {
+                    Text(
+                        meta,
+                        color = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun HubCompactModeChip(
+    selected: Boolean,
+    label: String,
+    onClick: () -> Unit
+) {
+    val palette = rememberHubPalette()
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        colors = androidx.compose.material3.FilterChipDefaults.filterChipColors(
+            selectedContainerColor = palette.primaryAccent.copy(alpha = 0.14f),
+            selectedLabelColor = palette.primaryAccent
+        ),
+        border = androidx.compose.material3.FilterChipDefaults.filterChipBorder(
+            enabled = true,
+            selected = selected,
+            borderColor = palette.heroOutline,
+            selectedBorderColor = palette.primaryAccent.copy(alpha = 0.24f)
+        )
+    )
 }
 
 @Composable
@@ -15104,7 +15080,7 @@ private fun HubCalendarPreviewRow(
                     style = MaterialTheme.typography.bodySmall
                 )
             }
-            Icon(Icons.Filled.ArrowForward, contentDescription = "Zum Feed", tint = accent)
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Zum Feed", tint = accent)
         }
     }
 }
@@ -15118,13 +15094,13 @@ private fun hubSectionTitle(section: HubSection): String = when (section) {
     HubSection.BOOKMARKS -> "Gemerkt"
 }
 
-private fun hubSectionSubtitle(section: HubSection, unreadCount: Int, lockedCapsules: Int): String = when (section) {
-    HubSection.DASHBOARD -> "Dein Start"
-    HubSection.TIMELINE -> if (unreadCount > 0) "$unreadCount neue Ereignisse" else "letzte 7 Tage"
-    HubSection.CALENDAR -> "sichtbare Posts"
-    HubSection.TIME_CAPSULES -> if (lockedCapsules > 0) "$lockedCapsules gesperrt" else "alle offen"
-    HubSection.SEARCH -> "Texte & Hashtags"
-    HubSection.BOOKMARKS -> "gespeicherte Posts"
+private fun hubSectionMeta(section: HubSection, unreadCount: Int, lockedCapsules: Int): String = when (section) {
+    HubSection.DASHBOARD -> ""
+    HubSection.TIMELINE -> if (unreadCount > 0) "$unreadCount neu" else "7 Tage"
+    HubSection.CALENDAR -> "Feed"
+    HubSection.TIME_CAPSULES -> if (lockedCapsules > 0) "$lockedCapsules gesperrt" else "offen"
+    HubSection.SEARCH -> "Texte"
+    HubSection.BOOKMARKS -> "Saved"
 }
 
 private fun hubSectionIcon(section: HubSection): ImageVector = when (section) {
@@ -15318,6 +15294,7 @@ fun CalendarTab(
     onOpenDayInFeed: (String) -> Unit,
     onOpenPhotoInFeed: (String, Long) -> Unit
 ) {
+    val hubPalette = rememberHubPalette()
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val openPrimaryFeedTarget: (String, Long?) -> Unit = remember(onOpenDayInFeed, onOpenPhotoInFeed) {
@@ -15370,13 +15347,13 @@ fun CalendarTab(
         CalendarMode.SEARCH -> "Suche"
     }
     val subtitle = when (mode) {
-        CalendarMode.PUBLIC -> "Alle sichtbaren Posts im Kalender"
+        CalendarMode.PUBLIC -> "Sichtbare Posts"
         CalendarMode.BOOKMARKS -> when (bookmarkFilter) {
-            BookmarkCalendarFilter.MINE -> "Direkte Liste nur mit deinen gemerkten Beitraegen"
-            BookmarkCalendarFilter.ALL -> "Kuratierte Liste aus allen Beitragen, die irgendwer gemerkt hat"
+            BookmarkCalendarFilter.MINE -> "Deine Bookmarks"
+            BookmarkCalendarFilter.ALL -> "Alle Bookmarks"
         }
-        CalendarMode.TIME_CAPSULES -> "Globaler Capsule-Feed mit offenen und gesperrten Timecapsules"
-        CalendarMode.SEARCH -> if (searchQuery.isBlank()) "Suche nach Caption, Kommentaren und Hashtags" else "Treffer fuer \"$searchQuery\""
+        CalendarMode.TIME_CAPSULES -> "Capsule-Feed"
+        CalendarMode.SEARCH -> if (searchQuery.isBlank()) "Caption, Kommentare, Hashtags" else "\"$searchQuery\""
     }
     val filteredBookmarkItems = remember(bookmarkItems) { bookmarkItems }
     val filteredTimeCapsules = remember(timeCapsuleItems, timeCapsuleFilter) {
@@ -15395,40 +15372,63 @@ fun CalendarTab(
             modifier = Modifier.fillMaxSize()
         ) {
         item("calendar-header") {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = hubPalette.sectionBg)
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().clickable { onPickerExpandedChange(!pickerExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPickerExpandedChange(!pickerExpanded) },
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("Kalender: $modeLabel", fontWeight = FontWeight.Bold)
-                            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(hubPalette.actionBg)
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(modeLabel, fontWeight = FontWeight.SemiBold, color = hubPalette.primaryAccent)
+                            }
+                            Text(
+                                subtitle,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
-                        Text(if (pickerExpanded) "Weniger" else "Auswaehlen", color = Color(0xFF1F5FBF))
+                        Text(
+                            if (pickerExpanded) "Weniger" else "Modi",
+                            color = hubPalette.calendarAccent,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                     AnimatedVisibility(
                         visible = pickerExpanded,
                         enter = fadeIn() + expandVertically(),
                         exit = fadeOut() + shrinkVertically()
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                 items(CalendarMode.entries) { entry ->
-                                    FilterChip(
+                                    HubCompactModeChip(
                                         selected = mode == entry,
-                                        onClick = { onModeChange(entry) },
-                                        label = {
-                                            Text(
-                                                when (entry) {
-                                                    CalendarMode.PUBLIC -> "Oeffentlich"
-                                                    CalendarMode.BOOKMARKS -> "Gemerkt"
-                                                    CalendarMode.TIME_CAPSULES -> "Timecapsules"
-                                                    CalendarMode.SEARCH -> "Suche"
-                                                }
-                                            )
-                                        }
+                                        label = when (entry) {
+                                            CalendarMode.PUBLIC -> "Oeffentlich"
+                                            CalendarMode.BOOKMARKS -> "Gemerkt"
+                                            CalendarMode.TIME_CAPSULES -> "Timecapsules"
+                                            CalendarMode.SEARCH -> "Suche"
+                                        },
+                                        onClick = { onModeChange(entry) }
                                     )
                                 }
                             }
@@ -15455,41 +15455,41 @@ fun CalendarTab(
                             } else if (mode == CalendarMode.BOOKMARKS) {
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                     item {
-                                        FilterChip(
+                                        HubCompactModeChip(
                                             selected = bookmarkFilter == BookmarkCalendarFilter.MINE,
-                                            onClick = { onBookmarkFilterChange(BookmarkCalendarFilter.MINE) },
-                                            label = { Text("Von mir gemerkt") }
+                                            label = "Von mir gemerkt",
+                                            onClick = { onBookmarkFilterChange(BookmarkCalendarFilter.MINE) }
                                         )
                                     }
                                     item {
-                                        FilterChip(
+                                        HubCompactModeChip(
                                             selected = bookmarkFilter == BookmarkCalendarFilter.ALL,
-                                            onClick = { onBookmarkFilterChange(BookmarkCalendarFilter.ALL) },
-                                            label = { Text("Von allen gemerkt") }
+                                            label = "Von allen gemerkt",
+                                            onClick = { onBookmarkFilterChange(BookmarkCalendarFilter.ALL) }
                                         )
                                     }
                                 }
                             } else if (mode == CalendarMode.TIME_CAPSULES) {
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                     item {
-                                        FilterChip(
+                                        HubCompactModeChip(
                                             selected = timeCapsuleFilter == TimeCapsuleFilter.ALL,
-                                            onClick = { onTimeCapsuleFilterChange(TimeCapsuleFilter.ALL) },
-                                            label = { Text("Alle") }
+                                            label = "Alle",
+                                            onClick = { onTimeCapsuleFilterChange(TimeCapsuleFilter.ALL) }
                                         )
                                     }
                                     item {
-                                        FilterChip(
+                                        HubCompactModeChip(
                                             selected = timeCapsuleFilter == TimeCapsuleFilter.RELEASED,
-                                            onClick = { onTimeCapsuleFilterChange(TimeCapsuleFilter.RELEASED) },
-                                            label = { Text("Offen $timeCapsuleReleasedCount") }
+                                            label = "Offen $timeCapsuleReleasedCount",
+                                            onClick = { onTimeCapsuleFilterChange(TimeCapsuleFilter.RELEASED) }
                                         )
                                     }
                                     item {
-                                        FilterChip(
+                                        HubCompactModeChip(
                                             selected = timeCapsuleFilter == TimeCapsuleFilter.LOCKED,
-                                            onClick = { onTimeCapsuleFilterChange(TimeCapsuleFilter.LOCKED) },
-                                            label = { Text("Gesperrt $timeCapsuleLockedCount") }
+                                            label = "Gesperrt $timeCapsuleLockedCount",
+                                            onClick = { onTimeCapsuleFilterChange(TimeCapsuleFilter.LOCKED) }
                                         )
                                     }
                                 }
@@ -15552,7 +15552,9 @@ fun CalendarTab(
                                 AsyncImage(
                                     model = result.photo.url,
                                     contentDescription = "Trefferbild",
-                                    modifier = Modifier.size(58.dp),
+                                    modifier = Modifier
+                                        .size(58.dp)
+                                        .clip(RoundedCornerShape(16.dp)),
                                     contentScale = ContentScale.Crop
                                 )
                                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -15586,7 +15588,10 @@ fun CalendarTab(
         }
         if (mode == CalendarMode.BOOKMARKS && filteredBookmarkItems.isNotEmpty()) {
             item("calendar-bookmark-feed") {
-                Card(modifier = Modifier.fillMaxWidth()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = hubPalette.sectionBg)
+                ) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(
                             if (bookmarkFilter == BookmarkCalendarFilter.MINE) "Deine gemerkten Beitraege" else "Von allen gemerkte Beitraege",
@@ -15603,7 +15608,9 @@ fun CalendarTab(
                                 AsyncImage(
                                     model = item.photo.url,
                                     contentDescription = "Gemerkter Beitrag",
-                                    modifier = Modifier.size(84.dp),
+                                    modifier = Modifier
+                                        .size(84.dp)
+                                        .clip(RoundedCornerShape(16.dp)),
                                     contentScale = ContentScale.Crop
                                 )
                                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -15649,7 +15656,10 @@ fun CalendarTab(
         }
         if (mode == CalendarMode.TIME_CAPSULES && filteredTimeCapsules.isNotEmpty()) {
             item("calendar-timecapsules-results") {
-                Card(modifier = Modifier.fillMaxWidth()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = hubPalette.sectionBg)
+                ) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("Globaler Capsule-Feed", fontWeight = FontWeight.Bold)
                         filteredTimeCapsules.take(32).forEach { item ->
@@ -15702,7 +15712,10 @@ fun CalendarTab(
             val stats = dayStats[day]
             val participantCount = stats?.participantCount ?: 0
             val featured = stats?.featuredPhoto
-            Card(modifier = Modifier.fillMaxWidth().clickable { onSelect(day) }) {
+            Card(
+                modifier = Modifier.fillMaxWidth().clickable { onSelect(day) },
+                colors = CardDefaults.cardColors(containerColor = hubPalette.sectionBg)
+            ) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         formatDayWithWeekday(day),
@@ -15741,7 +15754,8 @@ fun CalendarTab(
                                         contentDescription = "Kalender-Vorschau 1",
                                         modifier = Modifier
                                             .weight(1f)
-                                            .height(88.dp),
+                                            .height(88.dp)
+                                            .clip(RoundedCornerShape(16.dp)),
                                         contentScale = ContentScale.Crop
                                     )
                                     AsyncImage(
@@ -15749,7 +15763,8 @@ fun CalendarTab(
                                         contentDescription = "Kalender-Vorschau 2",
                                         modifier = Modifier
                                             .weight(1f)
-                                            .height(88.dp),
+                                            .height(88.dp)
+                                            .clip(RoundedCornerShape(16.dp)),
                                         contentScale = ContentScale.Crop
                                     )
                                 }
@@ -15760,6 +15775,7 @@ fun CalendarTab(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .height(120.dp)
+                                        .clip(RoundedCornerShape(18.dp))
                                         .clickable {
                                             onSelect(day)
                                             onOpenPhotoInFeed(day, it.photoId)
