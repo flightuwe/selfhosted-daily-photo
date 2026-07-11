@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.23",
+  "title": "Hub-Hinweise und Navigation geschaerft",
+  "items": [
+    "Die Hub-Kopfzeile zeigt Hinweise jetzt nachvollziehbarer an: Die Badge-Zahl ist anklickbar und erklaert, wie sie sich aus Timeline-, System- und Capsule-Hinweisen zusammensetzt.",
+    "Timeline-Aufraeumen wirkt dadurch semantisch sauberer, weil gesperrte Timecapsules nicht mehr wie ungeclearte Timeline-Ereignisse aussehen.",
+    "Die Hub-Navigation wurde neu geordnet und scrollt beim Wechsel automatisch auf den aktiven Bereich, damit Kalender und andere Bereiche nicht mehr halb abgeschnitten wirken.",
+    "Im Dashboard bleibt `Neueste Aktivitaet` oben, waehrend `Kalender-Vorschau` jetzt vor den Timecapsules einsortiert ist."
+  ]
+}

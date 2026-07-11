@@ -15245,16 +15245,28 @@ fun HubTab(
     onOpenHubTarget: (HubTarget) -> Unit
 ) {
     val palette = rememberHubPalette()
-    val totalHighlights = timelineUnreadCount + timeCapsulesLocked.size
+    val headerListState = rememberLazyListState()
+    var showHighlightBreakdown by rememberSaveable { mutableStateOf(false) }
+    val unreadTimelineHighlights = remember(timelineItems) { timelineItems.count { it.unread && !it.system } }
+    val unreadSystemHighlights = remember(timelineItems) { timelineItems.count { it.unread && it.system } }
+    val lockedCapsuleHighlights = timeCapsulesLocked.size
+    val unreadTimelineTotal = timelineUnreadCount
+    val totalHighlights = unreadTimelineTotal + lockedCapsuleHighlights
     val timelineRenderItems = remember(timelineItems) { buildHubTimelineRenderItems(timelineItems) }
     val quickSections = listOf(
         HubSection.DASHBOARD,
         HubSection.TIMELINE,
-        HubSection.TIME_CAPSULES,
         HubSection.CALENDAR,
+        HubSection.TIME_CAPSULES,
         HubSection.SEARCH,
         HubSection.BOOKMARKS
     )
+    LaunchedEffect(section) {
+        val selectedIndex = quickSections.indexOf(section)
+        if (selectedIndex >= 0) {
+            headerListState.animateScrollToItem(selectedIndex)
+        }
+    }
     Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Card(
             colors = CardDefaults.cardColors(containerColor = Color.Transparent),
@@ -15270,13 +15282,14 @@ fun HubTab(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 LazyRow(
+                    state = headerListState,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.weight(1f)
                 ) {
                     items(quickSections, key = { it.name }) { entry ->
                         HubAeroSectionChip(
                             title = hubSectionTitle(entry),
-                            meta = hubSectionMeta(entry, timelineUnreadCount, timeCapsulesLocked.size),
+                            meta = hubSectionMeta(entry, unreadTimelineTotal, lockedCapsuleHighlights),
                             icon = hubSectionIcon(entry),
                             selected = section == entry,
                             onClick = { onSectionChange(entry) }
@@ -15286,7 +15299,8 @@ fun HubTab(
                 if (totalHighlights > 0) {
                     HubHeroBadge(
                         label = totalHighlights.toString(),
-                        accent = palette.primaryAccent
+                        accent = palette.primaryAccent,
+                        onClick = { showHighlightBreakdown = true }
                     )
                 }
                 IconButton(
@@ -15340,31 +15354,6 @@ fun HubTab(
                             }
                         }
                     }
-                    item("hub-dashboard-capsules") {
-                        HubDashboardSectionCard(
-                            title = "Bald frei",
-                            subtitle = "Timecapsules mit Countdown und schnellen Oeffnern fuer freigeschaltete Momente.",
-                            actionLabel = "Capsules",
-                            onAction = { onSectionChange(HubSection.TIME_CAPSULES) },
-                            leadingIcon = Icons.Filled.Refresh
-                        ) {
-                            val combined = (timeCapsulesLocked.take(2) + timeCapsulesReleased.take(1)).take(3)
-                            if (combined.isEmpty()) {
-                                when {
-                                    timeCapsulesLoadState.indicatesLoading() -> InlineLoadHint("Timecapsules werden vorbereitet ...")
-                                    timeCapsulesLoadState.indicatesFailure() -> InlineLoadHint("Timecapsules konnten gerade nicht geladen werden.")
-                                    else -> Text("Keine Timecapsules verfuegbar.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            } else {
-                                if (timeCapsulesLoadState.indicatesCached()) {
-                                    InlineLoadHint("Letzter Capsule-Stand aus dem Geraet.")
-                                }
-                                combined.forEach { item ->
-                                    HubTimeCapsuleRow(item = item, locked = item.countdownSecs > 0, onOpenPhotoInFeed = onOpenPhotoInFeed)
-                                }
-                            }
-                        }
-                    }
                     item("hub-dashboard-calendar") {
                         Card(modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -15403,6 +15392,31 @@ fun HubTab(
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                    item("hub-dashboard-capsules") {
+                        HubDashboardSectionCard(
+                            title = "Bald frei",
+                            subtitle = "Timecapsules mit Countdown und schnellen Oeffnern fuer freigeschaltete Momente.",
+                            actionLabel = "Capsules",
+                            onAction = { onSectionChange(HubSection.TIME_CAPSULES) },
+                            leadingIcon = Icons.Filled.Refresh
+                        ) {
+                            val combined = (timeCapsulesLocked.take(2) + timeCapsulesReleased.take(1)).take(3)
+                            if (combined.isEmpty()) {
+                                when {
+                                    timeCapsulesLoadState.indicatesLoading() -> InlineLoadHint("Timecapsules werden vorbereitet ...")
+                                    timeCapsulesLoadState.indicatesFailure() -> InlineLoadHint("Timecapsules konnten gerade nicht geladen werden.")
+                                    else -> Text("Keine Timecapsules verfuegbar.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            } else {
+                                if (timeCapsulesLoadState.indicatesCached()) {
+                                    InlineLoadHint("Letzter Capsule-Stand aus dem Geraet.")
+                                }
+                                combined.forEach { item ->
+                                    HubTimeCapsuleRow(item = item, locked = item.countdownSecs > 0, onOpenPhotoInFeed = onOpenPhotoInFeed)
                                 }
                             }
                         }
@@ -15512,6 +15526,29 @@ fun HubTab(
             }
         }
     }
+    if (showHighlightBreakdown) {
+        AlertDialog(
+            onDismissRequest = { showHighlightBreakdown = false },
+            confirmButton = {
+                TextButton(onClick = { showHighlightBreakdown = false }) { Text("Schliessen") }
+            },
+            title = { Text("Hub-Hinweise") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Die Zahl im Header setzt sich aktuell aus diesen Bereichen zusammen:")
+                    Text("Timeline gesamt: $unreadTimelineTotal")
+                    Text("davon persoenlich: $unreadTimelineHighlights")
+                    Text("davon System: $unreadSystemHighlights")
+                    Text("Gesperrte Capsules: $lockedCapsuleHighlights")
+                    Text(
+                        "Timeline aufraeumen entfernt nur Timeline-Ereignisse. Gesperrte Capsules bleiben sichtbar, bis sie freigeschaltet sind.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -15569,12 +15606,13 @@ private data class HubPalette(
 )
 
 @Composable
-private fun HubHeroBadge(label: String, accent: Color) {
+private fun HubHeroBadge(label: String, accent: Color, onClick: (() -> Unit)? = null) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))
             .background(accent.copy(alpha = 0.18f))
             .border(1.dp, accent.copy(alpha = 0.28f), RoundedCornerShape(999.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
         Text(label, color = accent, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
@@ -15598,7 +15636,7 @@ private fun HubAeroSectionChip(
     }
     Card(
         modifier = Modifier
-            .widthIn(min = 96.dp)
+            .widthIn(min = 104.dp)
             .clickable(onClick = onClick),
         colors = CardDefaults.cardColors(
             containerColor = if (selected) accent.copy(alpha = 0.14f) else palette.sectionAltBg.copy(alpha = 0.78f)
@@ -15619,7 +15657,7 @@ private fun HubAeroSectionChip(
                 Icon(icon, contentDescription = title, tint = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                Text(title, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelLarge)
+                Text(title, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (meta.isNotBlank()) {
                     Text(
                         meta,
