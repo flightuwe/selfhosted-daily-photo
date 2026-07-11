@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.18",
+  "title": "Hub-Dashboard optisch und strukturell veredelt",
+  "items": [
+    "Der Hub wurde visuell und strukturell zu einem professionelleren Dashboard weiterentwickelt: kompakter Hero-Bereich, klare Schnellnavigation, bessere Kartenhierarchie und ein aufgeraeumterer Einstieg in Aktivitaeten, Capsules und Kalender.",
+    "Der Hub passt sich jetzt sauberer an Dark- und Lightmode an, inklusive eigener Farbpalette, Status-Badges und kompakter Kennzahlen fuer Timeline, Capsules und Kalender.",
+    "Die Bottom-Navigation nutzt jetzt echte Icons statt Buchstaben-Platzhalter, wodurch die App deutlich fertiger und konsistenter wirkt.",
+    "Timeline- und Timecapsule-Bereiche wurden weiter verdichtet: bessere Hervorhebung wichtiger Ereignisse, klarere Aktionen und staerkere visuelle Priorisierung fuer Capsules mit Countdown."
+  ]
+}

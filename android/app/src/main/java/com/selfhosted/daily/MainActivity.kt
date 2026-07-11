@@ -85,10 +85,19 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material.icons.filled.VerticalAlignTop
 import androidx.compose.material.icons.filled.Visibility
@@ -149,6 +158,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path as ComposePath
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.geometry.Offset
@@ -11336,14 +11347,24 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     Scaffold(
         bottomBar = {
             NavigationBar {
-                NavigationBarItem(selected = state.activeTab == AppTab.CAMERA, onClick = { vm.setTab(AppTab.CAMERA) }, label = { Text("Kamera") }, icon = { Text("U") })
+                NavigationBarItem(
+                    selected = state.activeTab == AppTab.CAMERA,
+                    onClick = { vm.setTab(AppTab.CAMERA) },
+                    label = { Text("Kamera") },
+                    icon = { Icon(Icons.Filled.CameraAlt, contentDescription = "Kamera") }
+                )
                 FeedNavigationItem(
                     selected = state.activeTab == AppTab.FEED,
                     label = feedTabLabel,
                     onClick = { vm.setTab(AppTab.FEED) },
                     onLongClick = { feedModePickerVisible = true }
                 )
-                NavigationBarItem(selected = state.activeTab == AppTab.CALENDAR, onClick = { vm.setTab(AppTab.CALENDAR) }, label = { Text("Hub") }, icon = { Text("H") })
+                NavigationBarItem(
+                    selected = state.activeTab == AppTab.CALENDAR,
+                    onClick = { vm.setTab(AppTab.CALENDAR) },
+                    label = { Text("Hub") },
+                    icon = { Icon(Icons.Filled.Home, contentDescription = "Hub") }
+                )
                 NavigationBarItem(
                     selected = state.activeTab == AppTab.CHAT,
                     onClick = { vm.setTab(AppTab.CHAT) },
@@ -11355,7 +11376,12 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         )
                     }
                 )
-                NavigationBarItem(selected = state.activeTab == AppTab.PROFILE, onClick = { vm.setTab(AppTab.PROFILE) }, label = { Text("Profil") }, icon = { Text("M") })
+                NavigationBarItem(
+                    selected = state.activeTab == AppTab.PROFILE,
+                    onClick = { vm.setTab(AppTab.PROFILE) },
+                    label = { Text("Profil") },
+                    icon = { Icon(Icons.Filled.Person, contentDescription = "Profil") }
+                )
             }
         }
     ) { innerPadding ->
@@ -12573,7 +12599,11 @@ private fun SpecialMomentActionButton(
 @Composable
 fun ChatTabIcon(showIndicator: Boolean, unread: Boolean) {
     Box(modifier = Modifier.size(20.dp)) {
-        Text("D", modifier = Modifier.align(Alignment.Center))
+        Icon(
+            imageVector = Icons.Filled.Forum,
+            contentDescription = "Chat",
+            modifier = Modifier.align(Alignment.Center)
+        )
         if (showIndicator) {
             Box(
                 modifier = Modifier
@@ -13870,11 +13900,10 @@ private fun RowScope.FeedNavigationItem(
                     .padding(horizontal = 20.dp, vertical = 4.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    "T",
-                    color = iconColor,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold
+                Icon(
+                    imageVector = Icons.Filled.Today,
+                    contentDescription = label,
+                    tint = iconColor
                 )
             }
             Text(
@@ -14593,104 +14622,144 @@ fun HubTab(
     onOpenPhotoInFeed: (String, Long) -> Unit,
     onOpenHubTarget: (HubTarget) -> Unit
 ) {
-    val sectionLabel = when (section) {
-        HubSection.DASHBOARD -> "Dashboard"
-        HubSection.TIMELINE -> if (timelineUnreadCount > 0) "Timeline $timelineUnreadCount" else "Timeline"
-        HubSection.CALENDAR -> "Kalender"
-        HubSection.TIME_CAPSULES -> "Timecapsules"
-        HubSection.SEARCH -> "Suche"
-        HubSection.BOOKMARKS -> "Gemerkt"
-    }
-    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    val palette = rememberHubPalette()
+    val totalHighlights = timelineUnreadCount + timeCapsulesLocked.size
+    val quickSections = listOf(
+        HubSection.TIMELINE,
+        HubSection.TIME_CAPSULES,
+        HubSection.CALENDAR,
+        HubSection.SEARCH,
+        HubSection.BOOKMARKS
+    )
+    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)),
-            modifier = Modifier.fillMaxWidth()
+            colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, palette.heroOutline, RoundedCornerShape(28.dp))
         ) {
-            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .background(palette.heroBrush)
+                    .padding(horizontal = 18.dp, vertical = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.Top
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text("Hub", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("Hub", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.headlineSmall)
                         Text(
                             when (section) {
-                                HubSection.DASHBOARD -> "Dashboard mit Schnellwahl, echten Vorschauen und Sprungpunkten in den Feed"
-                                HubSection.TIMELINE -> "Personalisierte Aktivitaeten der letzten 7 Tage"
-                                HubSection.TIME_CAPSULES -> "Gesperrte Capsules zuerst, freigeschaltete danach"
-                                HubSection.CALENDAR -> "Kalenderansicht fuer sichtbare Beitraege"
-                                HubSection.SEARCH -> "Suche nach Caption, Hashtags und Kommentaren"
-                                HubSection.BOOKMARKS -> "Deine gemerkten Beitraege als eigener Hub-Bereich"
+                                HubSection.DASHBOARD -> "Alles Wichtige kompakt: Aktivitaet, Capsules und direkte Spruenge in den Feed."
+                                HubSection.TIMELINE -> "Deine persoenlichen Ereignisse der letzten 7 Tage in sauberer Chronologie."
+                                HubSection.TIME_CAPSULES -> "Gesperrte Capsules zuerst, Freischaltungen direkt darunter."
+                                HubSection.CALENDAR -> "Sichtbare Beitraege mit schnellem Ruecksprung in den Feed."
+                                HubSection.SEARCH -> "Finde Captions, Hashtags und Kommentare ohne Umwege."
+                                HubSection.BOOKMARKS -> "Deine gemerkten Beitraege als fokussierter Hub-Bereich."
                             },
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
-                    Text(sectionLabel, color = Color(0xFF1F5FBF), fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        HubHeroBadge(
+                            label = if (totalHighlights > 0) "$totalHighlights neu" else "ruhig",
+                            accent = if (totalHighlights > 0) palette.primaryAccent else MaterialTheme.colorScheme.outline
+                        )
+                        IconButton(
+                            onClick = onRefreshHub,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(palette.actionBg)
+                        ) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Hub aktualisieren", tint = palette.primaryAccent)
+                        }
+                    }
                 }
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    items(HubSection.entries) { entry ->
-                        FilterChip(
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    items(quickSections, key = { it.name }) { entry ->
+                        HubQuickLinkCard(
+                            title = hubSectionTitle(entry),
+                            subtitle = hubSectionSubtitle(entry, timelineUnreadCount, timeCapsulesLocked.size),
+                            icon = hubSectionIcon(entry),
                             selected = section == entry,
-                            onClick = { onSectionChange(entry) },
-                            label = {
-                                Text(
-                                    when (entry) {
-                                        HubSection.DASHBOARD -> "Dashboard"
-                                        HubSection.TIMELINE -> "Timeline"
-                                        HubSection.CALENDAR -> "Kalender"
-                                        HubSection.TIME_CAPSULES -> "Timecapsules"
-                                        HubSection.SEARCH -> "Suche"
-                                        HubSection.BOOKMARKS -> "Gemerkt"
-                                    }
-                                )
-                            }
+                            onClick = { onSectionChange(entry) }
                         )
                     }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    HubMetricPill(
+                        label = "Timeline",
+                        value = if (timelineUnreadCount > 0) "$timelineUnreadCount neu" else "ruhig",
+                        accent = palette.primaryAccent,
+                        modifier = Modifier.weight(1f)
+                    )
+                    HubMetricPill(
+                        label = "Capsules",
+                        value = if (timeCapsulesLocked.isNotEmpty()) "${timeCapsulesLocked.size} gesperrt" else "offen",
+                        accent = palette.capsuleAccent,
+                        modifier = Modifier.weight(1f)
+                    )
+                    HubMetricPill(
+                        label = "Kalender",
+                        value = "${bootstrap?.dashboard?.calendarPreview?.size ?: 0} Tage",
+                        accent = palette.calendarAccent,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
             }
         }
 
         when (section) {
             HubSection.DASHBOARD -> {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
-                    item("hub-dashboard-actions") {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            Button(onClick = onRefreshHub, modifier = Modifier.weight(1f)) { Text("Hub aktualisieren") }
-                            OutlinedButton(onClick = { onSectionChange(HubSection.TIMELINE) }, modifier = Modifier.weight(1f)) { Text("Zur Timeline") }
-                        }
-                    }
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 12.dp)
+                ) {
                     item("hub-dashboard-timeline") {
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                    Text("Neueste Aktivitaet", fontWeight = FontWeight.Bold)
-                                    TextButton(onClick = { onSectionChange(HubSection.TIMELINE) }) { Text("Mehr") }
-                                }
-                                if (timelineItems.isEmpty()) {
-                                    Text("Noch keine Aktivitaeten fuer deine Timeline gefunden.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                } else {
-                                    timelineItems.take(4).forEach { item ->
-                                        HubTimelineRow(item = item, onOpenHubTarget = onOpenHubTarget, onOpenDayInFeed = onOpenDayInFeed)
-                                    }
+                        HubDashboardSectionCard(
+                            title = "Neueste Aktivitaet",
+                            subtitle = "Die wichtigsten Ereignisse und direkte Sprungpunkte in den Feed.",
+                            actionLabel = "Timeline",
+                            onAction = { onSectionChange(HubSection.TIMELINE) },
+                            leadingIcon = Icons.Filled.AccessTime
+                        ) {
+                            if (timelineItems.isEmpty()) {
+                                Text("Noch keine Aktivitaeten fuer deine Timeline gefunden.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } else {
+                                timelineItems.take(3).forEachIndexed { index, item ->
+                                    HubTimelineRow(
+                                        item = item,
+                                        onOpenHubTarget = onOpenHubTarget,
+                                        onOpenDayInFeed = onOpenDayInFeed,
+                                        emphasized = index == 0
+                                    )
                                 }
                             }
                         }
                     }
                     item("hub-dashboard-capsules") {
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                    Text("Timecapsules", fontWeight = FontWeight.Bold)
-                                    TextButton(onClick = { onSectionChange(HubSection.TIME_CAPSULES) }) { Text("Mehr") }
-                                }
-                                val combined = (timeCapsulesLocked.take(2) + timeCapsulesReleased.take(2)).take(4)
-                                if (combined.isEmpty()) {
-                                    Text("Keine Timecapsules verfuegbar.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                } else {
-                                    combined.forEach { item ->
-                                        HubTimeCapsuleRow(item = item, locked = item.countdownSecs > 0, onOpenPhotoInFeed = onOpenPhotoInFeed)
-                                    }
+                        HubDashboardSectionCard(
+                            title = "Bald frei",
+                            subtitle = "Timecapsules mit Countdown und schnellen Oeffnern fuer freigeschaltete Momente.",
+                            actionLabel = "Capsules",
+                            onAction = { onSectionChange(HubSection.TIME_CAPSULES) },
+                            leadingIcon = Icons.Filled.Refresh
+                        ) {
+                            val combined = (timeCapsulesLocked.take(2) + timeCapsulesReleased.take(1)).take(3)
+                            if (combined.isEmpty()) {
+                                Text("Keine Timecapsules verfuegbar.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } else {
+                                combined.forEach { item ->
+                                    HubTimeCapsuleRow(item = item, locked = item.countdownSecs > 0, onOpenPhotoInFeed = onOpenPhotoInFeed)
                                 }
                             }
                         }
@@ -14732,10 +14801,16 @@ fun HubTab(
                 }
             }
             HubSection.TIMELINE -> {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 12.dp)
+                ) {
                     item("hub-timeline-actions") {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                             Button(onClick = onRefreshTimeline, modifier = Modifier.weight(1f), enabled = !timelineLoading) {
+                                Icon(Icons.Filled.Refresh, contentDescription = null)
+                                Spacer(Modifier.width(8.dp))
                                 Text(if (timelineLoading) "Laedt..." else "Aktualisieren")
                             }
                             OutlinedButton(onClick = onClearTimeline, modifier = Modifier.weight(1f), enabled = !timelineLoading) {
@@ -14760,9 +14835,15 @@ fun HubTab(
                 }
             }
             HubSection.TIME_CAPSULES -> {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 12.dp)
+                ) {
                     item("hub-capsule-actions") {
                         Button(onClick = onRefreshTimeCapsules, enabled = !timeCapsulesLoading, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Filled.Refresh, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
                             Text(if (timeCapsulesLoading) "Laedt..." else "Timecapsules aktualisieren")
                         }
                     }
@@ -14809,10 +14890,258 @@ fun HubTab(
 }
 
 @Composable
+private fun rememberHubPalette(): HubPalette {
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val surfaceVariant = MaterialTheme.colorScheme.surfaceVariant
+    return remember(isDark, surfaceVariant) {
+        if (isDark) {
+            HubPalette(
+                heroBrush = Brush.linearGradient(
+                    listOf(
+                        Color(0xFF2B273B),
+                        Color(0xFF1B2233),
+                        Color(0xFF161616)
+                    )
+                ),
+                heroOutline = Color.White.copy(alpha = 0.08f),
+                primaryAccent = Color(0xFFD2C2FF),
+                capsuleAccent = Color(0xFFFFB774),
+                calendarAccent = Color(0xFF7CD9FF),
+                actionBg = Color.White.copy(alpha = 0.06f),
+                sectionBg = surfaceVariant.copy(alpha = 0.54f),
+                sectionAltBg = surfaceVariant.copy(alpha = 0.38f)
+            )
+        } else {
+            HubPalette(
+                heroBrush = Brush.linearGradient(
+                    listOf(
+                        Color(0xFFF4EEFF),
+                        Color(0xFFE9F6FF),
+                        Color(0xFFFFFBF5)
+                    )
+                ),
+                heroOutline = Color(0x14000000),
+                primaryAccent = Color(0xFF6D4AFF),
+                capsuleAccent = Color(0xFFB8601A),
+                calendarAccent = Color(0xFF0F7AA8),
+                actionBg = Color.White.copy(alpha = 0.72f),
+                sectionBg = Color(0xFFF5F0FF),
+                sectionAltBg = Color(0xFFF2F6FB)
+            )
+        }
+    }
+}
+
+private data class HubPalette(
+    val heroBrush: Brush,
+    val heroOutline: Color,
+    val primaryAccent: Color,
+    val capsuleAccent: Color,
+    val calendarAccent: Color,
+    val actionBg: Color,
+    val sectionBg: Color,
+    val sectionAltBg: Color
+)
+
+@Composable
+private fun HubHeroBadge(label: String, accent: Color) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(accent.copy(alpha = 0.18f))
+            .border(1.dp, accent.copy(alpha = 0.28f), RoundedCornerShape(999.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Text(label, color = accent, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun HubMetricPill(
+    label: String,
+    value: String,
+    accent: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(accent.copy(alpha = 0.10f))
+            .border(1.dp, accent.copy(alpha = 0.18f), RoundedCornerShape(18.dp))
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = accent)
+    }
+}
+
+@Composable
+private fun HubQuickLinkCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val palette = rememberHubPalette()
+    Card(
+        modifier = Modifier
+            .width(138.dp)
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) palette.primaryAccent.copy(alpha = 0.14f) else palette.sectionAltBg
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (selected) palette.primaryAccent.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = title, tint = if (selected) palette.primaryAccent else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(
+                subtitle,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun HubDashboardSectionCard(
+    title: String,
+    subtitle: String,
+    actionLabel: String?,
+    onAction: (() -> Unit)?,
+    leadingIcon: ImageVector,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val palette = rememberHubPalette()
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = palette.sectionBg)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(palette.actionBg),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(leadingIcon, contentDescription = title, tint = palette.primaryAccent)
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(title, fontWeight = FontWeight.Bold)
+                        Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                if (actionLabel != null && onAction != null) {
+                    TextButton(onClick = onAction) { Text(actionLabel) }
+                }
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun HubCalendarPreviewRow(
+    stat: DayStatItem,
+    accent: Color,
+    onOpen: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen),
+        colors = CardDefaults.cardColors(containerColor = accent.copy(alpha = 0.08f))
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            stat.featuredPhoto?.url?.takeIf { it.isNotBlank() }?.let { url ->
+                AsyncImage(
+                    model = url,
+                    contentDescription = "Kalender-Vorschau",
+                    modifier = Modifier
+                        .size(58.dp)
+                        .clip(RoundedCornerShape(16.dp)),
+                    contentScale = ContentScale.Crop
+                )
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(formatDayLabel(stat.day), fontWeight = FontWeight.SemiBold)
+                Text(
+                    "${stat.postCount} Posts · ${stat.participantCount} Personen",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Icon(Icons.Filled.ArrowForward, contentDescription = "Zum Feed", tint = accent)
+        }
+    }
+}
+
+private fun hubSectionTitle(section: HubSection): String = when (section) {
+    HubSection.DASHBOARD -> "Dashboard"
+    HubSection.TIMELINE -> "Timeline"
+    HubSection.CALENDAR -> "Kalender"
+    HubSection.TIME_CAPSULES -> "Capsules"
+    HubSection.SEARCH -> "Suche"
+    HubSection.BOOKMARKS -> "Gemerkt"
+}
+
+private fun hubSectionSubtitle(section: HubSection, unreadCount: Int, lockedCapsules: Int): String = when (section) {
+    HubSection.DASHBOARD -> "Dein Start"
+    HubSection.TIMELINE -> if (unreadCount > 0) "$unreadCount neue Ereignisse" else "letzte 7 Tage"
+    HubSection.CALENDAR -> "sichtbare Posts"
+    HubSection.TIME_CAPSULES -> if (lockedCapsules > 0) "$lockedCapsules gesperrt" else "alle offen"
+    HubSection.SEARCH -> "Texte & Hashtags"
+    HubSection.BOOKMARKS -> "gespeicherte Posts"
+}
+
+private fun hubSectionIcon(section: HubSection): ImageVector = when (section) {
+    HubSection.DASHBOARD -> Icons.Filled.Home
+    HubSection.TIMELINE -> Icons.Filled.AccessTime
+    HubSection.CALENDAR -> Icons.Filled.Today
+    HubSection.TIME_CAPSULES -> Icons.Filled.Refresh
+    HubSection.SEARCH -> Icons.Filled.Search
+    HubSection.BOOKMARKS -> Icons.Filled.Bookmark
+}
+
+@Composable
 private fun HubTimelineRow(
     item: HubTimelineItem,
     onOpenHubTarget: (HubTarget) -> Unit,
-    onOpenDayInFeed: (String) -> Unit
+    onOpenDayInFeed: (String) -> Unit,
+    emphasized: Boolean = false
 ) {
     val accentColor = when (item.accent) {
         "capsule" -> Color(0xFFB63A14)
@@ -14834,7 +15163,11 @@ private fun HubTimelineRow(
                 }
             },
         colors = CardDefaults.cardColors(
-            containerColor = if (item.unread) accentColor.copy(alpha = 0.10f) else MaterialTheme.colorScheme.surface
+            containerColor = when {
+                emphasized -> accentColor.copy(alpha = 0.18f)
+                item.unread -> accentColor.copy(alpha = 0.10f)
+                else -> MaterialTheme.colorScheme.surface
+            }
         )
     ) {
         Row(
@@ -14842,12 +15175,30 @@ private fun HubTimelineRow(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.Top
         ) {
+            Box(
+                modifier = Modifier
+                    .width(if (emphasized) 6.dp else 4.dp)
+                    .height(if (emphasized) 82.dp else 68.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(accentColor.copy(alpha = if (item.unread || emphasized) 0.95f else 0.45f))
+            )
             item.photo?.url?.takeIf { it.isNotBlank() }?.let { url ->
-                AsyncImage(model = url, contentDescription = "Hub-Ereignisbild", modifier = Modifier.size(68.dp), contentScale = ContentScale.Crop)
+                AsyncImage(
+                    model = url,
+                    contentDescription = "Hub-Ereignisbild",
+                    modifier = Modifier
+                        .size(if (emphasized) 76.dp else 68.dp)
+                        .clip(RoundedCornerShape(18.dp)),
+                    contentScale = ContentScale.Crop
+                )
             }
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text(item.title.ifBlank { "Aktivitaet" }, fontWeight = FontWeight.Bold)
+                    Text(
+                        item.title.ifBlank { "Aktivitaet" },
+                        fontWeight = FontWeight.Bold,
+                        style = if (emphasized) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyLarge
+                    )
                     if (item.unread) {
                         Text("Neu", color = accentColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                     }
@@ -14872,8 +15223,23 @@ private fun HubTimeCapsuleRow(
     locked: Boolean,
     onOpenPhotoInFeed: (String, Long) -> Unit
 ) {
+    val transition = rememberInfiniteTransition(label = "hub-capsule-rainbow")
+    val hueShift by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 20000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "hub-capsule-hue"
+    )
     val capsuleColors = if (locked) {
-        listOf(Color(0xFF0C5A6B), Color(0xFF357266), Color(0xFF7A4DFF))
+        listOf(
+            rainbowColor(hueShift + 210f),
+            rainbowColor(hueShift + 150f),
+            rainbowColor(hueShift + 90f),
+            rainbowColor(hueShift + 30f)
+        )
     } else {
         listOf(Color(0xFFDA7A14), Color(0xFFB63A14), Color(0xFF8A1C1C))
     }
@@ -14893,7 +15259,9 @@ private fun HubTimeCapsuleRow(
             AsyncImage(
                 model = item.photo.capsulePreviewUrl?.takeIf { it.isNotBlank() } ?: item.photo.url,
                 contentDescription = "Timecapsule-Vorschau",
-                modifier = Modifier.size(74.dp),
+                modifier = Modifier
+                    .size(74.dp)
+                    .clip(RoundedCornerShape(18.dp)),
                 contentScale = ContentScale.Crop
             )
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
