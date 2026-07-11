@@ -1118,6 +1118,11 @@ data class HubTimelineItem(
     val targetUrl: String = ""
 )
 
+private data class HubTimelineRenderItem(
+    val renderKey: String,
+    val item: HubTimelineItem
+)
+
 data class HubTimeCapsuleEntry(
     val photo: PromptPhoto,
     val user: User,
@@ -6231,6 +6236,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 else -> state.calendarMode
             }
         )
+        repo.logDebug(
+            type = "hub_section_open",
+            message = "hub section selected",
+            meta = "section=${section.name.lowercase()};timelineItems=${state.hubTimelineItems.size};timelineUnread=${state.hubTimelineUnreadCount};lockedCapsules=${state.hubTimeCapsulesLocked.size};releasedCapsules=${state.hubTimeCapsulesReleased.size}"
+        )
         viewModelScope.launch {
             when (section) {
                 HubSection.DASHBOARD -> refreshHubBootstrap(force = false)
@@ -6248,6 +6258,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(hubTimelineLoading = true, hubTimeCapsulesLoading = true)
         runCatching { repo.hubBootstrap() }
             .onSuccess { bootstrap ->
+                logHubTimelineDiagnostics(
+                    source = "bootstrap",
+                    items = bootstrap.timeline.items,
+                    unreadCount = bootstrap.timeline.unreadCount
+                )
                 state = state.copy(
                     hubBootstrap = bootstrap,
                     hubTimelineItems = bootstrap.timeline.items,
@@ -6261,6 +6276,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 )
             }
             .onFailure {
+                repo.logDebug(
+                    type = "hub_bootstrap_failed",
+                    message = apiError(it, "Hub laden fehlgeschlagen"),
+                    meta = "force=$force"
+                )
                 state = state.copy(
                     hubTimelineLoading = false,
                     hubTimeCapsulesLoading = false,
@@ -6274,6 +6294,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(hubTimelineLoading = true)
         runCatching { repo.hubTimeline() }
             .onSuccess { response ->
+                logHubTimelineDiagnostics(
+                    source = "timeline_refresh",
+                    items = response.items,
+                    unreadCount = response.unreadCount
+                )
                 state = state.copy(
                     hubTimelineItems = response.items,
                     hubTimelineUnreadCount = response.unreadCount,
@@ -6283,6 +6308,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 )
             }
             .onFailure {
+                repo.logDebug(
+                    type = "hub_timeline_failed",
+                    message = apiError(it, "Timeline laden fehlgeschlagen"),
+                    meta = "force=$force"
+                )
                 state = state.copy(hubTimelineLoading = false, message = apiError(it, "Timeline laden fehlgeschlagen"))
             }
     }
@@ -6307,6 +6337,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(hubTimelineLoading = true)
         runCatching { repo.clearHubTimeline() }
             .onSuccess {
+                repo.logDebug(
+                    type = "hub_timeline_cleared",
+                    message = "timeline cleared",
+                    meta = "previousItems=${state.hubTimelineItems.size};previousUnread=${state.hubTimelineUnreadCount}"
+                )
                 state = state.copy(
                     hubTimelineItems = emptyList(),
                     hubTimelineUnreadCount = 0,
@@ -6315,8 +6350,34 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 refreshHubBootstrap(force = true)
             }
             .onFailure {
+                repo.logDebug(
+                    type = "hub_timeline_clear_failed",
+                    message = apiError(it, "Timeline aufraeumen fehlgeschlagen")
+                )
                 state = state.copy(hubTimelineLoading = false, message = apiError(it, "Timeline aufraeumen fehlgeschlagen"))
             }
+    }
+
+    private fun logHubTimelineDiagnostics(source: String, items: List<HubTimelineItem>, unreadCount: Int) {
+        val duplicateGroups = items
+            .groupBy { it.id.ifBlank { "<blank>" } }
+            .filterValues { it.size > 1 }
+        val typeSummary = items
+            .groupingBy { it.type.ifBlank { "unknown" } }
+            .eachCount()
+            .entries
+            .sortedByDescending { it.value }
+            .joinToString(",") { "${it.key}:${it.value}" }
+        val duplicateSummary = duplicateGroups.entries
+            .take(6)
+            .joinToString(",") { "${it.key}:${it.value.size}" }
+            .ifBlank { "-" }
+        val firstIds = items.take(8).joinToString(",") { it.id.ifBlank { "<blank>" } }.ifBlank { "-" }
+        repo.logDebug(
+            type = "hub_timeline_snapshot",
+            message = "hub timeline loaded",
+            meta = "source=$source;items=${items.size};unread=$unreadCount;duplicates=${duplicateGroups.size};duplicateIds=$duplicateSummary;types=$typeSummary;firstIds=$firstIds"
+        )
     }
 
     fun setCalendarPickerExpanded(expanded: Boolean) {
@@ -14624,6 +14685,7 @@ fun HubTab(
 ) {
     val palette = rememberHubPalette()
     val totalHighlights = timelineUnreadCount + timeCapsulesLocked.size
+    val timelineRenderItems = remember(timelineItems) { buildHubTimelineRenderItems(timelineItems) }
     val quickSections = listOf(
         HubSection.DASHBOARD,
         HubSection.TIMELINE,
@@ -14696,9 +14758,9 @@ fun HubTab(
                             if (timelineItems.isEmpty()) {
                                 Text("Noch keine Aktivitaeten fuer deine Timeline gefunden.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             } else {
-                                timelineItems.take(3).forEachIndexed { index, item ->
+                                timelineRenderItems.take(3).forEachIndexed { index, renderItem ->
                                     HubTimelineRow(
-                                        item = item,
+                                        item = renderItem.item,
                                         onOpenHubTarget = onOpenHubTarget,
                                         onOpenDayInFeed = onOpenDayInFeed,
                                         emphasized = index == 0
@@ -14789,8 +14851,8 @@ fun HubTab(
                             }
                         }
                     } else {
-                        items(timelineItems, key = { it.id }) { item ->
-                            HubTimelineRow(item = item, onOpenHubTarget = onOpenHubTarget, onOpenDayInFeed = onOpenDayInFeed)
+                        items(timelineRenderItems, key = { it.renderKey }) { renderItem ->
+                            HubTimelineRow(item = renderItem.item, onOpenHubTarget = onOpenHubTarget, onOpenDayInFeed = onOpenDayInFeed)
                         }
                     }
                 }
@@ -14818,6 +14880,7 @@ fun HubTab(
             }
             HubSection.CALENDAR, HubSection.SEARCH, HubSection.BOOKMARKS -> {
                 CalendarTab(
+                    hubSectionContext = section,
                     mode = calendarMode,
                     days = days,
                     dayStats = dayStats,
@@ -15112,6 +15175,32 @@ private fun hubSectionIcon(section: HubSection): ImageVector = when (section) {
     HubSection.BOOKMARKS -> Icons.Filled.Bookmark
 }
 
+private fun buildHubTimelineRenderItems(items: List<HubTimelineItem>): List<HubTimelineRenderItem> {
+    if (items.isEmpty()) return emptyList()
+    val seen = LinkedHashMap<String, Int>()
+    return items.mapIndexed { index, item ->
+        val base = item.id.ifBlank {
+            buildString {
+                append(item.type.ifBlank { "timeline" })
+                append("-")
+                append(item.occurredAt.orEmpty().ifBlank { "unknown" })
+                append("-")
+                append(item.target.photoId)
+                append("-")
+                append(item.target.commentId)
+                append("-")
+                append(index)
+            }
+        }
+        val occurrence = (seen[base] ?: 0) + 1
+        seen[base] = occurrence
+        HubTimelineRenderItem(
+            renderKey = if (occurrence == 1) base else "$base#$occurrence",
+            item = item
+        )
+    }
+}
+
 @Composable
 private fun HubTimelineRow(
     item: HubTimelineItem,
@@ -15267,6 +15356,7 @@ private fun formatCountdownLabel(totalSeconds: Long): String {
 
 @Composable
 fun CalendarTab(
+    hubSectionContext: HubSection? = null,
     mode: CalendarMode,
     days: List<String>,
     dayStats: Map<String, DayStatItem>,
@@ -15340,20 +15430,39 @@ fun CalendarTab(
             listState.animateScrollToItem(dayListStartIndex + selectedIndex)
         }
     }
-    val modeLabel = when (mode) {
-        CalendarMode.PUBLIC -> "Oeffentlich"
-        CalendarMode.BOOKMARKS -> "Gemerkt"
-        CalendarMode.TIME_CAPSULES -> "Timecapsules"
-        CalendarMode.SEARCH -> "Suche"
+    val hubScopedMode = when (hubSectionContext) {
+        HubSection.SEARCH -> CalendarMode.SEARCH
+        HubSection.BOOKMARKS -> CalendarMode.BOOKMARKS
+        HubSection.CALENDAR -> CalendarMode.PUBLIC
+        else -> mode
     }
-    val subtitle = when (mode) {
-        CalendarMode.PUBLIC -> "Sichtbare Posts"
-        CalendarMode.BOOKMARKS -> when (bookmarkFilter) {
+    val modeLabel = when {
+        hubSectionContext == HubSection.CALENDAR -> "Kalender"
+        hubSectionContext == HubSection.BOOKMARKS -> "Gemerkt"
+        hubSectionContext == HubSection.SEARCH -> "Suche"
+        mode == CalendarMode.PUBLIC -> "Oeffentlich"
+        mode == CalendarMode.BOOKMARKS -> "Gemerkt"
+        mode == CalendarMode.TIME_CAPSULES -> "Timecapsules"
+        else -> "Suche"
+    }
+    val subtitle = when {
+        hubSectionContext == HubSection.CALENDAR -> "Sichtbare Posts und direkte Feed-Spruenge"
+        hubScopedMode == CalendarMode.BOOKMARKS -> when (bookmarkFilter) {
             BookmarkCalendarFilter.MINE -> "Deine Bookmarks"
             BookmarkCalendarFilter.ALL -> "Alle Bookmarks"
         }
-        CalendarMode.TIME_CAPSULES -> "Capsule-Feed"
-        CalendarMode.SEARCH -> if (searchQuery.isBlank()) "Caption, Kommentare, Hashtags" else "\"$searchQuery\""
+        hubScopedMode == CalendarMode.TIME_CAPSULES -> "Capsule-Feed"
+        hubScopedMode == CalendarMode.SEARCH -> if (searchQuery.isBlank()) "Caption, Kommentare, Hashtags" else "\"$searchQuery\""
+        else -> "Sichtbare Posts"
+    }
+    val showModeSwitcher = hubSectionContext == null
+    val hasExpandableControls = showModeSwitcher || hubScopedMode == CalendarMode.SEARCH || hubScopedMode == CalendarMode.BOOKMARKS || hubScopedMode == CalendarMode.TIME_CAPSULES
+    val headerActionLabel = when {
+        !hasExpandableControls -> ""
+        showModeSwitcher -> if (pickerExpanded) "Weniger" else "Modi"
+        hubScopedMode == CalendarMode.SEARCH -> if (pickerExpanded) "Weniger" else "Suche"
+        hubScopedMode == CalendarMode.BOOKMARKS -> if (pickerExpanded) "Weniger" else "Ansicht"
+        else -> if (pickerExpanded) "Weniger" else "Details"
     }
     val filteredBookmarkItems = remember(bookmarkItems) { bookmarkItems }
     val filteredTimeCapsules = remember(timeCapsuleItems, timeCapsuleFilter) {
@@ -15380,7 +15489,7 @@ fun CalendarTab(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onPickerExpandedChange(!pickerExpanded) },
+                            .then(if (hasExpandableControls) Modifier.clickable { onPickerExpandedChange(!pickerExpanded) } else Modifier),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -15405,34 +15514,38 @@ fun CalendarTab(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        Text(
-                            if (pickerExpanded) "Weniger" else "Modi",
-                            color = hubPalette.calendarAccent,
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        if (headerActionLabel.isNotBlank()) {
+                            Text(
+                                headerActionLabel,
+                                color = hubPalette.calendarAccent,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                     AnimatedVisibility(
-                        visible = pickerExpanded,
+                        visible = hasExpandableControls && pickerExpanded,
                         enter = fadeIn() + expandVertically(),
                         exit = fadeOut() + shrinkVertically()
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                items(CalendarMode.entries) { entry ->
-                                    HubCompactModeChip(
-                                        selected = mode == entry,
-                                        label = when (entry) {
-                                            CalendarMode.PUBLIC -> "Oeffentlich"
-                                            CalendarMode.BOOKMARKS -> "Gemerkt"
-                                            CalendarMode.TIME_CAPSULES -> "Timecapsules"
-                                            CalendarMode.SEARCH -> "Suche"
-                                        },
-                                        onClick = { onModeChange(entry) }
-                                    )
+                            if (showModeSwitcher) {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    items(CalendarMode.entries) { entry ->
+                                        HubCompactModeChip(
+                                            selected = mode == entry,
+                                            label = when (entry) {
+                                                CalendarMode.PUBLIC -> "Oeffentlich"
+                                                CalendarMode.BOOKMARKS -> "Gemerkt"
+                                                CalendarMode.TIME_CAPSULES -> "Timecapsules"
+                                                CalendarMode.SEARCH -> "Suche"
+                                            },
+                                            onClick = { onModeChange(entry) }
+                                        )
+                                    }
                                 }
                             }
-                            if (mode == CalendarMode.SEARCH) {
+                            if (hubScopedMode == CalendarMode.SEARCH) {
                                 OutlinedTextField(
                                     value = searchQuery,
                                     onValueChange = onSearchQueryChange,
@@ -15452,7 +15565,7 @@ fun CalendarTab(
                                         Text("#daily")
                                     }
                                 }
-                            } else if (mode == CalendarMode.BOOKMARKS) {
+                            } else if (hubScopedMode == CalendarMode.BOOKMARKS) {
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                     item {
                                         HubCompactModeChip(
@@ -15469,7 +15582,7 @@ fun CalendarTab(
                                         )
                                     }
                                 }
-                            } else if (mode == CalendarMode.TIME_CAPSULES) {
+                            } else if (hubScopedMode == CalendarMode.TIME_CAPSULES) {
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                                     item {
                                         HubCompactModeChip(
@@ -15496,7 +15609,10 @@ fun CalendarTab(
                             }
                         }
                     }
-                    if (mode != CalendarMode.SEARCH && mode != CalendarMode.BOOKMARKS || (mode == CalendarMode.SEARCH && days.isNotEmpty())) {
+                    if (
+                        (hubScopedMode != CalendarMode.SEARCH && hubScopedMode != CalendarMode.BOOKMARKS) ||
+                        (hubScopedMode == CalendarMode.SEARCH && days.isNotEmpty())
+                    ) {
                         OutlinedButton(
                             onClick = { tagJumpExpanded = !tagJumpExpanded },
                             modifier = Modifier.fillMaxWidth()
