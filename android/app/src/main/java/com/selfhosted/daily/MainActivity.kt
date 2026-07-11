@@ -4703,7 +4703,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 feedViewportAnchor = normalized,
                 feedVisibleAnchorDay = normalized.day
             )
-            val signature = "${normalized.day}|${normalized.photoId}|${normalized.kind}|${normalized.rowIndex}|${normalized.firstVisibleIndex}|${normalized.lastVisibleIndex}|${normalized.rowsSize}|${normalized.presentInRows}"
+            val signature = "${normalized.day}|${normalized.photoId}|${normalized.kind}|${normalized.rowIndex}|${normalized.rowOffsetPx}|${normalized.firstVisibleIndex}|${normalized.lastVisibleIndex}|${normalized.rowsSize}|${normalized.presentInRows}"
             if (signature != lastFeedAnchorDebugSignature) {
                 lastFeedAnchorDebugSignature = signature
                 logFeedDecision(
@@ -4729,6 +4729,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             type = "feed_viewport_restore_requested",
             message = "viewport restore requested",
             meta = "${feedNavigationMeta(traceId = requestId, source = source)};anchor=${describeAnchor(anchor)}"
+        )
+    }
+
+    private fun skipFeedViewportRestore(anchor: FeedViewportAnchor, source: String, reason: String) {
+        pendingFeedRestoreFailureReason = ""
+        pendingFeedRestoreFailureAnchor = ""
+        lastFeedJumpAnchorBefore = null
+        logFeedDecision(
+            type = "feed_viewport_restore_skipped",
+            message = "viewport restore skipped",
+            meta = "${feedNavigationMeta(source = source)};anchor=${describeAnchor(anchor)};reason=$reason"
         )
     }
 
@@ -4794,11 +4805,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (before != null && before.day != null && resolved.day != null) {
             val rowDistance = if (before.rowIndex >= 0 && resolved.rowIndex >= 0) abs(before.rowIndex - resolved.rowIndex) else 0
             val dayDistance = abs(compareDayStrings(before.day, resolved.day))
+            val offsetDelta = abs(before.rowOffsetPx - resolved.rowOffsetPx)
             if (before.day != resolved.day || rowDistance > 6) {
                 logFeedDecision(
                     type = "feed_jump_detected",
                     message = "feed viewport moved during restore",
-                    meta = "${feedNavigationMeta()};beforeAnchor=${describeAnchor(before)};afterAnchor=${describeAnchor(resolved)};beforeFirstVisible=${before.firstVisibleIndex};afterFirstVisible=${resolved.firstVisibleIndex};jumpDistanceRows=$rowDistance;jumpDistanceDays=$dayDistance;trigger=viewport_restore"
+                    meta = "${feedNavigationMeta()};beforeAnchor=${describeAnchor(before)};afterAnchor=${describeAnchor(resolved)};beforeFirstVisible=${before.firstVisibleIndex};afterFirstVisible=${resolved.firstVisibleIndex};jumpDistanceRows=$rowDistance;jumpDistanceDays=$dayDistance;offsetDeltaPx=$offsetDelta;trigger=viewport_restore"
+                )
+            } else if (offsetDelta > 32) {
+                logFeedDecision(
+                    type = "feed_micro_jump_detected",
+                    message = "feed viewport shifted slightly during restore",
+                    meta = "${feedNavigationMeta()};beforeAnchor=${describeAnchor(before)};afterAnchor=${describeAnchor(resolved)};sameDay=true;samePhoto=${before.photoId != null && before.photoId == resolved.photoId};jumpDistanceRows=$rowDistance;offsetDeltaPx=$offsetDelta;trigger=viewport_restore"
                 )
             }
         }
@@ -7399,10 +7417,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
-    private suspend fun refreshOffscreenStaleDays(trigger: String): Int {
+    private data class OffscreenFeedRefreshResult(
+        val refreshedDays: Int = 0,
+        val hiddenDays: List<String> = emptyList()
+    )
+
+    private suspend fun refreshOffscreenStaleDays(trigger: String): OffscreenFeedRefreshResult {
         val visibleSet = state.feedDays.toSet()
         val hiddenDays = staleFeedDays.filter { it !in visibleSet }.distinct().sortedDescending()
-        if (hiddenDays.isEmpty()) return 0
+        if (hiddenDays.isEmpty()) return OffscreenFeedRefreshResult()
         var refreshed = 0
         hiddenDays.take(2).forEach { day ->
             val result = fetchDaySafe(day, forceReload = true)
@@ -7417,7 +7440,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 meta = "result=fetched_partial;trigger=$trigger;refreshed=$refreshed;hiddenNewer=${state.feedHasHiddenNewerContent};hiddenAnchor=${state.feedHiddenNewerAnchorDay ?: "-"}"
             )
         }
-        return refreshed
+        return OffscreenFeedRefreshResult(
+            refreshedDays = refreshed,
+            hiddenDays = hiddenDays.take(refreshed)
+        )
     }
 
     suspend fun refreshAll(
@@ -7958,19 +7984,25 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         0
                     }
                 }
+                var offscreenRefreshResult = OffscreenFeedRefreshResult()
                 if (!isModeSwitchRefresh) {
-                    val partialRefreshDays = refreshOffscreenStaleDays(reason)
-                    if (partialRefreshDays > 0) {
-                        refreshedFeedDays += partialRefreshDays
-                    }
+                    offscreenRefreshResult = refreshOffscreenStaleDays(reason)
                 }
                 if (isModeSwitchRefresh && refreshedFeedDays > 0) {
                     requestFeedScrollToTop(reason)
-                } else if (viewportAnchorBeforeRefresh != null && refreshedFeedDays > 0) {
-                    requestFeedViewportRestore(
-                        anchor = viewportAnchorBeforeRefresh,
-                        source = refreshRestoreSource(reason)
-                    )
+                } else if (viewportAnchorBeforeRefresh != null) {
+                    val restoreSource = refreshRestoreSource(reason)
+                    when {
+                        refreshedFeedDays > 0 -> requestFeedViewportRestore(
+                            anchor = viewportAnchorBeforeRefresh,
+                            source = restoreSource
+                        )
+                        offscreenRefreshResult.refreshedDays > 0 -> skipFeedViewportRestore(
+                            anchor = viewportAnchorBeforeRefresh,
+                            source = restoreSource,
+                            reason = "offscreen_only_refresh"
+                        )
+                    }
                 }
             } else {
                 val today = prompt.day
@@ -13516,17 +13548,42 @@ fun FeedTab(
         if (viewportRestoreRequestId <= 0L || viewportRestoreRequestId == handledViewportRestoreRequestId) return@LaunchedEffect
         val idx = restoreRowIndex(viewportRestoreAnchor)
         if (idx >= 0) {
-            listState.scrollToItem(idx, viewportRestoreAnchor.rowOffsetPx.coerceAtLeast(0))
-            onViewportRestoreResult(
-                viewportRestoreAnchor,
-                rowAnchorAt(
-                    index = idx,
-                    offsetPx = viewportRestoreAnchor.rowOffsetPx.coerceAtLeast(0),
-                    firstVisibleIndex = idx,
-                    lastVisibleIndex = idx
-                ),
-                ""
-            )
+            val desiredOffset = viewportRestoreAnchor.rowOffsetPx.coerceAtLeast(0)
+            val currentIndex = listState.firstVisibleItemIndex
+            val currentOffset = listState.firstVisibleItemScrollOffset
+            val sameIndex = currentIndex == idx
+            val offsetDelta = kotlin.math.abs(currentOffset - desiredOffset)
+            val currentAnchor = currentViewportAnchor
+            val samePhoto = viewportRestoreAnchor.photoId != null &&
+                currentAnchor?.photoId != null &&
+                viewportRestoreAnchor.photoId == currentAnchor.photoId
+            val sameDay = !viewportRestoreAnchor.day.isNullOrBlank() &&
+                viewportRestoreAnchor.day == currentAnchor?.day
+            val shouldSkipRestore = sameIndex && (samePhoto || sameDay) && offsetDelta <= 96
+            if (shouldSkipRestore) {
+                onViewportRestoreResult(
+                    viewportRestoreAnchor,
+                    currentAnchor ?: rowAnchorAt(
+                        index = idx,
+                        offsetPx = currentOffset.coerceAtLeast(0),
+                        firstVisibleIndex = currentIndex,
+                        lastVisibleIndex = currentIndex
+                    ),
+                    "small_delta_skip"
+                )
+            } else {
+                listState.scrollToItem(idx, desiredOffset)
+                onViewportRestoreResult(
+                    viewportRestoreAnchor,
+                    rowAnchorAt(
+                        index = idx,
+                        offsetPx = desiredOffset,
+                        firstVisibleIndex = idx,
+                        lastVisibleIndex = idx
+                    ),
+                    ""
+                )
+            }
         } else {
             if (!isChronoMode && rows.isNotEmpty()) {
                 listState.scrollToItem(0)

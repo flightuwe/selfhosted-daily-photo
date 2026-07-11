@@ -12,8 +12,8 @@ android {
         applicationId = "com.selfhosted.daily"
         minSdk = 26
         targetSdk = 34
-        versionCode = 141554
-        versionName = "0.6.23"
+        versionCode = 141555
+        versionName = "0.6.24"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "API_BASE_URL", "\"https://daily.example.tld/api/\"")

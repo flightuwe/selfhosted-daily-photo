@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.24",
+  "title": "Feed-Scrollstabilitaet und Mikro-Jump-Debug",
+  "items": [
+    "Der Feed scrollt stabiler, wenn im Hintergrund neuere oder veraltete Tage nachgeladen werden: Reine Offscreen-Aktualisierungen loesen keinen sichtbaren Viewport-Restore mehr aus.",
+    "Kleine sichtbare Mikro-Jumps wurden weiter gehaertet, indem Restore-Vorgaenge mit nur minimaler Delta-Abweichung uebersprungen werden.",
+    "Das Feed-Debug wurde erweitert und unterscheidet jetzt besser zwischen echten Spruengen, kleinen Offset-Verschiebungen und bewusst ausgelassenen Restore-Vorgaengen.",
+    "Dadurch lassen sich kuenftige Scroll-Ruckler im Diagnose-Log deutlich praeziser einordnen."
+  ]
+}
