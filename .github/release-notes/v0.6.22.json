@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.22",
+  "title": "Hub-Warmstart und semantische Ladezustaende",
+  "items": [
+    "Der Hub startet jetzt sichtbar kontrollierter: Timeline, Capsules und Kalender-Vorschau koennen einen kleinen lokalen Warmstart-Snapshot zeigen, waehrend frische Daten im Hintergrund nachgeladen werden.",
+    "Leere Hub-Bloecke wirken nicht mehr wie echte Nullzustande, wenn Daten nur noch nicht fertig geladen sind. Stattdessen werden gezielte Lade-, Cache- und Fehlerhinweise angezeigt.",
+    "Die Kalenderansicht zeigt nicht mehr vorschnell `0 Nutzer haben gepostet`, wenn nur die Tage schon bekannt sind, die zugehoerigen Tagesstatistiken aber noch nachgeladen werden.",
+    "Ausserdem wurde die Refresh-Orchestrierung beruhigt, damit Tab-Wechsel und Warmstart nicht sofort wieder unnoetige Doppel-Loads und sichtbare Nachladeruckler ausloesen."
+  ]
+}

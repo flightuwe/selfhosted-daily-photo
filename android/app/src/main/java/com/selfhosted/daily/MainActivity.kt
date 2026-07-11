@@ -205,6 +205,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.google.gson.Gson
 import com.google.android.gms.location.CurrentLocationRequest
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
@@ -1700,6 +1701,7 @@ class AppRepo(
     private val httpClient: OkHttpClient
 ) {
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
+    private val gson = Gson()
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(context) }
     @Volatile
     private var api: Api = buildApiService(resolveApiBaseUrl(context), httpClient)
@@ -1715,6 +1717,8 @@ class AppRepo(
     private val diagnosticsConsentPendingKey = "diagnostics_consent_pending"
     private val diagnosticsSessionIdKey = "diagnostics_session_id"
     private val promptSeenVersionPrefix = "user_prompt_seen_version_"
+    private val warmCacheLastUserIdKey = "warm_cache_last_user_id_v1"
+    private val warmCacheSchemaVersion = "app_warm_cache_v1"
     private val debugMaxEntries = 500
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
     private val debugAggregateWindowMs = 10 * 60 * 1000L
@@ -1722,6 +1726,91 @@ class AppRepo(
     private var lastAuthTransitionReason: String = "startup"
 
     fun token(): String = accessToken()
+
+    private fun warmCacheDir(): File = File(context.filesDir, "warm-cache").apply { mkdirs() }
+
+    private fun warmCacheFile(userId: Long): File = File(warmCacheDir(), "user_${userId}_hub.json")
+
+    private fun readWarmCacheEnvelope(userId: Long): AppWarmCacheEnvelope? {
+        if (userId <= 0L) return null
+        val file = warmCacheFile(userId)
+        if (!file.exists()) return null
+        return runCatching {
+            gson.fromJson(file.readText(), AppWarmCacheEnvelope::class.java)
+        }.getOrNull()?.takeIf { envelope ->
+            envelope.schemaVersion == warmCacheSchemaVersion && envelope.userId == userId
+        }
+    }
+
+    private fun writeWarmCacheEnvelope(userId: Long, transform: (AppWarmCacheEnvelope) -> AppWarmCacheEnvelope) {
+        if (userId <= 0L) return
+        val current = readWarmCacheEnvelope(userId) ?: AppWarmCacheEnvelope(
+            schemaVersion = warmCacheSchemaVersion,
+            userId = userId,
+            savedAtEpochMs = 0L
+        )
+        val updated = transform(current).copy(
+            schemaVersion = warmCacheSchemaVersion,
+            userId = userId,
+            savedAtEpochMs = System.currentTimeMillis()
+        )
+        runCatching {
+            warmCacheFile(userId).writeText(gson.toJson(updated))
+            prefs.edit().putLong(warmCacheLastUserIdKey, userId).apply()
+        }
+    }
+
+    fun loadLastWarmCache(): AppWarmCacheEnvelope? {
+        val userId = prefs.getLong(warmCacheLastUserIdKey, 0L)
+        val snapshot = readWarmCacheEnvelope(userId)
+        logDebug(
+            type = "warm_cache_lookup",
+            message = if (snapshot != null) "warm cache hit" else "warm cache miss",
+            meta = "userId=$userId;hit=${snapshot != null}"
+        )
+        return snapshot
+    }
+
+    fun saveHubBootstrapWarmCache(userId: Long, bootstrap: HubBootstrapResponse) {
+        writeWarmCacheEnvelope(userId) { current ->
+            current.copy(
+                hubBootstrap = HubBootstrapSnapshot(
+                    serverNow = bootstrap.serverNow,
+                    timelinePreview = bootstrap.timeline.items.take(12),
+                    timelineUnreadCount = bootstrap.timeline.unreadCount,
+                    timeCapsulesLocked = bootstrap.timeCapsules.locked.take(4),
+                    timeCapsulesReleased = bootstrap.timeCapsules.released.take(3),
+                    calendarPreview = bootstrap.dashboard.calendarPreview.take(6)
+                )
+            )
+        }
+    }
+
+    fun saveTimelineWarmCache(userId: Long, response: HubTimelineResponse) {
+        writeWarmCacheEnvelope(userId) { current ->
+            current.copy(
+                timelineLite = HubTimelineSnapshotLite(
+                    savedAtEpochMs = System.currentTimeMillis(),
+                    items = response.items.take(24),
+                    unreadCount = response.unreadCount
+                )
+            )
+        }
+    }
+
+    fun saveCalendarPublicWarmCache(userId: Long, dataset: CalendarDataset) {
+        val trimmedDays = dataset.days.take(7)
+        writeWarmCacheEnvelope(userId) { current ->
+            current.copy(
+                calendarPublicLite = CalendarPublicSnapshotLite(
+                    savedAtEpochMs = System.currentTimeMillis(),
+                    days = trimmedDays,
+                    dayStats = trimmedDays.mapNotNull(dataset.dayStats::get),
+                    photosByDay = trimmedDays.associateWith { day -> dataset.photosByDay[day].orEmpty().take(3) }
+                )
+            )
+        }
+    }
 
     private fun accessToken(): String = AuthSessionCoordinator.snapshot(context).accessToken
 
@@ -4017,6 +4106,53 @@ data class CalendarSearchDataset(
         get() = dataset.days.flatMap { day -> matchesByDay[day].orEmpty() }
 }
 
+enum class SurfaceLoadPhase {
+    COLD_LOADING,
+    WARM_CACHED,
+    REFRESHING,
+    READY,
+    EMPTY_CONFIRMED,
+    FAILED_WITH_CACHE,
+    FAILED_EMPTY
+}
+
+data class SurfaceLoadState(
+    val phase: SurfaceLoadPhase = SurfaceLoadPhase.COLD_LOADING,
+    val updatedAtEpochMs: Long = 0L,
+    val detail: String = ""
+)
+
+data class HubBootstrapSnapshot(
+    val serverNow: String? = null,
+    val timelinePreview: List<HubTimelineItem> = emptyList(),
+    val timelineUnreadCount: Int = 0,
+    val timeCapsulesLocked: List<HubTimeCapsuleEntry> = emptyList(),
+    val timeCapsulesReleased: List<HubTimeCapsuleEntry> = emptyList(),
+    val calendarPreview: List<DayStatItem> = emptyList()
+)
+
+data class HubTimelineSnapshotLite(
+    val savedAtEpochMs: Long = 0L,
+    val items: List<HubTimelineItem> = emptyList(),
+    val unreadCount: Int = 0
+)
+
+data class CalendarPublicSnapshotLite(
+    val savedAtEpochMs: Long = 0L,
+    val days: List<String> = emptyList(),
+    val dayStats: List<DayStatItem> = emptyList(),
+    val photosByDay: Map<String, List<CalendarPhotoItem>> = emptyMap()
+)
+
+data class AppWarmCacheEnvelope(
+    val schemaVersion: String = "app_warm_cache_v1",
+    val userId: Long = 0L,
+    val savedAtEpochMs: Long = 0L,
+    val hubBootstrap: HubBootstrapSnapshot? = null,
+    val timelineLite: HubTimelineSnapshotLite? = null,
+    val calendarPublicLite: CalendarPublicSnapshotLite? = null
+)
+
 data class UiState(
     val token: String = "",
     val user: User? = null,
@@ -4046,17 +4182,22 @@ data class UiState(
     val calendarSearchQuery: String = "",
     val hubSection: HubSection = HubSection.DASHBOARD,
     val hubBootstrap: HubBootstrapResponse? = null,
+    val hubBootstrapLoadState: SurfaceLoadState = SurfaceLoadState(),
     val hubTimelineItems: List<HubTimelineItem> = emptyList(),
     val hubTimelineUnreadCount: Int = 0,
     val hubTimelineLoading: Boolean = false,
+    val hubTimelineLoadState: SurfaceLoadState = SurfaceLoadState(),
     val hubTimelineClearedAt: String? = null,
     val hubTimelineViewedAt: String? = null,
     val hubTimeCapsulesLocked: List<HubTimeCapsuleEntry> = emptyList(),
     val hubTimeCapsulesReleased: List<HubTimeCapsuleEntry> = emptyList(),
     val hubTimeCapsulesLoading: Boolean = false,
+    val hubTimeCapsulesLoadState: SurfaceLoadState = SurfaceLoadState(),
     val calendarBookmarksFilter: BookmarkCalendarFilter = BookmarkCalendarFilter.MINE,
     val calendarTimeCapsuleFilter: TimeCapsuleFilter = TimeCapsuleFilter.ALL,
     val calendarLoading: Boolean = false,
+    val calendarPublicLoadState: SurfaceLoadState = SurfaceLoadState(),
+    val calendarModeLoadState: SurfaceLoadState = SurfaceLoadState(),
     val communityStats: CommunityStatsResponse? = null,
     val communityStatsLoading: Boolean = false,
     val feedFocusDay: String? = null,
@@ -4284,6 +4425,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val globalRefreshActiveBaseMs = 20_000L
     private val globalRefreshActiveJitterMs = 15_000L
     private val launchIntentRefreshMinIntervalMs = 5_000L
+    private val hubBootstrapFreshMs = 90_000L
+    private val hubTimelineFreshMs = 60_000L
+    private val calendarPublicFreshMs = 120_000L
     private val networkFailureBackoffStagesMs = longArrayOf(30_000L, 60_000L, 120_000L, 300_000L)
     private val circuitBreakerActivationThreshold = 3
     private val manualRefreshDuringNetworkFailureMinIntervalMs = 4_000L
@@ -4438,6 +4582,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val id = nextFeedScrollRequestId
         nextFeedScrollRequestId += 1L
         return id
+    }
+
+    private fun isFreshLoadState(state: SurfaceLoadState, ttlMs: Long): Boolean {
+        if (state.updatedAtEpochMs <= 0L) return false
+        if (state.phase == SurfaceLoadPhase.COLD_LOADING) return false
+        return (System.currentTimeMillis() - state.updatedAtEpochMs) <= ttlMs
     }
 
     private fun refreshPriorityFor(reason: String, forceFeedReload: Boolean): RefreshPriority = when {
@@ -4736,6 +4886,104 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             dataset = CalendarDataset(days = days, dayStats = dayStats.associateBy { it.day }),
             matchesByDay = matchedPhotosByDay
         )
+
+    private fun HubBootstrapSnapshot.toResponse(): HubBootstrapResponse =
+        HubBootstrapResponse(
+            serverNow = serverNow,
+            timeline = HubTimelineResponse(
+                serverNow = serverNow,
+                unreadCount = timelineUnreadCount,
+                items = timelinePreview
+            ),
+            timeCapsules = HubTimeCapsulesResponse(
+                serverNow = serverNow,
+                lockedCount = timeCapsulesLocked.size,
+                releasedCount = timeCapsulesReleased.size,
+                locked = timeCapsulesLocked,
+                released = timeCapsulesReleased
+            ),
+            dashboard = HubDashboardPreview(calendarPreview = calendarPreview)
+        )
+
+    private fun CalendarPublicSnapshotLite.toDataset(): CalendarDataset =
+        CalendarDataset(
+            days = days,
+            dayStats = dayStats.associateBy { it.day },
+            photosByDay = photosByDay
+        )
+
+    private fun surfaceLoadStateFor(
+        hasContent: Boolean,
+        loading: Boolean,
+        failed: Boolean = false,
+        detail: String = ""
+    ): SurfaceLoadState {
+        val phase = when {
+            loading && hasContent -> SurfaceLoadPhase.REFRESHING
+            loading -> SurfaceLoadPhase.COLD_LOADING
+            failed && hasContent -> SurfaceLoadPhase.FAILED_WITH_CACHE
+            failed -> SurfaceLoadPhase.FAILED_EMPTY
+            hasContent -> SurfaceLoadPhase.READY
+            else -> SurfaceLoadPhase.EMPTY_CONFIRMED
+        }
+        return SurfaceLoadState(phase = phase, updatedAtEpochMs = System.currentTimeMillis(), detail = detail)
+    }
+
+    private fun applyWarmCacheSnapshot(snapshot: AppWarmCacheEnvelope) {
+        val bootstrap = snapshot.hubBootstrap?.toResponse()
+        val timelineItems = snapshot.timelineLite?.items
+            ?.takeIf { it.isNotEmpty() }
+            ?: bootstrap?.timeline?.items.orEmpty()
+        val timelineUnread = snapshot.timelineLite?.unreadCount
+            ?: bootstrap?.timeline?.unreadCount
+            ?: 0
+        val calendarDataset = snapshot.calendarPublicLite?.toDataset() ?: CalendarDataset()
+        val hasBootstrap = bootstrap != null
+        val hasTimeline = timelineItems.isNotEmpty()
+        val hasCapsules = bootstrap?.timeCapsules?.let { it.locked.isNotEmpty() || it.released.isNotEmpty() } == true
+        val hasCalendar = calendarDataset.days.isNotEmpty() || calendarDataset.dayStats.isNotEmpty()
+        state = state.copy(
+            hubBootstrap = bootstrap ?: state.hubBootstrap,
+            hubBootstrapLoadState = if (hasBootstrap) {
+                SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.savedAtEpochMs, "cache")
+            } else {
+                state.hubBootstrapLoadState
+            },
+            hubTimelineItems = if (hasTimeline) timelineItems else state.hubTimelineItems,
+            hubTimelineUnreadCount = if (hasTimeline) timelineUnread else state.hubTimelineUnreadCount,
+            hubTimelineLoadState = if (hasTimeline) {
+                SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.timelineLite?.savedAtEpochMs ?: snapshot.savedAtEpochMs, "cache")
+            } else {
+                state.hubTimelineLoadState
+            },
+            hubTimeCapsulesLocked = bootstrap?.timeCapsules?.locked ?: state.hubTimeCapsulesLocked,
+            hubTimeCapsulesReleased = bootstrap?.timeCapsules?.released ?: state.hubTimeCapsulesReleased,
+            hubTimeCapsulesLoadState = if (hasCapsules) {
+                SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.savedAtEpochMs, "cache")
+            } else {
+                state.hubTimeCapsulesLoadState
+            },
+            calendarPublicData = if (hasCalendar) calendarDataset else state.calendarPublicData,
+            calendarPublicLoadState = if (hasCalendar) {
+                SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.calendarPublicLite?.savedAtEpochMs ?: snapshot.savedAtEpochMs, "cache")
+            } else {
+                state.calendarPublicLoadState
+            },
+            calendarModeLoadState = if (state.calendarMode == CalendarMode.PUBLIC && hasCalendar) {
+                SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.calendarPublicLite?.savedAtEpochMs ?: snapshot.savedAtEpochMs, "cache")
+            } else {
+                state.calendarModeLoadState
+            }
+        )
+        if (hasCalendar && (state.calendarMode == CalendarMode.PUBLIC || state.calendarDays.isEmpty())) {
+            applyCalendarDataset(calendarDataset)
+        }
+        repo.logDebug(
+            type = "warm_cache_applied",
+            message = "warm cache applied",
+            meta = "userId=${snapshot.userId};hub=$hasBootstrap;timeline=$hasTimeline;capsules=$hasCapsules;calendar=$hasCalendar"
+        )
+    }
 
     private fun applyCalendarDataset(dataset: CalendarDataset) {
         val selectedDay = state.calendarSelectedDay?.takeIf { dataset.days.contains(it) }
@@ -5588,6 +5836,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val showChangelog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME)
         val changelogLines = if (showChangelog) fetchChangelogLinesFresh() else emptyList()
         val healthOk = health?.ok == true
+        val warmCache = if (healthOk && repo.token().isNotBlank()) repo.loadLastWarmCache() else null
         val startupQuote = if (healthOk) {
             if (repo.token().isNotBlank()) {
                 val chatLine = runCatching { repo.randomStartupChatLine(repo.listChat()) }.getOrDefault("")
@@ -5648,10 +5897,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             debugLogs = repo.recentDebugLogs(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         ))
+        warmCache?.let(::applyWarmCacheSnapshot)
         repo.pendingUpdateInstallWarning(BuildConfig.VERSION_NAME)?.let { warning ->
             state = state.copy(message = warning)
         }
         runCatching { checkForUpdate(silent = true) }
+        if (healthOk && repo.token().isNotBlank()) {
+            viewModelScope.launch {
+                refreshHubBootstrap(force = true)
+                prefetchCalendarPublic(force = false)
+            }
+        }
         logPerfEvent(
             event = "app_start",
             durationMs = System.currentTimeMillis() - perfStartedAt,
@@ -6242,8 +6498,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (tab == AppTab.CALENDAR) {
             state = state.copy(activeTab = tab)
             viewModelScope.launch {
-                ensureCalendarModeLoaded(state.calendarMode, force = false)
-                refreshHubBootstrap(force = false)
+                if (!isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)) {
+                    ensureCalendarModeLoaded(state.calendarMode, force = false)
+                }
+                if (!isFreshLoadState(state.hubBootstrapLoadState, hubBootstrapFreshMs)) {
+                    refreshHubBootstrap(force = false)
+                }
             }
             return
         }
@@ -6267,19 +6527,81 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         )
         viewModelScope.launch {
             when (section) {
-                HubSection.DASHBOARD -> refreshHubBootstrap(force = false)
-                HubSection.TIMELINE -> refreshHubTimeline(force = false)
+                HubSection.DASHBOARD -> if (!isFreshLoadState(state.hubBootstrapLoadState, hubBootstrapFreshMs)) {
+                    refreshHubBootstrap(force = false)
+                }
+                HubSection.TIMELINE -> if (!isFreshLoadState(state.hubTimelineLoadState, hubTimelineFreshMs)) {
+                    refreshHubTimeline(force = false)
+                }
                 HubSection.TIME_CAPSULES -> refreshHubTimeCapsules(force = false)
-                HubSection.CALENDAR -> ensureCalendarModeLoaded(CalendarMode.PUBLIC, force = false)
+                HubSection.CALENDAR -> if (!isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs)) {
+                    ensureCalendarModeLoaded(CalendarMode.PUBLIC, force = false)
+                }
                 HubSection.SEARCH -> ensureCalendarModeLoaded(CalendarMode.SEARCH, force = false)
                 HubSection.BOOKMARKS -> ensureCalendarModeLoaded(CalendarMode.BOOKMARKS, force = false)
             }
         }
     }
 
+    private suspend fun prefetchCalendarPublic(force: Boolean) {
+        val hasCached = state.calendarPublicData.days.isNotEmpty()
+        if (!force && (hasCached || isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs))) return
+        runCatching { repo.calendarPublic() }
+            .onSuccess { payload ->
+                val dataset = payload.toDataset()
+                state = state.copy(
+                    calendarPublicData = dataset,
+                    calendarPublicLoadState = surfaceLoadStateFor(
+                        hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
+                        loading = false
+                    )
+                )
+                if (state.calendarMode == CalendarMode.PUBLIC || state.calendarDays.isEmpty()) {
+                    applyCalendarDataset(dataset)
+                    state = state.copy(calendarModeLoadState = state.calendarPublicLoadState)
+                }
+                state.user?.id?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
+                repo.logDebug(
+                    type = "calendar_prefetch_applied",
+                    message = "calendar public prefetch applied",
+                    meta = "days=${dataset.days.size};dayStats=${dataset.dayStats.size};forced=$force"
+                )
+            }
+            .onFailure {
+                repo.logDebug(
+                    type = "calendar_prefetch_failed",
+                    message = apiError(it, "Kalender-Vorladen fehlgeschlagen"),
+                    meta = "forced=$force;hasCache=${state.calendarPublicData.days.isNotEmpty()}"
+                )
+                state = state.copy(
+                    calendarPublicLoadState = surfaceLoadStateFor(
+                        hasContent = state.calendarPublicData.days.isNotEmpty() || state.calendarPublicData.dayStats.isNotEmpty(),
+                        loading = false,
+                        failed = true,
+                        detail = debugFailureMessage(it)
+                    )
+                )
+            }
+    }
+
     suspend fun refreshHubBootstrap(force: Boolean = true) {
-        if (!force && state.hubBootstrap != null) return
-        state = state.copy(hubTimelineLoading = true, hubTimeCapsulesLoading = true)
+        if (!force && isFreshLoadState(state.hubBootstrapLoadState, hubBootstrapFreshMs)) return
+        state = state.copy(
+            hubTimelineLoading = true,
+            hubTimeCapsulesLoading = true,
+            hubBootstrapLoadState = surfaceLoadStateFor(
+                hasContent = state.hubBootstrap != null,
+                loading = true
+            ),
+            hubTimelineLoadState = surfaceLoadStateFor(
+                hasContent = state.hubTimelineItems.isNotEmpty(),
+                loading = true
+            ),
+            hubTimeCapsulesLoadState = surfaceLoadStateFor(
+                hasContent = state.hubTimeCapsulesLocked.isNotEmpty() || state.hubTimeCapsulesReleased.isNotEmpty(),
+                loading = true
+            )
+        )
         runCatching { repo.hubBootstrap() }
             .onSuccess { bootstrap ->
                 logHubTimelineDiagnostics(
@@ -6296,8 +6618,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     hubTimeCapsulesLocked = bootstrap.timeCapsules.locked,
                     hubTimeCapsulesReleased = bootstrap.timeCapsules.released,
                     hubTimelineLoading = false,
-                    hubTimeCapsulesLoading = false
+                    hubTimeCapsulesLoading = false,
+                    hubBootstrapLoadState = surfaceLoadStateFor(
+                        hasContent = true,
+                        loading = false
+                    ),
+                    hubTimelineLoadState = surfaceLoadStateFor(
+                        hasContent = bootstrap.timeline.items.isNotEmpty(),
+                        loading = false
+                    ),
+                    hubTimeCapsulesLoadState = surfaceLoadStateFor(
+                        hasContent = bootstrap.timeCapsules.locked.isNotEmpty() || bootstrap.timeCapsules.released.isNotEmpty(),
+                        loading = false
+                    )
                 )
+                state.user?.id?.let { repo.saveHubBootstrapWarmCache(it, bootstrap) }
             }
             .onFailure {
                 repo.logDebug(
@@ -6308,14 +6643,38 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state = state.copy(
                     hubTimelineLoading = false,
                     hubTimeCapsulesLoading = false,
+                    hubBootstrapLoadState = surfaceLoadStateFor(
+                        hasContent = state.hubBootstrap != null,
+                        loading = false,
+                        failed = true,
+                        detail = debugFailureMessage(it)
+                    ),
+                    hubTimelineLoadState = surfaceLoadStateFor(
+                        hasContent = state.hubTimelineItems.isNotEmpty(),
+                        loading = false,
+                        failed = true,
+                        detail = debugFailureMessage(it)
+                    ),
+                    hubTimeCapsulesLoadState = surfaceLoadStateFor(
+                        hasContent = state.hubTimeCapsulesLocked.isNotEmpty() || state.hubTimeCapsulesReleased.isNotEmpty(),
+                        loading = false,
+                        failed = true,
+                        detail = debugFailureMessage(it)
+                    ),
                     message = apiError(it, "Hub laden fehlgeschlagen")
                 )
             }
     }
 
     suspend fun refreshHubTimeline(force: Boolean = true) {
-        if (!force && state.hubTimelineItems.isNotEmpty()) return
-        state = state.copy(hubTimelineLoading = true)
+        if (!force && isFreshLoadState(state.hubTimelineLoadState, hubTimelineFreshMs)) return
+        state = state.copy(
+            hubTimelineLoading = true,
+            hubTimelineLoadState = surfaceLoadStateFor(
+                hasContent = state.hubTimelineItems.isNotEmpty(),
+                loading = true
+            )
+        )
         runCatching { repo.hubTimeline() }
             .onSuccess { response ->
                 logHubTimelineDiagnostics(
@@ -6328,8 +6687,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     hubTimelineUnreadCount = response.unreadCount,
                     hubTimelineClearedAt = response.clearedAt,
                     hubTimelineViewedAt = response.viewedAt,
-                    hubTimelineLoading = false
+                    hubTimelineLoading = false,
+                    hubTimelineLoadState = surfaceLoadStateFor(
+                        hasContent = response.items.isNotEmpty(),
+                        loading = false
+                    )
                 )
+                state.user?.id?.let { repo.saveTimelineWarmCache(it, response) }
             }
             .onFailure {
                 repo.logDebug(
@@ -6337,23 +6701,51 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     message = apiError(it, "Timeline laden fehlgeschlagen"),
                     meta = "force=$force"
                 )
-                state = state.copy(hubTimelineLoading = false, message = apiError(it, "Timeline laden fehlgeschlagen"))
+                state = state.copy(
+                    hubTimelineLoading = false,
+                    hubTimelineLoadState = surfaceLoadStateFor(
+                        hasContent = state.hubTimelineItems.isNotEmpty(),
+                        loading = false,
+                        failed = true,
+                        detail = debugFailureMessage(it)
+                    ),
+                    message = apiError(it, "Timeline laden fehlgeschlagen")
+                )
             }
     }
 
     suspend fun refreshHubTimeCapsules(force: Boolean = true) {
-        if (!force && (state.hubTimeCapsulesLocked.isNotEmpty() || state.hubTimeCapsulesReleased.isNotEmpty())) return
-        state = state.copy(hubTimeCapsulesLoading = true)
+        if (!force && isFreshLoadState(state.hubTimeCapsulesLoadState, hubBootstrapFreshMs)) return
+        state = state.copy(
+            hubTimeCapsulesLoading = true,
+            hubTimeCapsulesLoadState = surfaceLoadStateFor(
+                hasContent = state.hubTimeCapsulesLocked.isNotEmpty() || state.hubTimeCapsulesReleased.isNotEmpty(),
+                loading = true
+            )
+        )
         runCatching { repo.hubTimeCapsules() }
             .onSuccess { response ->
                 state = state.copy(
                     hubTimeCapsulesLocked = response.locked,
                     hubTimeCapsulesReleased = response.released,
-                    hubTimeCapsulesLoading = false
+                    hubTimeCapsulesLoading = false,
+                    hubTimeCapsulesLoadState = surfaceLoadStateFor(
+                        hasContent = response.locked.isNotEmpty() || response.released.isNotEmpty(),
+                        loading = false
+                    )
                 )
             }
             .onFailure {
-                state = state.copy(hubTimeCapsulesLoading = false, message = apiError(it, "Timecapsules laden fehlgeschlagen"))
+                state = state.copy(
+                    hubTimeCapsulesLoading = false,
+                    hubTimeCapsulesLoadState = surfaceLoadStateFor(
+                        hasContent = state.hubTimeCapsulesLocked.isNotEmpty() || state.hubTimeCapsulesReleased.isNotEmpty(),
+                        loading = false,
+                        failed = true,
+                        detail = debugFailureMessage(it)
+                    ),
+                    message = apiError(it, "Timecapsules laden fehlgeschlagen")
+                )
             }
     }
 
@@ -6447,29 +6839,75 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private suspend fun ensureCalendarModeLoaded(mode: CalendarMode, force: Boolean) {
+        if (!force) {
+            when (mode) {
+                CalendarMode.PUBLIC -> if (isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs)) return
+                CalendarMode.BOOKMARKS,
+                CalendarMode.SEARCH,
+                CalendarMode.TIME_CAPSULES -> if (isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)) return
+            }
+        }
         if (state.calendarLoading && !force) return
-        state = state.copy(calendarLoading = true)
+        val existingDataset = when (mode) {
+            CalendarMode.PUBLIC -> state.calendarPublicData
+            CalendarMode.BOOKMARKS -> state.calendarBookmarksData
+            CalendarMode.TIME_CAPSULES -> state.calendarTimeCapsulesData
+            CalendarMode.SEARCH -> state.calendarSearchData.dataset
+        }
+        state = state.copy(
+            calendarLoading = true,
+            calendarModeLoadState = surfaceLoadStateFor(
+                hasContent = existingDataset.days.isNotEmpty() || existingDataset.dayStats.isNotEmpty(),
+                loading = true
+            )
+        )
         try {
             when (mode) {
                 CalendarMode.PUBLIC -> {
-                    if (!force && state.calendarPublicData.days.isNotEmpty()) {
+                    if (!force && state.calendarPublicData.days.isNotEmpty() && isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs)) {
                         applyCalendarDataset(state.calendarPublicData)
+                        state = state.copy(
+                            calendarPublicLoadState = surfaceLoadStateFor(
+                                hasContent = true,
+                                loading = false
+                            ),
+                            calendarModeLoadState = surfaceLoadStateFor(
+                                hasContent = true,
+                                loading = false
+                            )
+                        )
                     } else {
                         val payload = repo.calendarPublic()
                         val dataset = payload.toDataset()
                         state = state.copy(
-                            calendarPublicData = dataset
+                            calendarPublicData = dataset,
+                            calendarPublicLoadState = surfaceLoadStateFor(
+                                hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
+                                loading = false
+                            ),
+                            calendarModeLoadState = surfaceLoadStateFor(
+                                hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
+                                loading = false
+                            )
                         )
                         applyCalendarDataset(dataset)
+                        state.user?.id?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
                     }
                 }
                 CalendarMode.BOOKMARKS -> {
-                    if (!force && state.calendarBookmarksData.days.isNotEmpty()) {
+                    if (!force && state.calendarBookmarksData.days.isNotEmpty() && isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)) {
                         applyCalendarDataset(state.calendarBookmarksData)
+                        state = state.copy(calendarModeLoadState = surfaceLoadStateFor(hasContent = true, loading = false))
                     } else {
                         val payload = repo.calendarBookmarks(state.calendarBookmarksFilter)
                         val dataset = payload.toDataset()
-                        state = state.copy(calendarBookmarksData = dataset)
+                        state = state.copy(
+                            calendarBookmarksData = dataset,
+                            calendarModeLoadState = surfaceLoadStateFor(
+                                hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
+                                loading = false
+                            )
+                        )
                         applyCalendarDataset(dataset)
                     }
                 }
@@ -6477,36 +6915,64 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     val query = state.calendarSearchQuery.trim()
                     if (query.isBlank()) {
                         val empty = CalendarSearchDataset()
-                        state = state.copy(calendarSearchData = empty)
+                        state = state.copy(
+                            calendarSearchData = empty,
+                            calendarModeLoadState = SurfaceLoadState(
+                                phase = SurfaceLoadPhase.EMPTY_CONFIRMED,
+                                updatedAtEpochMs = System.currentTimeMillis(),
+                                detail = "search_idle"
+                            )
+                        )
                         applyCalendarDataset(empty.dataset)
                     } else {
                         val cached = state.calendarSearchData.takeIf { it.normalizedQuery == query.lowercase() }
-                        if (!force && cached != null && cached.dataset.days.isNotEmpty()) {
+                        if (!force && cached != null && cached.dataset.days.isNotEmpty() && isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)) {
                             applyCalendarDataset(cached.dataset)
+                            state = state.copy(calendarModeLoadState = surfaceLoadStateFor(hasContent = true, loading = false))
                         } else {
                             val payload = repo.calendarSearch(query)
                             val dataset = payload.toDataset()
                             state = state.copy(
                                 calendarSearchData = dataset,
-                                calendarSearchQuery = payload.query.ifBlank { query }
+                                calendarSearchQuery = payload.query.ifBlank { query },
+                                calendarModeLoadState = surfaceLoadStateFor(
+                                    hasContent = dataset.dataset.days.isNotEmpty() || dataset.dataset.dayStats.isNotEmpty(),
+                                    loading = false
+                                )
                             )
                             applyCalendarDataset(dataset.dataset)
                         }
                     }
                 }
                 CalendarMode.TIME_CAPSULES -> {
-                    if (!force && state.calendarTimeCapsulesData.days.isNotEmpty()) {
+                    if (!force && state.calendarTimeCapsulesData.days.isNotEmpty() && isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)) {
                         applyCalendarDataset(state.calendarTimeCapsulesData)
+                        state = state.copy(calendarModeLoadState = surfaceLoadStateFor(hasContent = true, loading = false))
                     } else {
                         val payload = repo.calendarTimeCapsules()
                         val dataset = payload.toDataset()
-                        state = state.copy(calendarTimeCapsulesData = dataset)
+                        state = state.copy(
+                            calendarTimeCapsulesData = dataset,
+                            calendarModeLoadState = surfaceLoadStateFor(
+                                hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
+                                loading = false
+                            )
+                        )
                         applyCalendarDataset(dataset)
                     }
                 }
             }
         } catch (t: Throwable) {
-            state = state.copy(message = apiError(t, "Kalender laden fehlgeschlagen"))
+            val hasContent = existingDataset.days.isNotEmpty() || existingDataset.dayStats.isNotEmpty()
+            state = state.copy(
+                calendarModeLoadState = surfaceLoadStateFor(
+                    hasContent = hasContent,
+                    loading = false,
+                    failed = true,
+                    detail = debugFailureMessage(t)
+                ),
+                message = apiError(t, "Kalender laden fehlgeschlagen")
+            )
         } finally {
             state = state.copy(calendarLoading = false)
         }
@@ -7325,11 +7791,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             runCatching { repo.calendarPublic() }.getOrNull()?.let { publicCalendar ->
                 val dataset = publicCalendar.toDataset()
                 state = state.copy(
-                    calendarPublicData = dataset
+                    calendarPublicData = dataset,
+                    calendarPublicLoadState = surfaceLoadStateFor(
+                        hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
+                        loading = false
+                    )
                 )
                 if (state.calendarMode == CalendarMode.PUBLIC) {
                     applyCalendarDataset(dataset)
+                    state = state.copy(calendarModeLoadState = state.calendarPublicLoadState)
                 }
+                me.id.takeIf { it > 0L }?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
             }
             repo.setDiagnosticsConsentLocal(me.diagnosticsConsentGranted)
             if (!me.diagnosticsConsentGranted && state.diagnosticsUploadEnabled) {
@@ -10707,8 +11179,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         return
     }
 
-    LaunchedEffect(state.token, state.activeTab) {
-        if (state.token.isBlank()) return@LaunchedEffect
+    LaunchedEffect(state.token, state.startupDone) {
+        if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         while (true) {
             vm.refreshAll(refreshFeedWindow = vm.state.activeTab != AppTab.FEED)
             delay(vm.globalRefreshIntervalMs())
@@ -11671,12 +12143,15 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     HubTab(
                     section = state.hubSection,
                     bootstrap = state.hubBootstrap,
+                    hubBootstrapLoadState = state.hubBootstrapLoadState,
                     timelineItems = mergedTimelineItems,
                     timelineUnreadCount = mergedTimelineUnread,
                     timelineLoading = state.hubTimelineLoading,
+                    timelineLoadState = state.hubTimelineLoadState,
                     timeCapsulesLocked = state.hubTimeCapsulesLocked,
                     timeCapsulesReleased = state.hubTimeCapsulesReleased,
                     timeCapsulesLoading = state.hubTimeCapsulesLoading,
+                    timeCapsulesLoadState = state.hubTimeCapsulesLoadState,
                     calendarMode = state.calendarMode,
                     days = state.calendarDays,
                     dayStats = state.calendarDayStats,
@@ -11697,6 +12172,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     selected = state.calendarSelectedDay ?: state.prompt?.day.orEmpty(),
                     pickerExpanded = state.calendarPickerExpanded,
                     calendarLoading = state.calendarLoading,
+                    calendarPublicLoadState = state.calendarPublicLoadState,
+                    calendarModeLoadState = state.calendarModeLoadState,
                     showPublicPostNumbers = state.showPublicPostNumbers,
                     onSectionChange = vm::setHubSection,
                     onRefreshHub = { scope.launch { vm.refreshHubBootstrap(force = true) } },
@@ -14705,16 +15182,33 @@ private fun MonthlyRecapCard(recap: MonthlyRecap) {
     }
 }
 
+private fun SurfaceLoadState.indicatesLoading(): Boolean =
+    phase == SurfaceLoadPhase.COLD_LOADING || phase == SurfaceLoadPhase.REFRESHING
+
+private fun SurfaceLoadState.indicatesCached(): Boolean =
+    phase == SurfaceLoadPhase.WARM_CACHED || phase == SurfaceLoadPhase.FAILED_WITH_CACHE
+
+private fun SurfaceLoadState.indicatesFailure(): Boolean =
+    phase == SurfaceLoadPhase.FAILED_EMPTY || phase == SurfaceLoadPhase.FAILED_WITH_CACHE
+
+@Composable
+private fun InlineLoadHint(text: String) {
+    Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+}
+
 @Composable
 fun HubTab(
     section: HubSection,
     bootstrap: HubBootstrapResponse?,
+    hubBootstrapLoadState: SurfaceLoadState,
     timelineItems: List<HubTimelineItem>,
     timelineUnreadCount: Int,
     timelineLoading: Boolean,
+    timelineLoadState: SurfaceLoadState,
     timeCapsulesLocked: List<HubTimeCapsuleEntry>,
     timeCapsulesReleased: List<HubTimeCapsuleEntry>,
     timeCapsulesLoading: Boolean,
+    timeCapsulesLoadState: SurfaceLoadState,
     calendarMode: CalendarMode,
     days: List<String>,
     dayStats: Map<String, DayStatItem>,
@@ -14730,6 +15224,8 @@ fun HubTab(
     selected: String,
     pickerExpanded: Boolean,
     calendarLoading: Boolean,
+    calendarPublicLoadState: SurfaceLoadState,
+    calendarModeLoadState: SurfaceLoadState,
     showPublicPostNumbers: Boolean,
     onSectionChange: (HubSection) -> Unit,
     onRefreshHub: () -> Unit,
@@ -14821,8 +15317,18 @@ fun HubTab(
                             leadingIcon = Icons.Filled.AccessTime
                         ) {
                             if (timelineItems.isEmpty()) {
-                                Text("Noch keine Aktivitaeten fuer deine Timeline gefunden.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                when {
+                                    timelineLoadState.indicatesLoading() -> InlineLoadHint("Timeline wird vorbereitet und im Hintergrund geladen ...")
+                                    timelineLoadState.indicatesCached() -> InlineLoadHint("Letzter Timeline-Stand wird vorbereitet ...")
+                                    timelineLoadState.indicatesFailure() -> InlineLoadHint("Timeline konnte gerade nicht aktualisiert werden.")
+                                    else -> Text("Noch keine Aktivitaeten fuer deine Timeline gefunden.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             } else {
+                                if (timelineLoadState.indicatesCached()) {
+                                    InlineLoadHint("Letzter Stand aus dem Geraet, wird im Hintergrund aktualisiert.")
+                                } else if (timelineLoadState.phase == SurfaceLoadPhase.REFRESHING) {
+                                    InlineLoadHint("Timeline wird aktualisiert ...")
+                                }
                                 timelineRenderItems.take(3).forEachIndexed { index, renderItem ->
                                     HubTimelineRow(
                                         item = renderItem.item,
@@ -14844,8 +15350,15 @@ fun HubTab(
                         ) {
                             val combined = (timeCapsulesLocked.take(2) + timeCapsulesReleased.take(1)).take(3)
                             if (combined.isEmpty()) {
-                                Text("Keine Timecapsules verfuegbar.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                when {
+                                    timeCapsulesLoadState.indicatesLoading() -> InlineLoadHint("Timecapsules werden vorbereitet ...")
+                                    timeCapsulesLoadState.indicatesFailure() -> InlineLoadHint("Timecapsules konnten gerade nicht geladen werden.")
+                                    else -> Text("Keine Timecapsules verfuegbar.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             } else {
+                                if (timeCapsulesLoadState.indicatesCached()) {
+                                    InlineLoadHint("Letzter Capsule-Stand aus dem Geraet.")
+                                }
                                 combined.forEach { item ->
                                     HubTimeCapsuleRow(item = item, locked = item.countdownSecs > 0, onOpenPhotoInFeed = onOpenPhotoInFeed)
                                 }
@@ -14861,8 +15374,16 @@ fun HubTab(
                                 }
                                 val previewStats = bootstrap?.dashboard?.calendarPreview.orEmpty().take(4)
                                 if (previewStats.isEmpty()) {
-                                    Text("Noch keine Kalender-Vorschau geladen.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    when {
+                                        hubBootstrapLoadState.indicatesLoading() || calendarPublicLoadState.indicatesLoading() -> InlineLoadHint("Kalender-Vorschau wird vorbereitet ...")
+                                        calendarPublicLoadState.indicatesCached() -> InlineLoadHint("Letzte Kalender-Vorschau wird vorbereitet ...")
+                                        hubBootstrapLoadState.indicatesFailure() || calendarPublicLoadState.indicatesFailure() -> InlineLoadHint("Kalender-Vorschau konnte gerade nicht aktualisiert werden.")
+                                        else -> Text("Noch keine Kalender-Vorschau geladen.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                 } else {
+                                    if (calendarPublicLoadState.indicatesCached() || hubBootstrapLoadState.indicatesCached()) {
+                                        InlineLoadHint("Letzter Stand aus dem Geraet, wird im Hintergrund aktualisiert.")
+                                    }
                                     previewStats.forEach { stat ->
                                         Row(
                                             modifier = Modifier
@@ -14910,8 +15431,21 @@ fun HubTab(
                         item("hub-timeline-empty") {
                             Card(modifier = Modifier.fillMaxWidth()) {
                                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Text("Timeline leer", fontWeight = FontWeight.Bold)
-                                    Text("Hier erscheinen die letzten 7 Tage mit persoenlichen Aktivitaeten und Sprungpunkten in den Feed.")
+                                    Text(
+                                        when {
+                                            timelineLoadState.indicatesLoading() -> "Timeline wird vorbereitet"
+                                            timelineLoadState.indicatesFailure() -> "Timeline gerade nicht verfuegbar"
+                                            else -> "Timeline leer"
+                                        },
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        when {
+                                            timelineLoadState.indicatesLoading() -> "Die letzten 7 Tage werden geladen, damit direkte Sprungpunkte sofort bereitstehen."
+                                            timelineLoadState.indicatesFailure() -> "Die Timeline konnte nicht geladen werden. Beim naechsten Refresh wird es erneut versucht."
+                                            else -> "Hier erscheinen die letzten 7 Tage mit persoenlichen Aktivitaeten und Sprungpunkten in den Feed."
+                                        }
+                                    )
                                 }
                             }
                         }
@@ -14961,6 +15495,8 @@ fun HubTab(
                     selected = selected,
                     pickerExpanded = pickerExpanded,
                     loading = calendarLoading,
+                    publicLoadState = calendarPublicLoadState,
+                    modeLoadState = calendarModeLoadState,
                     showPublicPostNumbers = showPublicPostNumbers,
                     onPickerExpandedChange = onPickerExpandedChange,
                     onModeChange = onModeChange,
@@ -15504,6 +16040,8 @@ fun CalendarTab(
     selected: String,
     pickerExpanded: Boolean,
     loading: Boolean,
+    publicLoadState: SurfaceLoadState,
+    modeLoadState: SurfaceLoadState,
     showPublicPostNumbers: Boolean,
     onPickerExpandedChange: (Boolean) -> Unit,
     onModeChange: (CalendarMode) -> Unit,
@@ -15606,6 +16144,8 @@ fun CalendarTab(
             }
         }
     }
+    val effectiveLoadState = if (mode == CalendarMode.PUBLIC) publicLoadState else modeLoadState
+    val showLoadingState = loading || effectiveLoadState.indicatesLoading()
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
@@ -15944,7 +16484,9 @@ fun CalendarTab(
                 Box(modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp), contentAlignment = Alignment.Center) {
                     Text(
                         when {
-                            loading -> "Kalender wird geladen ..."
+                            showLoadingState -> "Kalender wird geladen ..."
+                            effectiveLoadState.indicatesCached() -> "Letzter Kalender-Stand wird vorbereitet ..."
+                            effectiveLoadState.indicatesFailure() -> "Kalender konnte gerade nicht geladen werden"
                             mode == CalendarMode.SEARCH -> "Keine Treffer gefunden"
                             mode == CalendarMode.BOOKMARKS -> if (bookmarkFilter == BookmarkCalendarFilter.MINE) "Du hast noch keine Beitraege gemerkt" else "Noch keine global gemerkten Beitraege gefunden"
                             mode == CalendarMode.TIME_CAPSULES -> "Keine Timecapsules gefunden"
@@ -15958,7 +16500,7 @@ fun CalendarTab(
         items(days) { day ->
             val selectedDay = day == selected
             val stats = dayStats[day]
-            val participantCount = stats?.participantCount ?: 0
+            val participantCount = stats?.participantCount
             val featured = stats?.featuredPhoto
             Card(
                 modifier = Modifier.fillMaxWidth().clickable { onSelect(day) },
@@ -15970,7 +16512,13 @@ fun CalendarTab(
                         fontWeight = if (selectedDay) FontWeight.Bold else FontWeight.Normal
                     )
                     Text(
-                        if (participantCount == 1L) "1 Nutzer hat gepostet" else "$participantCount Nutzer haben gepostet",
+                        when {
+                            participantCount == null && showLoadingState -> "Kalenderdaten werden geladen ..."
+                            participantCount == null && effectiveLoadState.indicatesCached() -> "Letzter Stand wird vorbereitet ..."
+                            participantCount == null -> "Kalenderdaten werden nachgeladen"
+                            participantCount == 1L -> "1 Nutzer hat gepostet"
+                            else -> "$participantCount Nutzer haben gepostet"
+                        },
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     if (showPublicPostNumbers && !featured?.publicNumber.isNullOrBlank()) {
