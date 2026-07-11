@@ -181,6 +181,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -4070,6 +4071,8 @@ data class UiState(
     val feedScrollToTopRequestId: Long = 0L,
     val feedViewportRestoreAnchor: FeedViewportAnchor = FeedViewportAnchor(),
     val feedViewportRestoreRequestId: Long = 0L,
+    val feedNavigationTraceId: Long = 0L,
+    val feedNavigationSource: String = "",
     val feedPaging: Boolean = false,
     val feedRefreshing: Boolean = false,
     val feedWindowReloadInFlight: Boolean = false,
@@ -4514,6 +4517,26 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    private fun navigationSourceLabel(source: String): String = source.trim().ifBlank { "unspecified" }
+
+    private fun withFeedNavigationTrace(requestId: Long, source: String): UiState =
+        state.copy(
+            feedNavigationTraceId = requestId,
+            feedNavigationSource = navigationSourceLabel(source)
+        )
+
+    private fun feedNavigationMeta(
+        traceId: Long = state.feedNavigationTraceId,
+        source: String = state.feedNavigationSource
+    ): String = "traceId=$traceId;source=${navigationSourceLabel(source)}"
+
+    private fun refreshRestoreSource(reason: String): String = when (reason) {
+        "feed_auto" -> "background_refresh"
+        "feed_pull" -> "pull_refresh"
+        "feed_push" -> "push_refresh"
+        else -> "feed_refresh"
+    }
+
     private fun logFeedDecision(
         type: String,
         message: String,
@@ -4542,19 +4565,20 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
-    private fun requestFeedViewportRestore(anchor: FeedViewportAnchor) {
+    private fun requestFeedViewportRestore(anchor: FeedViewportAnchor, source: String) {
         if (anchor.day.isNullOrBlank() && anchor.photoId == null) return
+        val requestId = issueFeedScrollRequestId()
         lastFeedJumpAnchorBefore = anchor
         pendingFeedRestoreFailureReason = ""
         pendingFeedRestoreFailureAnchor = ""
-        state = state.copy(
+        state = withFeedNavigationTrace(requestId = requestId, source = source).copy(
             feedViewportRestoreAnchor = anchor,
-            feedViewportRestoreRequestId = issueFeedScrollRequestId()
+            feedViewportRestoreRequestId = requestId
         )
         logFeedDecision(
             type = "feed_viewport_restore_requested",
             message = "viewport restore requested",
-            meta = "anchor=${describeAnchor(anchor)}"
+            meta = "${feedNavigationMeta(traceId = requestId, source = source)};anchor=${describeAnchor(anchor)}"
         )
     }
 
@@ -4593,12 +4617,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             logFeedDecision(
                 type = "feed_viewport_restore_failed",
                 message = "viewport restore failed",
-                meta = "requestedAnchor=${describeAnchor(requested)};failureReason=${failureReason.ifBlank { "anchor_not_found" }};rowsSize=${state.feedViewportAnchor.rowsSize}"
+                meta = "${feedNavigationMeta()};requestedAnchor=${describeAnchor(requested)};failureReason=${failureReason.ifBlank { "anchor_not_found" }};rowsSize=${state.feedViewportAnchor.rowsSize}"
             )
             logFeedDecision(
                 type = "feed_refresh_result",
                 message = "feed restore failed",
-                meta = "result=restore_failed;requestedAnchor=${describeAnchor(requested)};failureReason=${failureReason.ifBlank { "anchor_not_found" }}"
+                meta = "${feedNavigationMeta()};result=restore_failed;requestedAnchor=${describeAnchor(requested)};failureReason=${failureReason.ifBlank { "anchor_not_found" }}"
             )
             return
         }
@@ -4608,13 +4632,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             logFeedDecision(
                 type = "feed_viewport_restore_fallback",
                 message = "viewport restore fallback applied",
-                meta = "requestedAnchor=${describeAnchor(requested)};resolvedRowIndex=${resolved.rowIndex};resolvedRowType=${resolved.kind.name.lowercase()};resolvedDay=${resolved.day ?: "-"};resolvedPhotoId=${resolved.photoId ?: -1L};failureReason=$failureReason"
+                meta = "${feedNavigationMeta()};requestedAnchor=${describeAnchor(requested)};resolvedRowIndex=${resolved.rowIndex};resolvedRowType=${resolved.kind.name.lowercase()};resolvedDay=${resolved.day ?: "-"};resolvedPhotoId=${resolved.photoId ?: -1L};failureReason=$failureReason"
             )
         }
         logFeedDecision(
             type = "feed_viewport_restore_applied",
             message = "viewport restore applied",
-            meta = "requestedAnchor=${describeAnchor(requested)};resolvedRowIndex=${resolved.rowIndex};resolvedRowType=${resolved.kind.name.lowercase()};resolvedDay=${resolved.day ?: "-"};resolvedPhotoId=${resolved.photoId ?: -1L};offsetPx=${resolved.rowOffsetPx}"
+            meta = "${feedNavigationMeta()};requestedAnchor=${describeAnchor(requested)};resolvedRowIndex=${resolved.rowIndex};resolvedRowType=${resolved.kind.name.lowercase()};resolvedDay=${resolved.day ?: "-"};resolvedPhotoId=${resolved.photoId ?: -1L};offsetPx=${resolved.rowOffsetPx}"
         )
         val before = lastFeedJumpAnchorBefore
         if (before != null && before.day != null && resolved.day != null) {
@@ -4624,7 +4648,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 logFeedDecision(
                     type = "feed_jump_detected",
                     message = "feed viewport moved during restore",
-                    meta = "beforeAnchor=${describeAnchor(before)};afterAnchor=${describeAnchor(resolved)};beforeFirstVisible=${before.firstVisibleIndex};afterFirstVisible=${resolved.firstVisibleIndex};jumpDistanceRows=$rowDistance;jumpDistanceDays=$dayDistance;trigger=viewport_restore"
+                    meta = "${feedNavigationMeta()};beforeAnchor=${describeAnchor(before)};afterAnchor=${describeAnchor(resolved)};beforeFirstVisible=${before.firstVisibleIndex};afterFirstVisible=${resolved.firstVisibleIndex};jumpDistanceRows=$rowDistance;jumpDistanceDays=$dayDistance;trigger=viewport_restore"
                 )
             }
         }
@@ -6659,10 +6683,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
-    suspend fun jumpToDay(day: String) {
+    suspend fun jumpToDay(day: String, source: String = "direct_jump") {
         clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
-        state = state.copy(
+        state = withFeedNavigationTrace(requestId = scrollRequestId, source = source).copy(
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = null,
@@ -6671,6 +6695,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedFocusReactionEmoji = null,
             feedFocusBoundary = FeedJumpBoundary.START,
             feedScrollRequestId = scrollRequestId
+        )
+        logFeedDecision(
+            type = "feed_navigation_requested",
+            message = "feed day jump requested",
+            meta = "${feedNavigationMeta(traceId = scrollRequestId, source = source)};targetDay=$day;targetBoundary=start"
         )
         runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
             .onFailure {
@@ -6687,11 +6716,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         photoId: Long,
         commentId: Long? = null,
         photoMojiId: Long? = null,
-        reactionEmoji: String? = null
+        reactionEmoji: String? = null,
+        source: String = "direct_jump"
     ) {
         clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
-        state = state.copy(
+        state = withFeedNavigationTrace(requestId = scrollRequestId, source = source).copy(
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = photoId,
@@ -6701,16 +6731,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedFocusBoundary = null,
             feedScrollRequestId = scrollRequestId
         )
+        logFeedDecision(
+            type = "feed_navigation_requested",
+            message = "feed target jump requested",
+            meta = "${feedNavigationMeta(traceId = scrollRequestId, source = source)};targetDay=$day;targetPhotoId=$photoId;targetCommentId=${commentId ?: -1L};targetPhotoMojiId=${photoMojiId ?: -1L};targetReaction=${reactionEmoji?.trim().orEmpty().ifBlank { "-" }}"
+        )
         runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
             .onFailure {
                 state = state.copy(message = apiError(it, "Beitrag laden fehlgeschlagen"))
             }
     }
 
-    suspend fun jumpToDayBoundary(day: String, boundary: FeedJumpBoundary) {
+    suspend fun jumpToDayBoundary(day: String, boundary: FeedJumpBoundary, source: String = "direct_jump") {
         clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
-        state = state.copy(
+        state = withFeedNavigationTrace(requestId = scrollRequestId, source = source).copy(
             activeTab = AppTab.FEED,
             feedFocusDay = day,
             feedFocusPhotoId = null,
@@ -6719,6 +6754,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedFocusReactionEmoji = null,
             feedFocusBoundary = boundary,
             feedScrollRequestId = scrollRequestId
+        )
+        logFeedDecision(
+            type = "feed_navigation_requested",
+            message = "feed boundary jump requested",
+            meta = "${feedNavigationMeta(traceId = scrollRequestId, source = source)};targetDay=$day;targetBoundary=${boundary.name.lowercase()}"
         )
         runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
             .onFailure {
@@ -6746,10 +6786,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photoId = target.photoId,
                 commentId = target.commentId.takeIf { it > 0L },
                 photoMojiId = target.photoMojiId.takeIf { it > 0L },
-                reactionEmoji = target.reactionEmoji.takeIf { it.isNotBlank() }
+                reactionEmoji = target.reactionEmoji.takeIf { it.isNotBlank() },
+                source = "hub_jump"
             )
         } else {
-            jumpToDay(day)
+            jumpToDay(day, source = "hub_jump")
         }
     }
 
@@ -7454,7 +7495,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 if (isModeSwitchRefresh && refreshedFeedDays > 0) {
                     requestFeedScrollToTop(reason)
                 } else if (viewportAnchorBeforeRefresh != null && refreshedFeedDays > 0) {
-                    requestFeedViewportRestore(viewportAnchorBeforeRefresh)
+                    requestFeedViewportRestore(
+                        anchor = viewportAnchorBeforeRefresh,
+                        source = refreshRestoreSource(reason)
+                    )
                 }
             } else {
                 val today = prompt.day
@@ -7490,7 +7534,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 logFeedDecision(
                     type = "feed_refresh_result",
                     message = if (restoreFailureReason.isNotBlank()) "feed refresh finished with restore failure" else "feed refresh finished",
-                    meta = "result=${when {
+                    meta = "${feedNavigationMeta()};result=${when {
                         restoreFailureReason.isNotBlank() && (reason == "feed_pull" || reason == "feed_push") -> "visible_fetch_restore_failed"
                         restoreFailureReason.isNotBlank() -> "restore_failed"
                         refreshedFeedDays > 0 && (reason == "feed_pull" || reason == "feed_push") -> "visible_fetch"
@@ -8119,6 +8163,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 throw e
             }
         } catch (t: Throwable) {
+            if (isBenignCancellationShared(t)) {
+                logPerfEvent(
+                    event = "feed_day_load",
+                    durationMs = System.currentTimeMillis() - startedAt,
+                    result = PerfEventResult.CANCELLED,
+                    extra = "day=$day;cancelled=${t::class.java.simpleName};forced=$forceReload"
+                )
+                throw t
+            }
             logPerfEvent(
                 event = "feed_day_load",
                 durationMs = System.currentTimeMillis() - startedAt,
@@ -11604,11 +11657,22 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     }
                 )
 
-                AppTab.CALENDAR -> HubTab(
+                AppTab.CALENDAR -> {
+                    val localAppUpdateItem = rememberLocalAppUpdateTimelineItem(
+                        unread = state.showChangelogDialog,
+                        changelogLines = state.changelogLines
+                    )
+                    val mergedTimelineItems = remember(state.hubTimelineItems, localAppUpdateItem) {
+                        mergeHubTimelineItemsWithLocal(state.hubTimelineItems, localAppUpdateItem)
+                    }
+                    val mergedTimelineUnread = remember(state.hubTimelineUnreadCount, mergedTimelineItems) {
+                        mergedTimelineItems.count { it.unread }
+                    }
+                    HubTab(
                     section = state.hubSection,
                     bootstrap = state.hubBootstrap,
-                    timelineItems = state.hubTimelineItems,
-                    timelineUnreadCount = state.hubTimelineUnreadCount,
+                    timelineItems = mergedTimelineItems,
+                    timelineUnreadCount = mergedTimelineUnread,
                     timelineLoading = state.hubTimelineLoading,
                     timeCapsulesLocked = state.hubTimeCapsulesLocked,
                     timeCapsulesReleased = state.hubTimeCapsulesReleased,
@@ -11651,6 +11715,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onOpenPhotoInFeed = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
                     onOpenHubTarget = { target -> scope.launch { vm.jumpToHubTarget(target) } }
                 )
+                }
 
                 AppTab.CHAT -> ChatTab(
                     items = state.chat,
@@ -15201,6 +15266,71 @@ private fun buildHubTimelineRenderItems(items: List<HubTimelineItem>): List<HubT
     }
 }
 
+private fun mergeHubTimelineItemsWithLocal(
+    remoteItems: List<HubTimelineItem>,
+    localItem: HubTimelineItem?
+): List<HubTimelineItem> {
+    if (localItem == null) return remoteItems
+    val merged = LinkedHashMap<String, HubTimelineItem>()
+    listOf(localItem).plus(remoteItems).forEach { item ->
+        val id = item.id.ifBlank { "timeline-${item.type}-${item.occurredAt.orEmpty()}" }
+        val existing = merged[id]
+        merged[id] = if (existing == null) {
+            item
+        } else {
+            existing.copy(
+                unread = existing.unread || item.unread,
+                bookmarkContext = existing.bookmarkContext || item.bookmarkContext,
+                body = if (existing.body.isNotBlank()) existing.body else item.body,
+                targetUrl = if (existing.targetUrl.isNotBlank()) existing.targetUrl else item.targetUrl
+            )
+        }
+    }
+    return merged.values.sortedByDescending { parseIsoInstantMs(it.occurredAt.orEmpty()) }
+}
+
+@Composable
+private fun rememberLocalAppUpdateTimelineItem(
+    unread: Boolean,
+    changelogLines: List<String>
+): HubTimelineItem? {
+    val context = LocalContext.current
+    return remember(context, unread, changelogLines) {
+        buildLocalAppUpdateTimelineItem(context, unread, changelogLines)
+    }
+}
+
+private fun buildLocalAppUpdateTimelineItem(
+    context: Context,
+    unread: Boolean,
+    changelogLines: List<String>
+): HubTimelineItem? {
+    val version = BuildConfig.VERSION_NAME.trim().removePrefix("v")
+    if (version.isBlank()) return null
+    val packageInfo = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0)
+    }.getOrNull() ?: return null
+    val updatedAtMs = packageInfo.lastUpdateTime
+    if (updatedAtMs <= 0L) return null
+    val ageMs = System.currentTimeMillis() - updatedAtMs
+    if (ageMs > 7L * 24L * 60L * 60L * 1000L) return null
+    val occurredAt = OffsetDateTime.ofInstant(Instant.ofEpochMilli(updatedAtMs), ZoneId.systemDefault()).toString()
+    val summary = changelogLines.firstOrNull()?.trim().orEmpty()
+    val body = if (summary.isNotBlank()) "v$version · $summary" else "v$version · Release-Infos verfuegbar"
+    return HubTimelineItem(
+        id = "app-update-v$version",
+        type = "app_update",
+        group = "system",
+        system = true,
+        accent = "system",
+        title = "App-Update installiert",
+        body = body,
+        occurredAt = occurredAt,
+        unread = unread,
+        targetUrl = "https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v$version"
+    )
+}
+
 @Composable
 private fun HubTimelineRow(
     item: HubTimelineItem,
@@ -15208,6 +15338,7 @@ private fun HubTimelineRow(
     onOpenDayInFeed: (String) -> Unit,
     emphasized: Boolean = false
 ) {
+    val uriHandler = LocalUriHandler.current
     val accentColor = when (item.accent) {
         "capsule" -> Color(0xFFB63A14)
         "system" -> Color(0xFF0A5C7A)
@@ -15225,6 +15356,7 @@ private fun HubTimelineRow(
                 when {
                     target.photoId > 0L && target.day.isNotBlank() -> onOpenHubTarget(target)
                     target.day.isNotBlank() -> onOpenDayInFeed(target.day)
+                    item.targetUrl.isNotBlank() -> uriHandler.openUri(item.targetUrl)
                 }
             },
         colors = CardDefaults.cardColors(

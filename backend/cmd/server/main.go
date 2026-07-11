@@ -81,6 +81,9 @@ func main() {
 		FeedCache:   api.NewFeedDayCache(12 * time.Second),
 		FeedLimiter: api.NewFeedPollLimiter(28, 30*time.Second),
 	}
+	if err := server.EnsureHubVersionSystemEvent(time.Now().In(location)); err != nil {
+		log.Printf("hub system event bootstrap failed: %v", err)
+	}
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 	defer runtimeCancel()
 	go server.RunAutoBookmarkCleanupLoop(runtimeCtx, 30*time.Minute)

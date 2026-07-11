@@ -260,6 +260,7 @@ func (s *Server) hubTimelinePayload(user models.User, now time.Time, limit int, 
 		return nil, 0, err
 	}
 	items = append(items, rows...)
+	items = mergeHubTimelineItems(items)
 
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].SortAt.Equal(items[j].SortAt) {
@@ -304,6 +305,69 @@ func fmtHubTimelineID(item gin.H) string {
 	return ""
 }
 
+func mergeHubTimelineItems(items []hubTimelineItem) []hubTimelineItem {
+	if len(items) < 2 {
+		return items
+	}
+	out := make([]hubTimelineItem, 0, len(items))
+	byID := make(map[string]int, len(items))
+	for _, item := range items {
+		id := fmtHubTimelineID(item.Data)
+		if id == "" {
+			out = append(out, item)
+			continue
+		}
+		if idx, ok := byID[id]; ok {
+			out[idx] = mergeHubTimelineItem(out[idx], item)
+			continue
+		}
+		byID[id] = len(out)
+		out = append(out, item)
+	}
+	return out
+}
+
+func mergeHubTimelineItem(primary hubTimelineItem, secondary hubTimelineItem) hubTimelineItem {
+	if secondary.SortAt.After(primary.SortAt) {
+		primary.SortAt = secondary.SortAt
+	}
+	if primary.Data == nil {
+		primary.Data = gin.H{}
+	}
+	if secondary.Data == nil {
+		return primary
+	}
+	if primary.Data["bookmarkContext"] == true || secondary.Data["bookmarkContext"] == true {
+		primary.Data["bookmarkContext"] = true
+	}
+	primaryTargetURL, _ := primary.Data["targetUrl"].(string)
+	if strings.TrimSpace(primaryTargetURL) == "" {
+		if targetURL, ok := secondary.Data["targetUrl"].(string); ok && strings.TrimSpace(targetURL) != "" {
+			primary.Data["targetUrl"] = targetURL
+		}
+	}
+	primaryBody, _ := primary.Data["body"].(string)
+	if strings.TrimSpace(primaryBody) == "" {
+		if body, ok := secondary.Data["body"].(string); ok {
+			primary.Data["body"] = body
+		}
+	}
+	primaryTitle, _ := primary.Data["title"].(string)
+	if strings.TrimSpace(primaryTitle) == "" {
+		if title, ok := secondary.Data["title"].(string); ok {
+			primary.Data["title"] = title
+		}
+	}
+	for _, key := range []string{"photo", "photoUser", "actor", "comment", "photoMoji", "target", "meta"} {
+		if _, exists := primary.Data[key]; !exists {
+			if value, ok := secondary.Data[key]; ok {
+				primary.Data[key] = value
+			}
+		}
+	}
+	return primary
+}
+
 func (s *Server) hubPostItems(viewerID uint, now, from time.Time) ([]hubTimelineItem, error) {
 	var photos []models.Photo
 	if err := s.DB.Preload("User").
@@ -341,6 +405,17 @@ func (s *Server) hubPostItems(viewerID uint, now, from time.Time) ([]hubTimeline
 }
 
 func (s *Server) hubCommentItems(viewerID uint, now, from time.Time) ([]hubTimelineItem, error) {
+	return s.hubCommentItemsMatching(viewerID, now, from, func(photo models.Photo, item models.PhotoComment) bool {
+		return photo.UserID == viewerID || item.UserID == viewerID
+	}, false)
+}
+
+func (s *Server) hubCommentItemsMatching(
+	viewerID uint,
+	now, from time.Time,
+	include func(photo models.Photo, item models.PhotoComment) bool,
+	bookmarkContext bool,
+) ([]hubTimelineItem, error) {
 	type row struct {
 		Comment models.PhotoComment
 		Photo   models.Photo
@@ -367,7 +442,7 @@ func (s *Server) hubCommentItems(viewerID uint, now, from time.Time) ([]hubTimel
 		if !ok || !photoVisibleToViewer(viewerID, photo, now) {
 			continue
 		}
-		if photo.UserID != viewerID && item.UserID != viewerID {
+		if include != nil && !include(photo, item) {
 			continue
 		}
 		title := "Neuer Kommentar"
@@ -378,7 +453,7 @@ func (s *Server) hubCommentItems(viewerID uint, now, from time.Time) ([]hubTimel
 		if len(body) > 120 {
 			body = body[:120] + "..."
 		}
-		rows = append(rows, s.hubTimelinePhotoItem(
+		row := s.hubTimelinePhotoItem(
 			viewerID,
 			photo,
 			item.CreatedAt,
@@ -396,12 +471,27 @@ func (s *Server) hubCommentItems(viewerID uint, now, from time.Time) ([]hubTimel
 				"actor":      s.userPublicJSON(viewerID, item.User),
 				"comment":    s.photoCommentJSON(item),
 			},
-		))
+		)
+		if bookmarkContext {
+			row.Data["bookmarkContext"] = true
+		}
+		rows = append(rows, row)
 	}
 	return rows, nil
 }
 
 func (s *Server) hubReactionItems(viewerID uint, now, from time.Time) ([]hubTimelineItem, error) {
+	return s.hubReactionItemsMatching(viewerID, now, from, func(photo models.Photo, item models.PhotoReaction) bool {
+		return photo.UserID == viewerID || item.UserID == viewerID
+	}, false)
+}
+
+func (s *Server) hubReactionItemsMatching(
+	viewerID uint,
+	now, from time.Time,
+	include func(photo models.Photo, item models.PhotoReaction) bool,
+	bookmarkContext bool,
+) ([]hubTimelineItem, error) {
 	var reactions []models.PhotoReaction
 	if err := s.DB.Where("created_at >= ?", from.UTC()).
 		Order("created_at desc, id desc").
@@ -429,7 +519,7 @@ func (s *Server) hubReactionItems(viewerID uint, now, from time.Time) ([]hubTime
 		if !ok || !photoVisibleToViewer(viewerID, photo, now) {
 			continue
 		}
-		if photo.UserID != viewerID && item.UserID != viewerID {
+		if include != nil && !include(photo, item) {
 			continue
 		}
 		actor := usersByID[item.UserID]
@@ -437,7 +527,7 @@ func (s *Server) hubReactionItems(viewerID uint, now, from time.Time) ([]hubTime
 		if item.UserID == viewerID {
 			title = "Deine Reaktion"
 		}
-		rows = append(rows, s.hubTimelinePhotoItem(
+		row := s.hubTimelinePhotoItem(
 			viewerID,
 			photo,
 			item.CreatedAt,
@@ -455,12 +545,27 @@ func (s *Server) hubReactionItems(viewerID uint, now, from time.Time) ([]hubTime
 				"target":        s.hubTargetJSON(hubTargetRef{Day: photo.Day, PhotoID: photo.ID, ReactionEmoji: item.Emoji}),
 				"actor":         s.userPublicJSON(viewerID, actor),
 			},
-		))
+		)
+		if bookmarkContext {
+			row.Data["bookmarkContext"] = true
+		}
+		rows = append(rows, row)
 	}
 	return rows, nil
 }
 
 func (s *Server) hubFotomojiItems(viewerID uint, now, from time.Time) ([]hubTimelineItem, error) {
+	return s.hubFotomojiItemsMatching(viewerID, now, from, func(photo models.Photo, item models.PhotoFotomoji) bool {
+		return photo.UserID == viewerID || item.UserID == viewerID
+	}, false)
+}
+
+func (s *Server) hubFotomojiItemsMatching(
+	viewerID uint,
+	now, from time.Time,
+	include func(photo models.Photo, item models.PhotoFotomoji) bool,
+	bookmarkContext bool,
+) ([]hubTimelineItem, error) {
 	var items []models.PhotoFotomoji
 	if err := s.DB.Preload("User").
 		Where("created_at >= ?", from.UTC()).
@@ -483,14 +588,14 @@ func (s *Server) hubFotomojiItems(viewerID uint, now, from time.Time) ([]hubTime
 		if !ok || !photoVisibleToViewer(viewerID, photo, now) {
 			continue
 		}
-		if photo.UserID != viewerID && item.UserID != viewerID {
+		if include != nil && !include(photo, item) {
 			continue
 		}
 		title := "Neue FotoMoji"
 		if item.UserID == viewerID {
 			title = "Deine FotoMoji"
 		}
-		rows = append(rows, s.hubTimelinePhotoItem(
+		row := s.hubTimelinePhotoItem(
 			viewerID,
 			photo,
 			item.CreatedAt,
@@ -508,7 +613,11 @@ func (s *Server) hubFotomojiItems(viewerID uint, now, from time.Time) ([]hubTime
 				"actor":      s.userPublicJSON(viewerID, item.User),
 				"photoMoji":  s.photoFotomojiJSON(item, true),
 			},
-		))
+		)
+		if bookmarkContext {
+			row.Data["bookmarkContext"] = true
+		}
+		rows = append(rows, row)
 	}
 	return rows, nil
 }
@@ -527,15 +636,24 @@ func (s *Server) hubBookmarkedActivityItems(viewerID uint, now, from time.Time) 
 		photoIDs = append(photoIDs, bookmark.PhotoID)
 		bookmarkSet[bookmark.PhotoID] = struct{}{}
 	}
-	commentRows, err := s.hubCommentItems(viewerID, now, from)
+	commentRows, err := s.hubCommentItemsMatching(viewerID, now, from, func(photo models.Photo, item models.PhotoComment) bool {
+		_, exists := bookmarkSet[photo.ID]
+		return exists
+	}, true)
 	if err != nil {
 		return nil, err
 	}
-	reactionRows, err := s.hubReactionItems(viewerID, now, from)
+	reactionRows, err := s.hubReactionItemsMatching(viewerID, now, from, func(photo models.Photo, item models.PhotoReaction) bool {
+		_, exists := bookmarkSet[photo.ID]
+		return exists
+	}, true)
 	if err != nil {
 		return nil, err
 	}
-	fotomojiRows, err := s.hubFotomojiItems(viewerID, now, from)
+	fotomojiRows, err := s.hubFotomojiItemsMatching(viewerID, now, from, func(photo models.Photo, item models.PhotoFotomoji) bool {
+		_, exists := bookmarkSet[photo.ID]
+		return exists
+	}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -555,12 +673,37 @@ func (s *Server) hubBookmarkedActivityItems(viewerID uint, now, from time.Time) 
 		if _, exists := bookmarkSet[photoIDValue]; !exists {
 			continue
 		}
-		row.Data["group"] = "bookmarked"
-		row.Data["accent"] = "bookmark"
 		row.Data["bookmarkContext"] = true
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+func (s *Server) EnsureHubVersionSystemEvent(now time.Time) error {
+	version := strings.TrimSpace(s.Config.AppVersion)
+	if version == "" || strings.EqualFold(version, "dev") {
+		return nil
+	}
+	eventType := "backend_runtime_update"
+	title := "Backend-Update"
+	body := "Runtime-Version " + version + " ist aktiv."
+	metaJSON := `{"version":"` + version + `","kind":"backend_runtime"}`
+	var existing models.HubSystemEvent
+	err := s.DB.Where("event_type = ? AND meta_json = ?", eventType, metaJSON).First(&existing).Error
+	if err == nil {
+		return nil
+	}
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "record not found") {
+		return err
+	}
+	return s.DB.Create(&models.HubSystemEvent{
+		EventType:  eventType,
+		Scope:      hubTimelineSystemEventScope,
+		Title:      title,
+		Body:       body,
+		OccurredAt: now.UTC(),
+		MetaJSON:   metaJSON,
+	}).Error
 }
 
 func (s *Server) hubPostChangeItems(viewerID uint, now, from time.Time) ([]hubTimelineItem, error) {

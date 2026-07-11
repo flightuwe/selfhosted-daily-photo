@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -118,5 +119,124 @@ func TestHubTimeCapsulesPayloadSeparatesLockedAndReleased(t *testing.T) {
 	}
 	if len(releasedItems) != 1 {
 		t.Fatalf("expected 1 released capsule, got %d", len(releasedItems))
+	}
+}
+
+func TestHubTimelinePayloadDeduplicatesBookmarkedOwnComment(t *testing.T) {
+	server := newSearchTestServer(t)
+
+	viewer := models.User{
+		Username:                   "viewer",
+		PasswordHash:               "x",
+		PhotoCommentPushEnabled:    true,
+		BookmarkedPhotoPushEnabled: true,
+	}
+	owner := models.User{Username: "owner", PasswordHash: "x"}
+	for _, user := range []*models.User{&viewer, &owner} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+
+	photo := models.Photo{
+		UserID:    owner.ID,
+		User:      owner,
+		Day:       "2026-07-11",
+		FilePath:  "2026-07-11/owner.jpg",
+		CreatedAt: time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoBookmark{UserID: viewer.ID, PhotoID: photo.ID, Active: true}).Error; err != nil {
+		t.Fatalf("create bookmark: %v", err)
+	}
+	comment := models.PhotoComment{
+		PhotoID:   photo.ID,
+		UserID:    viewer.ID,
+		User:      viewer,
+		Body:      "Mein eigener Kommentar",
+		CreatedAt: time.Date(2026, 7, 11, 9, 10, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&comment).Error; err != nil {
+		t.Fatalf("create comment: %v", err)
+	}
+
+	items, _, err := server.hubTimelinePayload(viewer, time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC), 40, nil, nil)
+	if err != nil {
+		t.Fatalf("hubTimelinePayload failed: %v", err)
+	}
+	commentCount := 0
+	bookmarkContext := false
+	for _, item := range items {
+		if item["id"] == "comment-"+fmt.Sprint(comment.ID) {
+			commentCount++
+			if item["bookmarkContext"] == true {
+				bookmarkContext = true
+			}
+		}
+	}
+	if commentCount != 1 {
+		t.Fatalf("expected exactly one merged comment item, got %d", commentCount)
+	}
+	if !bookmarkContext {
+		t.Fatal("expected merged comment item to preserve bookmark context")
+	}
+}
+
+func TestHubTimelinePayloadIncludesOwnerCommentOnBookmarkedPhoto(t *testing.T) {
+	server := newSearchTestServer(t)
+
+	viewer := models.User{
+		Username:                   "viewer",
+		PasswordHash:               "x",
+		BookmarkedPhotoPushEnabled: true,
+	}
+	owner := models.User{Username: "owner", PasswordHash: "x"}
+	for _, user := range []*models.User{&viewer, &owner} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+
+	photo := models.Photo{
+		UserID:    owner.ID,
+		User:      owner,
+		Day:       "2026-07-11",
+		FilePath:  "2026-07-11/owner.jpg",
+		CreatedAt: time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoBookmark{UserID: viewer.ID, PhotoID: photo.ID, Active: true}).Error; err != nil {
+		t.Fatalf("create bookmark: %v", err)
+	}
+	comment := models.PhotoComment{
+		PhotoID:   photo.ID,
+		UserID:    owner.ID,
+		User:      owner,
+		Body:      "Antwort vom Owner",
+		CreatedAt: time.Date(2026, 7, 11, 9, 10, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&comment).Error; err != nil {
+		t.Fatalf("create comment: %v", err)
+	}
+
+	items, _, err := server.hubTimelinePayload(viewer, time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC), 40, nil, nil)
+	if err != nil {
+		t.Fatalf("hubTimelinePayload failed: %v", err)
+	}
+	found := false
+	for _, item := range items {
+		if item["id"] == "comment-"+fmt.Sprint(comment.ID) {
+			found = true
+			if item["bookmarkContext"] != true {
+				t.Fatal("expected bookmarked owner comment to be marked as bookmark context")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected owner comment on bookmarked photo to appear in timeline")
 	}
 }
