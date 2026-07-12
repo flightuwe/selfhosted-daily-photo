@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.26",
+  "title": "Crash-Fix fuer Feed-Interaktionen und konsistente Kalender-Metadaten",
+  "items": [
+    "Ein Crash beim Kommentieren, Reagieren oder Senden von FotoMojis wurde behoben. Die App faengt fehlende Interaktions-Metadaten jetzt defensiv ab, statt beim lokalen Feed-Update abzustuerzen.",
+    "Kalender-, Bookmark- und Hub-Payloads liefern jetzt dieselben Interaktions-Metadaten wie der Feed. Dadurch bleibt das Verhalten zwischen Hub, Kalender und Feed bei Interaktionen konsistent.",
+    "Der gemeinsame Interaktionspfad ist gehaertet worden, damit alte oder unvollstaendige FeedItem-Datensaetze keine NullPointer-Abstuerze mehr ausloesen.",
+    "Zusaetzliche Regressionstests sichern den Kalender-Payload gegen Rueckfaelle bei interactionSnapshot- und interactionCounts-Metadaten ab."
+  ]
+}

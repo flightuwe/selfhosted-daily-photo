@@ -1003,6 +1003,19 @@ data class FeedInteractionSnapshot(
     val isFull: Boolean
         get() = kind.equals("full", ignoreCase = true)
 }
+
+private fun FeedItem.normalizedInteractionSnapshot(): FeedInteractionSnapshot =
+    (interactionSnapshot as FeedInteractionSnapshot?) ?: FeedInteractionSnapshot()
+
+private fun FeedItem.normalizedInteractionCounts(): InteractionCounts =
+    (interactionCounts as InteractionCounts?) ?: InteractionCounts()
+
+private fun FeedItem.withNormalizedInteractionMeta(): FeedItem =
+    copy(
+        interactionCounts = normalizedInteractionCounts(),
+        interactionSnapshot = normalizedInteractionSnapshot()
+    )
+
 data class PhotoInteractionMutation(
     val type: String = "",
     val deduplicated: Boolean = false
@@ -4926,16 +4939,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun applyResolvedPhotoInteractions(item: FeedItem): FeedItem {
-        val cached = photoInteractionsStore[item.photo.id] ?: return item
-        if (!cached.full && item.interactionSnapshot.isFull) return item
-        return item.copy(
+        val normalized = item.withNormalizedInteractionMeta()
+        val cached = photoInteractionsStore[item.photo.id] ?: return normalized
+        if (!cached.full && normalized.interactionSnapshot.isFull) return normalized
+        return normalized.copy(
             reactions = cached.reactions,
             photoMojis = cached.photoMojis,
             comments = cached.comments,
             interactionCounts = cached.counts,
             interactionSnapshot = interactionSnapshotFromResponse(
                 response = cached,
-                previewLimit = item.interactionSnapshot.commentPreviewLimit
+                previewLimit = normalized.interactionSnapshot.commentPreviewLimit
             )
         )
     }
@@ -5188,14 +5202,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         cachePhotoInteractions(interactions)
         stalePhotoInteractionIds.remove(photoId)
         patchFeedItemState(photoId) { item ->
-            item.copy(
+            val normalized = item.withNormalizedInteractionMeta()
+            normalized.copy(
                 reactions = interactions.reactions,
                 photoMojis = interactions.photoMojis,
                 comments = interactions.comments,
                 interactionCounts = interactions.counts,
                 interactionSnapshot = interactionSnapshotFromResponse(
                     response = interactions,
-                    previewLimit = item.interactionSnapshot.commentPreviewLimit
+                    previewLimit = normalized.interactionSnapshot.commentPreviewLimit
                 )
             )
         }

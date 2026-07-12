@@ -368,6 +368,77 @@ func TestCalendarBookmarksPayloadIncludesAllBookmarkedPhotosForSameDay(t *testin
 	}
 }
 
+func TestCalendarPayloadIncludesInteractionPreviewMetadata(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	author := models.User{Username: "author", PasswordHash: "x"}
+	reactor := models.User{Username: "reactor", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if err := server.DB.Create(&author).Error; err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	if err := server.DB.Create(&reactor).Error; err != nil {
+		t.Fatalf("create reactor: %v", err)
+	}
+
+	day := "2026-07-01"
+	photo := models.Photo{
+		UserID:    author.ID,
+		User:      author,
+		Day:       day,
+		FilePath:  day + "/post.jpg",
+		CreatedAt: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoComment{
+		PhotoID: photo.ID,
+		UserID:  reactor.ID,
+		Body:    "sichtbar",
+	}).Error; err != nil {
+		t.Fatalf("create comment: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoReaction{
+		PhotoID: photo.ID,
+		UserID:  reactor.ID,
+		Emoji:   "fire",
+	}).Error; err != nil {
+		t.Fatalf("create reaction: %v", err)
+	}
+
+	payload, err := server.calendarPayload(viewer.ID, "public", 0, time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("calendarPayload: %v", err)
+	}
+	items, ok := payload["items"].([]gin.H)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %#v, want one item", payload["items"])
+	}
+	snapshot, ok := items[0]["interactionSnapshot"].(gin.H)
+	if !ok {
+		t.Fatalf("interactionSnapshot = %#v, want gin.H", items[0]["interactionSnapshot"])
+	}
+	if got := snapshot["kind"]; got != "preview" {
+		t.Fatalf("interactionSnapshot.kind = %#v, want preview", got)
+	}
+	if got := snapshot["commentPreviewLimit"]; got == nil {
+		t.Fatalf("interactionSnapshot.commentPreviewLimit missing")
+	}
+	counts, ok := items[0]["interactionCounts"].(gin.H)
+	if !ok {
+		t.Fatalf("interactionCounts = %#v, want gin.H", items[0]["interactionCounts"])
+	}
+	if got := counts["comments"]; got != int64(1) {
+		t.Fatalf("interactionCounts.comments = %#v, want 1", got)
+	}
+	if got := counts["reactions"]; got != int64(1) {
+		t.Fatalf("interactionCounts.reactions = %#v, want 1", got)
+	}
+}
+
 func TestSortPhotosForFeedUsesEffectiveTime(t *testing.T) {
 	uploadA := time.Date(2026, 3, 12, 18, 0, 0, 0, time.UTC)
 	capturedA := uploadA.Add(-10 * time.Minute)

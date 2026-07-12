@@ -2262,16 +2262,16 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 			photoMojis = []gin.H{}
 		}
 		out = append(out, gin.H{
-			"isEarly":                     isEarly,
-			"isLate":                      isLate,
-			"capsuleLocked":               capsuleLocked,
-			"capsuleReleased":             capsuleReleased,
-			"photo":                       s.photoJSONForViewer(adminUser.ID, p, decorations),
-			"user":                        s.userPublicJSON(adminUser.ID, p.User),
-			"reactions":                   reactions,
-			"comments":                    comments,
-			"photoMojis":                  photoMojis,
-			"interactionCounts":           countsByPhoto[p.ID],
+			"isEarly":           isEarly,
+			"isLate":            isLate,
+			"capsuleLocked":     capsuleLocked,
+			"capsuleReleased":   capsuleReleased,
+			"photo":             s.photoJSONForViewer(adminUser.ID, p, decorations),
+			"user":              s.userPublicJSON(adminUser.ID, p.User),
+			"reactions":         reactions,
+			"comments":          comments,
+			"photoMojis":        photoMojis,
+			"interactionCounts": countsByPhoto[p.ID],
 			"interactionSnapshot": gin.H{
 				"kind":                "preview",
 				"commentPreviewLimit": commentPreviewLimit,
@@ -2779,16 +2779,16 @@ func (s *Server) feedPayloadForDay(userID uint, day string, now time.Time) (gin.
 			photoMojis = []gin.H{}
 		}
 		out = append(out, gin.H{
-			"isEarly":                     isEarly,
-			"isLate":                      isLate,
-			"capsuleLocked":               capsuleLocked,
-			"capsuleReleased":             capsuleReleased,
-			"photo":                       s.photoJSONForViewerWithAttachments(userID, p, decorations, attachmentByPhoto[p.ID]),
-			"user":                        s.userPublicJSON(userID, p.User),
-			"reactions":                   reactions,
-			"comments":                    comments,
-			"photoMojis":                  photoMojis,
-			"interactionCounts":           countsByPhoto[p.ID],
+			"isEarly":           isEarly,
+			"isLate":            isLate,
+			"capsuleLocked":     capsuleLocked,
+			"capsuleReleased":   capsuleReleased,
+			"photo":             s.photoJSONForViewerWithAttachments(userID, p, decorations, attachmentByPhoto[p.ID]),
+			"user":              s.userPublicJSON(userID, p.User),
+			"reactions":         reactions,
+			"comments":          comments,
+			"photoMojis":        photoMojis,
+			"interactionCounts": countsByPhoto[p.ID],
 			"interactionSnapshot": gin.H{
 				"kind":                "preview",
 				"commentPreviewLimit": commentPreviewLimit,
@@ -6405,11 +6405,6 @@ func (s *Server) loadVisiblePhotoForViewer(viewerID uint, rawPhotoID string) (mo
 }
 
 func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint, now time.Time) (gin.H, error) {
-	type interactionRow struct {
-		PhotoID uint
-		Count   int64
-	}
-
 	var photos []models.Photo
 	query := s.DB.Preload("User").Model(&models.Photo{})
 	orderClause := "photos.day desc, photos.created_at desc, photos.id desc"
@@ -6491,47 +6486,22 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 	reactionPreviewByPhoto := make(map[uint][]gin.H, len(photoIDs))
 	commentPreviewByPhoto := make(map[uint][]gin.H, len(photoIDs))
 	photoMojiPreviewByPhoto := make(map[uint][]gin.H, len(photoIDs))
+	countsByPhoto := make(map[uint]gin.H, len(photoIDs))
+	commentPreviewLimit := 0
 	if len(photoIDs) > 0 {
-		var reactionRows []interactionRow
-		if err := s.DB.Model(&models.PhotoReaction{}).
-			Select("photo_id, COUNT(*) as count").
-			Where("photo_id IN ?", photoIDs).
-			Group("photo_id").
-			Scan(&reactionRows).Error; err != nil {
-			return nil, err
-		}
-		for _, row := range reactionRows {
-			reactionCounts[row.PhotoID] = row.Count
-		}
-		var fotomojiRows []interactionRow
-		if err := s.DB.Model(&models.PhotoFotomoji{}).
-			Select("photo_id, COUNT(*) as count").
-			Where("photo_id IN ?", photoIDs).
-			Group("photo_id").
-			Scan(&fotomojiRows).Error; err != nil {
-			return nil, err
-		}
-		for _, row := range fotomojiRows {
-			reactionCounts[row.PhotoID] += row.Count
-		}
-		var commentRows []interactionRow
-		if err := s.DB.Model(&models.PhotoComment{}).
-			Select("photo_id, COUNT(*) as count").
-			Where("photo_id IN ?", photoIDs).
-			Group("photo_id").
-			Scan(&commentRows).Error; err != nil {
-			return nil, err
-		}
-		for _, row := range commentRows {
-			commentCounts[row.PhotoID] = row.Count
-		}
-		previewReactions, previewComments, previewPhotoMojis, _, _, previewErr := s.feedInteractionPreview(photoIDs)
+		var previewErr error
+		reactionPreviewByPhoto, commentPreviewByPhoto, photoMojiPreviewByPhoto, countsByPhoto, commentPreviewLimit, previewErr = s.feedInteractionPreview(photoIDs)
 		if previewErr != nil {
 			return nil, previewErr
 		}
-		reactionPreviewByPhoto = previewReactions
-		commentPreviewByPhoto = previewComments
-		photoMojiPreviewByPhoto = previewPhotoMojis
+		for photoID, counts := range countsByPhoto {
+			if reactionCount, ok := counts["reactions"].(int64); ok {
+				reactionCounts[photoID] = reactionCount
+			}
+			if commentCount, ok := counts["comments"].(int64); ok {
+				commentCounts[photoID] = commentCount
+			}
+		}
 	}
 
 	postCountByDay := make(map[string]int64, len(days))
@@ -6596,15 +6566,20 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		}
 		outPhotosByDay[photo.Day] = append(outPhotosByDay[photo.Day], row)
 		item := gin.H{
-			"isEarly":         false,
-			"isLate":          false,
-			"capsuleLocked":   false,
-			"capsuleReleased": false,
-			"photo":           photoRow,
-			"user":            userRow,
-			"reactions":       reactionPreviewByPhoto[photo.ID],
-			"comments":        commentPreviewByPhoto[photo.ID],
-			"photoMojis":      photoMojiPreviewByPhoto[photo.ID],
+			"isEarly":           false,
+			"isLate":            false,
+			"capsuleLocked":     false,
+			"capsuleReleased":   false,
+			"photo":             photoRow,
+			"user":              userRow,
+			"reactions":         reactionPreviewByPhoto[photo.ID],
+			"comments":          commentPreviewByPhoto[photo.ID],
+			"photoMojis":        photoMojiPreviewByPhoto[photo.ID],
+			"interactionCounts": countsByPhoto[photo.ID],
+			"interactionSnapshot": gin.H{
+				"kind":                "preview",
+				"commentPreviewLimit": commentPreviewLimit,
+			},
 		}
 		if item["reactions"] == nil {
 			item["reactions"] = []gin.H{}
@@ -6614,6 +6589,13 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		}
 		if item["photoMojis"] == nil {
 			item["photoMojis"] = []gin.H{}
+		}
+		if item["interactionCounts"] == nil {
+			item["interactionCounts"] = gin.H{
+				"reactions":  0,
+				"comments":   0,
+				"photoMojis": 0,
+			}
 		}
 		outItems = append(outItems, item)
 	}
@@ -6804,15 +6786,15 @@ func (s *Server) calendarTimeCapsulesPayload(viewerID uint, now time.Time) (gin.
 			bestCommentByDay[photo.Day] = commentCount
 		}
 		row := gin.H{
-			"isEarly":         false,
-			"isLate":          false,
-			"capsuleLocked":   locked,
-			"capsuleReleased": released,
-			"photo":           s.timeCapsulePhotoJSONForViewer(viewerID, photo, decorations, now),
-			"user":            s.userPublicJSON(viewerID, photo.User),
-			"reactions":       reactionByPhoto[photo.ID],
-			"comments":        commentByPhoto[photo.ID],
-			"photoMojis":      photoMojiByPhoto[photo.ID],
+			"isEarly":           false,
+			"isLate":            false,
+			"capsuleLocked":     locked,
+			"capsuleReleased":   released,
+			"photo":             s.timeCapsulePhotoJSONForViewer(viewerID, photo, decorations, now),
+			"user":              s.userPublicJSON(viewerID, photo.User),
+			"reactions":         reactionByPhoto[photo.ID],
+			"comments":          commentByPhoto[photo.ID],
+			"photoMojis":        photoMojiByPhoto[photo.ID],
 			"interactionCounts": countsByPhoto[photo.ID],
 			"interactionSnapshot": gin.H{
 				"kind":                "preview",
