@@ -1,0 +1,10 @@
+{
+  "version": "v0.6.27",
+  "title": "Feed-Normalisierung, praeziseres Debug und ruhigeres Refresh-Verhalten",
+  "items": [
+    "Der Feed normalisiert Interaktions-Metadaten jetzt direkt beim Einlesen aus API-, Kalender-, Bookmark-, Such- und Hub-Datensaetzen. Dadurch bleiben Kommentare, Reaktionen und FotoMojis auch bei unvollstaendigen Payloads stabil.",
+    "Exportierte Diagnose-Logs zeigen nun praezise, aus welchem Dataset fehlende interactionSnapshot- oder interactionCounts-Metadaten kamen. Das macht kuenftige Feed-vs-Timeline-Abweichungen deutlich leichter nachvollziehbar.",
+    "Der sichtbare Pull-to-Refresh-Kreis ist von Hintergrund-Aktualisierungen entkoppelt worden. Passive Feed-Reloads drehen die Anzeige nicht mehr dauerhaft an, waehrend der Nutzer nur scrollt.",
+    "Die Feed-Viewport-Logik schreibt deutlich weniger Anchor-Updates bei kleinen Scrollbewegungen. Das soll Mini-Jumps reduzieren und die Feed-Diagnose-Logs merklich beruhigen."
+  ]
+}

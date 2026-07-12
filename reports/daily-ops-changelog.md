@@ -2,6 +2,60 @@
 
 This file is append-only operational history for Forge-side Daily continuity.
 
+## 2026-07-12
+
+- Prepared Android patch `v0.6.27` after analyzing `daily-diagnose-1783855910430.txt`, which showed heavy `feed_viewport_anchor_changed` churn instead of a fresh crash.
+- Added global FeedItem normalization directly at Android API/dataset mapping boundaries so feed, calendar, bookmarks, search and hub-backed datasets all sanitize missing interaction metadata before state updates.
+- Added dataset-specific `feed_item_meta_normalized` diagnostics so future exported logs show exactly which source payload produced missing `interactionSnapshot` or `interactionCounts` metadata.
+- Decoupled the visible pull-to-refresh spinner from background feed refreshes and reduced viewport-anchor state churn by ignoring minor visible-range changes, so the feed refresh indicator no longer spins during passive reloads and scroll jitter should reduce noticeably.
+- Re-verified locally with `gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain --max-workers=1` after clearing corrupted local Android build caches.
+
+- Released combined server/android hardening `v0.6.25` from `main` commit `806b0d87a8428dd033f5d861e234f4c89963d6ac` after unifying Hub-to-Feed interaction resolution for comments, reactions and FotoMojis.
+- Added preview-vs-full interaction semantics across backend and Android feed models so timeline targets can force a precise post-interaction reload instead of relying on stale feed previews.
+- Extended diagnostics with dedicated target-resolution and interaction-refresh events to make future Timeline-versus-Feed divergence cases directly visible in exported client logs.
+- Verified locally with `go test ./internal/api/...`, `gradle -p android testDebugUnitTest --no-daemon --stacktrace --console=plain --max-workers=1` and `gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain --max-workers=1`.
+- Confirmed GitHub Actions success for `CI` run `29186912127`, `Publish Server Images` run `29186912180` and `Release Android APK` run `29187032968`.
+- Rolled Broutschek CT `9204` manually, pulled `backend` and `admin`, recreated both containers and verified internal `/api/health`, internal `/api/health/live` and external `https://daily.broutschek.de/api/health/live` on runtime `srv-330.1`.
+- Confirmed GitHub release `v0.6.25` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.25`.
+
+## 2026-07-11
+
+- Released Hub warm-start and loading-state hardening `v0.6.22` from `main` commit `8ed17aa84446f6f942ec26ccff6b5d854e537580`.
+- Added app-side warm cache persistence for small Hub bootstrap, timeline and public-calendar snapshots so the Hub can render a believable last-known state immediately after startup while fresh data loads in the background.
+- Reworked Hub and calendar surface states with explicit cached, loading, refreshing and failure semantics so empty cards and premature `0 Nutzer haben gepostet` placeholders no longer appear when data is only partially loaded.
+- Reduced refresh churn by introducing freshness windows for Hub bootstrap, timeline and public calendar loads and by decoupling the global refresh loop from immediate tab-switch restarts.
+- Verified locally with `gradle :app:compileDebugKotlin`, `gradle :app:assembleDebug --no-daemon --stacktrace --console=plain` and `go test ./internal/api/... ./cmd/server`.
+- Confirmed GitHub Actions success for `CI` run `29149549332`, `Publish Server Images` run `29149549330` and `Release Android APK` run `29149694380`.
+- Rolled Broutschek CT `9204` manually, pulled `backend` and `admin`, recreated both containers and verified internal plus external `/api/health/live` on runtime `srv-327.1`.
+- Confirmed GitHub release `v0.6.22` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.22`.
+
+## 2026-07-11
+
+- Released combined Hub hardening `v0.6.21` from `main` commit `5a2ad363e0e6c640f5eadc94befe2ac9457f9028` after fixing duplicate Hub timeline entries on bookmarked interactions, restoring owner interaction visibility on bookmarked foreign posts and extending timeline system events for backend/app updates.
+- Added feed navigation trace IDs and source labels for Hub-to-Feed jumps plus background viewport restores, and downgraded benign Compose cancellation cases so `LeftCompositionCancellationException` no longer pollutes feed error diagnostics.
+- Verified locally with `go test ./internal/api/... ./cmd/server` and `gradle :app:assembleDebug --no-daemon --stacktrace --console=plain` at `versionName=0.6.21`, `versionCode=141552`.
+- Confirmed GitHub Actions success for `CI` run `29148055294`, `Publish Server Images` run `29148055313` and `Release Android APK` run `29148208997`.
+- Rolled Broutschek CT `9204` manually via Proxmox host `192.168.0.40`, pulled `backend` and `admin`, recreated both containers and verified internal plus external health on runtime `srv-326.1`.
+- Confirmed GitHub release `v0.6.21` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.21`.
+
+## 2026-07-10
+
+- Released Hub rollout `v0.6.17` from `main` commit `d2def6c2acc3a726a44b6c0d8102ac9b204aa895` with the former calendar tab rebuilt into a broader Hub including dashboard entry points, a 7-day personalized timeline and highlighted feed jump targets for comments, reactions and FotoMojis.
+- Added backend Hub APIs for bootstrap, timeline, timeline clear and time-capsule sections, plus persisted per-user Hub timeline state and server-side synthesis of personalized activity items respecting the existing notification preference flags.
+- Verified locally with `go test ./internal/api ./cmd/server` and `gradle :app:compileDebugKotlin`.
+- Confirmed GitHub Actions success for `CI` run `29117494677`, `Publish Server Images` run `29117494672` and `Release Android APK` run `29117845817`.
+- Rolled Broutschek CT `9204` manually via `docker compose pull backend admin` and `docker compose up -d backend admin`, then verified internal and external health endpoints on runtime `srv-322.1`.
+- Confirmed GitHub release `v0.6.17` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.17`.
+
+## 2026-07-06
+
+- Released Android patch `v0.6.15` from `main` commit `384d5a29d347b4a7c0fff244d0568044789d0a3f` after fixing the broken long-press delete flow for own feed comments and the stale delete-feature recovery state after transient backend failures.
+- Unified the 3-second delete-hold logic for chat messages and feed comments on Android, added explicit delete-gesture diagnostics, and introduced active post-recovery feature syncs so `chatDeleteSupported` / `commentDeleteSupported` no longer stay stuck `false` until app restart.
+- Verified locally with `gradle :app:assembleDebug --no-daemon --stacktrace --console=plain` at `versionName=0.6.15`, `versionCode=141546`.
+- Confirmed GitHub Actions success for `CI` run `28812965922`, `Publish Server Images` run `28812965905` and `Release Android APK` run `28813288445`.
+- Confirmed GitHub release `v0.6.15` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.15`.
+- Verified the production rollout manually after image publication and confirmed healthy live runtime behaviour on the active deployment target.
+
 ## 2026-07-02
 
 - Released combined server/android stabilization `v0.6.6` from `main` commit `415053d11e272ca5646f501d703db2f8e53e2676` after merge of PR `#2`.

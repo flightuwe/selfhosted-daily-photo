@@ -1004,11 +1004,17 @@ data class FeedInteractionSnapshot(
         get() = kind.equals("full", ignoreCase = true)
 }
 
+private fun Any?.asFeedInteractionSnapshotOrNull(): FeedInteractionSnapshot? =
+    this as? FeedInteractionSnapshot
+
+private fun Any?.asInteractionCountsOrNull(): InteractionCounts? =
+    this as? InteractionCounts
+
 private fun FeedItem.normalizedInteractionSnapshot(): FeedInteractionSnapshot =
-    (interactionSnapshot as FeedInteractionSnapshot?) ?: FeedInteractionSnapshot()
+    interactionSnapshot.asFeedInteractionSnapshotOrNull() ?: FeedInteractionSnapshot()
 
 private fun FeedItem.normalizedInteractionCounts(): InteractionCounts =
-    (interactionCounts as InteractionCounts?) ?: InteractionCounts()
+    interactionCounts.asInteractionCountsOrNull() ?: InteractionCounts()
 
 private fun FeedItem.withNormalizedInteractionMeta(): FeedItem =
     copy(
@@ -4238,6 +4244,7 @@ data class UiState(
     val feedNavigationSource: String = "",
     val feedPaging: Boolean = false,
     val feedRefreshing: Boolean = false,
+    val feedManualRefreshing: Boolean = false,
     val feedWindowReloadInFlight: Boolean = false,
     val feedTodayLocked: Boolean = false,
     val feedJumpLoadingDay: String? = null,
@@ -4479,6 +4486,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var nextFeedScrollRequestId = 1L
     private val pendingFeedMutations = mutableMapOf<Long, PendingFeedMutation>()
     private val photoInteractionsStore = LinkedHashMap<Long, PhotoInteractionsResponse>()
+    private val loggedFeedInteractionMetaSources = LinkedHashSet<String>()
     private var queuedRefreshRequest: QueuedRefreshRequest? = null
     private var calendarStatsLoadedPrefix = 0
     private var calendarStatsLoading = false
@@ -4722,12 +4730,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     fun updateFeedViewportAnchor(anchor: FeedViewportAnchor) {
         val normalizedDay = anchor.day?.takeIf { it.isNotBlank() }
         val normalized = anchor.copy(day = normalizedDay, rowOffsetPx = anchor.rowOffsetPx.coerceAtLeast(0))
-        if (state.feedViewportAnchor != normalized || state.feedVisibleAnchorDay != normalized.day) {
+        val previous = state.feedViewportAnchor
+        val previousOffsetBucket = previous.rowOffsetPx / 48
+        val nextOffsetBucket = normalized.rowOffsetPx / 48
+        val identityChanged =
+            previous.day != normalized.day ||
+                previous.photoId != normalized.photoId ||
+                previous.kind != normalized.kind ||
+                previous.rowIndex != normalized.rowIndex
+        val shouldUpdateOffset = previousOffsetBucket != nextOffsetBucket
+        if (identityChanged || shouldUpdateOffset || state.feedVisibleAnchorDay != normalized.day) {
             state = state.copy(
                 feedViewportAnchor = normalized,
                 feedVisibleAnchorDay = normalized.day
             )
-            val signature = "${normalized.day}|${normalized.photoId}|${normalized.kind}|${normalized.rowIndex}|${normalized.rowOffsetPx}|${normalized.firstVisibleIndex}|${normalized.lastVisibleIndex}|${normalized.rowsSize}|${normalized.presentInRows}"
+            val signature = "${normalized.day}|${normalized.photoId}|${normalized.kind}|${normalized.rowIndex}|$nextOffsetBucket"
             if (signature != lastFeedAnchorDebugSignature) {
                 lastFeedAnchorDebugSignature = signature
                 logFeedDecision(
@@ -4911,12 +4928,55 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
-    private fun CalendarPayloadResponse.toDataset(): CalendarDataset =
+    private fun rememberFeedInteractionMetaIssue(
+        source: String,
+        item: FeedItem,
+        snapshotMissing: Boolean,
+        countsMissing: Boolean
+    ) {
+        val key = "$source|${item.photo.id}|$snapshotMissing|$countsMissing"
+        if (!loggedFeedInteractionMetaSources.add(key)) return
+        while (loggedFeedInteractionMetaSources.size > 320) {
+            val oldest = loggedFeedInteractionMetaSources.firstOrNull() ?: break
+            loggedFeedInteractionMetaSources.remove(oldest)
+        }
+        repo.logDebug(
+            type = "feed_item_meta_normalized",
+            message = "feed item interaction metadata normalized",
+            meta = "source=$source;photoId=${item.photo.id};day=${item.photo.day.ifBlank { "-" }};snapshotMissing=$snapshotMissing;countsMissing=$countsMissing;commentItems=${item.comments?.size ?: -1};reactionItems=${item.reactions?.size ?: -1};photoMojiItems=${item.photoMojis?.size ?: -1}"
+        )
+    }
+
+    private fun normalizeFeedItem(item: FeedItem, source: String): FeedItem {
+        val snapshot = item.interactionSnapshot.asFeedInteractionSnapshotOrNull()
+        val counts = item.interactionCounts.asInteractionCountsOrNull()
+        val snapshotMissing = snapshot == null
+        val countsMissing = counts == null
+        if (!snapshotMissing && !countsMissing) return item
+        rememberFeedInteractionMetaIssue(source, item, snapshotMissing, countsMissing)
+        return item.copy(
+            interactionSnapshot = snapshot ?: FeedInteractionSnapshot(),
+            interactionCounts = counts ?: InteractionCounts()
+        )
+    }
+
+    private fun normalizeFeedItems(items: List<FeedItem>, source: String): List<FeedItem> =
+        items.map { item -> normalizeFeedItem(item, source = "$source/day:${item.photo.day.ifBlank { "-" }}") }
+
+    private fun FeedResponse.normalized(source: String): FeedResponse =
+        copy(items = normalizeFeedItems(items, source))
+
+    private fun FeedWindowResponse.normalized(source: String): FeedWindowResponse =
+        copy(days = days.mapIndexed { index, payload ->
+            payload.normalized("$source/windowDay:${payload.day ?: "index_$index"}")
+        })
+
+    private fun CalendarPayloadResponse.toDataset(source: String): CalendarDataset =
         CalendarDataset(
             days = days,
             dayStats = dayStats.associateBy { it.day },
             photosByDay = photosByDay,
-            feedItems = items,
+            feedItems = normalizeFeedItems(items, source),
             lockedCount = lockedCount,
             releasedCount = releasedCount
         )
@@ -5099,9 +5159,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         photoId: Long,
         transform: (PromptPhoto) -> PromptPhoto
     ) {
-        val newFeedByDay = state.feedByDay.mapValues { (_, items) ->
+        val newFeedByDay = state.feedByDay.mapValues { (day, items) ->
             items.map { item ->
-                if (item.photo.id == photoId) item.copy(photo = transform(item.photo)) else item
+                val normalized = normalizeFeedItem(item, source = "feed_by_day_patch_photo:$day")
+                if (normalized.photo.id == photoId) normalized.copy(photo = transform(normalized.photo)) else normalized
             }
         }
         val newPhotos = state.photos.map { photo ->
@@ -5113,7 +5174,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 if (photo.id == photoId) transform(photo) else photo
             }
         )
-        fun updateDataset(dataset: CalendarDataset): CalendarDataset {
+        fun updateDataset(dataset: CalendarDataset, datasetSource: String): CalendarDataset {
             val updatedStats = dataset.dayStats.mapValues { (_, stat) ->
                 val featured = stat.featuredPhoto
                 if (featured?.photoId == photoId) {
@@ -5145,7 +5206,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 }
             }
             val updatedFeedItems = dataset.feedItems.map { item ->
-                if (item.photo.id == photoId) item.copy(photo = transform(item.photo)) else item
+                val normalized = normalizeFeedItem(item, source = datasetSource)
+                if (normalized.photo.id == photoId) normalized.copy(photo = transform(normalized.photo)) else normalized
             }
             return dataset.copy(dayStats = updatedStats, photosByDay = updatedPhotosByDay, feedItems = updatedFeedItems)
         }
@@ -5159,11 +5221,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feed = newFeedByDay[state.prompt?.day].orEmpty(),
             photos = newPhotos,
             viewedProfile = newViewedProfile,
-            calendarPublicData = updateDataset(state.calendarPublicData),
-            calendarBookmarksData = updateDataset(state.calendarBookmarksData),
-            calendarTimeCapsulesData = updateDataset(state.calendarTimeCapsulesData),
+            calendarPublicData = updateDataset(state.calendarPublicData, "calendar_public_patch_photo"),
+            calendarBookmarksData = updateDataset(state.calendarBookmarksData, "calendar_bookmarks_patch_photo"),
+            calendarTimeCapsulesData = updateDataset(state.calendarTimeCapsulesData, "calendar_time_capsules_patch_photo"),
             calendarSearchData = state.calendarSearchData.copy(
-                dataset = updateDataset(state.calendarSearchData.dataset),
+                dataset = updateDataset(state.calendarSearchData.dataset, "calendar_search_patch_photo"),
                 matchesByDay = updatedSearchMatches
             )
         )
@@ -5174,25 +5236,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         photoId: Long,
         transform: (FeedItem) -> FeedItem
     ) {
-        val newFeedByDay = state.feedByDay.mapValues { (_, items) ->
+        val newFeedByDay = state.feedByDay.mapValues { (day, items) ->
             items.map { item ->
-                if (item.photo.id == photoId) applyResolvedPhotoInteractions(transform(item)) else item
+                val normalized = normalizeFeedItem(item, source = "feed_by_day_patch_interactions:$day")
+                if (normalized.photo.id == photoId) applyResolvedPhotoInteractions(transform(normalized)) else normalized
             }
         }
-        fun updateDataset(dataset: CalendarDataset): CalendarDataset =
+        fun updateDataset(dataset: CalendarDataset, datasetSource: String): CalendarDataset =
             dataset.copy(
                 feedItems = dataset.feedItems.map { item ->
-                    if (item.photo.id == photoId) applyResolvedPhotoInteractions(transform(item)) else item
+                    val normalized = normalizeFeedItem(item, source = datasetSource)
+                    if (normalized.photo.id == photoId) applyResolvedPhotoInteractions(transform(normalized)) else normalized
                 }
             )
         state = state.copy(
             feedByDay = newFeedByDay,
             feed = newFeedByDay[state.prompt?.day].orEmpty(),
-            calendarPublicData = updateDataset(state.calendarPublicData),
-            calendarBookmarksData = updateDataset(state.calendarBookmarksData),
-            calendarTimeCapsulesData = updateDataset(state.calendarTimeCapsulesData),
+            calendarPublicData = updateDataset(state.calendarPublicData, "calendar_public_patch_interactions"),
+            calendarBookmarksData = updateDataset(state.calendarBookmarksData, "calendar_bookmarks_patch_interactions"),
+            calendarTimeCapsulesData = updateDataset(state.calendarTimeCapsulesData, "calendar_time_capsules_patch_interactions"),
             calendarSearchData = state.calendarSearchData.copy(
-                dataset = updateDataset(state.calendarSearchData.dataset)
+                dataset = updateDataset(state.calendarSearchData.dataset, "calendar_search_patch_interactions")
             )
         )
         applyCalendarModeDataset()
@@ -6646,7 +6710,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (!force && (hasCached || isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs))) return
         runCatching { repo.calendarPublic() }
             .onSuccess { payload ->
-                val dataset = payload.toDataset()
+                val dataset = payload.toDataset(source = "calendar_public_prefetch")
                 state = state.copy(
                     calendarPublicData = dataset,
                     calendarPublicLoadState = surfaceLoadStateFor(
@@ -6976,7 +7040,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         )
                     } else {
                         val payload = repo.calendarPublic()
-                        val dataset = payload.toDataset()
+                        val dataset = payload.toDataset(source = "calendar_public")
                         state = state.copy(
                             calendarPublicData = dataset,
                             calendarPublicLoadState = surfaceLoadStateFor(
@@ -6998,7 +7062,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         state = state.copy(calendarModeLoadState = surfaceLoadStateFor(hasContent = true, loading = false))
                     } else {
                         val payload = repo.calendarBookmarks(state.calendarBookmarksFilter)
-                        val dataset = payload.toDataset()
+                        val dataset = payload.toDataset(source = "calendar_bookmarks:${state.calendarBookmarksFilter.name.lowercase()}")
                         state = state.copy(
                             calendarBookmarksData = dataset,
                             calendarModeLoadState = surfaceLoadStateFor(
@@ -7048,7 +7112,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         state = state.copy(calendarModeLoadState = surfaceLoadStateFor(hasContent = true, loading = false))
                     } else {
                         val payload = repo.calendarTimeCapsules()
-                        val dataset = payload.toDataset()
+                        val dataset = payload.toDataset(source = "calendar_time_capsules")
                         state = state.copy(
                             calendarTimeCapsulesData = dataset,
                             calendarModeLoadState = surfaceLoadStateFor(
@@ -8009,7 +8073,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     .onFailure { state = state.copy(message = apiError(it, "YOLO-Feature-Sync fehlgeschlagen")) }
             }
             runCatching { repo.calendarPublic() }.getOrNull()?.let { publicCalendar ->
-                val dataset = publicCalendar.toDataset()
+                val dataset = publicCalendar.toDataset(source = "calendar_public_refresh")
                 state = state.copy(
                     calendarPublicData = dataset,
                     calendarPublicLoadState = surfaceLoadStateFor(
@@ -8376,7 +8440,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (isManual) {
             lastManualRefreshAtMs = now
         }
-        state = state.copy(feedRefreshing = true)
+        state = state.copy(feedRefreshing = true, feedManualRefreshing = isManual)
         lastRefreshExecutionDisposition = RefreshExecutionDisposition.IDLE
         val started = System.currentTimeMillis()
         var ok = false
@@ -8409,7 +8473,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 extra = "reason=$reason;disposition=${lastRefreshExecutionDisposition.name.lowercase()}"
             )
             if (elapsed < 700) delay(700 - elapsed)
-            state = state.copy(feedRefreshing = false)
+            state = state.copy(feedRefreshing = false, feedManualRefreshing = false)
         }
     }
 
@@ -8576,7 +8640,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 beforeDays = around,
                 afterDays = around,
                 focusPhotoId = state.feedFocusPhotoId
-            )
+            ).normalized(source = "feed_window_center:$target")
             applyFeedWindow(window, target, replaceVisibleDays = replaceVisibleDays, forceReload = forceReload)
         } catch (t: Throwable) {
             if (isFeedLockedTodayError(t, target)) {
@@ -8600,7 +8664,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         state = state.copy(feedPaging = true, feedWindowReloadInFlight = true)
         try {
-            runCatching { repo.feedWindow(anchorDay = anchorDay, beforeDays = beforeDays, afterDays = afterDays) }
+            runCatching { repo.feedWindow(anchorDay = anchorDay, beforeDays = beforeDays, afterDays = afterDays).normalized(source = "feed_window_edge:$anchorDay") }
                 .onSuccess { window ->
                     applyFeedWindow(window, anchorDay, replaceVisibleDays = false, forceReload = false, appendOlder = appendOlder)
                 }
@@ -8648,7 +8712,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 randomSeed = seed,
                 anchorDay = anchorDay,
                 focusPhotoId = focusPhotoId
-            )
+            ).normalized(source = "feed_discover:${state.feedOrderMode.name.lowercase()}:offset_$offset")
             applyFeedWindow(window, window.anchorDay.ifBlank { state.feedFocusDay.orEmpty() }, replaceVisibleDays = replaceVisibleDays, forceReload = false, appendOlder = appendOlder)
         } finally {
             if (state.feedPaging) {
@@ -8826,7 +8890,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private suspend fun fetchDaySafe(day: String, forceReload: Boolean): DayFetchResult {
         val startedAt = System.currentTimeMillis()
         return try {
-            val res = repo.feedByDay(day)
+            val res = repo.feedByDay(day).normalized(source = "feed_day:$day")
             logPerfEvent(
                 event = "feed_day_load",
                 durationMs = System.currentTimeMillis() - startedAt,
@@ -12325,7 +12389,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     viewportRestoreRequestId = state.feedViewportRestoreRequestId,
                     jumpLoadingDay = state.feedJumpLoadingDay,
                     listState = feedListState,
-                    refreshing = state.feedRefreshing,
+                    refreshing = state.feedManualRefreshing,
+                    refreshInFlight = state.feedRefreshing,
                     todayLocked = state.feedTodayLocked,
                     hasHiddenNewerContent = state.feedHasHiddenNewerContent,
                     hiddenNewerAnchorDay = state.feedHiddenNewerAnchorDay,
@@ -13486,6 +13551,7 @@ fun FeedTab(
     jumpLoadingDay: String?,
     listState: LazyListState,
     refreshing: Boolean,
+    refreshInFlight: Boolean,
     todayLocked: Boolean,
     hasHiddenNewerContent: Boolean,
     hiddenNewerAnchorDay: String?,
@@ -13836,14 +13902,14 @@ fun FeedTab(
         currentViewportAnchor?.let(onViewportAnchorChanged)
     }
 
-    LaunchedEffect(listState, rows.size, paging, refreshing, feedWindowReloadInFlight) {
+    LaunchedEffect(listState, rows.size, paging, refreshInFlight, feedWindowReloadInFlight) {
         snapshotFlow {
             val info = listState.layoutInfo
             val first = info.visibleItemsInfo.firstOrNull()?.index ?: -1
             val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
             Triple(first, last, pullRefreshState.progress)
         }.collect { (first, last, pullProgress) ->
-            if (rows.isEmpty() || paging || refreshing || feedWindowReloadInFlight || pullProgress > 0f) return@collect
+            if (rows.isEmpty() || paging || refreshInFlight || feedWindowReloadInFlight || pullProgress > 0f) return@collect
             if (first in 0..2) onLoadNewer()
             if (last >= rows.lastIndex - 4) onLoadOlder()
         }
