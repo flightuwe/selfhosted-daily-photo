@@ -2226,7 +2226,7 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 		return
 	}
 	interactionStart := time.Now()
-	reactionByPhoto, commentByPhoto, photoMojiByPhoto, err := s.feedInteractionPreview(photoIDs)
+	reactionByPhoto, commentByPhoto, photoMojiByPhoto, countsByPhoto, commentPreviewLimit, err := s.feedInteractionPreview(photoIDs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "interaction query failed"})
 		return
@@ -2271,6 +2271,11 @@ func (s *Server) handleAdminFeed(c *gin.Context) {
 			"reactions":                   reactions,
 			"comments":                    comments,
 			"photoMojis":                  photoMojis,
+			"interactionCounts":           countsByPhoto[p.ID],
+			"interactionSnapshot": gin.H{
+				"kind":                "preview",
+				"commentPreviewLimit": commentPreviewLimit,
+			},
 			"triggerSource":               prompt.TriggerSource,
 			"requestedByUser":             requestedByUser,
 			"momentKind":                  momentKind,
@@ -2740,7 +2745,7 @@ func (s *Server) feedPayloadForDay(userID uint, day string, now time.Time) (gin.
 		return nil, http.StatusInternalServerError, errors.New("photo decorations query failed")
 	}
 	attachmentByPhoto := s.photoAttachmentsByPhotoIDs(photoIDs)
-	reactionByPhoto, commentByPhoto, photoMojiByPhoto, err := s.feedInteractionPreview(photoIDs)
+	reactionByPhoto, commentByPhoto, photoMojiByPhoto, countsByPhoto, commentPreviewLimit, err := s.feedInteractionPreview(photoIDs)
 	if err != nil {
 		return nil, http.StatusInternalServerError, errors.New("interaction query failed")
 	}
@@ -2783,6 +2788,11 @@ func (s *Server) feedPayloadForDay(userID uint, day string, now time.Time) (gin.
 			"reactions":                   reactions,
 			"comments":                    comments,
 			"photoMojis":                  photoMojis,
+			"interactionCounts":           countsByPhoto[p.ID],
+			"interactionSnapshot": gin.H{
+				"kind":                "preview",
+				"commentPreviewLimit": commentPreviewLimit,
+			},
 			"triggerSource":               prompt.TriggerSource,
 			"requestedByUser":             requestedByUser,
 			"momentKind":                  momentKind,
@@ -6515,7 +6525,7 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		for _, row := range commentRows {
 			commentCounts[row.PhotoID] = row.Count
 		}
-		previewReactions, previewComments, previewPhotoMojis, previewErr := s.feedInteractionPreview(photoIDs)
+		previewReactions, previewComments, previewPhotoMojis, _, _, previewErr := s.feedInteractionPreview(photoIDs)
 		if previewErr != nil {
 			return nil, previewErr
 		}
@@ -6724,20 +6734,19 @@ func (s *Server) calendarTimeCapsulesPayload(viewerID uint, now time.Time) (gin.
 	if err != nil {
 		return nil, err
 	}
-	reactionByPhoto, commentByPhoto, photoMojiByPhoto, err := s.feedInteractionPreview(photoIDs)
+	reactionByPhoto, commentByPhoto, photoMojiByPhoto, countsByPhoto, commentPreviewLimit, err := s.feedInteractionPreview(photoIDs)
 	if err != nil {
 		return nil, err
 	}
 	reactionCounts := make(map[uint]int64, len(photoIDs))
 	commentCounts := make(map[uint]int64, len(photoIDs))
-	for photoID, rows := range reactionByPhoto {
-		reactionCounts[photoID] = int64(len(rows))
-	}
-	for photoID, rows := range photoMojiByPhoto {
-		reactionCounts[photoID] += int64(len(rows))
-	}
-	for photoID, rows := range commentByPhoto {
-		commentCounts[photoID] = int64(len(rows))
+	for photoID, counts := range countsByPhoto {
+		if reactionCount, ok := counts["reactions"].(int64); ok {
+			reactionCounts[photoID] = reactionCount
+		}
+		if commentCount, ok := counts["comments"].(int64); ok {
+			commentCounts[photoID] = commentCount
+		}
 	}
 
 	daySeen := make(map[string]struct{}, len(photos))
@@ -6804,6 +6813,11 @@ func (s *Server) calendarTimeCapsulesPayload(viewerID uint, now time.Time) (gin.
 			"reactions":       reactionByPhoto[photo.ID],
 			"comments":        commentByPhoto[photo.ID],
 			"photoMojis":      photoMojiByPhoto[photo.ID],
+			"interactionCounts": countsByPhoto[photo.ID],
+			"interactionSnapshot": gin.H{
+				"kind":                "preview",
+				"commentPreviewLimit": commentPreviewLimit,
+			},
 		}
 		if row["reactions"] == nil {
 			row["reactions"] = []gin.H{}
@@ -11538,12 +11552,13 @@ func (s *Server) loadPhotoForInteraction(photoID uint) (models.Photo, error) {
 	return photo, nil
 }
 
-func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[uint][]gin.H, map[uint][]gin.H, error) {
+func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[uint][]gin.H, map[uint][]gin.H, map[uint]gin.H, int, error) {
 	reactionByPhoto := make(map[uint][]gin.H)
 	commentByPhoto := make(map[uint][]gin.H)
 	photoMojiByPhoto := make(map[uint][]gin.H)
+	countsByPhoto := make(map[uint]gin.H)
 	if len(photoIDs) == 0 {
-		return reactionByPhoto, commentByPhoto, photoMojiByPhoto, nil
+		return reactionByPhoto, commentByPhoto, photoMojiByPhoto, countsByPhoto, 0, nil
 	}
 	commentLimit := 10
 	var settings models.AppSettings
@@ -11560,7 +11575,7 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 		Group("photo_id, emoji").
 		Order("count desc, emoji asc").
 		Scan(&reactionRows).Error; err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, 0, err
 	}
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/feed", "feed_reaction_preview_query", time.Since(reactionQueryStart))
@@ -11602,7 +11617,7 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 		WHERE rn <= ?
 		ORDER BY created_at DESC, id DESC
 	`, photoIDs, commentLimit).Scan(&rows).Error; err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, 0, err
 	}
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/feed", "feed_comment_preview_query", time.Since(commentQueryStart))
@@ -11649,7 +11664,7 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 		WHERE rn <= ?
 		ORDER BY created_at ASC, id ASC
 	`, photoIDs, fotomojiLimit).Scan(&fotomojiRows).Error; err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, 0, err
 	}
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/feed", "feed_fotomoji_preview_query", time.Since(fotomojiQueryStart))
@@ -11668,7 +11683,59 @@ func (s *Server) feedInteractionPreview(photoIDs []uint) (map[uint][]gin.H, map[
 		})
 	}
 
-	return reactionByPhoto, commentByPhoto, photoMojiByPhoto, nil
+	type interactionCountRow struct {
+		PhotoID uint
+		Count   int64
+	}
+	commentCounts := make(map[uint]int64, len(photoIDs))
+	reactionCounts := make(map[uint]int64, len(photoIDs))
+	photoMojiCounts := make(map[uint]int64, len(photoIDs))
+
+	var commentCountRows []interactionCountRow
+	if err := s.DB.Model(&models.PhotoComment{}).
+		Select("photo_id as photo_id, COUNT(*) as count").
+		Where("photo_id IN ?", photoIDs).
+		Group("photo_id").
+		Scan(&commentCountRows).Error; err != nil {
+		return nil, nil, nil, nil, 0, err
+	}
+	for _, row := range commentCountRows {
+		commentCounts[row.PhotoID] = row.Count
+	}
+
+	var reactionCountRows []interactionCountRow
+	if err := s.DB.Model(&models.PhotoReaction{}).
+		Select("photo_id as photo_id, COUNT(*) as count").
+		Where("photo_id IN ?", photoIDs).
+		Group("photo_id").
+		Scan(&reactionCountRows).Error; err != nil {
+		return nil, nil, nil, nil, 0, err
+	}
+	for _, row := range reactionCountRows {
+		reactionCounts[row.PhotoID] = row.Count
+	}
+
+	var photoMojiCountRows []interactionCountRow
+	if err := s.DB.Model(&models.PhotoFotomoji{}).
+		Select("photo_id as photo_id, COUNT(*) as count").
+		Where("photo_id IN ?", photoIDs).
+		Group("photo_id").
+		Scan(&photoMojiCountRows).Error; err != nil {
+		return nil, nil, nil, nil, 0, err
+	}
+	for _, row := range photoMojiCountRows {
+		photoMojiCounts[row.PhotoID] = row.Count
+	}
+
+	for _, photoID := range photoIDs {
+		countsByPhoto[photoID] = gin.H{
+			"comments":   commentCounts[photoID],
+			"reactions":  reactionCounts[photoID],
+			"photoMojis": photoMojiCounts[photoID],
+		}
+	}
+
+	return reactionByPhoto, commentByPhoto, photoMojiByPhoto, countsByPhoto, commentLimit, nil
 }
 
 func (s *Server) ensurePhotoVisibleToUser(userID uint, photo models.Photo) (bool, string) {
@@ -12071,7 +12138,9 @@ func (s *Server) photoInteractionsPayload(photo models.Photo, viewerID uint) (gi
 	}
 
 	reactions := make([]gin.H, 0, len(reactionRows))
+	reactionTotal := 0
 	for _, row := range reactionRows {
+		reactionTotal += int(row.Count)
 		reactions = append(reactions, gin.H{
 			"emoji": row.Emoji,
 			"count": row.Count,
@@ -12105,6 +12174,12 @@ func (s *Server) photoInteractionsPayload(photo models.Photo, viewerID uint) (gi
 		"photoMojis":  photoMojiItems,
 		"myPhotoMoji": myPhotoMojiOut,
 		"canDownload": canDownload,
+		"counts": gin.H{
+			"comments":   len(comments),
+			"reactions":  reactionTotal,
+			"photoMojis": len(photoMojis),
+		},
+		"full": true,
 	}, nil
 }
 

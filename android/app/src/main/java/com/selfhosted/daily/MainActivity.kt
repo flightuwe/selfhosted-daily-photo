@@ -716,6 +716,8 @@ data class FeedItem(
     val reactions: List<ReactionCount>? = null,
     val photoMojis: List<PhotoMojiItem>? = null,
     val comments: List<PhotoCommentItem>? = null,
+    val interactionCounts: InteractionCounts = InteractionCounts(),
+    val interactionSnapshot: FeedInteractionSnapshot = FeedInteractionSnapshot(),
     val triggerSource: String? = null,
     val requestedByUser: String? = null,
     val momentKind: String? = null,
@@ -994,6 +996,13 @@ data class InteractionCounts(
     val photoMojis: Int = 0,
     val comments: Int = 0
 )
+data class FeedInteractionSnapshot(
+    val kind: String = "preview",
+    val commentPreviewLimit: Int = 0
+) {
+    val isFull: Boolean
+        get() = kind.equals("full", ignoreCase = true)
+}
 data class PhotoInteractionMutation(
     val type: String = "",
     val deduplicated: Boolean = false
@@ -4456,11 +4465,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var lastDeleteFeatureSyncAttemptAtMs = 0L
     private var nextFeedScrollRequestId = 1L
     private val pendingFeedMutations = mutableMapOf<Long, PendingFeedMutation>()
+    private val photoInteractionsStore = LinkedHashMap<Long, PhotoInteractionsResponse>()
     private var queuedRefreshRequest: QueuedRefreshRequest? = null
     private var calendarStatsLoadedPrefix = 0
     private var calendarStatsLoading = false
     private val staleFeedDays = mutableSetOf<String>()
     private val staleFeedPhotoIds = mutableSetOf<Long>()
+    private val stalePhotoInteractionIds = mutableSetOf<Long>()
     private var lastFeedAnchorDebugSignature = ""
     private var lastFeedJumpAnchorBefore: FeedViewportAnchor? = null
     private var pendingFeedRestoreFailureReason: String = ""
@@ -4854,13 +4865,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun applyPendingFeedMutation(item: FeedItem): FeedItem {
-        val pending = pendingFeedMutations[item.photo.id] ?: return item
-        return item.copy(
+        val pending = pendingFeedMutations[item.photo.id] ?: return applyResolvedPhotoInteractions(item)
+        return applyResolvedPhotoInteractions(item.copy(
             photo = pending.photoOverride ?: item.photo,
             reactions = pending.reactionsOverride ?: item.reactions,
             photoMojis = pending.photoMojisOverride ?: item.photoMojis,
             comments = pending.commentsOverride ?: item.comments
-        )
+        ))
     }
 
     private fun reconcilePendingFeedMutation(item: FeedItem) {
@@ -4896,6 +4907,53 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             lockedCount = lockedCount,
             releasedCount = releasedCount
         )
+
+    private fun interactionSnapshotFromResponse(
+        response: PhotoInteractionsResponse,
+        previewLimit: Int = 0
+    ): FeedInteractionSnapshot =
+        FeedInteractionSnapshot(
+            kind = if (response.full) "full" else "preview",
+            commentPreviewLimit = previewLimit
+        )
+
+    private fun cachePhotoInteractions(response: PhotoInteractionsResponse) {
+        if (response.photoId <= 0L) return
+        val existing = photoInteractionsStore[response.photoId]
+        if (existing != null && existing.full && !response.full) return
+        photoInteractionsStore[response.photoId] = response
+        prunePhotoInteractionsStore()
+    }
+
+    private fun applyResolvedPhotoInteractions(item: FeedItem): FeedItem {
+        val cached = photoInteractionsStore[item.photo.id] ?: return item
+        if (!cached.full && item.interactionSnapshot.isFull) return item
+        return item.copy(
+            reactions = cached.reactions,
+            photoMojis = cached.photoMojis,
+            comments = cached.comments,
+            interactionCounts = cached.counts,
+            interactionSnapshot = interactionSnapshotFromResponse(
+                response = cached,
+                previewLimit = item.interactionSnapshot.commentPreviewLimit
+            )
+        )
+    }
+
+    private fun prunePhotoInteractionsStore() {
+        if (photoInteractionsStore.size <= 180) return
+        val keep = mutableSetOf<Long>()
+        keep += state.feedByDay.values.flatten().map { it.photo.id }
+        keep += state.calendarPublicData.feedItems.map { it.photo.id }
+        keep += state.calendarBookmarksData.feedItems.map { it.photo.id }
+        keep += state.calendarSearchData.dataset.feedItems.map { it.photo.id }
+        keep += state.calendarTimeCapsulesData.feedItems.map { it.photo.id }
+        state.feedFocusPhotoId?.takeIf { it > 0L }?.let(keep::add)
+        state.photoInteractions?.photoId?.takeIf { it > 0L }?.let(keep::add)
+        stalePhotoInteractionIds.forEach(keep::add)
+        val removable = photoInteractionsStore.keys.filterNot(keep::contains)
+        removable.take((photoInteractionsStore.size - 160).coerceAtLeast(0)).forEach(photoInteractionsStore::remove)
+    }
 
     private fun CalendarSearchResponse.toDataset(): CalendarSearchDataset =
         CalendarSearchDataset(
@@ -5104,13 +5162,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     ) {
         val newFeedByDay = state.feedByDay.mapValues { (_, items) ->
             items.map { item ->
-                if (item.photo.id == photoId) transform(item) else item
+                if (item.photo.id == photoId) applyResolvedPhotoInteractions(transform(item)) else item
             }
         }
         fun updateDataset(dataset: CalendarDataset): CalendarDataset =
             dataset.copy(
                 feedItems = dataset.feedItems.map { item ->
-                    if (item.photo.id == photoId) transform(item) else item
+                    if (item.photo.id == photoId) applyResolvedPhotoInteractions(transform(item)) else item
                 }
             )
         state = state.copy(
@@ -5127,11 +5185,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun applyPhotoInteractionsToFeedState(photoId: Long, interactions: PhotoInteractionsResponse) {
+        cachePhotoInteractions(interactions)
+        stalePhotoInteractionIds.remove(photoId)
         patchFeedItemState(photoId) { item ->
             item.copy(
                 reactions = interactions.reactions,
                 photoMojis = interactions.photoMojis,
-                comments = interactions.comments
+                comments = interactions.comments,
+                interactionCounts = interactions.counts,
+                interactionSnapshot = interactionSnapshotFromResponse(
+                    response = interactions,
+                    previewLimit = item.interactionSnapshot.commentPreviewLimit
+                )
             )
         }
     }
@@ -7220,10 +7285,92 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             message = "feed target jump requested",
             meta = "${feedNavigationMeta(traceId = scrollRequestId, source = source)};targetDay=$day;targetPhotoId=$photoId;targetCommentId=${commentId ?: -1L};targetPhotoMojiId=${photoMojiId ?: -1L};targetReaction=${reactionEmoji?.trim().orEmpty().ifBlank { "-" }}"
         )
-        runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
+        runCatching {
+            loadFeedWindow(day, around = 2, forceReload = false)
+            ensureFeedInteractionTarget(
+                day = day,
+                photoId = photoId,
+                commentId = commentId,
+                photoMojiId = photoMojiId,
+                reactionEmoji = reactionEmoji,
+                source = source
+            )
+        }
             .onFailure {
                 state = state.copy(message = apiError(it, "Beitrag laden fehlgeschlagen"))
             }
+    }
+
+    private fun findFeedItemByPhotoId(photoId: Long): FeedItem? =
+        state.feedByDay.values.firstNotNullOfOrNull { items -> items.firstOrNull { it.photo.id == photoId } }
+
+    private fun hasInteractionTarget(
+        item: FeedItem?,
+        commentId: Long?,
+        photoMojiId: Long?,
+        reactionEmoji: String?
+    ): Boolean {
+        if (item == null) return false
+        val cleanCommentId = commentId?.takeIf { it > 0L }
+        val cleanPhotoMojiId = photoMojiId?.takeIf { it > 0L }
+        val cleanReactionEmoji = reactionEmoji?.trim()?.takeIf { it.isNotBlank() }
+        return when {
+            cleanCommentId != null -> item.comments.orEmpty().any { it.id == cleanCommentId }
+            cleanPhotoMojiId != null -> item.photoMojis.orEmpty().any { it.id == cleanPhotoMojiId }
+            cleanReactionEmoji != null -> item.reactions.orEmpty().any { it.emoji == cleanReactionEmoji }
+            else -> true
+        }
+    }
+
+    private suspend fun ensureFeedInteractionTarget(
+        day: String,
+        photoId: Long,
+        commentId: Long?,
+        photoMojiId: Long?,
+        reactionEmoji: String?,
+        source: String
+    ) {
+        val cleanCommentId = commentId?.takeIf { it > 0L }
+        val cleanPhotoMojiId = photoMojiId?.takeIf { it > 0L }
+        val cleanReactionEmoji = reactionEmoji?.trim()?.takeIf { it.isNotBlank() }
+        if (cleanCommentId == null && cleanPhotoMojiId == null && cleanReactionEmoji == null) return
+        val before = findFeedItemByPhotoId(photoId)
+        val beforePresent = hasInteractionTarget(before, cleanCommentId, cleanPhotoMojiId, cleanReactionEmoji)
+        logFeedDecision(
+            type = "feed_target_resolve_started",
+            message = "feed interaction target resolve started",
+            meta = "source=$source;targetDay=$day;targetPhotoId=$photoId;targetCommentId=${cleanCommentId ?: -1L};targetPhotoMojiId=${cleanPhotoMojiId ?: -1L};targetReaction=${cleanReactionEmoji ?: "-"};targetPresentBefore=$beforePresent;beforeSnapshot=${before?.interactionSnapshot?.kind ?: "-"};beforeComments=${before?.comments?.size ?: -1}"
+        )
+        val resolved = if (beforePresent && before?.interactionSnapshot?.isFull == true) {
+            before
+        } else {
+            stalePhotoInteractionIds.add(photoId)
+            loadPhotoInteractions(photoId, reason = "target_resolve:$source", surfaceError = false)
+            findFeedItemByPhotoId(photoId)
+        }
+        val afterPresent = hasInteractionTarget(resolved, cleanCommentId, cleanPhotoMojiId, cleanReactionEmoji)
+        val afterSnapshot = resolved?.interactionSnapshot?.kind ?: "-"
+        if (afterPresent) {
+            stalePhotoInteractionIds.remove(photoId)
+            logFeedDecision(
+                type = "feed_target_resolved",
+                message = "feed interaction target resolved",
+                meta = "source=$source;targetDay=$day;targetPhotoId=$photoId;targetCommentId=${cleanCommentId ?: -1L};targetPhotoMojiId=${cleanPhotoMojiId ?: -1L};targetReaction=${cleanReactionEmoji ?: "-"};targetPresentBefore=$beforePresent;targetPresentAfter=true;afterSnapshot=$afterSnapshot;afterComments=${resolved?.comments?.size ?: -1}"
+            )
+            return
+        }
+        logFeedDecision(
+            type = "feed_target_missing",
+            message = "feed interaction target missing after reload",
+            meta = "source=$source;targetDay=$day;targetPhotoId=$photoId;targetCommentId=${cleanCommentId ?: -1L};targetPhotoMojiId=${cleanPhotoMojiId ?: -1L};targetReaction=${cleanReactionEmoji ?: "-"};targetPresentBefore=$beforePresent;targetPresentAfter=false;afterSnapshot=$afterSnapshot;afterComments=${resolved?.comments?.size ?: -1}"
+        )
+        state = state.copy(
+            message = when {
+                cleanCommentId != null -> "Der Kommentar konnte im Feed noch nicht sichtbar geladen werden."
+                cleanPhotoMojiId != null -> "Die FotoMoji konnte im Feed noch nicht sichtbar geladen werden."
+                else -> "Die Reaktion konnte im Feed noch nicht sichtbar geladen werden."
+            }
+        )
     }
 
     suspend fun jumpToDayBoundary(day: String, boundary: FeedJumpBoundary, source: String = "direct_jump") {
@@ -7320,6 +7467,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         if (cleanPhotoId != null) {
             staleFeedPhotoIds.add(cleanPhotoId)
+            stalePhotoInteractionIds.add(cleanPhotoId)
         }
         if (persist) {
             repo.queueFeedInvalidation(cleanDay, cleanPhotoId, reason = reason, source = source)
@@ -7342,6 +7490,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             if (photoId != null) {
                 staleFeedPhotoIds.add(photoId)
+                stalePhotoInteractionIds.add(photoId)
             }
             if (day.isNotBlank() || photoId != null) {
                 logFeedDecision(
@@ -7421,6 +7570,36 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val refreshedDays: Int = 0,
         val hiddenDays: List<String> = emptyList()
     )
+
+    private suspend fun refreshVisibleStalePhotoInteractions(trigger: String): Int {
+        if (stalePhotoInteractionIds.isEmpty()) return 0
+        val visiblePhotoIds = state.feedDays
+            .flatMap { day -> state.feedByDay[day].orEmpty() }
+            .map { it.photo.id }
+            .toSet()
+        if (visiblePhotoIds.isEmpty()) return 0
+        val targets = stalePhotoInteractionIds.filter(visiblePhotoIds::contains).take(3)
+        if (targets.isEmpty()) return 0
+        var refreshed = 0
+        targets.forEach { photoId ->
+            val response = loadPhotoInteractions(
+                photoId = photoId,
+                reason = "visible_stale:$trigger",
+                surfaceError = false
+            )
+            if (response != null) {
+                refreshed += 1
+            }
+        }
+        if (refreshed > 0) {
+            logFeedDecision(
+                type = "visible_interactions_refreshed",
+                message = "visible stale photo interactions refreshed",
+                meta = "trigger=$trigger;refreshed=$refreshed;photoIds=${targets.joinToString(",").ifBlank { "-" }}"
+            )
+        }
+        return refreshed
+    }
 
     private suspend fun refreshOffscreenStaleDays(trigger: String): OffscreenFeedRefreshResult {
         val visibleSet = state.feedDays.toSet()
@@ -7985,8 +8164,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     }
                 }
                 var offscreenRefreshResult = OffscreenFeedRefreshResult()
+                var refreshedVisibleInteractions = 0
                 if (!isModeSwitchRefresh) {
                     offscreenRefreshResult = refreshOffscreenStaleDays(reason)
+                    refreshedVisibleInteractions = refreshVisibleStalePhotoInteractions(reason)
                 }
                 if (isModeSwitchRefresh && refreshedFeedDays > 0) {
                     requestFeedScrollToTop(reason)
@@ -8003,6 +8184,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                             reason = "offscreen_only_refresh"
                         )
                     }
+                }
+                if (refreshedVisibleInteractions > 0) {
+                    repo.logDebug(
+                        type = "feed_interactions_refresh",
+                        message = "visible interaction refresh completed",
+                        meta = "reason=$reason;refreshed=$refreshedVisibleInteractions;remainingStale=${stalePhotoInteractionIds.joinToString(",").ifBlank { "-" }}"
+                    )
                 }
             } else {
                 val today = prompt.day
@@ -8975,21 +9163,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
-    suspend fun loadPhotoInteractions(photoId: Long) {
-        if (photoId <= 0) return
+    suspend fun loadPhotoInteractions(
+        photoId: Long,
+        reason: String = "viewer_open",
+        surfaceError: Boolean = true
+    ): PhotoInteractionsResponse? {
+        if (photoId <= 0) return null
         if (activePhotoInteractionsLoadPhotoId == photoId) {
             logFeedDecision(
                 type = "interactions_reload_skipped",
                 message = "photo interactions reload skipped",
-                meta = "photoId=$photoId;reason=already_loading"
+                meta = "photoId=$photoId;reason=already_loading;trigger=$reason"
             )
-            return
+            return photoInteractionsStore[photoId]
         }
         activePhotoInteractionsLoadPhotoId = photoId
         state = state.copy(interactionsLoading = true)
-        runCatching { repo.photoInteractions(photoId) }
+        return runCatching { repo.photoInteractions(photoId) }
             .onSuccess {
                 noteApiSuccess()
+                cachePhotoInteractions(it)
+                stalePhotoInteractionIds.remove(photoId)
                 applyPhotoInteractionsToFeedState(photoId, it)
                 upsertPendingFeedMutation(photoId) { pending ->
                     pending.copy(
@@ -9002,11 +9196,24 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 logFeedDecision(
                     type = "interactions_reloaded",
                     message = "photo interactions reloaded",
-                    meta = "photoId=$photoId;comments=${it.comments.size};reactions=${it.reactions.size};photoMojis=${it.photoMojis.size}"
+                    meta = "photoId=$photoId;comments=${it.comments.size};reactions=${it.reactions.size};photoMojis=${it.photoMojis.size};full=${it.full};trigger=$reason"
                 )
             }
-            .onFailure { state = state.copy(interactionsLoading = false, message = apiError(it, "Interaktionen laden fehlgeschlagen")) }
-        activePhotoInteractionsLoadPhotoId = null
+            .onFailure {
+                state = state.copy(
+                    interactionsLoading = false,
+                    message = if (surfaceError) apiError(it, "Interaktionen laden fehlgeschlagen") else state.message
+                )
+                logFeedDecision(
+                    type = "interactions_reload_failed",
+                    message = "photo interactions reload failed",
+                    meta = "photoId=$photoId;trigger=$reason;error=${it::class.java.simpleName}"
+                )
+            }
+            .getOrNull()
+            .also {
+                activePhotoInteractionsLoadPhotoId = null
+            }
     }
 
     private suspend fun reloadPhotoInteractionsIfVisible(photoId: Long, reason: String) {
@@ -9025,7 +9232,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             message = "photo interactions reload requested",
             meta = "photoId=$photoId;trigger=$reason"
         )
-        loadPhotoInteractions(photoId)
+        loadPhotoInteractions(photoId, reason = reason)
     }
 
     suspend fun reactPhoto(photoId: Long, emoji: String) {
@@ -9177,13 +9384,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             if (!touchedDay.isNullOrBlank()) {
                 staleFeedDays.add(touchedDay)
             }
-            patchFeedItemState(photoId) { item ->
-                item.copy(
-                    reactions = response.reactions,
-                    photoMojis = response.photoMojis,
-                    comments = response.comments
-                )
-            }
+            applyPhotoInteractionsToFeedState(photoId, response)
             upsertPendingFeedMutation(photoId) {
                 it.copy(
                     commentsOverride = response.comments,
@@ -9231,13 +9432,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 if (!touchedDay.isNullOrBlank()) {
                     staleFeedDays.add(touchedDay)
                 }
-                patchFeedItemState(photoId) { item ->
-                    item.copy(
-                        reactions = response.reactions,
-                        photoMojis = response.photoMojis,
-                        comments = response.comments
-                    )
-                }
+                applyPhotoInteractionsToFeedState(photoId, response)
                 upsertPendingFeedMutation(photoId) {
                     it.copy(
                         commentsOverride = response.comments,

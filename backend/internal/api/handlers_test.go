@@ -1603,6 +1603,134 @@ func TestFeedDaysForUserDoesNotReinsertLockedTodayAnchor(t *testing.T) {
 	}
 }
 
+func TestFeedPayloadForDayIncludesInteractionPreviewMetadata(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	author := models.User{Username: "author", PasswordHash: "x"}
+	reactor := models.User{Username: "reactor", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if err := server.DB.Create(&author).Error; err != nil {
+		t.Fatalf("create author: %v", err)
+	}
+	if err := server.DB.Create(&reactor).Error; err != nil {
+		t.Fatalf("create reactor: %v", err)
+	}
+
+	day := "2026-07-01"
+	if err := server.DB.Create(&models.DailyPrompt{Day: day, TriggerSource: "daily_moment"}).Error; err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+	photo := models.Photo{
+		UserID:    author.ID,
+		Day:       day,
+		FilePath:  day + "/post.jpg",
+		CreatedAt: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoComment{
+		PhotoID: photo.ID,
+		UserID:  reactor.ID,
+		Body:    "sichtbar",
+	}).Error; err != nil {
+		t.Fatalf("create comment: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoReaction{
+		PhotoID: photo.ID,
+		UserID:  reactor.ID,
+		Emoji:   "fire",
+	}).Error; err != nil {
+		t.Fatalf("create reaction: %v", err)
+	}
+
+	payload, status, err := server.feedPayloadForDay(viewer.ID, day, time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("feedPayloadForDay() error = %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("feedPayloadForDay() status = %d, want 200", status)
+	}
+	items, ok := payload["items"].([]gin.H)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %#v, want one item", payload["items"])
+	}
+	snapshot, ok := items[0]["interactionSnapshot"].(gin.H)
+	if !ok {
+		t.Fatalf("interactionSnapshot = %#v, want gin.H", items[0]["interactionSnapshot"])
+	}
+	if got := snapshot["kind"]; got != "preview" {
+		t.Fatalf("interactionSnapshot.kind = %#v, want preview", got)
+	}
+	if got := snapshot["commentPreviewLimit"]; got == nil {
+		t.Fatalf("interactionSnapshot.commentPreviewLimit missing")
+	}
+	counts, ok := items[0]["interactionCounts"].(gin.H)
+	if !ok {
+		t.Fatalf("interactionCounts = %#v, want gin.H", items[0]["interactionCounts"])
+	}
+	if got := counts["comments"]; got != int64(1) {
+		t.Fatalf("interactionCounts.comments = %#v, want 1", got)
+	}
+	if got := counts["reactions"]; got != int64(1) {
+		t.Fatalf("interactionCounts.reactions = %#v, want 1", got)
+	}
+}
+
+func TestPhotoInteractionsPayloadIncludesFullCounts(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	owner := models.User{Username: "owner", PasswordHash: "x"}
+	other := models.User{Username: "other", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	if err := server.DB.Create(&owner).Error; err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	if err := server.DB.Create(&other).Error; err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	photo := models.Photo{
+		UserID:    owner.ID,
+		Day:       "2026-07-02",
+		FilePath:  "2026-07-02/post.jpg",
+		CreatedAt: time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoComment{PhotoID: photo.ID, UserID: viewer.ID, Body: "eins"}).Error; err != nil {
+		t.Fatalf("create comment: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoReaction{PhotoID: photo.ID, UserID: viewer.ID, Emoji: "fire"}).Error; err != nil {
+		t.Fatalf("create first reaction: %v", err)
+	}
+	if err := server.DB.Create(&models.PhotoReaction{PhotoID: photo.ID, UserID: other.ID, Emoji: "fire"}).Error; err != nil {
+		t.Fatalf("create second reaction: %v", err)
+	}
+
+	payload, err := server.photoInteractionsPayload(photo, viewer.ID)
+	if err != nil {
+		t.Fatalf("photoInteractionsPayload() error = %v", err)
+	}
+	if got := payload["full"]; got != true {
+		t.Fatalf("full = %#v, want true", got)
+	}
+	counts, ok := payload["counts"].(gin.H)
+	if !ok {
+		t.Fatalf("counts = %#v, want gin.H", payload["counts"])
+	}
+	if got := counts["comments"]; got != 1 {
+		t.Fatalf("counts.comments = %#v, want 1", got)
+	}
+	if got := counts["reactions"]; got != 2 {
+		t.Fatalf("counts.reactions = %#v, want 2", got)
+	}
+}
+
 func TestFeedPayloadForDayAllowsPastDayWithoutTodayPost(t *testing.T) {
 	server := newSearchTestServer(t)
 	viewer := models.User{Username: "viewer", PasswordHash: "x"}
