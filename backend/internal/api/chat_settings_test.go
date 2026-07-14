@@ -31,6 +31,41 @@ func TestNormalizeSettingsPreservesUnlimitedChatSetting(t *testing.T) {
 	}
 }
 
+func TestNormalizeSettingsAppliesDefaultPostMediaLimit(t *testing.T) {
+	settings := normalizeSettings(models.AppSettings{
+		PostMediaMaxCount: 0,
+	})
+
+	if settings.PostMediaMaxCount != 6 {
+		t.Fatalf("PostMediaMaxCount = %d, want 6", settings.PostMediaMaxCount)
+	}
+}
+
+func TestNormalizeSettingsPreservesUnlimitedPostMediaSetting(t *testing.T) {
+	settings := normalizeSettings(models.AppSettings{
+		PostMediaMaxCount:  -42,
+		PostMediaUnlimited: true,
+	})
+
+	if !settings.PostMediaUnlimited {
+		t.Fatalf("PostMediaUnlimited = false, want true")
+	}
+	if settings.PostMediaMaxCount != 6 {
+		t.Fatalf("PostMediaMaxCount = %d, want normalized 6", settings.PostMediaMaxCount)
+	}
+}
+
+func TestNormalizeSettingsMigratesLegacyPostMediaDefaultToUnlimited(t *testing.T) {
+	settings := normalizeSettings(models.AppSettings{})
+
+	if !settings.PostMediaUnlimited {
+		t.Fatalf("PostMediaUnlimited = false, want true for legacy zero-value settings")
+	}
+	if settings.PostMediaMaxCount != 6 {
+		t.Fatalf("PostMediaMaxCount = %d, want normalized 6", settings.PostMediaMaxCount)
+	}
+}
+
 func TestChatMessageLengthUsesRuneCount(t *testing.T) {
 	body := strings.Repeat("ä", 5001)
 	if got := len([]rune(body)); got != 5001 {

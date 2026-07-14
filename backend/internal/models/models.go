@@ -93,6 +93,8 @@ type AppSettings struct {
 	MaxUploadBytes                   int64      `gorm:"default:0" json:"maxUploadBytes"`
 	ChatMessageMaxLength             int        `gorm:"default:5000" json:"chatMessageMaxLength"`
 	ChatMessageUnlimited             bool       `gorm:"default:false" json:"chatMessageUnlimited"`
+	PostMediaMaxCount                int        `gorm:"default:6" json:"postMediaMaxCount"`
+	PostMediaUnlimited               bool       `gorm:"default:true" json:"postMediaUnlimited"`
 	ChatCommandEnabled               bool       `gorm:"default:false" json:"chatCommandEnabled"`
 	ChatCommandValue                 string     `gorm:"size:64;default:'-moment'" json:"chatCommandValue"`
 	ChatCommandTrigger               bool       `gorm:"default:true" json:"chatCommandTrigger"`

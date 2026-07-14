@@ -692,6 +692,8 @@ data class PromptResponse(
     val ownPhoto: PromptPhoto? = null,
     val canAppendToOwnLatestPost: Boolean = false,
     val appendTargetPhotoId: Long? = null,
+    val appendRemainingMediaSlots: Int? = null,
+    val appendMediaUnlimited: Boolean = false,
     val triggerSource: String? = null,
     val requestedByUser: String? = null,
     val momentKind: String? = null
@@ -13181,10 +13183,23 @@ fun CameraTab(
                     )
                 }
                 if (prompt?.canAppendToOwnLatestPost == true && prompt.appendTargetPhotoId != null) {
-                    OutlinedButton(
-                        onClick = { onAppendToLatestPost(prompt.appendTargetPhotoId) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Dem eigenen letzten Beitrag Bild hinzufuegen") }
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { onAppendToLatestPost(prompt.appendTargetPhotoId) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Dem eigenen letzten Beitrag Bild hinzufuegen") }
+                        if (!prompt.appendMediaUnlimited) {
+                            prompt.appendRemainingMediaSlots?.let { remaining ->
+                                Text(
+                                    "$remaining Medien verbleibend bis Limit",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
                 } else if (hasVisiblePosted) {
                     Text(
                         "Weitere Bilder lassen sich nur am letzten sichtbaren Beitrag von heute anhaengen.",
@@ -19936,6 +19951,10 @@ private fun apiError(t: Throwable, fallback: String, httpErrorRawOverride: Strin
             409 -> when {
                 raw.contains("username exists") -> "Benutzername ist bereits vergeben."
                 errorCode == "duplicate_consecutive_comment" || raw.contains("duplicate consecutive comment") -> "Derselbe Kommentar wurde gerade bereits gepostet."
+                errorCode == "post_media_limit_reached" || raw.contains("attachment limit reached") -> {
+                    val maxCount = extractJsonIntField(rawBody, "maxCount")
+                    if (maxCount != null) "Medienlimit fuer diesen Beitrag erreicht (max. $maxCount)." else "Medienlimit fuer diesen Beitrag erreicht."
+                }
                 else -> "Du hast heute bereits gepostet"
             }
             423 -> when {

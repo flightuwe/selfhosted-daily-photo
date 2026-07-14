@@ -201,6 +201,8 @@ const DEFAULT_SETTINGS: Settings = {
   maxUploadBytes: 0,
   chatMessageMaxLength: 5000,
   chatMessageUnlimited: false,
+  postMediaMaxCount: 6,
+  postMediaUnlimited: true,
   chatCommandEnabled: false,
   chatCommandValue: "-moment",
   chatCommandTrigger: true,
@@ -7459,6 +7461,12 @@ export function App() {
                     : `${savedSettings.chatMessageMaxLength} Zeichen`}
                 </p>
                 <p>
+                  <strong>Medien pro Beitrag:</strong>{" "}
+                  {savedSettings.postMediaUnlimited
+                    ? "Unbegrenzt"
+                    : `${savedSettings.postMediaMaxCount} Medien`}
+                </p>
+                <p>
                   <strong>Notification-Text:</strong>{" "}
                   {savedSettings.promptNotificationText}
                 </p>
@@ -7624,6 +7632,58 @@ export function App() {
                   {settings.chatMessageUnlimited
                     ? "Unbegrenzt"
                     : `${settings.chatMessageMaxLength} Zeichen`}
+                </p>
+              </div>
+              <div
+                className="stack"
+                style={{
+                  border: "1px solid var(--border)",
+                  borderRadius: 12,
+                  padding: 12,
+                }}
+              >
+                <h3>Medien pro Beitrag</h3>
+                <label>
+                  Max Medien pro Beitrag
+                  <input
+                    type="number"
+                    min={1}
+                    value={settings.postMediaMaxCount}
+                    disabled={settings.postMediaUnlimited}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        postMediaMaxCount: Math.max(
+                          1,
+                          Number(e.target.value) ||
+                            DEFAULT_SETTINGS.postMediaMaxCount,
+                        ),
+                      })
+                    }
+                  />
+                </label>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={settings.postMediaUnlimited}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        postMediaUnlimited: e.target.checked,
+                        postMediaMaxCount:
+                          settings.postMediaMaxCount > 0
+                            ? settings.postMediaMaxCount
+                            : DEFAULT_SETTINGS.postMediaMaxCount,
+                      })
+                    }
+                  />
+                  Unbegrenzte Medien pro Beitrag erlauben
+                </label>
+                <p className="small">
+                  Effektiv:{" "}
+                  {settings.postMediaUnlimited
+                    ? "Unbegrenzt"
+                    : `${settings.postMediaMaxCount} Medien`}
                 </p>
               </div>
               <div className="stack">

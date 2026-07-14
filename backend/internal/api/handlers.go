@@ -1420,9 +1420,13 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	hasAnyPost := stats.PostCount > 0
 	hasVisiblePost := stats.VisibleCount > 0
 	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/prompt/current")
+	var settings models.AppSettings
+	_ = s.DB.First(&settings).Error
+	settings = normalizeSettings(settings)
 	var ownPhoto gin.H
 	canAppendToOwnLatestPost := false
 	var appendTargetPhotoID any = nil
+	var appendRemainingMediaSlots any = nil
 	if hasPromptPosted {
 		var p models.Photo
 		ownPhotoQueryStart := time.Now()
@@ -1435,7 +1439,11 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	}
 	if latestPhoto, ok, err := s.latestAppendablePhotoForDay(user.ID, day, now); err == nil && ok {
 		appendTargetPhotoID = latestPhoto.ID
-		canAppendToOwnLatestPost = s.photoMediaCount(latestPhoto) < 6
+		remaining, unlimited := s.remainingPostMediaSlots(latestPhoto, settings)
+		canAppendToOwnLatestPost = unlimited || remaining > 0
+		if !unlimited {
+			appendRemainingMediaSlots = remaining
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1458,6 +1466,8 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		"specialRequestedByUserColor": triggerStatus.SpecialRequestedByUserColor,
 		"canAppendToOwnLatestPost":    canAppendToOwnLatestPost,
 		"appendTargetPhotoId":         appendTargetPhotoID,
+		"appendRemainingMediaSlots":   appendRemainingMediaSlots,
+		"appendMediaUnlimited":        settings.PostMediaUnlimited,
 	})
 }
 
@@ -1503,20 +1513,24 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 	var ownPhoto gin.H
 	canAppendToOwnLatestPost := false
 	var appendTargetPhotoID any = nil
+	var appendRemainingMediaSlots any = nil
 	if hasPromptPosted {
 		var p models.Photo
 		if err := s.DB.Where("user_id = ? AND day = ? AND prompt_only = ?", user.ID, day, true).Order("created_at desc").First(&p).Error; err == nil {
 			ownPhoto = s.photoJSON(p)
 		}
 	}
-	if latestPhoto, ok, err := s.latestAppendablePhotoForDay(user.ID, day, now); err == nil && ok {
-		appendTargetPhotoID = latestPhoto.ID
-		canAppendToOwnLatestPost = s.photoMediaCount(latestPhoto) < 6
-	}
-
 	var settings models.AppSettings
 	_ = s.DB.First(&settings).Error
 	settings = normalizeSettings(settings)
+	if latestPhoto, ok, err := s.latestAppendablePhotoForDay(user.ID, day, now); err == nil && ok {
+		appendTargetPhotoID = latestPhoto.ID
+		remaining, unlimited := s.remainingPostMediaSlots(latestPhoto, settings)
+		canAppendToOwnLatestPost = unlimited || remaining > 0
+		if !unlimited {
+			appendRemainingMediaSlots = remaining
+		}
+	}
 
 	specialStatus, _ := s.specialMomentStatus(user.ID)
 	feedDays, _, _, _ := s.feedDaysForUser(user.ID, "", "", "", "", 60, "", now)
@@ -1572,6 +1586,8 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 			"specialRequestedByUserColor": triggerStatus.SpecialRequestedByUserColor,
 			"canAppendToOwnLatestPost":    canAppendToOwnLatestPost,
 			"appendTargetPhotoId":         appendTargetPhotoID,
+			"appendRemainingMediaSlots":   appendRemainingMediaSlots,
+			"appendMediaUnlimited":        settings.PostMediaUnlimited,
 		},
 		"promptRules": gin.H{
 			"promptWindowStartHour": settings.PromptWindowStartHour,
@@ -2845,6 +2861,8 @@ type settingsRequest struct {
 	MaxUploadBytes                   int64            `json:"maxUploadBytes"`
 	ChatMessageMaxLength             int              `json:"chatMessageMaxLength"`
 	ChatMessageUnlimited             bool             `json:"chatMessageUnlimited"`
+	PostMediaMaxCount                int              `json:"postMediaMaxCount"`
+	PostMediaUnlimited               bool             `json:"postMediaUnlimited"`
 	ChatCommandEnabled               bool             `json:"chatCommandEnabled"`
 	ChatCommandValue                 string           `json:"chatCommandValue"`
 	ChatCommandTrigger               bool             `json:"chatCommandTrigger"`
@@ -2905,6 +2923,8 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	settings.MaxUploadBytes = req.MaxUploadBytes
 	settings.ChatMessageMaxLength = req.ChatMessageMaxLength
 	settings.ChatMessageUnlimited = req.ChatMessageUnlimited
+	settings.PostMediaMaxCount = req.PostMediaMaxCount
+	settings.PostMediaUnlimited = req.PostMediaUnlimited
 	settings.ChatCommandEnabled = req.ChatCommandEnabled
 	settings.ChatCommandValue = req.ChatCommandValue
 	settings.ChatCommandTrigger = req.ChatCommandTrigger
@@ -8597,8 +8617,18 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "append not allowed for hidden post"})
 		return
 	}
-	if s.photoMediaCount(photo) >= 6 {
-		c.JSON(http.StatusConflict, gin.H{"error": "attachment limit reached"})
+	var settings models.AppSettings
+	if err := s.DB.First(&settings).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
+		return
+	}
+	settings = normalizeSettings(settings)
+	if remaining, unlimited := s.remainingPostMediaSlots(photo, settings); !unlimited && remaining <= 0 {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":    "attachment limit reached",
+			"code":     "post_media_limit_reached",
+			"maxCount": settings.PostMediaMaxCount,
+		})
 		return
 	}
 
@@ -11504,6 +11534,17 @@ func (s *Server) photoMediaCount(photo models.Photo) int {
 	return count
 }
 
+func (s *Server) remainingPostMediaSlots(photo models.Photo, settings models.AppSettings) (int, bool) {
+	if settings.PostMediaUnlimited {
+		return 0, true
+	}
+	remaining := settings.PostMediaMaxCount - s.photoMediaCount(photo)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining, false
+}
+
 type photoReactionCountRow struct {
 	Emoji string
 	Count int64
@@ -13018,6 +13059,7 @@ func encodeUserPromptRulesJSON(rules []userPromptRule) string {
 
 func normalizeSettings(settings models.AppSettings) models.AppSettings {
 	const defaultChatMessageMaxLength = 5000
+	const defaultPostMediaMaxCount = 6
 	if strings.TrimSpace(settings.ChatCommandValue) == "" {
 		settings.ChatCommandValue = "-moment"
 	}
@@ -13038,6 +13080,12 @@ func normalizeSettings(settings models.AppSettings) models.AppSettings {
 	}
 	if settings.ChatMessageMaxLength <= 0 {
 		settings.ChatMessageMaxLength = defaultChatMessageMaxLength
+	}
+	if settings.PostMediaMaxCount == 0 && !settings.PostMediaUnlimited {
+		settings.PostMediaUnlimited = true
+	}
+	if settings.PostMediaMaxCount <= 0 {
+		settings.PostMediaMaxCount = defaultPostMediaMaxCount
 	}
 	if settings.PerformanceTrackingWindowMinutes < 5 {
 		settings.PerformanceTrackingWindowMinutes = 30
@@ -13069,6 +13117,8 @@ func settingsJSON(settings models.AppSettings) gin.H {
 		"maxUploadBytes":                   settings.MaxUploadBytes,
 		"chatMessageMaxLength":             settings.ChatMessageMaxLength,
 		"chatMessageUnlimited":             settings.ChatMessageUnlimited,
+		"postMediaMaxCount":                settings.PostMediaMaxCount,
+		"postMediaUnlimited":               settings.PostMediaUnlimited,
 		"chatCommandEnabled":               settings.ChatCommandEnabled,
 		"chatCommandValue":                 settings.ChatCommandValue,
 		"chatCommandTrigger":               settings.ChatCommandTrigger,

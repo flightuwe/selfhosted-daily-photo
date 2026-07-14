@@ -27,6 +27,8 @@ export type Settings = {
   maxUploadBytes: number;
   chatMessageMaxLength: number;
   chatMessageUnlimited: boolean;
+  postMediaMaxCount: number;
+  postMediaUnlimited: boolean;
   chatCommandEnabled: boolean;
   chatCommandValue: string;
   chatCommandTrigger: boolean;
@@ -1023,6 +1025,8 @@ const settingsDefaults: Settings = {
   maxUploadBytes: 0,
   chatMessageMaxLength: 5000,
   chatMessageUnlimited: false,
+  postMediaMaxCount: 6,
+  postMediaUnlimited: true,
   chatCommandEnabled: false,
   chatCommandValue: "-moment",
   chatCommandTrigger: true,
@@ -1143,6 +1147,16 @@ function normalizeSettings(raw: any): Settings {
       raw?.chatMessageUnlimited ??
       raw?.ChatMessageUnlimited ??
       settingsDefaults.chatMessageUnlimited,
+    ),
+    postMediaMaxCount: Number(
+      raw?.postMediaMaxCount ??
+        raw?.PostMediaMaxCount ??
+        settingsDefaults.postMediaMaxCount,
+    ),
+    postMediaUnlimited: Boolean(
+      raw?.postMediaUnlimited ??
+      raw?.PostMediaUnlimited ??
+      settingsDefaults.postMediaUnlimited,
     ),
     chatCommandEnabled: Boolean(
       raw?.chatCommandEnabled ??

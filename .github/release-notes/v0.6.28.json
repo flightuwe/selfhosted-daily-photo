@@ -1,0 +1,9 @@
+{
+  "version": "v0.6.28",
+  "title": "Konfigurierbares Medienlimit pro Beitrag",
+  "items": [
+    "Das bisher feste Limit fuer weitere Bilder am eigenen Beitrag ist jetzt serverseitig als Admin-Einstellung 'Medien pro Beitrag' verfuegbar. Standardmaessig ist es unbegrenzt, kann aber jederzeit wieder begrenzt werden.",
+    "Der Kamera-Tab zeigt beim Button zum Hinzufuegen weiterer Bilder jetzt direkt an, wie viele Medien bis zum aktiven Limit noch verbleiben. Bei unbegrenzter Einstellung wird bewusst kein Limittext eingeblendet.",
+    "Das Backend liefert die verbleibenden Medien-Slots direkt in der Prompt-Antwort aus und blockiert Anhaenge konsistent anhand derselben Admin-Einstellung statt anhand eines fest eingebauten 6er-Limits."
+  ]
+}
