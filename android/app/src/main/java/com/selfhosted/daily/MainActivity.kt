@@ -817,6 +817,10 @@ data class FeedWindowResponse(
     val hasNewer: Boolean = false,
     val oldestLoadedDay: String? = null,
     val newestLoadedDay: String? = null,
+    val requestedBeforeDays: Int? = null,
+    val requestedAfterDays: Int? = null,
+    val minReturnedDay: String? = null,
+    val maxReturnedDay: String? = null,
     val resolvedFocusPhotoId: Long? = null,
     val mode: String? = null,
     val offset: Int = 0,
@@ -833,6 +837,12 @@ enum class FeedViewportAnchorKind {
 enum class FeedJumpBoundary {
     START,
     END
+}
+
+private enum class FeedWindowMergeDirection {
+    CENTER,
+    OLDER,
+    NEWER
 }
 
 data class FeedViewportAnchor(
@@ -8643,7 +8653,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 afterDays = around,
                 focusPhotoId = state.feedFocusPhotoId
             ).normalized(source = "feed_window_center:$target")
-            applyFeedWindow(window, target, replaceVisibleDays = replaceVisibleDays, forceReload = forceReload)
+            applyFeedWindow(
+                window,
+                target,
+                replaceVisibleDays = replaceVisibleDays,
+                forceReload = forceReload,
+                mergeDirection = FeedWindowMergeDirection.CENTER
+            )
         } catch (t: Throwable) {
             if (isFeedLockedTodayError(t, target)) {
                 applyTodayFeedLockedState(target)
@@ -8668,7 +8684,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         try {
             runCatching { repo.feedWindow(anchorDay = anchorDay, beforeDays = beforeDays, afterDays = afterDays).normalized(source = "feed_window_edge:$anchorDay") }
                 .onSuccess { window ->
-                    applyFeedWindow(window, anchorDay, replaceVisibleDays = false, forceReload = false, appendOlder = appendOlder)
+                    applyFeedWindow(
+                        window,
+                        anchorDay,
+                        replaceVisibleDays = false,
+                        forceReload = false,
+                        appendOlder = appendOlder,
+                        mergeDirection = if (appendOlder) FeedWindowMergeDirection.OLDER else FeedWindowMergeDirection.NEWER
+                    )
                 }
                 .onFailure { throwable ->
                     if (isFeedLockedTodayError(throwable, anchorDay)) {
@@ -8715,7 +8738,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 anchorDay = anchorDay,
                 focusPhotoId = focusPhotoId
             ).normalized(source = "feed_discover:${state.feedOrderMode.name.lowercase()}:offset_$offset")
-            applyFeedWindow(window, window.anchorDay.ifBlank { state.feedFocusDay.orEmpty() }, replaceVisibleDays = replaceVisibleDays, forceReload = false, appendOlder = appendOlder)
+            applyFeedWindow(
+                window,
+                window.anchorDay.ifBlank { state.feedFocusDay.orEmpty() },
+                replaceVisibleDays = replaceVisibleDays,
+                forceReload = false,
+                appendOlder = appendOlder,
+                mergeDirection = FeedWindowMergeDirection.CENTER
+            )
         } finally {
             if (state.feedPaging) {
                 state = state.copy(feedPaging = false, feedJumpLoadingDay = null, feedWindowReloadInFlight = false)
@@ -8737,9 +8767,44 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         requestedAnchorDay: String,
         replaceVisibleDays: Boolean,
         forceReload: Boolean,
-        appendOlder: Boolean = false
+        appendOlder: Boolean = false,
+        mergeDirection: FeedWindowMergeDirection = FeedWindowMergeDirection.CENTER
     ): Int {
-        val windowDays = window.days.mapNotNull { it.day }.distinct()
+        val previousVisibleDays = state.feedDays
+        val currentNewestDay = previousVisibleDays.firstOrNull()
+        val currentOldestDay = previousVisibleDays.lastOrNull()
+        val rawWindowDays = window.days.mapNotNull { it.day }.distinct()
+        val directionFilteredPayloads = if (state.feedOrderMode == FeedOrderMode.CHRONO) {
+            when (mergeDirection) {
+                FeedWindowMergeDirection.OLDER -> window.days.filter { payload ->
+                    val day = payload.day ?: return@filter false
+                    currentOldestDay == null || day <= currentOldestDay
+                }
+                FeedWindowMergeDirection.NEWER -> window.days.filter { payload ->
+                    val day = payload.day ?: return@filter false
+                    currentNewestDay == null || day >= currentNewestDay
+                }
+                FeedWindowMergeDirection.CENTER -> window.days
+            }
+        } else {
+            window.days
+        }
+        val discardedByDirection = window.days.size - directionFilteredPayloads.size
+        if (rawWindowDays.isNotEmpty() && directionFilteredPayloads.isEmpty()) {
+            state = state.copy(
+                feedJumpLoadingDay = null,
+                feedPaging = false,
+                feedWindowReloadInFlight = false
+            )
+            repo.logFeedDebug(
+                type = "feed_window_direction_rejected",
+                message = "feed window rejected by direction guard",
+                meta = "direction=${mergeDirection.name.lowercase()};requestedAnchor=$requestedAnchorDay;resolvedAnchor=${window.anchorDay.ifBlank { requestedAnchorDay }};currentOldestDay=${currentOldestDay ?: "-"};currentNewestDay=${currentNewestDay ?: "-"};minReturnedDay=${window.minReturnedDay ?: rawWindowDays.minOrNull() ?: "-"};maxReturnedDay=${window.maxReturnedDay ?: rawWindowDays.maxOrNull() ?: "-"};discardedByDirection=$discardedByDirection;windowDays=${rawWindowDays.joinToString(",").ifBlank { "-" }}"
+            )
+            return 0
+        }
+        val effectiveWindow = if (discardedByDirection > 0) window.copy(days = directionFilteredPayloads) else window
+        val windowDays = effectiveWindow.days.mapNotNull { it.day }.distinct()
         if (windowDays.isEmpty()) {
             val today = state.prompt?.day ?: LocalDate.now().toString()
             state = state.copy(
@@ -8754,7 +8819,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val cacheMap = state.feedByDay.toMutableMap()
         val promptMap = state.promptMetaByDay.toMutableMap()
         val recapMap = state.monthRecapByDay.toMutableMap()
-        window.days.forEach { dayPayload ->
+        effectiveWindow.days.forEach { dayPayload ->
             val day = dayPayload.day ?: return@forEach
             dayPayload.items.forEach(::reconcilePendingFeedMutation)
             cacheMap[day] = dayPayload.items.map(::applyPendingFeedMutation)
@@ -8775,7 +8840,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             staleFeedDays.remove(day)
         }
         val mergedKnownDays = mergeDayIndex(state.calendarDays, windowDays)
-        val previousVisibleDays = state.feedDays
         val visibleDays = mergeVisibleFeedDays(windowDays, replaceVisibleDays = replaceVisibleDays, appendOlder = appendOlder)
         val prunedCache = pruneFeedCaches(cacheMap, promptMap, recapMap, visibleDays, requestedAnchorDay)
         val today = state.prompt?.day ?: LocalDate.now().toString()
@@ -8798,27 +8862,28 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             promptMetaByDay = finalPromptMeta,
             feed = if (postedToday) finalFeedByDay[today].orEmpty() else emptyList(),
             feedTodayLocked = todayLocked,
-            feedFocusPhotoId = window.resolvedFocusPhotoId ?: state.feedFocusPhotoId,
-            feedDiscoverOffset = window.offset,
-            feedDiscoverNextOffset = window.nextOffset,
-            randomFeedSeed = if (window.randomSeed != 0L) window.randomSeed else state.randomFeedSeed,
+            feedFocusPhotoId = effectiveWindow.resolvedFocusPhotoId ?: state.feedFocusPhotoId,
+            feedDiscoverOffset = effectiveWindow.offset,
+            feedDiscoverNextOffset = effectiveWindow.nextOffset,
+            randomFeedSeed = if (effectiveWindow.randomSeed != 0L) effectiveWindow.randomSeed else state.randomFeedSeed,
             feedJumpLoadingDay = null,
             feedPaging = false,
             feedWindowReloadInFlight = false,
             feedHasHiddenNewerContent = if (hiddenNewerCleared) false else state.feedHasHiddenNewerContent,
             feedHiddenNewerAnchorDay = if (hiddenNewerCleared) null else state.feedHiddenNewerAnchorDay
         )
-        val anchorPresentAfterApply = finalVisibleDays.contains(requestedAnchorDay) || finalVisibleDays.contains(window.anchorDay)
+        val anchorPresentAfterApply = finalVisibleDays.contains(requestedAnchorDay) || finalVisibleDays.contains(effectiveWindow.anchorDay)
+        val insertedDays = finalVisibleDays.filterNot { previousVisibleDays.contains(it) }
         repo.logFeedDebug(
             type = "feed_window_apply",
             message = "feed window applied",
-            meta = "requestedAnchor=$requestedAnchorDay;resolvedAnchor=${window.anchorDay.ifBlank { requestedAnchorDay }};visibleBefore=${previousVisibleDays.joinToString(",").ifBlank { "-" }};visibleAfter=${finalVisibleDays.joinToString(",").ifBlank { "-" }};windowDays=${windowDays.joinToString(",").ifBlank { "-" }};replaceVisibleDays=$replaceVisibleDays;appendOlder=$appendOlder;anchorPresentAfterApply=$anchorPresentAfterApply;hiddenNewerCleared=$hiddenNewerCleared"
+            meta = "direction=${mergeDirection.name.lowercase()};requestedAnchor=$requestedAnchorDay;resolvedAnchor=${effectiveWindow.anchorDay.ifBlank { requestedAnchorDay }};currentOldestDay=${currentOldestDay ?: "-"};currentNewestDay=${currentNewestDay ?: "-"};minReturnedDay=${effectiveWindow.minReturnedDay ?: windowDays.minOrNull() ?: "-"};maxReturnedDay=${effectiveWindow.maxReturnedDay ?: windowDays.maxOrNull() ?: "-"};discardedByDirection=$discardedByDirection;insertedDays=${insertedDays.joinToString(",").ifBlank { "-" }};visibleBefore=${previousVisibleDays.joinToString(",").ifBlank { "-" }};visibleAfter=${finalVisibleDays.joinToString(",").ifBlank { "-" }};windowDays=${windowDays.joinToString(",").ifBlank { "-" }};replaceVisibleDays=$replaceVisibleDays;appendOlder=$appendOlder;anchorPresentAfterApply=$anchorPresentAfterApply;hiddenNewerCleared=$hiddenNewerCleared"
         )
         if (forceReload) {
             repo.logDebug(
                 type = "feed_window_refresh",
                 message = "feed window loaded",
-                meta = "requestedAnchor=$requestedAnchorDay;resolvedAnchor=${window.anchorDay.ifBlank { requestedAnchorDay }};visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};daysLoaded=${windowDays.size};replaceVisibleDays=$replaceVisibleDays;appendOlder=$appendOlder;visibleBefore=${previousVisibleDays.joinToString(",").ifBlank { "-" }};visibleAfter=${finalVisibleDays.joinToString(",").ifBlank { "-" }}"
+                meta = "direction=${mergeDirection.name.lowercase()};requestedAnchor=$requestedAnchorDay;resolvedAnchor=${effectiveWindow.anchorDay.ifBlank { requestedAnchorDay }};visibleAnchor=${state.feedVisibleAnchorDay ?: "-"};daysLoaded=${windowDays.size};discardedByDirection=$discardedByDirection;replaceVisibleDays=$replaceVisibleDays;appendOlder=$appendOlder;visibleBefore=${previousVisibleDays.joinToString(",").ifBlank { "-" }};visibleAfter=${finalVisibleDays.joinToString(",").ifBlank { "-" }}"
             )
         }
         return windowDays.size

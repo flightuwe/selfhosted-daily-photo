@@ -2468,26 +2468,42 @@ func (s *Server) handleFeedWindow(c *gin.Context) {
 	}
 	focusPhotoID := strings.TrimSpace(c.Query("focus_photo_id"))
 
-	newerDays, _, hasNewer, err := s.feedDaysForUser(user.ID, "", "", "", anchorDay, beforeDays, "", now)
-	if err != nil {
-		if strings.Contains(err.Error(), "invalid") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	beforeDays = minInt(beforeDays, 60)
+	afterDays = minInt(afterDays, 60)
+
+	newerDays := []string{}
+	hasNewer := false
+	if beforeDays > 0 {
+		var err error
+		newerDays, _, hasNewer, err = s.feedDaysForUser(user.ID, "", "", "", anchorDay, beforeDays, "", now)
+		if err != nil {
+			if strings.Contains(err.Error(), "invalid") {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-		return
+		newerDays = filterDaysAfter(newerDays, anchorDay)
 	}
-	olderDays, hasOlder, _, err := s.feedDaysForUser(user.ID, "", "", anchorDay, "", afterDays, "", now)
-	if err != nil {
-		if strings.Contains(err.Error(), "invalid") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	olderDays := []string{}
+	hasOlder := false
+	if afterDays > 0 {
+		var err error
+		olderDays, hasOlder, _, err = s.feedDaysForUser(user.ID, "", "", anchorDay, "", afterDays, "", now)
+		if err != nil {
+			if strings.Contains(err.Error(), "invalid") {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-		return
+		olderDays = filterDaysBefore(olderDays, anchorDay)
 	}
 	selectedDays := append(append(newerDays, anchorDay), olderDays...)
 	selectedDays = uniqueDays(selectedDays)
+	sort.Slice(selectedDays, func(i, j int) bool { return selectedDays[i] > selectedDays[j] })
 	items := make([]gin.H, 0, len(selectedDays))
 	for _, day := range selectedDays {
 		payload, status, payloadErr := s.feedPayloadForDay(user.ID, day, now)
@@ -2504,6 +2520,10 @@ func (s *Server) handleFeedWindow(c *gin.Context) {
 		"hasNewer":             hasNewer,
 		"oldestLoadedDay":      selectedDays[len(selectedDays)-1],
 		"newestLoadedDay":      selectedDays[0],
+		"requestedBeforeDays":  beforeDays,
+		"requestedAfterDays":   afterDays,
+		"minReturnedDay":       selectedDays[len(selectedDays)-1],
+		"maxReturnedDay":       selectedDays[0],
 		"resolvedFocusPhotoId": parseOptionalInt64(focusPhotoID),
 	})
 }
@@ -5290,6 +5310,26 @@ func uniqueDays(days []string) []string {
 		}
 		seen[day] = struct{}{}
 		out = append(out, day)
+	}
+	return out
+}
+
+func filterDaysAfter(days []string, anchorDay string) []string {
+	out := make([]string, 0, len(days))
+	for _, day := range days {
+		if day > anchorDay {
+			out = append(out, day)
+		}
+	}
+	return out
+}
+
+func filterDaysBefore(days []string, anchorDay string) []string {
+	out := make([]string, 0, len(days))
+	for _, day := range days {
+		if day < anchorDay {
+			out = append(out, day)
+		}
 	}
 	return out
 }

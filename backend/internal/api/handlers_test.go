@@ -1641,6 +1641,129 @@ func TestHandleFeedWindowLocksTodayWithoutOwnVisiblePost(t *testing.T) {
 	}
 }
 
+func TestHandleFeedWindowExplicitZeroSkipsNewerSide(t *testing.T) {
+	server, viewer := newFeedWindowDirectionTestServer(t)
+
+	body := requestFeedWindowForTest(t, server, viewer, "/api/feed/window?anchor_day=2026-05-12&before_days=0&after_days=2")
+	days := feedWindowDaysForTest(t, body)
+
+	want := []string{"2026-05-12", "2026-05-11", "2026-05-10"}
+	if fmt.Sprint(days) != fmt.Sprint(want) {
+		t.Fatalf("days = %v, want %v", days, want)
+	}
+	if got := int(body["requestedBeforeDays"].(float64)); got != 0 {
+		t.Fatalf("requestedBeforeDays = %d, want 0", got)
+	}
+	if got := body["minReturnedDay"]; got != "2026-05-10" {
+		t.Fatalf("minReturnedDay = %#v, want 2026-05-10", got)
+	}
+	if got := body["maxReturnedDay"]; got != "2026-05-12" {
+		t.Fatalf("maxReturnedDay = %#v, want 2026-05-12", got)
+	}
+}
+
+func TestHandleFeedWindowExplicitZeroSkipsOlderSide(t *testing.T) {
+	server, viewer := newFeedWindowDirectionTestServer(t)
+
+	body := requestFeedWindowForTest(t, server, viewer, "/api/feed/window?anchor_day=2026-05-12&before_days=2&after_days=0")
+	days := feedWindowDaysForTest(t, body)
+
+	want := []string{"2026-07-12", "2026-05-14", "2026-05-12"}
+	if fmt.Sprint(days) != fmt.Sprint(want) {
+		t.Fatalf("days = %v, want %v", days, want)
+	}
+	if got := int(body["requestedAfterDays"].(float64)); got != 0 {
+		t.Fatalf("requestedAfterDays = %d, want 0", got)
+	}
+	if got := body["minReturnedDay"]; got != "2026-05-12" {
+		t.Fatalf("minReturnedDay = %#v, want 2026-05-12", got)
+	}
+	if got := body["maxReturnedDay"]; got != "2026-07-12" {
+		t.Fatalf("maxReturnedDay = %#v, want 2026-07-12", got)
+	}
+}
+
+func TestHandleFeedWindowRejectsNegativeWindowCount(t *testing.T) {
+	server, viewer := newFeedWindowDirectionTestServer(t)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/feed/window?anchor_day=2026-05-12&before_days=-1&after_days=0", nil)
+	c.Set("user", viewer)
+
+	server.handleFeedWindow(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("handleFeedWindow() status = %d, want 400", rec.Code)
+	}
+}
+
+func newFeedWindowDirectionTestServer(t *testing.T) (*Server, models.User) {
+	t.Helper()
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "viewer", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	for _, day := range []string{"2026-07-12", "2026-05-14", "2026-05-12", "2026-05-11", "2026-05-10"} {
+		createdAt, err := time.Parse("2006-01-02", day)
+		if err != nil {
+			t.Fatalf("parse day %s: %v", day, err)
+		}
+		photo := models.Photo{
+			UserID:    viewer.ID,
+			User:      viewer,
+			Day:       day,
+			FilePath:  day + "/test.jpg",
+			CreatedAt: createdAt,
+		}
+		if err := server.DB.Create(&photo).Error; err != nil {
+			t.Fatalf("create photo %s: %v", day, err)
+		}
+	}
+	return server, viewer
+}
+
+func requestFeedWindowForTest(t *testing.T, server *Server, viewer models.User, target string) map[string]any {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
+	c.Set("user", viewer)
+
+	server.handleFeedWindow(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handleFeedWindow() status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return body
+}
+
+func feedWindowDaysForTest(t *testing.T, body map[string]any) []string {
+	t.Helper()
+	rawDays, ok := body["days"].([]any)
+	if !ok {
+		t.Fatalf("days missing or wrong type: %#v", body["days"])
+	}
+	days := make([]string, 0, len(rawDays))
+	for _, raw := range rawDays {
+		payload, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("day payload wrong type: %#v", raw)
+		}
+		day, ok := payload["day"].(string)
+		if !ok {
+			t.Fatalf("day missing or wrong type: %#v", payload["day"])
+		}
+		days = append(days, day)
+	}
+	return days
+}
+
 func TestFeedDaysForUserDoesNotReinsertLockedTodayAnchor(t *testing.T) {
 	server := newSearchTestServer(t)
 	viewer := models.User{Username: "viewer", PasswordHash: "x"}
