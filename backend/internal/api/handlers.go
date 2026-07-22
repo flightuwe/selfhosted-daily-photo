@@ -1398,16 +1398,15 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	}
 
 	canUpload := isPromptWindowActive(prompt, now)
+	activeMomentKind := momentKindFromTriggerSource(prompt.TriggerSource)
 	type dayStatsRow struct {
-		HasPromptPosted int64 `gorm:"column:has_prompt_posted"`
-		PostCount       int64 `gorm:"column:post_count"`
-		VisibleCount    int64 `gorm:"column:visible_count"`
+		PostCount    int64 `gorm:"column:post_count"`
+		VisibleCount int64 `gorm:"column:visible_count"`
 	}
 	stats := dayStatsRow{}
 	statsQueryStart := time.Now()
 	_ = s.DB.Raw(`
 		SELECT
-			COALESCE(MAX(CASE WHEN prompt_only = 1 THEN 1 ELSE 0 END), 0) AS has_prompt_posted,
 			COALESCE(COUNT(*), 0) AS post_count,
 			COALESCE(SUM(CASE WHEN capsule_visible_at IS NULL OR capsule_visible_at <= ? THEN 1 ELSE 0 END), 0) AS visible_count
 		FROM photos
@@ -1416,7 +1415,7 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	if s.Monitor != nil {
 		s.Monitor.RecordDBQuery("/api/prompt/current", "prompt_current_user_day_stats", time.Since(statsQueryStart))
 	}
-	hasPromptPosted := stats.HasPromptPosted > 0
+	hasPromptPosted, _ := s.userHasPostedForMomentDay(user.ID, day, activeMomentKind, prompt)
 	hasAnyPost := stats.PostCount > 0
 	hasVisiblePost := stats.VisibleCount > 0
 	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/prompt/current")
@@ -1430,7 +1429,7 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	if hasPromptPosted {
 		var p models.Photo
 		ownPhotoQueryStart := time.Now()
-		if err := s.DB.Where("user_id = ? AND day = ? AND prompt_only = ?", user.ID, day, true).Order("created_at desc").First(&p).Error; err == nil {
+		if err := s.ownPromptPhotoForMomentDay(user.ID, day, activeMomentKind, prompt, &p); err == nil {
 			ownPhoto = s.photoJSON(p)
 		}
 		if s.Monitor != nil {
@@ -1458,7 +1457,7 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		"ownPhoto":                    ownPhoto,
 		"triggerSource":               prompt.TriggerSource,
 		"requestedByUser":             prompt.RequestedBy,
-		"momentKind":                  momentKindFromTriggerSource(prompt.TriggerSource),
+		"momentKind":                  activeMomentKind,
 		"dailyTriggeredAt":            triggerStatus.DailyTriggeredAt,
 		"dailyPending":                triggerStatus.DailyPending,
 		"specialTriggeredAt":          triggerStatus.SpecialTriggeredAt,
@@ -1490,22 +1489,21 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 	var prompt models.DailyPrompt
 	_ = s.DB.Where("day = ?", day).First(&prompt).Error
 	canUpload := isPromptWindowActive(prompt, now)
+	activeMomentKind := momentKindFromTriggerSource(prompt.TriggerSource)
 
 	type dayStatsRow struct {
-		HasPromptPosted int64 `gorm:"column:has_prompt_posted"`
-		PostCount       int64 `gorm:"column:post_count"`
-		VisibleCount    int64 `gorm:"column:visible_count"`
+		PostCount    int64 `gorm:"column:post_count"`
+		VisibleCount int64 `gorm:"column:visible_count"`
 	}
 	stats := dayStatsRow{}
 	_ = s.DB.Raw(`
 		SELECT
-			COALESCE(MAX(CASE WHEN prompt_only = 1 THEN 1 ELSE 0 END), 0) AS has_prompt_posted,
 			COALESCE(COUNT(*), 0) AS post_count,
 			COALESCE(SUM(CASE WHEN capsule_visible_at IS NULL OR capsule_visible_at <= ? THEN 1 ELSE 0 END), 0) AS visible_count
 		FROM photos
 		WHERE user_id = ? AND day = ?
 	`, now, user.ID, day).Scan(&stats).Error
-	hasPromptPosted := stats.HasPromptPosted > 0
+	hasPromptPosted, _ := s.userHasPostedForMomentDay(user.ID, day, activeMomentKind, prompt)
 	hasAnyPost := stats.PostCount > 0
 	hasVisiblePost := stats.VisibleCount > 0
 	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/dashboard/bootstrap")
@@ -1516,7 +1514,7 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 	var appendRemainingMediaSlots any = nil
 	if hasPromptPosted {
 		var p models.Photo
-		if err := s.DB.Where("user_id = ? AND day = ? AND prompt_only = ?", user.ID, day, true).Order("created_at desc").First(&p).Error; err == nil {
+		if err := s.ownPromptPhotoForMomentDay(user.ID, day, activeMomentKind, prompt, &p); err == nil {
 			ownPhoto = s.photoJSON(p)
 		}
 	}
@@ -1578,7 +1576,7 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 			"ownPhoto":                    ownPhoto,
 			"triggerSource":               prompt.TriggerSource,
 			"requestedByUser":             prompt.RequestedBy,
-			"momentKind":                  momentKindFromTriggerSource(prompt.TriggerSource),
+			"momentKind":                  activeMomentKind,
 			"dailyTriggeredAt":            triggerStatus.DailyTriggeredAt,
 			"dailyPending":                triggerStatus.DailyPending,
 			"specialTriggeredAt":          triggerStatus.SpecialTriggeredAt,
@@ -1831,6 +1829,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 	now := time.Now().In(s.Location)
 	day := now.Format("2006-01-02")
 	todayWindowActive := s.isDailyWindowActive(day, now)
+	momentKind := ""
 	if kind == "prompt" {
 		resolvedDay, allowed, acceptedOffline, blockedCode := s.resolvePromptUploadDecision(day, now, capturedAt)
 		day = resolvedDay
@@ -1843,6 +1842,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": message, "errorCode": blockedCode})
 			return
 		}
+		momentKind = s.promptMomentKindForDay(day)
 	}
 
 	if _, err := s.cleanupInvalidPromptOnlyPhotosForDay(day); err != nil {
@@ -1850,7 +1850,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 		return
 	}
 
-	hasPromptPosted, err := s.userHasPostedForDay(user.ID, day)
+	hasPromptPosted, err := s.userHasPostedForMomentDay(user.ID, day, momentKind, models.DailyPrompt{})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -1904,6 +1904,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 		UserID:             user.ID,
 		Day:                day,
 		PromptOnly:         kind == "prompt",
+		MomentKind:         momentKind,
 		UploadClientID:     uploadClientID,
 		FilePath:           relPath,
 		PrimaryDigest:      "",
@@ -8468,6 +8469,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	now := time.Now().In(s.Location)
 	day := now.Format("2006-01-02")
 	todayWindowActive := s.isDailyWindowActive(day, now)
+	momentKind := ""
 	if kind == "prompt" {
 		resolvedDay, allowed, acceptedOffline, blockedCode := s.resolvePromptUploadDecision(day, now, capturedAt)
 		day = resolvedDay
@@ -8480,6 +8482,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": message, "errorCode": blockedCode})
 			return
 		}
+		momentKind = s.promptMomentKindForDay(day)
 	}
 
 	if _, err := s.cleanupInvalidPromptOnlyPhotosForDay(day); err != nil {
@@ -8487,7 +8490,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		return
 	}
 
-	hasPromptPosted, err := s.userHasPostedForDay(user.ID, day)
+	hasPromptPosted, err := s.userHasPostedForMomentDay(user.ID, day, momentKind, models.DailyPrompt{})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -8545,6 +8548,7 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		UserID:                   user.ID,
 		Day:                      day,
 		PromptOnly:               kind == "prompt",
+		MomentKind:               momentKind,
 		UploadClientID:           uploadClientID,
 		FilePath:                 backPath,
 		SecondPath:               frontPath,
@@ -11045,6 +11049,7 @@ func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.P
 		"id":                 p.ID,
 		"day":                p.Day,
 		"promptOnly":         p.PromptOnly,
+		"momentKind":         normalizePhotoMomentKind(p.MomentKind),
 		"caption":            p.Caption,
 		"createdAt":          effectiveAt,
 		"capturedAt":         p.CapturedAt,
@@ -11519,11 +11524,68 @@ func toAdminUser(
 }
 
 func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {
-	var count int64
-	if err := s.DB.Model(&models.Photo{}).Where("user_id = ? AND day = ? AND prompt_only = ?", userID, day, true).Count(&count).Error; err != nil {
-		return false, err
+	return s.userHasPostedForMomentDay(userID, day, "daily", models.DailyPrompt{})
+}
+
+func normalizePhotoMomentKind(kind string) string {
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case "special":
+		return "special"
+	case "daily":
+		return "daily"
+	default:
+		return ""
 	}
-	return count > 0, nil
+}
+
+func (s *Server) promptMomentKindForDay(day string) string {
+	var prompt models.DailyPrompt
+	if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
+		return "daily"
+	}
+	return momentKindFromTriggerSource(prompt.TriggerSource)
+}
+
+func (s *Server) userHasPostedForMomentDay(userID uint, day string, momentKind string, prompt models.DailyPrompt) (bool, error) {
+	var photo models.Photo
+	err := s.ownPromptPhotoForMomentDay(userID, day, momentKind, prompt, &photo)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (s *Server) ownPromptPhotoForMomentDay(userID uint, day string, momentKind string, prompt models.DailyPrompt, out *models.Photo) error {
+	momentKind = normalizePhotoMomentKind(momentKind)
+	if momentKind == "" {
+		momentKind = "daily"
+	}
+
+	query := s.DB.Where("user_id = ? AND day = ? AND prompt_only = ?", userID, day, true)
+	switch momentKind {
+	case "special":
+		if prompt.Day == "" {
+			_ = s.DB.Where("day = ?", day).First(&prompt).Error
+		}
+		if prompt.TriggeredAt != nil && prompt.UploadUntil != nil {
+			query = query.Where("(moment_kind = ? OR (moment_kind = '' AND created_at >= ? AND created_at <= ?))", "special", prompt.TriggeredAt, prompt.UploadUntil)
+		} else {
+			query = query.Where("moment_kind = ?", "special")
+		}
+	default:
+		if prompt.Day == "" {
+			_ = s.DB.Where("day = ?", day).First(&prompt).Error
+		}
+		if prompt.TriggeredAt != nil && prompt.UploadUntil != nil {
+			query = query.Where("(moment_kind = ? OR (moment_kind = '' AND created_at >= ? AND created_at <= ?))", "daily", prompt.TriggeredAt, prompt.UploadUntil)
+		} else {
+			query = query.Where("moment_kind = ?", "daily")
+		}
+	}
+	return query.Order("created_at desc").First(out).Error
 }
 
 func (s *Server) userHasAnyPhotoForDay(userID uint, day string) (bool, error) {
@@ -12007,13 +12069,34 @@ func formatNotificationPostReference(photo models.Photo) string {
 	return " #" + number
 }
 
-func invalidPromptOnlyPhotoIDs(photos []models.Photo, promptByDay map[string]models.DailyPrompt) []uint {
+type promptUploadWindow struct {
+	TriggeredAt time.Time
+	UploadUntil time.Time
+}
+
+func invalidPromptOnlyPhotoIDs(photos []models.Photo, promptByDay map[string]models.DailyPrompt, auditWindowsByDay map[string][]promptUploadWindow) []uint {
 	ids := make([]uint, 0)
 	for _, photo := range photos {
-		prompt, ok := promptByDay[photo.Day]
-		if !ok || !isPromptWindowActive(prompt, photo.CreatedAt) {
-			ids = append(ids, photo.ID)
+		if normalizePhotoMomentKind(photo.MomentKind) != "" {
+			continue
 		}
+		effectiveAt := photoEffectiveTime(photo)
+		prompt, ok := promptByDay[photo.Day]
+		if ok && prompt.TriggeredAt != nil && prompt.UploadUntil != nil &&
+			!effectiveAt.Before(*prompt.TriggeredAt) && !effectiveAt.After(*prompt.UploadUntil) {
+			continue
+		}
+		validAuditWindow := false
+		for _, window := range auditWindowsByDay[photo.Day] {
+			if !effectiveAt.Before(window.TriggeredAt) && !effectiveAt.After(window.UploadUntil) {
+				validAuditWindow = true
+				break
+			}
+		}
+		if validAuditWindow {
+			continue
+		}
+		ids = append(ids, photo.ID)
 	}
 	return ids
 }
@@ -12059,7 +12142,25 @@ func (s *Server) cleanupInvalidPromptOnlyPhotosSinceDay(startDay string) (int64,
 		promptByDay[prompt.Day] = prompt
 	}
 
-	invalidIDs := invalidPromptOnlyPhotoIDs(photos, promptByDay)
+	var settings models.AppSettings
+	_ = s.DB.First(&settings).Error
+	settings = normalizeSettings(settings)
+	var audits []models.DailyTriggerAuditEvent
+	if err := s.DB.
+		Where("day IN ? AND result = ?", days, "triggered").
+		Find(&audits).Error; err != nil {
+		return 0, err
+	}
+	auditWindowsByDay := make(map[string][]promptUploadWindow, len(days))
+	for _, audit := range audits {
+		triggeredAt := audit.OccurredAt
+		auditWindowsByDay[audit.Day] = append(auditWindowsByDay[audit.Day], promptUploadWindow{
+			TriggeredAt: triggeredAt,
+			UploadUntil: triggeredAt.Add(time.Duration(settings.UploadWindowMinutes) * time.Minute),
+		})
+	}
+
+	invalidIDs := invalidPromptOnlyPhotoIDs(photos, promptByDay, auditWindowsByDay)
 	if len(invalidIDs) == 0 {
 		return 0, nil
 	}

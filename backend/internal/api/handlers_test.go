@@ -213,9 +213,36 @@ func TestInvalidPromptOnlyPhotoIDs(t *testing.T) {
 		},
 	}
 
-	got := invalidPromptOnlyPhotoIDs(photos, promptByDay)
+	got := invalidPromptOnlyPhotoIDs(photos, promptByDay, nil)
 	if len(got) != 2 || got[0] != uint(2) || got[1] != uint(3) {
 		t.Fatalf("invalidPromptOnlyPhotoIDs() = %v, want [2 3]", got)
+	}
+}
+
+func TestInvalidPromptOnlyPhotoIDsKeepsLegacySpecialAuditWindowPost(t *testing.T) {
+	dailyTriggeredAt := time.Date(2026, 3, 12, 17, 0, 0, 0, time.UTC)
+	dailyUploadUntil := dailyTriggeredAt.Add(10 * time.Minute)
+	specialTriggeredAt := time.Date(2026, 3, 12, 9, 56, 0, 0, time.UTC)
+	photos := []models.Photo{
+		{ID: 1, Day: "2026-03-12", PromptOnly: true, CreatedAt: specialTriggeredAt.Add(2 * time.Minute)},
+		{ID: 2, Day: "2026-03-12", PromptOnly: true, CreatedAt: dailyTriggeredAt.Add(-time.Hour)},
+	}
+	promptByDay := map[string]models.DailyPrompt{
+		"2026-03-12": {
+			Day:         "2026-03-12",
+			TriggeredAt: &dailyTriggeredAt,
+			UploadUntil: &dailyUploadUntil,
+		},
+	}
+	auditWindowsByDay := map[string][]promptUploadWindow{
+		"2026-03-12": {
+			{TriggeredAt: specialTriggeredAt, UploadUntil: specialTriggeredAt.Add(10 * time.Minute)},
+		},
+	}
+
+	got := invalidPromptOnlyPhotoIDs(photos, promptByDay, auditWindowsByDay)
+	if len(got) != 1 || got[0] != uint(2) {
+		t.Fatalf("invalidPromptOnlyPhotoIDs() = %v, want [2]", got)
 	}
 }
 
@@ -698,6 +725,85 @@ func TestHandleUploadDeduplicatesByUploadClientIDOnRetry(t *testing.T) {
 	}
 	if photos[0].UploadClientID != "retry-client-1" {
 		t.Fatalf("stored upload client id = %q, want retry-client-1", photos[0].UploadClientID)
+	}
+}
+
+func TestHandleUploadAllowsDailyAfterEarlierSpecialMomentPost(t *testing.T) {
+	server := newSearchTestServer(t)
+	now := time.Now().UTC()
+	user := models.User{Username: "poster", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	dailyTriggeredAt := now.Add(-time.Minute)
+	prompt := models.DailyPrompt{
+		Day:           now.Format("2006-01-02"),
+		TriggeredAt:   &dailyTriggeredAt,
+		UploadUntil:   ptrTime(now.Add(5 * time.Minute)),
+		TriggerSource: "scheduler",
+	}
+	if err := server.DB.Create(&prompt).Error; err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+	specialCreatedAt := now.Add(-7 * time.Hour)
+	if err := server.DB.Create(&models.DailyTriggerAuditEvent{
+		Day:        prompt.Day,
+		OccurredAt: specialCreatedAt.Add(-2 * time.Minute),
+		Source:     "special_request",
+		Result:     "triggered",
+	}).Error; err != nil {
+		t.Fatalf("create special audit: %v", err)
+	}
+	if err := server.DB.Create(&models.Photo{
+		UserID:     user.ID,
+		Day:        prompt.Day,
+		PromptOnly: true,
+		FilePath:   prompt.Day + "/special.jpg",
+		CreatedAt:  specialCreatedAt,
+	}).Error; err != nil {
+		t.Fatalf("create legacy special photo: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("kind", "prompt"); err != nil {
+		t.Fatalf("write kind: %v", err)
+	}
+	part, err := writer.CreateFormFile("photo", "daily.jpg")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write([]byte("daily-upload")); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/api/uploads", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	ctx.Request = req
+	ctx.Set("user", user)
+
+	server.handleUpload(ctx)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("handleUpload() status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var photos []models.Photo
+	if err := server.DB.Where("user_id = ?", user.ID).Order("created_at asc").Find(&photos).Error; err != nil {
+		t.Fatalf("load photos: %v", err)
+	}
+	if len(photos) != 2 {
+		t.Fatalf("photo count = %d, want 2", len(photos))
+	}
+	if got := photos[1].MomentKind; got != "daily" {
+		t.Fatalf("new daily photo moment kind = %q, want daily", got)
+	}
+	if !photos[0].PromptOnly {
+		t.Fatalf("legacy special photo prompt_only = false, want true")
 	}
 }
 

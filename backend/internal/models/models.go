@@ -293,6 +293,7 @@ type Photo struct {
 	User                     User       `json:"user"`
 	Day                      string     `gorm:"index;size:10;not null" json:"day"`
 	PromptOnly               bool       `gorm:"default:false" json:"promptOnly"`
+	MomentKind               string     `gorm:"size:16;index" json:"momentKind"`
 	UploadClientID           string     `gorm:"size:64;index:idx_photo_user_upload_client" json:"uploadClientId"`
 	FilePath                 string     `gorm:"size:255;not null" json:"filePath"`
 	SecondPath               string     `gorm:"size:255" json:"secondPath"`

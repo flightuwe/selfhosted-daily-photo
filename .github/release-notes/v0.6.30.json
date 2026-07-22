@@ -1,0 +1,9 @@
+{
+  "version": "v0.6.30",
+  "title": "Sondermoment unabhaengig vom Daily",
+  "items": [
+    "Sondermomente und Daily-Momente sind beim Posten jetzt getrennt: ein Sondermoment vor dem Daily blockiert den spaeteren Daily-Upload nicht mehr.",
+    "Neue Prompt-Posts speichern ihren Moment-Typ, damit Feed, Status und Upload-Sperren Daily und Sondermoment sauber unterscheiden.",
+    "Bestehende untypisierte Sondermoment-Posts werden anhand der Trigger-Zeitfenster geschuetzt, damit sie nicht versehentlich als Extra behandelt werden."
+  ]
+}
