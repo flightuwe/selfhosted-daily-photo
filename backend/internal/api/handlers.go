@@ -242,7 +242,12 @@ func (s *Server) Router() *gin.Engine {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	r.Static("/uploads", s.Config.UploadDir)
+	uploads := r.Group("/uploads")
+	uploads.Use(func(c *gin.Context) {
+		c.Header("Cache-Control", "public, max-age=604800, immutable")
+		c.Next()
+	})
+	uploads.StaticFS("/", http.Dir(s.Config.UploadDir))
 
 	api := r.Group("/api")
 	{
@@ -286,6 +291,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.GET("/dashboard/bootstrap", s.handleDashboardBootstrap)
 			protected.GET("/hub/bootstrap", s.handleHubBootstrap)
 			protected.GET("/hub/timeline", s.handleHubTimeline)
+			protected.POST("/hub/timeline/viewed", s.handleHubTimelineViewed)
 			protected.POST("/hub/timeline/clear", s.handleHubTimelineClear)
 			protected.GET("/hub/time-capsules", s.handleHubTimeCapsules)
 			protected.GET("/moment/special/status", s.handleSpecialMomentStatus)
@@ -1857,8 +1863,16 @@ func (s *Server) handleUpload(c *gin.Context) {
 	}
 
 	if kind == "extra" && todayWindowActive {
-		c.JSON(http.StatusForbidden, gin.H{"error": "extra unavailable during daily moment window", "errorCode": "extra_window_blocked"})
-		return
+		if s.extraUploadOfflineGraceAllowed(day, now, capturedAt) {
+			acceptedViaOfflineGrace = true
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":        "extra unavailable during daily moment window",
+				"errorCode":    "extra_window_blocked",
+				"actionNeeded": true,
+			})
+			return
+		}
 	}
 
 	capsuleMode, capsuleVisibleAt, capsulePrivate, capsuleGroupRemind, capsuleErr := parseCapsuleForm(c, kind, todayWindowActive, now)
@@ -2505,18 +2519,39 @@ func (s *Server) handleFeedWindow(c *gin.Context) {
 	selectedDays := append(append(newerDays, anchorDay), olderDays...)
 	selectedDays = uniqueDays(selectedDays)
 	sort.Slice(selectedDays, func(i, j int) bool { return selectedDays[i] > selectedDays[j] })
+	revisions := make(map[string]int64, len(selectedDays))
+	for _, day := range selectedDays {
+		revisions[day] = s.syncRevision(feedRevisionScope(day))
+	}
+	etag := revisionETag("feed-window", revisions)
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "private, no-cache")
+	if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	knownRevisions := parseKnownFeedRevisions(c.Query("known_revisions"))
+	unchangedDays := make([]string, 0, len(selectedDays))
 	items := make([]gin.H, 0, len(selectedDays))
 	for _, day := range selectedDays {
+		if known, ok := knownRevisions[day]; ok && known == revisions[day] {
+			unchangedDays = append(unchangedDays, day)
+			continue
+		}
 		payload, status, payloadErr := s.feedPayloadForDay(user.ID, day, now)
 		if payloadErr != nil {
 			writeFeedDayAccessError(c, status, payloadErr)
 			return
 		}
+		payload["revision"] = revisions[day]
 		items = append(items, payload)
 	}
 	c.JSON(http.StatusOK, gin.H{
+		"schemaVersion":        "feed_window_v2",
 		"anchorDay":            anchorDay,
 		"days":                 items,
+		"dayRevisions":         revisions,
+		"unchangedDays":        unchangedDays,
 		"hasOlder":             hasOlder,
 		"hasNewer":             hasNewer,
 		"oldestLoadedDay":      selectedDays[len(selectedDays)-1],
@@ -2527,6 +2562,24 @@ func (s *Server) handleFeedWindow(c *gin.Context) {
 		"maxReturnedDay":       selectedDays[0],
 		"resolvedFocusPhotoId": parseOptionalInt64(focusPhotoID),
 	})
+}
+
+func parseKnownFeedRevisions(raw string) map[string]int64 {
+	result := make(map[string]int64)
+	for _, part := range strings.Split(strings.TrimSpace(raw), ",") {
+		pair := strings.SplitN(strings.TrimSpace(part), ":", 2)
+		if len(pair) != 2 {
+			continue
+		}
+		if _, err := time.Parse("2006-01-02", pair[0]); err != nil {
+			continue
+		}
+		revision, err := strconv.ParseInt(pair[1], 10, 64)
+		if err == nil && revision > 0 {
+			result[pair[0]] = revision
+		}
+	}
+	return result
 }
 
 func (s *Server) handleFeedDiscover(c *gin.Context) {
@@ -4004,12 +4057,17 @@ func (s *Server) handleAdminDeleteUser(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
+	var affectedDays []string
+	_ = s.DB.Model(&models.Photo{}).Where("user_id = ?", id).Distinct("day").Pluck("day", &affectedDays).Error
 
 	_ = s.DB.Where("user_id = ?", id).Delete(&models.DeviceToken{}).Error
 	_ = s.DB.Where("user_id = ?", id).Delete(&models.Photo{}).Error
 	if err := s.DB.Delete(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
+	}
+	for _, day := range affectedDays {
+		s.invalidateFeedDayCache(day)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -6484,8 +6542,6 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 		orderClause = ""
 	case "user":
 		query = query.Where("photos.user_id = ?", targetUserID)
-	default:
-		query = query
 	}
 	if orderClause != "" {
 		query = query.Order(orderClause)
@@ -6694,6 +6750,7 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 			featured := gin.H{
 				"photoId":          photo.ID,
 				"url":              fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, photo.FilePath),
+				"thumbnailUrl":     s.photoThumbnailURL(photo.FilePath),
 				"secondUrl":        "",
 				"user":             s.userPublicJSON(viewerID, photo.User),
 				"reactionCount":    reactionCount,
@@ -6705,6 +6762,7 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 			}
 			if strings.TrimSpace(photo.SecondPath) != "" {
 				featured["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, photo.SecondPath)
+				featured["secondThumbnailUrl"] = s.photoThumbnailURL(photo.SecondPath)
 			}
 			item["featuredPhoto"] = featured
 		}
@@ -7348,6 +7406,7 @@ func (s *Server) calendarSearchPayload(viewerID uint, rawQuery string, now time.
 			featuredRow := gin.H{
 				"photoId":          featured.Photo.ID,
 				"url":              fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, featured.Photo.FilePath),
+				"thumbnailUrl":     s.photoThumbnailURL(featured.Photo.FilePath),
 				"secondUrl":        "",
 				"user":             s.userPublicJSON(viewerID, featured.Photo.User),
 				"reactionCount":    featuredReactions,
@@ -7358,6 +7417,7 @@ func (s *Server) calendarSearchPayload(viewerID uint, rawQuery string, now time.
 			}
 			if strings.TrimSpace(featured.Photo.SecondPath) != "" {
 				featuredRow["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, featured.Photo.SecondPath)
+				featuredRow["secondThumbnailUrl"] = s.photoThumbnailURL(featured.Photo.SecondPath)
 			}
 			stat["featuredPhoto"] = featuredRow
 		}
@@ -8497,8 +8557,16 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	}
 
 	if kind == "extra" && todayWindowActive {
-		c.JSON(http.StatusForbidden, gin.H{"error": "extra unavailable during daily moment window", "errorCode": "extra_window_blocked"})
-		return
+		if s.extraUploadOfflineGraceAllowed(day, now, capturedAt) {
+			acceptedViaOfflineGrace = true
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":        "extra unavailable during daily moment window",
+				"errorCode":    "extra_window_blocked",
+				"actionNeeded": true,
+			})
+			return
+		}
 	}
 
 	capsuleMode, capsuleVisibleAt, capsulePrivate, capsuleGroupRemind, capsuleErr := parseCapsuleForm(c, kind, todayWindowActive, now)
@@ -8643,7 +8711,6 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 	}
 
 	now := time.Now().In(s.Location)
-	day := now.Format("2006-01-02")
 	var photo models.Photo
 	if err := s.DB.Where("id = ? AND user_id = ?", photoID, user.ID).First(&photo).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -8653,13 +8720,30 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
-	if photo.Day != day {
-		c.JSON(http.StatusForbidden, gin.H{"error": "append not allowed for this post"})
-		return
-	}
 	if !photoVisibleToViewer(user.ID, photo, now) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "append not allowed for hidden post"})
 		return
+	}
+	uploadClientID := normalizeUploadClientID(c.PostForm("upload_client_id"))
+	if uploadClientID != "" {
+		var existing models.PhotoAttachment
+		if err := s.DB.Where("photo_id = ? AND upload_client_id = ?", photo.ID, uploadClientID).First(&existing).Error; err == nil {
+			decorations, decorationErr := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+			if decorationErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
+				return
+			}
+			attachmentByPhoto := s.photoAttachmentsByPhotoIDs([]uint{photo.ID})
+			c.JSON(http.StatusOK, gin.H{
+				"ok":           true,
+				"deduplicated": true,
+				"photo":        s.photoJSONForViewerWithAttachments(user.ID, photo, decorations, attachmentByPhoto[photo.ID]),
+			})
+			return
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
 	}
 	var settings models.AppSettings
 	if err := s.DB.First(&settings).Error; err != nil {
@@ -8738,13 +8822,14 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 		return
 	}
 	attachment := models.PhotoAttachment{
-		PhotoID:     photo.ID,
-		FilePath:    savedPath,
-		PreviewPath: previewPath,
-		Digest:      digest,
-		SortOrder:   int(attachmentCount) + 2,
-		CapturedAt:  capturedAt,
-		CreatedAt:   time.Now().UTC(),
+		PhotoID:        photo.ID,
+		UploadClientID: uploadClientID,
+		FilePath:       savedPath,
+		PreviewPath:    previewPath,
+		Digest:         digest,
+		SortOrder:      int(attachmentCount) + 2,
+		CapturedAt:     capturedAt,
+		CreatedAt:      time.Now().UTC(),
 	}
 	if err := s.DB.Create(&attachment).Error; err != nil {
 		_ = s.removePhotoFile(savedPath)
@@ -10094,7 +10179,9 @@ func (s *Server) handlePhotoComment(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
-	s.invalidateFeedDayCache(photo.Day)
+	if !deduplicated {
+		s.invalidateFeedDayCache(photo.Day)
+	}
 	if !deduplicated {
 		s.notifyPhotoComment(user, photo, comment)
 		c.JSON(http.StatusCreated, out)
@@ -10674,6 +10761,72 @@ func (s *Server) ensureCapsulePreview(relPath string) (string, error) {
 	return previewRel, nil
 }
 
+func (s *Server) ensurePhotoThumbnail(relPath string) (string, error) {
+	cleanRel := filepath.ToSlash(strings.TrimSpace(relPath))
+	if cleanRel == "" {
+		return "", errors.New("empty photo path")
+	}
+	ext := filepath.Ext(cleanRel)
+	base := strings.TrimSuffix(cleanRel, ext)
+	thumbnailRel := filepath.ToSlash(filepath.Join("thumbnails", base+"_thumb.jpg"))
+	thumbnailFull := filepath.Join(s.Config.UploadDir, thumbnailRel)
+	if _, err := os.Stat(thumbnailFull); err == nil {
+		return thumbnailRel, nil
+	}
+	source, err := os.Open(filepath.Join(s.Config.UploadDir, cleanRel))
+	if err != nil {
+		return "", err
+	}
+	defer source.Close()
+	img, _, err := image.Decode(source)
+	if err != nil {
+		return "", err
+	}
+	bounds := img.Bounds()
+	width, height := maxInt(1, bounds.Dx()), maxInt(1, bounds.Dy())
+	const targetMax = 480
+	if width > targetMax || height > targetMax {
+		if width >= height {
+			height = maxInt(1, int(float64(height)*float64(targetMax)/float64(width)))
+			width = targetMax
+		} else {
+			width = maxInt(1, int(float64(width)*float64(targetMax)/float64(height)))
+			height = targetMax
+		}
+	}
+	thumbnail := scaleImageNearest(img, width, height)
+	if err := os.MkdirAll(filepath.Dir(thumbnailFull), 0o755); err != nil {
+		return "", err
+	}
+	out, err := os.CreateTemp(filepath.Dir(thumbnailFull), ".daily-thumb-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	tempPath := out.Name()
+	defer os.Remove(tempPath)
+	if err := jpeg.Encode(out, thumbnail, &jpeg.Options{Quality: 72}); err != nil {
+		_ = out.Close()
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tempPath, thumbnailFull); err != nil {
+		if _, statErr := os.Stat(thumbnailFull); statErr != nil {
+			return "", err
+		}
+	}
+	return thumbnailRel, nil
+}
+
+func (s *Server) photoThumbnailURL(relPath string) string {
+	thumbnail, err := s.ensurePhotoThumbnail(relPath)
+	if err != nil || strings.TrimSpace(thumbnail) == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, thumbnail)
+}
+
 func buildFallbackPreviewImage() *image.RGBA {
 	w, h := 96, 96
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
@@ -10998,6 +11151,9 @@ func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttach
 			"capturedAt": p.CapturedAt,
 			"sourceKind": "primary",
 		}
+		if thumbnailURL := s.photoThumbnailURL(p.FilePath); thumbnailURL != "" {
+			item["thumbnailUrl"] = thumbnailURL
+		}
 		if strings.TrimSpace(p.CapsulePreviewPath) != "" {
 			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsulePreviewPath)
 		}
@@ -11010,6 +11166,9 @@ func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttach
 			"capturedAt": p.CapturedAt,
 			"sourceKind": "secondary",
 		}
+		if thumbnailURL := s.photoThumbnailURL(p.SecondPath); thumbnailURL != "" {
+			item["thumbnailUrl"] = thumbnailURL
+		}
 		if strings.TrimSpace(p.CapsuleSecondPreviewPath) != "" {
 			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsuleSecondPreviewPath)
 		}
@@ -11021,6 +11180,9 @@ func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttach
 			"url":        fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, attachment.FilePath),
 			"capturedAt": attachment.CapturedAt,
 			"sourceKind": "attachment",
+		}
+		if thumbnailURL := s.photoThumbnailURL(attachment.FilePath); thumbnailURL != "" {
+			item["thumbnailUrl"] = thumbnailURL
 		}
 		if strings.TrimSpace(attachment.PreviewPath) != "" {
 			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, attachment.PreviewPath)
@@ -11084,8 +11246,14 @@ func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.P
 		"marks":              []gin.H{},
 		"paints":             []gin.H{},
 	}
+	if thumbnailURL := s.photoThumbnailURL(p.FilePath); thumbnailURL != "" {
+		out["thumbnailUrl"] = thumbnailURL
+	}
 	if p.SecondPath != "" {
 		out["secondUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.SecondPath)
+		if thumbnailURL := s.photoThumbnailURL(p.SecondPath); thumbnailURL != "" {
+			out["secondThumbnailUrl"] = thumbnailURL
+		}
 	}
 	media := s.photoMediaJSON(p, attachments)
 	out["media"] = media
@@ -11441,6 +11609,10 @@ func (s *Server) profilePhotoJSONForViewer(viewerID uint, p models.Photo, locked
 		return row
 	}
 	row["secondUrl"] = ""
+	row["thumbnailUrl"] = ""
+	row["secondThumbnailUrl"] = ""
+	row["media"] = []gin.H{}
+	row["mediaCount"] = 0
 
 	previewPath := strings.TrimSpace(p.CapsulePreviewPath)
 	if previewPath == "" {
@@ -11451,6 +11623,7 @@ func (s *Server) profilePhotoJSONForViewer(viewerID uint, p models.Photo, locked
 	}
 	if previewPath != "" {
 		row["capsulePreviewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, previewPath)
+		row["thumbnailUrl"] = row["capsulePreviewUrl"]
 		row["url"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, previewPath)
 	} else {
 		row["url"] = ""
@@ -11894,6 +12067,21 @@ func (s *Server) isDailyWindowActive(day string, now time.Time) bool {
 	return isPromptWindowActive(prompt, now)
 }
 
+func (s *Server) extraUploadOfflineGraceAllowed(day string, now time.Time, capturedAt *time.Time) bool {
+	if capturedAt == nil || capturedAt.IsZero() {
+		return false
+	}
+	capturedLocal := capturedAt.In(s.Location)
+	if capturedLocal.After(now) || now.Sub(capturedLocal) > 24*time.Hour {
+		return false
+	}
+	var prompt models.DailyPrompt
+	if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil || prompt.TriggeredAt == nil {
+		return false
+	}
+	return capturedLocal.Before(prompt.TriggeredAt.In(s.Location))
+}
+
 func (s *Server) isPromptUploadAllowed(day string, now time.Time) bool {
 	var prompt models.DailyPrompt
 	if err := s.DB.Where("day = ?", day).First(&prompt).Error; err != nil {
@@ -12040,10 +12228,14 @@ func (s *Server) putFeedCachedPayload(userID uint, day string, payload gin.H, no
 }
 
 func (s *Server) invalidateFeedDayCache(day string) {
-	if s == nil || s.FeedCache == nil || strings.TrimSpace(day) == "" {
+	if s == nil || strings.TrimSpace(day) == "" {
 		return
 	}
-	s.FeedCache.InvalidateDay(day)
+	if s.FeedCache != nil {
+		s.FeedCache.InvalidateDay(day)
+	}
+	s.bumpSyncRevision(feedRevisionScope(day))
+	s.bumpSyncRevision(timelineRevisionScope)
 }
 
 func photoVisibleToViewer(userID uint, photo models.Photo, now time.Time) bool {

@@ -16,6 +16,31 @@ import java.util.concurrent.atomic.AtomicInteger
 class ConnectionHealthTest {
 
     @Test
+    fun evaluateConnectionHealthSurfacesActionRequiredUpload() {
+        val snapshot = evaluateConnectionHealth(
+            ConnectionHealthInputs(
+                nowMs = 30_000L,
+                startupDone = true,
+                serverConnected = true,
+                lastPingMs = 100L,
+                lastApiSuccessAtMs = 29_000L,
+                lastApiFailureAtMs = 0L,
+                lastApiFailureMessage = "",
+                networkSnapshot = "activeNetwork=true;internet=true;validated=true;metered=false;transport=wifi",
+                refreshCircuitRemainingMs = 0L,
+                lastRefreshFailureClass = "",
+                uploadQueue = listOf(queuedItem(status = UploadQueueStatus.ACTION_REQUIRED, lastFailureClass = "extra_window_blocked")),
+                networkRecoveryActive = false,
+                networkRecoveryReason = "",
+                lastNetworkTransitionAtMs = 0L
+            )
+        )
+        assertEquals(ConnectionHealthLevel.YELLOW, snapshot.level)
+        assertTrue(snapshot.uploadLine.contains("Entscheidung", ignoreCase = true))
+        assertTrue(snapshot.reasonLines.any { it.contains("Nutzerentscheidung", ignoreCase = true) })
+    }
+
+    @Test
     fun parseApiErrorCodeReadsJsonField() {
         val raw = """{"error":"upload window closed","errorCode":"upload_window_closed"}"""
         assertEquals("upload_window_closed", parseApiErrorCode(raw))

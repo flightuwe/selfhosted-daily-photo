@@ -202,6 +202,16 @@ type DailyUserActivity struct {
 	UpdatedAt    time.Time
 }
 
+// SyncRevision stores durable, monotonically increasing revisions for client
+// synchronization scopes. Scope values are either "timeline" or "feed:<day>".
+type SyncRevision struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Scope     string    `gorm:"size:64;uniqueIndex;not null" json:"scope"`
+	Revision  int64     `gorm:"not null;default:1" json:"revision"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 type APIMinuteMetric struct {
 	ID          uint      `gorm:"primaryKey"`
 	Minute      time.Time `gorm:"not null;index:idx_api_minute_metric_bucket,unique"`
@@ -318,14 +328,15 @@ type Photo struct {
 }
 
 type PhotoAttachment struct {
-	ID          uint       `gorm:"primaryKey" json:"id"`
-	PhotoID     uint       `gorm:"not null;index;index:idx_photo_attachment_photo_sort,priority:1" json:"photoId"`
-	FilePath    string     `gorm:"size:255;not null" json:"filePath"`
-	PreviewPath string     `gorm:"size:255" json:"previewPath"`
-	Digest      string     `gorm:"size:64;index" json:"digest"`
-	SortOrder   int        `gorm:"not null;index:idx_photo_attachment_photo_sort,priority:2" json:"sortOrder"`
-	CapturedAt  *time.Time `gorm:"index" json:"capturedAt"`
-	CreatedAt   time.Time  `json:"createdAt"`
+	ID             uint       `gorm:"primaryKey" json:"id"`
+	PhotoID        uint       `gorm:"not null;index;index:idx_photo_attachment_photo_sort,priority:1" json:"photoId"`
+	UploadClientID string     `gorm:"size:64;uniqueIndex:idx_attachment_photo_upload_client" json:"uploadClientId"`
+	FilePath       string     `gorm:"size:255;not null" json:"filePath"`
+	PreviewPath    string     `gorm:"size:255" json:"previewPath"`
+	Digest         string     `gorm:"size:64;index" json:"digest"`
+	SortOrder      int        `gorm:"not null;index:idx_photo_attachment_photo_sort,priority:2" json:"sortOrder"`
+	CapturedAt     *time.Time `gorm:"index" json:"capturedAt"`
+	CreatedAt      time.Time  `json:"createdAt"`
 }
 
 type PhotoBookmark struct {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -872,6 +873,165 @@ func TestHandleUploadReturnsUploadWindowClosedErrorCode(t *testing.T) {
 }
 
 func ptrTime(v time.Time) *time.Time { return &v }
+
+func TestExtraUploadOfflineGraceAllowsOnlyPreWindowCapturesWithin24Hours(t *testing.T) {
+	server := newSearchTestServer(t)
+	now := time.Date(2026, 8, 2, 18, 0, 0, 0, time.UTC)
+	triggeredAt := now.Add(-30 * time.Minute)
+	prompt := models.DailyPrompt{
+		Day:         now.Format("2006-01-02"),
+		TriggeredAt: &triggeredAt,
+		UploadUntil: ptrTime(now.Add(30 * time.Minute)),
+	}
+	if err := server.DB.Create(&prompt).Error; err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+
+	validCapture := triggeredAt.Add(-time.Minute)
+	if !server.extraUploadOfflineGraceAllowed(prompt.Day, now, &validCapture) {
+		t.Fatal("expected capture immediately before the active window to receive offline grace")
+	}
+	tooOld := now.Add(-24*time.Hour - time.Second)
+	if server.extraUploadOfflineGraceAllowed(prompt.Day, now, &tooOld) {
+		t.Fatal("capture older than 24 hours must not receive offline grace")
+	}
+	duringWindow := triggeredAt.Add(time.Minute)
+	if server.extraUploadOfflineGraceAllowed(prompt.Day, now, &duringWindow) {
+		t.Fatal("capture during the active window must not receive offline grace")
+	}
+	if server.extraUploadOfflineGraceAllowed(prompt.Day, now, nil) {
+		t.Fatal("missing capture timestamp must not receive offline grace")
+	}
+}
+
+func TestFeedRevisionBumpsAndKnownRevisionParsing(t *testing.T) {
+	server := newSearchTestServer(t)
+	day := "2026-08-02"
+	initialFeed := server.syncRevision(feedRevisionScope(day))
+	initialTimeline := server.syncRevision(timelineRevisionScope)
+	server.invalidateFeedDayCache(day)
+	if got := server.syncRevision(feedRevisionScope(day)); got <= initialFeed {
+		t.Fatalf("feed revision = %d, want > %d", got, initialFeed)
+	}
+	if got := server.syncRevision(timelineRevisionScope); got <= initialTimeline {
+		t.Fatalf("timeline revision = %d, want > %d", got, initialTimeline)
+	}
+	parsed := parseKnownFeedRevisions("2026-08-02:7,2026-08-01:4,invalid,2026-08-03:0")
+	if parsed["2026-08-02"] != 7 || parsed["2026-08-01"] != 4 || len(parsed) != 2 {
+		t.Fatalf("parsed known revisions = %#v", parsed)
+	}
+}
+
+func TestFeedWindowReturnsRevisionsDeltaAndNotModified(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "feed-delta-user", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	day := time.Now().UTC().Format("2006-01-02")
+	photo := models.Photo{UserID: user.ID, User: user, Day: day, MomentKind: "daily", FilePath: day + "/delta.jpg", CreatedAt: time.Now().UTC()}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+
+	request := func(target, etag string) (*httptest.ResponseRecorder, map[string]any) {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodGet, target, nil)
+		context.Request.Header.Set("If-None-Match", etag)
+		context.Set("user", user)
+		server.handleFeedWindow(context)
+		var payload map[string]any
+		if recorder.Body.Len() > 0 {
+			if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode feed window: %v", err)
+			}
+		}
+		return recorder, payload
+	}
+	target := "/api/feed/window?anchor_day=" + day + "&before_days=0&after_days=0"
+	first, payload := request(target, "")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first feed window status = %d, body=%s", first.Code, first.Body.String())
+	}
+	revisionMap, _ := payload["dayRevisions"].(map[string]any)
+	revision, ok := revisionMap[day].(float64)
+	if !ok || revision < 1 {
+		t.Fatalf("day revision missing: %#v", payload["dayRevisions"])
+	}
+	delta, deltaPayload := request(target+"&known_revisions="+day+":"+strconv.FormatInt(int64(revision), 10), "")
+	if delta.Code != http.StatusOK {
+		t.Fatalf("delta feed status = %d, body=%s", delta.Code, delta.Body.String())
+	}
+	days, _ := deltaPayload["days"].([]any)
+	unchanged, _ := deltaPayload["unchangedDays"].([]any)
+	if len(days) != 0 || len(unchanged) != 1 {
+		t.Fatalf("delta days/unchanged = %d/%d", len(days), len(unchanged))
+	}
+	notModified, _ := request(target, first.Header().Get("ETag"))
+	if notModified.Code != http.StatusNotModified {
+		t.Fatalf("conditional feed status = %d, want 304; body=%s", notModified.Code, notModified.Body.String())
+	}
+}
+
+func TestAttachmentUploadIsIdempotentForSelectableOlderOwnPost(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "attachment-owner", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	photo := models.Photo{
+		UserID: user.ID, User: user, Day: time.Now().UTC().AddDate(0, 0, -2).Format("2006-01-02"),
+		FilePath: "older/primary.jpg", CreatedAt: time.Now().UTC().AddDate(0, 0, -2),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create photo: %v", err)
+	}
+	makeRequest := func(payload string) *http.Request {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		_ = writer.WriteField("upload_client_id", "attachment-retry-1")
+		_ = writer.WriteField("captured_at", time.Now().UTC().Add(-time.Hour).Format(time.RFC3339))
+		part, err := writer.CreateFormFile("photo", "attachment.jpg")
+		if err != nil {
+			t.Fatalf("create attachment part: %v", err)
+		}
+		if _, err := part.Write([]byte(payload)); err != nil {
+			t.Fatalf("write attachment: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close multipart: %v", err)
+		}
+		request := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/photos/%d/attachments", photo.ID), &body)
+		request.Header.Set("Content-Type", writer.FormDataContentType())
+		return request
+	}
+	call := func(payload string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = makeRequest(payload)
+		context.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(uint64(photo.ID), 10)}}
+		context.Set("user", user)
+		server.handlePhotoAttachmentCreate(context)
+		return recorder
+	}
+	first := call("first-body")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first attachment status = %d, body=%s", first.Code, first.Body.String())
+	}
+	retry := call("different-retry-body")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("retry attachment status = %d, body=%s", retry.Code, retry.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(retry.Body.Bytes(), &response); err != nil || response["deduplicated"] != true {
+		t.Fatalf("attachment retry was not marked deduplicated: %#v, err=%v", response, err)
+	}
+	var count int64
+	if err := server.DB.Model(&models.PhotoAttachment{}).Where("photo_id = ?", photo.ID).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("attachment count = %d, err=%v", count, err)
+	}
+}
 
 func TestHandleUpdatePreferencesPersistsYoloMode(t *testing.T) {
 	server := newSearchTestServer(t)

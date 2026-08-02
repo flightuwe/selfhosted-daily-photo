@@ -1,0 +1,12 @@
+{
+  "version": "v0.7.0",
+  "title": "Zuverlaessiger Sync und weniger Datenverbrauch",
+  "items": [
+    "Offline aufgenommene Extras gehen nicht mehr verloren: berechtigte Aufnahmen erhalten bis zu 24 Stunden Upload-Gnade, Konflikte bleiben sichtbar und koennen spaeter gesendet, an einen eigenen Post angehaengt oder geloescht werden.",
+    "Uploads sind nach App-Abbruch und Netzwechsel robust: persistente Leases, idempotente Upload-IDs und bestaetigte Server-Antworten verhindern stille Verluste und Duplikate.",
+    "Feed und Hub-Timeline starten aus dem lokalen 7-Tage-Cache und gleichen anschliessend nur geaenderte Tage beziehungsweise neue Timeline-Seiten ab.",
+    "Kleine Thumbnails, ein langlebiger Mediencache und deutlich ruhigere Mobilfunk-/Vordergrund-Refreshes reduzieren wiederholte Downloads.",
+    "Die neue Datenverbrauchsansicht zeigt Heute und sieben Tage nach WLAN/Mobilfunk, Upload/Download, Cache-Treffern, Wiederholungen und groessten Endpunktklassen; eine UID-Gegenmessung erfasst auch Medien- und Hintergrundverkehr.",
+    "Diagnoseexporte enthalten nur aggregierte technische Verbrauchswerte, keine Tokens, Request-Inhalte oder personenbezogenen URL-Parameter."
+  ]
+}

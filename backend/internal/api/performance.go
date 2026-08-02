@@ -31,16 +31,16 @@ type performanceBucketRow struct {
 }
 
 type systemBucketRow struct {
-	BucketStart         time.Time `json:"bucketStart"`
-	MemAllocBytes       uint64    `json:"memAllocBytes"`
-	MemSysBytes         uint64    `json:"memSysBytes"`
-	NumGoroutine        int       `json:"numGoroutine"`
-	LastGCPauseMs       float64   `json:"lastGCPauseMs"`
-	DBOpenConnections   int       `json:"dbOpenConnections"`
-	DBInUseConnections  int       `json:"dbInUseConnections"`
-	DBIdleConnections   int       `json:"dbIdleConnections"`
-	DBWaitCount         int64     `json:"dbWaitCount"`
-	DBWaitDurationMs    float64   `json:"dbWaitDurationMs"`
+	BucketStart        time.Time `json:"bucketStart"`
+	MemAllocBytes      uint64    `json:"memAllocBytes"`
+	MemSysBytes        uint64    `json:"memSysBytes"`
+	NumGoroutine       int       `json:"numGoroutine"`
+	LastGCPauseMs      float64   `json:"lastGCPauseMs"`
+	DBOpenConnections  int       `json:"dbOpenConnections"`
+	DBInUseConnections int       `json:"dbInUseConnections"`
+	DBIdleConnections  int       `json:"dbIdleConnections"`
+	DBWaitCount        int64     `json:"dbWaitCount"`
+	DBWaitDurationMs   float64   `json:"dbWaitDurationMs"`
 }
 
 type dbHotspotRow struct {
@@ -53,15 +53,15 @@ type dbHotspotRow struct {
 }
 
 type routeHotspotRow struct {
-	Route    string  `json:"route"`
-	Method   string  `json:"method"`
-	Requests int64   `json:"requests"`
-	Errors   int64   `json:"errors"`
-	Errors4x int64   `json:"errors4xx"`
-	Errors5x int64   `json:"errors5xx"`
-	P95Peak  float64 `json:"p95PeakMs"`
-	P99Peak  float64 `json:"p99PeakMs"`
-	MaxPeak  float64 `json:"maxPeakMs"`
+	Route     string  `json:"route"`
+	Method    string  `json:"method"`
+	Requests  int64   `json:"requests"`
+	Errors    int64   `json:"errors"`
+	Errors4x  int64   `json:"errors4xx"`
+	Errors5x  int64   `json:"errors5xx"`
+	P95Peak   float64 `json:"p95PeakMs"`
+	P99Peak   float64 `json:"p99PeakMs"`
+	MaxPeak   float64 `json:"maxPeakMs"`
 	ErrorRate float64 `json:"errorRate"`
 }
 
@@ -250,9 +250,9 @@ func (s *Server) handleAdminPerformanceTrackingExport(c *gin.Context) {
 		"errorClasses":  errorClasses,
 		"slo":           slo,
 		"overview": gin.H{
-			"items":       overviewBuckets,
-			"system":      systemBuckets,
-			"dbHotspots":  hotspots,
+			"items":        overviewBuckets,
+			"system":       systemBuckets,
+			"dbHotspots":   hotspots,
 			"errorClasses": errorClasses,
 			"summary": gin.H{
 				"requests":      totalRequests,
@@ -263,9 +263,9 @@ func (s *Server) handleAdminPerformanceTrackingExport(c *gin.Context) {
 				"throttleRate":  perfRoundFloat(safeRate(throttleCount, totalRequests), 4),
 			},
 		},
-		"routes":     routes,
-		"minuteRows": rows,
-		"systemRows": systemRows,
+		"routes":      routes,
+		"minuteRows":  rows,
+		"systemRows":  systemRows,
 		"dbQueryRows": dbRows,
 	})
 }
@@ -351,8 +351,9 @@ func (s *Server) handleAdminPerformanceOverview(c *gin.Context) {
 		windowMinutes = 1
 	}
 	slo := buildSLOState(rows, time.Now().In(s.Location), s.Location, windowMinutes)
+	dataSync := s.buildDataSyncPerformance(rows, from, to)
 	c.JSON(http.StatusOK, gin.H{
-		"schemaVersion": "1.1",
+		"schemaVersion": "1.2",
 		"from":          from,
 		"to":            to,
 		"bucket":        bucket,
@@ -361,6 +362,7 @@ func (s *Server) handleAdminPerformanceOverview(c *gin.Context) {
 		"dbHotspots":    hotspots,
 		"errorClasses":  errorClasses,
 		"slo":           slo,
+		"dataSync":      dataSync,
 		"summary": gin.H{
 			"requests":      totalRequests,
 			"errors":        totalErrors,
@@ -494,6 +496,7 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 		windowMinutes = 1
 	}
 	slo := buildSLOState(rows, time.Now().In(s.Location), s.Location, windowMinutes)
+	dataSync := s.buildDataSyncPerformance(rows, from, to)
 
 	ts := time.Now().In(s.Location).Format("20060102-150405")
 	if format == "json" {
@@ -514,7 +517,7 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 		totalRequests := sumInt64FromBuckets(overviewBuckets, func(item performanceBucketRow) int64 { return item.Requests })
 		totalErrors := sumInt64FromBuckets(overviewBuckets, func(item performanceBucketRow) int64 { return item.Errors })
 		c.JSON(http.StatusOK, gin.H{
-			"schemaVersion": "1.1",
+			"schemaVersion": "1.2",
 			"generatedAt":   time.Now().In(s.Location),
 			"from":          from,
 			"to":            to,
@@ -525,10 +528,10 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 			"errorClasses":  errorClasses,
 			"slo":           slo,
 			"overview": gin.H{
-				"bucket":      "1m",
-				"items":       overviewBuckets,
-				"system":      systemBuckets,
-				"dbHotspots":  hotspots,
+				"bucket":       "1m",
+				"items":        overviewBuckets,
+				"system":       systemBuckets,
+				"dbHotspots":   hotspots,
 				"errorClasses": errorClasses,
 				"summary": gin.H{
 					"requests":      totalRequests,
@@ -539,7 +542,8 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 					"throttleRate":  perfRoundFloat(safeRate(throttleCount, totalRequests), 4),
 				},
 			},
-			"routes": routes,
+			"routes":   routes,
+			"dataSync": dataSync,
 		})
 		return
 	}
@@ -657,6 +661,64 @@ func (s *Server) handleAdminPerformanceExport(c *gin.Context) {
 		return
 	}
 	c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
+}
+
+func (s *Server) buildDataSyncPerformance(rows []models.APIMinuteMetric, from, to time.Time) gin.H {
+	type totals struct {
+		requests    int64
+		notModified int64
+		bytesOut    int64
+		p95Peak     float64
+	}
+	feed := totals{}
+	timeline := totals{}
+	upload := totals{}
+	for _, row := range rows {
+		var target *totals
+		switch {
+		case strings.Contains(row.Route, "/feed/window"):
+			target = &feed
+		case strings.Contains(row.Route, "/hub/timeline"):
+			target = &timeline
+		case strings.Contains(row.Route, "/uploads") || strings.Contains(row.Route, "/attachments"):
+			target = &upload
+		}
+		if target == nil {
+			continue
+		}
+		target.requests += row.Count
+		target.bytesOut += row.BytesOut
+		if row.StatusClass == "3xx" {
+			target.notModified += row.Count
+		}
+		if row.P95Latency > target.p95Peak {
+			target.p95Peak = row.P95Latency
+		}
+	}
+	var uploadRetries int64
+	_ = s.DB.Model(&models.ClientDebugLog{}).
+		Where("created_at >= ? AND created_at <= ?", from, to).
+		Where("type = ?", "upload_queue_retry_scheduled").
+		Count(&uploadRetries).Error
+	toJSON := func(value totals) gin.H {
+		return gin.H{
+			"requests":        value.requests,
+			"notModified":     value.notModified,
+			"notModifiedRate": perfRoundFloat(safeRate(value.notModified, value.requests), 4),
+			"responseBytes":   value.bytesOut,
+			"p95PeakMs":       value.p95Peak,
+		}
+	}
+	return gin.H{
+		"feed":     toJSON(feed),
+		"timeline": toJSON(timeline),
+		"uploads": gin.H{
+			"requests":           upload.requests,
+			"responseBytes":      upload.bytesOut,
+			"p95PeakMs":          upload.p95Peak,
+			"clientRetrySignals": uploadRetries,
+		},
+	}
 }
 
 func (s *Server) collectPerformanceErrorClasses(from, to time.Time, limit int) []performanceErrorClassRow {
@@ -1015,24 +1077,24 @@ func buildSLOState(rows []models.APIMinuteMetric, now time.Time, loc *time.Locat
 		windowMinutes = 1
 	}
 	const (
-		feedP95ThresholdMs      = 2500.0
-		global5xxRateThreshold  = 0.020
+		feedP95ThresholdMs       = 2500.0
+		global5xxRateThreshold   = 0.020
 		uploadErrorRateThreshold = 0.080
-		feed4xxRateThreshold    = 0.150
+		feed4xxRateThreshold     = 0.150
 	)
 	var (
 		totalReq int64
 		total5xx int64
 
-		feedReq int64
-		feedErr4xx int64
+		feedReq     int64
+		feedErr4xx  int64
 		feedP95Peak float64
 
-		uploadReq int64
-		uploadErr int64
+		uploadReq        int64
+		uploadErr        int64
 		bootstrapP95Peak float64
-		routePeakByKey = make(map[string]float64, 16)
-		routeReqByKey = make(map[string]int64, 16)
+		routePeakByKey   = make(map[string]float64, 16)
+		routeReqByKey    = make(map[string]int64, 16)
 	)
 	for _, row := range rows {
 		totalReq += row.Count
@@ -1072,45 +1134,45 @@ func buildSLOState(rows []models.APIMinuteMetric, now time.Time, loc *time.Locat
 	violations := make([]gin.H, 0, 4)
 	if feedP95Peak > feedP95ThresholdMs {
 		violations = append(violations, gin.H{
-			"id": "feed_p95_latency",
-			"severity": "high",
+			"id":        "feed_p95_latency",
+			"severity":  "high",
 			"threshold": feedP95ThresholdMs,
-			"observed": perfRoundFloat(feedP95Peak, 3),
-			"unit": "ms",
+			"observed":  perfRoundFloat(feedP95Peak, 3),
+			"unit":      "ms",
 		})
 	}
 	if global5xxRate > global5xxRateThreshold {
 		violations = append(violations, gin.H{
-			"id": "global_5xx_rate",
-			"severity": "high",
+			"id":        "global_5xx_rate",
+			"severity":  "high",
 			"threshold": global5xxRateThreshold,
-			"observed": perfRoundFloat(global5xxRate, 4),
-			"unit": "ratio",
+			"observed":  perfRoundFloat(global5xxRate, 4),
+			"unit":      "ratio",
 		})
 	}
 	if uploadErrorRate > uploadErrorRateThreshold {
 		violations = append(violations, gin.H{
-			"id": "upload_error_rate",
-			"severity": "medium",
+			"id":        "upload_error_rate",
+			"severity":  "medium",
 			"threshold": uploadErrorRateThreshold,
-			"observed": perfRoundFloat(uploadErrorRate, 4),
-			"unit": "ratio",
+			"observed":  perfRoundFloat(uploadErrorRate, 4),
+			"unit":      "ratio",
 		})
 	}
 	if feed4xxRate > feed4xxRateThreshold {
 		violations = append(violations, gin.H{
-			"id": "feed_4xx_rate",
-			"severity": "medium",
+			"id":        "feed_4xx_rate",
+			"severity":  "medium",
 			"threshold": feed4xxRateThreshold,
-			"observed": perfRoundFloat(feed4xxRate, 4),
-			"unit": "ratio",
+			"observed":  perfRoundFloat(feed4xxRate, 4),
+			"unit":      "ratio",
 		})
 	}
 	type nonFeedRoute struct {
-		Route string `json:"route"`
-		Method string `json:"method"`
+		Route     string  `json:"route"`
+		Method    string  `json:"method"`
 		P95PeakMs float64 `json:"p95PeakMs"`
-		Requests int64 `json:"requests"`
+		Requests  int64   `json:"requests"`
 	}
 	topNonFeedRoutes := make([]nonFeedRoute, 0, len(routePeakByKey))
 	for key, peak := range routePeakByKey {
@@ -1121,10 +1183,10 @@ func buildSLOState(rows []models.APIMinuteMetric, now time.Time, loc *time.Locat
 			method = parts[1]
 		}
 		topNonFeedRoutes = append(topNonFeedRoutes, nonFeedRoute{
-			Route: route,
-			Method: method,
+			Route:     route,
+			Method:    method,
 			P95PeakMs: perfRoundFloat(peak, 3),
-			Requests: routeReqByKey[key],
+			Requests:  routeReqByKey[key],
 		})
 	}
 	sort.Slice(topNonFeedRoutes, func(i, j int) bool {
@@ -1138,25 +1200,25 @@ func buildSLOState(rows []models.APIMinuteMetric, now time.Time, loc *time.Locat
 	}
 
 	return gin.H{
-		"evaluatedAt": now.In(loc),
+		"evaluatedAt":   now.In(loc),
 		"windowMinutes": windowMinutes,
-		"status": map[bool]string{true: "breach", false: "ok"}[len(violations) > 0],
+		"status":        map[bool]string{true: "breach", false: "ok"}[len(violations) > 0],
 		"metrics": gin.H{
-			"feedP95PeakMs": perfRoundFloat(feedP95Peak, 3),
+			"feedP95PeakMs":      perfRoundFloat(feedP95Peak, 3),
 			"bootstrapP95PeakMs": perfRoundFloat(bootstrapP95Peak, 3),
-			"global5xxRate": perfRoundFloat(global5xxRate, 4),
-			"uploadErrorRate": perfRoundFloat(uploadErrorRate, 4),
-			"feed4xxRate": perfRoundFloat(feed4xxRate, 4),
-			"requestsTotal": totalReq,
+			"global5xxRate":      perfRoundFloat(global5xxRate, 4),
+			"uploadErrorRate":    perfRoundFloat(uploadErrorRate, 4),
+			"feed4xxRate":        perfRoundFloat(feed4xxRate, 4),
+			"requestsTotal":      totalReq,
 		},
 		"thresholds": gin.H{
-			"feedP95PeakMs": feedP95ThresholdMs,
-			"global5xxRate": global5xxRateThreshold,
+			"feedP95PeakMs":   feedP95ThresholdMs,
+			"global5xxRate":   global5xxRateThreshold,
 			"uploadErrorRate": uploadErrorRateThreshold,
-			"feed4xxRate": feed4xxRateThreshold,
+			"feed4xxRate":     feed4xxRateThreshold,
 		},
 		"topNonFeedRoutes": topNonFeedRoutes,
-		"violations": violations,
+		"violations":       violations,
 	}
 }
 

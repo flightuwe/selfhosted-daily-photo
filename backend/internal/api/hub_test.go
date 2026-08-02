@@ -1,13 +1,104 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 )
+
+func TestHubTimelineCursorPaginationETagAndExplicitViewedState(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "timeline-viewer", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	now := time.Now().UTC()
+	for index := 0; index < 5; index++ {
+		if err := server.DB.Create(&models.HubSystemEvent{
+			EventType: "test_event", Scope: hubTimelineSystemEventScope,
+			Title: fmt.Sprintf("Event %d", index), OccurredAt: now.Add(-time.Duration(index) * time.Minute),
+		}).Error; err != nil {
+			t.Fatalf("create timeline event: %v", err)
+		}
+	}
+
+	requestPage := func(target, etag string) (*httptest.ResponseRecorder, map[string]any) {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodGet, target, nil)
+		if etag != "" {
+			context.Request.Header.Set("If-None-Match", etag)
+		}
+		context.Set("user", viewer)
+		server.handleHubTimeline(context)
+		var payload map[string]any
+		if recorder.Body.Len() > 0 {
+			if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode timeline response: %v", err)
+			}
+		}
+		return recorder, payload
+	}
+
+	first, firstPayload := requestPage("/api/hub/timeline?limit=2&explicit_viewed=true", "")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first page status = %d, body=%s", first.Code, first.Body.String())
+	}
+	items, _ := firstPayload["items"].([]any)
+	if len(items) != 2 || firstPayload["hasMore"] != true {
+		t.Fatalf("first page items/hasMore = %d/%#v", len(items), firstPayload["hasMore"])
+	}
+	cursor, _ := firstPayload["nextCursor"].(string)
+	if cursor == "" {
+		t.Fatal("expected next cursor")
+	}
+	second, secondPayload := requestPage("/api/hub/timeline?limit=2&explicit_viewed=true&cursor="+cursor, "")
+	secondItems, _ := secondPayload["items"].([]any)
+	if second.Code != http.StatusOK || len(secondItems) != 2 {
+		t.Fatalf("second page status/items = %d/%d", second.Code, len(secondItems))
+	}
+	unchanged, _ := requestPage("/api/hub/timeline?limit=2&explicit_viewed=true", first.Header().Get("ETag"))
+	if unchanged.Code != http.StatusNotModified {
+		t.Fatalf("unchanged timeline status = %d, want 304", unchanged.Code)
+	}
+
+	var stored models.User
+	if err := server.DB.First(&stored, viewer.ID).Error; err != nil {
+		t.Fatalf("reload viewer: %v", err)
+	}
+	if stored.HubTimelineLastViewedAt != nil {
+		t.Fatal("technical timeline GET must not update last viewed state")
+	}
+	legacy, _ := requestPage("/api/hub/timeline?limit=2", "")
+	if legacy.Code != http.StatusOK {
+		t.Fatalf("legacy timeline status = %d", legacy.Code)
+	}
+	if err := server.DB.First(&stored, viewer.ID).Error; err != nil || stored.HubTimelineLastViewedAt == nil {
+		t.Fatalf("legacy GET viewed compatibility was not preserved: %v", err)
+	}
+	stored.HubTimelineLastViewedAt = nil
+	if err := server.DB.Model(&stored).Update("hub_timeline_last_viewed_at", nil).Error; err != nil {
+		t.Fatalf("reset viewed state: %v", err)
+	}
+	viewedRecorder := httptest.NewRecorder()
+	viewedContext, _ := gin.CreateTestContext(viewedRecorder)
+	viewedContext.Request = httptest.NewRequest(http.MethodPost, "/api/hub/timeline/viewed", nil)
+	viewedContext.Set("user", viewer)
+	server.handleHubTimelineViewed(viewedContext)
+	if viewedRecorder.Code != http.StatusOK {
+		t.Fatalf("mark viewed status = %d", viewedRecorder.Code)
+	}
+	if err := server.DB.First(&stored, viewer.ID).Error; err != nil || stored.HubTimelineLastViewedAt == nil {
+		t.Fatalf("explicit viewed state was not persisted: %v", err)
+	}
+}
 
 func TestHubTimelinePayloadMarksUnreadAndRespectsClear(t *testing.T) {
 	server := newSearchTestServer(t)
@@ -119,6 +210,13 @@ func TestHubTimeCapsulesPayloadSeparatesLockedAndReleased(t *testing.T) {
 	}
 	if len(releasedItems) != 1 {
 		t.Fatalf("expected 1 released capsule, got %d", len(releasedItems))
+	}
+	lockedPhoto, _ := lockedItems[0]["photo"].(gin.H)
+	if got, _ := lockedPhoto["thumbnailUrl"].(string); strings.Contains(got, "locked.jpg") {
+		t.Fatalf("locked capsule leaked original thumbnail URL: %q", got)
+	}
+	if media, ok := lockedPhoto["media"].([]gin.H); ok && len(media) != 0 {
+		t.Fatalf("locked capsule exposed original media entries: %#v", media)
 	}
 }
 

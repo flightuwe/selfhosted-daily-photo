@@ -37,6 +37,7 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.DailyPrompt{},
 		&models.PromptPlan{},
 		&models.DailyUserActivity{},
+		&models.SyncRevision{},
 		&models.APIMinuteMetric{},
 		&models.SystemMinuteMetric{},
 		&models.DBQueryMinuteMetric{},

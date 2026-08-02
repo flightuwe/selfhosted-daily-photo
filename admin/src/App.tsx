@@ -5181,6 +5181,45 @@ export function App() {
                 value={Number((performanceOverview?.errorClasses || []).length)}
               />
             </div>
+            <article className="settings-current">
+              <h3>Delta-Sync und Datenverbrauch</h3>
+              <div className="grid4">
+                <CardStat
+                  title="Feed 304-Quote"
+                  value={`${(Number(performanceOverview?.dataSync?.feed?.notModifiedRate || 0) * 100).toFixed(1)}%`}
+                />
+                <CardStat
+                  title="Feed Response-Bytes"
+                  value={formatBytes(Number(performanceOverview?.dataSync?.feed?.responseBytes || 0))}
+                />
+                <CardStat
+                  title="Timeline 304-Quote"
+                  value={`${(Number(performanceOverview?.dataSync?.timeline?.notModifiedRate || 0) * 100).toFixed(1)}%`}
+                />
+                <CardStat
+                  title="Timeline Response-Bytes"
+                  value={formatBytes(Number(performanceOverview?.dataSync?.timeline?.responseBytes || 0))}
+                />
+              </div>
+              <div className="grid4">
+                <CardStat
+                  title="Feed P95"
+                  value={`${Number(performanceOverview?.dataSync?.feed?.p95PeakMs || 0).toFixed(1)} ms`}
+                />
+                <CardStat
+                  title="Timeline P95"
+                  value={`${Number(performanceOverview?.dataSync?.timeline?.p95PeakMs || 0).toFixed(1)} ms`}
+                />
+                <CardStat
+                  title="Upload Requests"
+                  value={Number(performanceOverview?.dataSync?.uploads?.requests || 0)}
+                />
+                <CardStat
+                  title="Upload Retry-Signale"
+                  value={Number(performanceOverview?.dataSync?.uploads?.clientRetrySignals || 0)}
+                />
+              </div>
+            </article>
             <div className="grid4">
               <CardStat
                 title="SLO Status"

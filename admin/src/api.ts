@@ -903,6 +903,11 @@ export type AdminPerformanceOverview = {
   dbHotspots?: AdminPerformanceDbHotspot[];
   errorClasses?: AdminPerformanceErrorClass[];
   slo?: AdminPerformanceSloState;
+  dataSync?: {
+    feed?: AdminDataSyncEndpoint;
+    timeline?: AdminDataSyncEndpoint;
+    uploads?: AdminDataSyncEndpoint & { clientRetrySignals?: number };
+  };
   summary?: {
     requests: number;
     errors: number;
@@ -911,6 +916,14 @@ export type AdminPerformanceOverview = {
     throttleCount?: number;
     throttleRate?: number;
   };
+};
+
+export type AdminDataSyncEndpoint = {
+  requests: number;
+  notModified?: number;
+  notModifiedRate?: number;
+  responseBytes: number;
+  p95PeakMs: number;
 };
 
 export type AdminPerformanceErrorClass = {
@@ -1847,6 +1860,7 @@ export async function getAdminPerformanceOverview(
     dbHotspots: data.dbHotspots || [],
     errorClasses: data.errorClasses || [],
     slo: data.slo,
+    dataSync: data.dataSync,
     summary: data.summary || {
       requests: 0,
       errors: 0,

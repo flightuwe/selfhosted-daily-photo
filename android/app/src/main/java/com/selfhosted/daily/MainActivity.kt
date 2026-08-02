@@ -1,6 +1,7 @@
 package com.selfhosted.daily
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.DownloadManager
 import android.content.Context
@@ -250,6 +251,8 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.net.UnknownHostException
 import java.security.cert.CertPathValidatorException
 import java.util.UUID
@@ -598,6 +601,7 @@ data class PostMediaItem(
     val id: String = "",
     val url: String = "",
     val previewUrl: String? = null,
+    val thumbnailUrl: String? = null,
     val capturedAt: String? = null,
     val sourceKind: String = "attachment"
 )
@@ -607,7 +611,9 @@ data class PromptPhoto(
     val promptOnly: Boolean,
     val caption: String?,
     val url: String,
+    val thumbnailUrl: String? = null,
     val secondUrl: String? = null,
+    val secondThumbnailUrl: String? = null,
     val createdAt: String,
     val capturedAt: String? = null,
     val uploadedAt: String? = null,
@@ -729,7 +735,7 @@ data class FeedItem(
 private fun PromptPhoto.mediaItems(): List<PostMediaItem> {
     if (media.isNotEmpty()) return media.filter { it.url.isNotBlank() }
     return listOfNotNull(
-        url.takeIf { it.isNotBlank() }?.let { PostMediaItem(id = "${id}-primary", url = it, capturedAt = capturedAt, sourceKind = "primary") },
+        url.takeIf { it.isNotBlank() }?.let { PostMediaItem(id = "${id}-primary", url = it, thumbnailUrl = thumbnailUrl, capturedAt = capturedAt, sourceKind = "primary") },
         secondUrl?.takeIf { it.isNotBlank() }?.let { PostMediaItem(id = "${id}-secondary", url = it, capturedAt = capturedAt, sourceKind = "secondary") }
     )
 }
@@ -808,11 +814,15 @@ data class FeedResponse(
     val momentKind: String? = null,
     val specialRequestedByUser: String? = null,
     val specialRequestedByUserColor: String? = null,
-    val monthRecap: MonthlyRecap? = null
+    val monthRecap: MonthlyRecap? = null,
+    val revision: Long = 0L
 )
 data class FeedWindowResponse(
-    val anchorDay: String,
+    val schemaVersion: String = "feed_window_v1",
+    val anchorDay: String = "",
     val days: List<FeedResponse> = emptyList(),
+    val dayRevisions: Map<String, Long> = emptyMap(),
+    val unchangedDays: List<String> = emptyList(),
     val hasOlder: Boolean = false,
     val hasNewer: Boolean = false,
     val oldestLoadedDay: String? = null,
@@ -890,7 +900,9 @@ data class DayListResponse(
 data class CalendarFeaturedPhoto(
     val photoId: Long,
     val url: String,
+    val thumbnailUrl: String? = null,
     val secondUrl: String? = null,
+    val secondThumbnailUrl: String? = null,
     val user: User,
     val reactionCount: Long = 0,
     val commentCount: Long = 0,
@@ -1008,6 +1020,7 @@ data class InteractionCounts(
     val photoMojis: Int = 0,
     val comments: Int = 0
 )
+data class UploadAppendTarget(val photoId: Long, val label: String)
 data class FeedInteractionSnapshot(
     val kind: String = "preview",
     val commentPreviewLimit: Int = 0
@@ -1191,6 +1204,9 @@ data class HubTimelineResponse(
     val unreadCount: Int = 0,
     val clearedAt: String? = null,
     val viewedAt: String? = null,
+    val revision: Long = 0L,
+    val nextCursor: String = "",
+    val hasMore: Boolean = false,
     val items: List<HubTimelineItem> = emptyList()
 )
 
@@ -1431,8 +1447,13 @@ interface Api {
     @GET("hub/timeline")
     suspend fun hubTimeline(
         @Header("Authorization") token: String,
-        @Query("limit") limit: Int = 80
+        @Query("limit") limit: Int = 80,
+        @Query("cursor") cursor: String? = null,
+        @Query("explicit_viewed") explicitViewed: Boolean = true
     ): HubTimelineResponse
+
+    @POST("hub/timeline/viewed")
+    suspend fun markHubTimelineViewed(@Header("Authorization") token: String)
 
     @POST("hub/timeline/clear")
     suspend fun clearHubTimeline(@Header("Authorization") token: String)
@@ -1455,7 +1476,8 @@ interface Api {
         @Query("anchor_day") anchorDay: String,
         @Query("before_days") beforeDays: Int = 2,
         @Query("after_days") afterDays: Int = 2,
-        @Query("focus_photo_id") focusPhotoId: Long? = null
+        @Query("focus_photo_id") focusPhotoId: Long? = null,
+        @Query("known_revisions") knownRevisions: String? = null
     ): FeedWindowResponse
 
     @GET("feed/discover")
@@ -1740,6 +1762,7 @@ class AppRepo(
     private val context: Context,
     private val httpClient: OkHttpClient
 ) {
+    fun isMeteredNetwork(): Boolean = NetworkUsageLedger.isMetered(context)
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     private val gson = Gson()
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(context) }
@@ -1758,7 +1781,7 @@ class AppRepo(
     private val diagnosticsSessionIdKey = "diagnostics_session_id"
     private val promptSeenVersionPrefix = "user_prompt_seen_version_"
     private val warmCacheLastUserIdKey = "warm_cache_last_user_id_v1"
-    private val warmCacheSchemaVersion = "app_warm_cache_v1"
+    private val warmCacheSchemaVersion = "app_warm_cache_v2"
     private val debugMaxEntries = 500
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
     private val debugAggregateWindowMs = 10 * 60 * 1000L
@@ -1778,8 +1801,8 @@ class AppRepo(
         return runCatching {
             gson.fromJson(file.readText(), AppWarmCacheEnvelope::class.java)
         }.getOrNull()?.takeIf { envelope ->
-            envelope.schemaVersion == warmCacheSchemaVersion && envelope.userId == userId
-        }
+            envelope.schemaVersion in setOf("app_warm_cache_v1", warmCacheSchemaVersion) && envelope.userId == userId
+        }?.copy(schemaVersion = warmCacheSchemaVersion)
     }
 
     private fun writeWarmCacheEnvelope(userId: Long, transform: (AppWarmCacheEnvelope) -> AppWarmCacheEnvelope) {
@@ -1795,8 +1818,20 @@ class AppRepo(
             savedAtEpochMs = System.currentTimeMillis()
         )
         runCatching {
-            warmCacheFile(userId).writeText(gson.toJson(updated))
-            prefs.edit().putLong(warmCacheLastUserIdKey, userId).apply()
+            val target = warmCacheFile(userId)
+            val temporary = File(target.parentFile, target.name + ".tmp")
+            temporary.writeText(gson.toJson(updated))
+            runCatching {
+                Files.move(
+                    temporary.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            }.getOrElse {
+                Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+            prefs.edit().putLong(warmCacheLastUserIdKey, userId).commit()
         }
     }
 
@@ -1831,8 +1866,35 @@ class AppRepo(
             current.copy(
                 timelineLite = HubTimelineSnapshotLite(
                     savedAtEpochMs = System.currentTimeMillis(),
-                    items = response.items.take(24),
-                    unreadCount = response.unreadCount
+                    items = response.items.take(1_000),
+                    unreadCount = response.unreadCount,
+                    isComplete = !response.hasMore,
+                    newestSortAt = response.items.firstOrNull()?.occurredAt,
+                    nextCursor = response.nextCursor,
+                    revision = response.revision
+                )
+            )
+        }
+    }
+
+    fun saveFeedWarmCache(
+        userId: Long,
+        days: List<String>,
+        feedByDay: Map<String, List<FeedItem>>,
+        promptMetaByDay: Map<String, PromptMeta>,
+        monthRecapByDay: Map<String, MonthlyRecap>,
+        revisions: Map<String, Long>
+    ) {
+        val retainedDays = days.distinct().sortedDescending().take(7)
+        writeWarmCacheEnvelope(userId) { current ->
+            current.copy(
+                feed = FeedWarmCacheSnapshot(
+                    savedAtEpochMs = System.currentTimeMillis(),
+                    days = retainedDays,
+                    feedByDay = retainedDays.associateWith { feedByDay[it].orEmpty() },
+                    promptMetaByDay = retainedDays.mapNotNull { day -> promptMetaByDay[day]?.let { day to it } }.toMap(),
+                    monthRecapByDay = retainedDays.mapNotNull { day -> monthRecapByDay[day]?.let { day to it } }.toMap(),
+                    revisions = retainedDays.mapNotNull { day -> revisions[day]?.let { day to it } }.toMap()
                 )
             )
         }
@@ -2377,6 +2439,7 @@ class AppRepo(
             appendLine("- Keine aktive Verbindung: ${families["no_active_network"] ?: 0}x")
             appendLine("- TLS-Handshake: ${families["ssl_handshake"] ?: 0}x")
             appendLine("- Zertifikatspfad: ${families["cert_path_validator"] ?: 0}x")
+            appendLine("- Datenverbrauch: ${NetworkUsageLedger.diagnosticSummary(context)}")
             appendLine("")
             if (aggregateRows.isNotEmpty()) {
                 appendLine("Verdichtete Wiederholungen")
@@ -3066,8 +3129,35 @@ class AppRepo(
     }
     suspend fun hubBootstrap(): HubBootstrapResponse =
         authorizedCall("/api/hub/bootstrap") { token -> api.hubBootstrap(token) }
-    suspend fun hubTimeline(limit: Int = 80): HubTimelineResponse =
-        authorizedCall("/api/hub/timeline") { token -> api.hubTimeline(token, limit) }
+    suspend fun hubTimeline(limit: Int = 1_000): HubTimelineResponse {
+        val all = mutableListOf<HubTimelineItem>()
+        var cursor: String? = null
+        var latest: HubTimelineResponse? = null
+        do {
+            val page = authorizedCall("/api/hub/timeline") { token ->
+                api.hubTimeline(token, limit.coerceAtMost(80), cursor)
+            }
+            latest = page
+            val known = all.mapTo(mutableSetOf()) { it.id }
+            all += page.items.filter { known.add(it.id) }
+            cursor = page.nextCursor.takeIf { page.hasMore && it.isNotBlank() }
+        } while (cursor != null && all.size < limit)
+        val base = latest ?: HubTimelineResponse()
+        return base.copy(
+            items = all.take(limit),
+            hasMore = cursor != null,
+            nextCursor = cursor.orEmpty()
+        )
+    }
+
+    fun deferExtraUploadUntil(id: String, retryAtMs: Long): Boolean =
+        UploadQueueManager.deferExtraUntil(context, id, retryAtMs)
+
+    fun convertExtraUploadToAttachments(id: String, targetPhotoId: Long): Boolean =
+        UploadQueueManager.convertExtraToAttachments(context, id, targetPhotoId)
+    suspend fun markHubTimelineViewed() {
+        authorizedCall("/api/hub/timeline/viewed") { token -> api.markHubTimelineViewed(token) }
+    }
     suspend fun clearHubTimeline() {
         authorizedCall("/api/hub/timeline/clear") { token -> api.clearHubTimeline(token) }
     }
@@ -3084,9 +3174,15 @@ class AppRepo(
         anchorDay: String,
         beforeDays: Int = 2,
         afterDays: Int = 2,
-        focusPhotoId: Long? = null
+        focusPhotoId: Long? = null,
+        knownRevisions: Map<String, Long> = emptyMap()
     ): FeedWindowResponse = authorizedCall("/api/feed/window") { token ->
-        api.feedWindow(token, anchorDay, beforeDays, afterDays, focusPhotoId)
+        val encodedKnown = knownRevisions.entries
+            .filter { it.value > 0L }
+            .sortedByDescending { it.key }
+            .joinToString(",") { "${it.key}:${it.value}" }
+            .ifBlank { null }
+        api.feedWindow(token, anchorDay, beforeDays, afterDays, focusPhotoId, encodedKnown)
     }
     suspend fun feedDiscover(
         mode: FeedOrderMode,
@@ -3694,12 +3790,13 @@ class AppRepo(
         uri: Uri,
         shareLocation: Boolean = false,
         capturedAtOverride: OffsetDateTime? = null,
+        uploadClientIdOverride: String? = null,
         onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
     ): PromptPhoto? {
         val capturedAt = capturedAtOverride ?: readCapturedAtFromUri(uri)
         val file = copyUriToTemp(uri)
         val bytesTotal = file.length().coerceAtLeast(1L)
-        val uploadClientId = UUID.randomUUID().toString()
+        val uploadClientId = uploadClientIdOverride?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
         val probe = measureUploadTelemetryProbe()
         var awaitingAckLogged = false
         val part = MultipartBody.Part.createFormData(
@@ -3856,6 +3953,7 @@ class AppRepo(
         return dm.enqueue(request)
     }
 
+    @SuppressLint("MissingPermission")
     private suspend fun lastAvailableLocationPayload(): PendingLocationPayload? {
         if (!hasLocationPermission(context)) {
             logDebug("location_permission_missing", "location permission not granted")
@@ -3879,6 +3977,7 @@ class AppRepo(
         return PendingLocationPayload(latitude = best.second.latitude, longitude = best.second.longitude)
     }
 
+    @SuppressLint("MissingPermission")
     private suspend fun currentHighAccuracyLocation(): android.location.Location? {
         val request = CurrentLocationRequest.Builder()
             .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
@@ -3891,6 +3990,7 @@ class AppRepo(
         }.getOrNull()
     }
 
+    @SuppressLint("MissingPermission")
     private suspend fun currentLocationFromManager(manager: LocationManager): android.location.Location? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         val provider = listOf(
@@ -4174,7 +4274,20 @@ data class HubBootstrapSnapshot(
 data class HubTimelineSnapshotLite(
     val savedAtEpochMs: Long = 0L,
     val items: List<HubTimelineItem> = emptyList(),
-    val unreadCount: Int = 0
+    val unreadCount: Int = 0,
+    val isComplete: Boolean = false,
+    val newestSortAt: String? = null,
+    val nextCursor: String = "",
+    val revision: Long = 0L
+)
+
+data class FeedWarmCacheSnapshot(
+    val savedAtEpochMs: Long = 0L,
+    val days: List<String> = emptyList(),
+    val feedByDay: Map<String, List<FeedItem>> = emptyMap(),
+    val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
+    val monthRecapByDay: Map<String, MonthlyRecap> = emptyMap(),
+    val revisions: Map<String, Long> = emptyMap()
 )
 
 data class CalendarPublicSnapshotLite(
@@ -4185,12 +4298,13 @@ data class CalendarPublicSnapshotLite(
 )
 
 data class AppWarmCacheEnvelope(
-    val schemaVersion: String = "app_warm_cache_v1",
+    val schemaVersion: String = "app_warm_cache_v2",
     val userId: Long = 0L,
     val savedAtEpochMs: Long = 0L,
     val hubBootstrap: HubBootstrapSnapshot? = null,
     val timelineLite: HubTimelineSnapshotLite? = null,
-    val calendarPublicLite: CalendarPublicSnapshotLite? = null
+    val calendarPublicLite: CalendarPublicSnapshotLite? = null,
+    val feed: FeedWarmCacheSnapshot? = null
 )
 
 data class UiState(
@@ -4202,6 +4316,7 @@ data class UiState(
     val feed: List<FeedItem> = emptyList(),
     val feedDays: List<String> = emptyList(),
     val feedByDay: Map<String, List<FeedItem>> = emptyMap(),
+    val feedDayRevisions: Map<String, Long> = emptyMap(),
     val monthRecapByDay: Map<String, MonthlyRecap> = emptyMap(),
     val promptMetaByDay: Map<String, PromptMeta> = emptyMap(),
     val feedOrderMode: FeedOrderMode = FeedOrderMode.CHRONO,
@@ -4229,6 +4344,7 @@ data class UiState(
     val hubTimelineLoadState: SurfaceLoadState = SurfaceLoadState(),
     val hubTimelineClearedAt: String? = null,
     val hubTimelineViewedAt: String? = null,
+    val hubTimelineComplete: Boolean = false,
     val hubTimeCapsulesLocked: List<HubTimeCapsuleEntry> = emptyList(),
     val hubTimeCapsulesReleased: List<HubTimeCapsuleEntry> = emptyList(),
     val hubTimeCapsulesLoading: Boolean = false,
@@ -4459,8 +4575,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val recentDashboardFailureAt = mutableMapOf<String, Long>()
     private val pendingChatWindowMs = 4_000L
     private val refreshAllCooldownMs = 2_000L
-    private val feedAutoRefreshBaseMs = 25_000L
-    private val feedAutoRefreshJitterMs = 15_000L
+    private val feedAutoRefreshWifiBaseMs = 90_000L
+    private val feedAutoRefreshWifiJitterMs = 30_000L
+    private val feedAutoRefreshMeteredBaseMs = 300_000L
+    private val feedAutoRefreshMeteredJitterMs = 60_000L
     private val globalRefreshSuccessBaseMs = 45_000L
     private val globalRefreshSuccessJitterMs = 30_000L
     private val globalRefreshActiveBaseMs = 20_000L
@@ -5104,6 +5222,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val hasTimeline = timelineItems.isNotEmpty()
         val hasCapsules = bootstrap?.timeCapsules?.let { it.locked.isNotEmpty() || it.released.isNotEmpty() } == true
         val hasCalendar = calendarDataset.days.isNotEmpty() || calendarDataset.dayStats.isNotEmpty()
+        val feedSnapshot = snapshot.feed
+        val hasFeed = feedSnapshot?.days?.isNotEmpty() == true
         state = state.copy(
             hubBootstrap = bootstrap ?: state.hubBootstrap,
             hubBootstrapLoadState = if (hasBootstrap) {
@@ -5113,6 +5233,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             },
             hubTimelineItems = if (hasTimeline) timelineItems else state.hubTimelineItems,
             hubTimelineUnreadCount = if (hasTimeline) timelineUnread else state.hubTimelineUnreadCount,
+            hubTimelineComplete = snapshot.timelineLite?.isComplete == true,
             hubTimelineLoadState = if (hasTimeline) {
                 SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.timelineLite?.savedAtEpochMs ?: snapshot.savedAtEpochMs, "cache")
             } else {
@@ -5135,7 +5256,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.calendarPublicLite?.savedAtEpochMs ?: snapshot.savedAtEpochMs, "cache")
             } else {
                 state.calendarModeLoadState
-            }
+            },
+            feedDays = if (hasFeed) feedSnapshot?.days.orEmpty() else state.feedDays,
+            feedByDay = if (hasFeed) feedSnapshot?.feedByDay.orEmpty() else state.feedByDay,
+            feedDayRevisions = if (hasFeed) feedSnapshot?.revisions.orEmpty() else state.feedDayRevisions,
+            promptMetaByDay = if (hasFeed) feedSnapshot?.promptMetaByDay.orEmpty() else state.promptMetaByDay,
+            monthRecapByDay = if (hasFeed) feedSnapshot?.monthRecapByDay.orEmpty() else state.monthRecapByDay
         )
         if (hasCalendar && (state.calendarMode == CalendarMode.PUBLIC || state.calendarDays.isEmpty())) {
             applyCalendarDataset(calendarDataset)
@@ -5143,7 +5269,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.logDebug(
             type = "warm_cache_applied",
             message = "warm cache applied",
-            meta = "userId=${snapshot.userId};hub=$hasBootstrap;timeline=$hasTimeline;capsules=$hasCapsules;calendar=$hasCalendar"
+            meta = "userId=${snapshot.userId};hub=$hasBootstrap;timeline=$hasTimeline;timelineComplete=${snapshot.timelineLite?.isComplete == true};capsules=$hasCapsules;calendar=$hasCalendar;feed=$hasFeed"
         )
     }
 
@@ -5197,7 +5323,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                             promptOnly = false,
                             caption = null,
                             url = featured.url,
+                            thumbnailUrl = featured.thumbnailUrl,
                             secondUrl = featured.secondUrl,
+                            secondThumbnailUrl = featured.secondThumbnailUrl,
                             createdAt = "",
                             bookmarkedByMe = featured.bookmarkedByMe,
                             bookmarkCount = featured.bookmarkCount,
@@ -5843,7 +5971,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     if (health.ok && repo.token().isNotBlank()) {
                         refreshAll(
                             reason = "network_recovery",
-                            forceFeedReload = true,
+                            forceFeedReload = false,
                             refreshFeedWindow = true,
                             bypassCooldown = true,
                             showLoading = false,
@@ -6001,16 +6129,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         repo.syncAutoUpdateScheduler()
         repo.syncUploadQueueScheduler()
+        val warmCache = if (repo.token().isNotBlank()) repo.loadLastWarmCache() else null
+        if (warmCache != null) {
+            applyWarmCacheSnapshot(warmCache)
+            // Make the persisted feed/timeline available while the health and
+            // delta checks continue in this coroutine.
+            state = refreshConnectionHealthState(state.copy(startupDone = true))
+        }
         val started = System.currentTimeMillis()
         val health = runCatching { repo.health() }.getOrNull()
         val elapsed = System.currentTimeMillis() - started
-        if (elapsed < 900) {
+        if (warmCache == null && elapsed < 900) {
             delay(900 - elapsed)
         }
         val showChangelog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME)
         val changelogLines = if (showChangelog) fetchChangelogLinesFresh() else emptyList()
         val healthOk = health?.ok == true
-        val warmCache = if (healthOk && repo.token().isNotBlank()) repo.loadLastWarmCache() else null
         val startupQuote = if (healthOk) {
             if (repo.token().isNotBlank()) {
                 val chatLine = runCatching { repo.randomStartupChatLine(repo.listChat()) }.getOrDefault("")
@@ -6071,7 +6205,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             debugLogs = repo.recentDebugLogs(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         ))
-        warmCache?.let(::applyWarmCacheSnapshot)
+        if (warmCache == null && repo.token().isNotBlank()) {
+            repo.loadLastWarmCache()?.let(::applyWarmCacheSnapshot)
+        }
         repo.pendingUpdateInstallWarning(BuildConfig.VERSION_NAME)?.let { warning ->
             state = state.copy(message = warning)
         }
@@ -6704,8 +6840,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 HubSection.DASHBOARD -> if (!isFreshLoadState(state.hubBootstrapLoadState, hubBootstrapFreshMs)) {
                     refreshHubBootstrap(force = false)
                 }
-                HubSection.TIMELINE -> if (!isFreshLoadState(state.hubTimelineLoadState, hubTimelineFreshMs)) {
-                    refreshHubTimeline(force = false)
+                HubSection.TIMELINE -> {
+                    if (!state.hubTimelineComplete || !isFreshLoadState(state.hubTimelineLoadState, hubTimelineFreshMs)) {
+                        refreshHubTimeline(force = false)
+                    }
+                    runCatching { repo.markHubTimelineViewed() }
                 }
                 HubSection.TIME_CAPSULES -> refreshHubTimeCapsules(force = false)
                 HubSection.CALENDAR -> if (!isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs)) {
@@ -6783,10 +6922,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     items = bootstrap.timeline.items,
                     unreadCount = bootstrap.timeline.unreadCount
                 )
+                val useTimelinePreview = !state.hubTimelineComplete && state.hubTimelineItems.isEmpty()
                 state = state.copy(
                     hubBootstrap = bootstrap,
-                    hubTimelineItems = bootstrap.timeline.items,
-                    hubTimelineUnreadCount = bootstrap.timeline.unreadCount,
+                    hubTimelineItems = if (useTimelinePreview) bootstrap.timeline.items else state.hubTimelineItems,
+                    hubTimelineUnreadCount = if (useTimelinePreview) bootstrap.timeline.unreadCount else state.hubTimelineUnreadCount,
                     hubTimelineClearedAt = bootstrap.timeline.clearedAt,
                     hubTimelineViewedAt = bootstrap.timeline.viewedAt,
                     hubTimeCapsulesLocked = bootstrap.timeCapsules.locked,
@@ -6797,9 +6937,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         hasContent = true,
                         loading = false
                     ),
-                    hubTimelineLoadState = surfaceLoadStateFor(
-                        hasContent = bootstrap.timeline.items.isNotEmpty(),
-                        loading = false
+                    hubTimelineLoadState = if (state.hubTimelineComplete) state.hubTimelineLoadState else surfaceLoadStateFor(
+                        hasContent = useTimelinePreview && bootstrap.timeline.items.isNotEmpty(),
+                        loading = false,
+                        detail = "preview"
                     ),
                     hubTimeCapsulesLoadState = surfaceLoadStateFor(
                         hasContent = bootstrap.timeCapsules.locked.isNotEmpty() || bootstrap.timeCapsules.released.isNotEmpty(),
@@ -6841,7 +6982,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun refreshHubTimeline(force: Boolean = true) {
-        if (!force && isFreshLoadState(state.hubTimelineLoadState, hubTimelineFreshMs)) return
+        if (!force && state.hubTimelineComplete && isFreshLoadState(state.hubTimelineLoadState, hubTimelineFreshMs)) return
         state = state.copy(
             hubTimelineLoading = true,
             hubTimelineLoadState = surfaceLoadStateFor(
@@ -6861,6 +7002,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     hubTimelineUnreadCount = response.unreadCount,
                     hubTimelineClearedAt = response.clearedAt,
                     hubTimelineViewedAt = response.viewedAt,
+                    hubTimelineComplete = !response.hasMore,
                     hubTimelineLoading = false,
                     hubTimelineLoadState = surfaceLoadStateFor(
                         hasContent = response.items.isNotEmpty(),
@@ -6935,6 +7077,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state = state.copy(
                     hubTimelineItems = emptyList(),
                     hubTimelineUnreadCount = 0,
+                    hubTimelineComplete = false,
                     hubTimelineLoading = false
                 )
                 refreshHubBootstrap(force = true)
@@ -8651,7 +8794,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 anchorDay = target,
                 beforeDays = around,
                 afterDays = around,
-                focusPhotoId = state.feedFocusPhotoId
+                focusPhotoId = state.feedFocusPhotoId,
+                knownRevisions = state.feedDayRevisions
             ).normalized(source = "feed_window_center:$target")
             applyFeedWindow(
                 window,
@@ -8682,7 +8826,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         state = state.copy(feedPaging = true, feedWindowReloadInFlight = true)
         try {
-            runCatching { repo.feedWindow(anchorDay = anchorDay, beforeDays = beforeDays, afterDays = afterDays).normalized(source = "feed_window_edge:$anchorDay") }
+            runCatching {
+                repo.feedWindow(
+                    anchorDay = anchorDay,
+                    beforeDays = beforeDays,
+                    afterDays = afterDays,
+                    knownRevisions = state.feedDayRevisions
+                ).normalized(source = "feed_window_edge:$anchorDay")
+            }
                 .onSuccess { window ->
                     applyFeedWindow(
                         window,
@@ -8773,7 +8924,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val previousVisibleDays = state.feedDays
         val currentNewestDay = previousVisibleDays.firstOrNull()
         val currentOldestDay = previousVisibleDays.lastOrNull()
-        val rawWindowDays = window.days.mapNotNull { it.day }.distinct()
+        val rawWindowDays = (window.days.mapNotNull { it.day } + window.unchangedDays).distinct()
         val directionFilteredPayloads = if (state.feedOrderMode == FeedOrderMode.CHRONO) {
             when (mergeDirection) {
                 FeedWindowMergeDirection.OLDER -> window.days.filter { payload ->
@@ -8790,7 +8941,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             window.days
         }
         val discardedByDirection = window.days.size - directionFilteredPayloads.size
-        if (rawWindowDays.isNotEmpty() && directionFilteredPayloads.isEmpty()) {
+        if (window.days.isNotEmpty() && directionFilteredPayloads.isEmpty()) {
             state = state.copy(
                 feedJumpLoadingDay = null,
                 feedPaging = false,
@@ -8804,7 +8955,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             return 0
         }
         val effectiveWindow = if (discardedByDirection > 0) window.copy(days = directionFilteredPayloads) else window
-        val windowDays = effectiveWindow.days.mapNotNull { it.day }.distinct()
+        val windowDays = (effectiveWindow.days.mapNotNull { it.day } + effectiveWindow.unchangedDays).distinct()
         if (windowDays.isEmpty()) {
             val today = state.prompt?.day ?: LocalDate.now().toString()
             state = state.copy(
@@ -8858,6 +9009,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedIndexHasNewer = window.hasNewer,
             feedDays = finalVisibleDays,
             feedByDay = finalFeedByDay,
+            feedDayRevisions = state.feedDayRevisions + effectiveWindow.dayRevisions +
+                effectiveWindow.days.mapNotNull { payload ->
+                    val day = payload.day ?: return@mapNotNull null
+                    payload.revision.takeIf { it > 0L }?.let { day to it }
+                }.toMap(),
             monthRecapByDay = finalRecapMap,
             promptMetaByDay = finalPromptMeta,
             feed = if (postedToday) finalFeedByDay[today].orEmpty() else emptyList(),
@@ -8872,6 +9028,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedHasHiddenNewerContent = if (hiddenNewerCleared) false else state.feedHasHiddenNewerContent,
             feedHiddenNewerAnchorDay = if (hiddenNewerCleared) null else state.feedHiddenNewerAnchorDay
         )
+        state.user?.id?.takeIf { it > 0L }?.let { userId ->
+            repo.saveFeedWarmCache(
+                userId = userId,
+                days = state.feedDays,
+                feedByDay = state.feedByDay,
+                promptMetaByDay = state.promptMetaByDay,
+                monthRecapByDay = state.monthRecapByDay,
+                revisions = state.feedDayRevisions
+            )
+        }
         val anchorPresentAfterApply = finalVisibleDays.contains(requestedAnchorDay) || finalVisibleDays.contains(effectiveWindow.anchorDay)
         val insertedDays = finalVisibleDays.filterNot { previousVisibleDays.contains(it) }
         repo.logFeedDebug(
@@ -9362,6 +9528,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
+    fun deferQueuedExtraUntilWindowEnds(id: String) {
+        val retryAt = state.prompt?.day?.let { state.promptMetaByDay[it]?.uploadUntil }?.let { raw ->
+            runCatching { OffsetDateTime.parse(raw).toInstant().toEpochMilli() + 30_000L }.getOrNull()
+        } ?: (System.currentTimeMillis() + 15L * 60L * 1000L)
+        if (repo.deferExtraUploadUntil(id, retryAt)) {
+            state = state.copy(
+                uploadQueue = repo.uploadQueue(),
+                message = "Extra wird nach dem aktuellen Daily-Fenster automatisch gesendet."
+            )
+        }
+    }
+
+    fun attachQueuedExtraToPost(id: String, targetPhotoId: Long) {
+        if (repo.convertExtraUploadToAttachments(id, targetPhotoId)) {
+            state = state.copy(
+                uploadQueue = repo.uploadQueue(),
+                message = "Bilder werden als Anhaenge zum gewaehlten Beitrag gesendet."
+            )
+        }
+    }
+
     private suspend fun reloadPhotoInteractionsIfVisible(photoId: Long, reason: String) {
         if (photoId <= 0) return
         if (state.photoInteractions?.photoId != photoId) return
@@ -9610,7 +9797,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
-    fun feedAutoRefreshIntervalMs(): Long = feedAutoRefreshBaseMs + Random.nextLong(feedAutoRefreshJitterMs + 1L)
+    fun feedAutoRefreshIntervalMs(): Long = if (repo.isMeteredNetwork()) {
+        feedAutoRefreshMeteredBaseMs + Random.nextLong(feedAutoRefreshMeteredJitterMs + 1L)
+    } else {
+        feedAutoRefreshWifiBaseMs + Random.nextLong(feedAutoRefreshWifiJitterMs + 1L)
+    }
 
     fun globalRefreshIntervalMs(): Long {
         val now = System.currentTimeMillis()
@@ -9643,7 +9834,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun shouldPauseFeedAutoRefresh(): Boolean {
         val now = System.currentTimeMillis()
-        return networkRecoveryActive ||
+        return !NetworkUsageLedger.isAppInForeground() ||
+            networkRecoveryActive ||
             refreshCircuitOpenRemainingMs(now) > 0L ||
             isNetworkFailureClass(lastRefreshFailureClass)
     }
@@ -11231,7 +11423,8 @@ class MainActivity : ComponentActivity() {
         PushNotificationDiagnostics.recordLaunchIntent(this, "activity_on_create", intent)
         PushMessagingService.clearTrackedPushNotifications(this, reason = "activity_on_create")
 
-        val httpClient = buildStandardHttpClient()
+        NetworkUsageLedger.recordUidBoundary(this, "process_start")
+        val httpClient = buildStandardHttpClient(this)
         repo = AppRepo(this, httpClient)
         repo.installCrashHandler()
         repo.captureLaunchIntent(intent)
@@ -11266,6 +11459,16 @@ class MainActivity : ComponentActivity() {
             repo.captureLaunchIntent(intent)
         }
         launchIntentTick += 1
+    }
+
+    override fun onStart() {
+        super.onStart()
+        NetworkUsageLedger.setAppInForeground(this, true)
+    }
+
+    override fun onStop() {
+        NetworkUsageLedger.setAppInForeground(this, false)
+        super.onStop()
     }
 
     override fun onResume() {
@@ -11555,7 +11758,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     LaunchedEffect(state.token, state.startupDone) {
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         while (true) {
-            vm.refreshAll(refreshFeedWindow = vm.state.activeTab != AppTab.FEED)
+            if (NetworkUsageLedger.isAppInForeground()) {
+                vm.refreshAll(refreshFeedWindow = vm.state.activeTab != AppTab.FEED)
+            }
             delay(vm.globalRefreshIntervalMs())
         }
     }
@@ -11748,7 +11953,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                                             val previewUrl = if (isLocked) {
                                                 safeApiString(item.capsulePreviewUrl).ifBlank { item.url }
                                             } else {
-                                                item.url
+                                                item.thumbnailUrl?.takeIf { it.isNotBlank() } ?: item.url
                                             }
                                             val urls = if (isLocked) emptyList() else listOfNotNull(item.url, item.secondUrl)
                                             Box(
@@ -12424,8 +12629,16 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     uploadDone = cameraUploadDone,
                     uploadError = cameraUploadError,
                     uploadQueue = state.uploadQueue,
+                    appendTargets = state.feedByDay.values.flatten()
+                        .filter { it.user.id == state.user?.id }
+                        .distinctBy { it.photo.id }
+                        .sortedByDescending { it.photo.createdAt }
+                        .take(6)
+                        .map { UploadAppendTarget(it.photo.id, it.photo.publicNumber?.let { number -> "Beitrag #$number" } ?: "Beitrag ${it.photo.id}") },
                     onRetryQueued = { id -> vm.retryQueuedUpload(id) },
                     onRetryQueuedAsExtra = { id -> vm.retryQueuedUploadAsExtra(id) },
+                    onDeferQueuedExtra = { id -> vm.deferQueuedExtraUntilWindowEnds(id) },
+                    onAttachQueuedExtra = { id, photoId -> vm.attachQueuedExtraToPost(id, photoId) },
                     onRemoveQueued = { id -> vm.removeQueuedUpload(id) },
                     onOpenViewer = { urls, photoId ->
                         viewerUrls = urls
@@ -13003,8 +13216,11 @@ fun CameraTab(
     uploadDone: Boolean,
     uploadError: String,
     uploadQueue: List<QueuedUploadItem>,
+    appendTargets: List<UploadAppendTarget>,
     onRetryQueued: (String) -> Unit,
     onRetryQueuedAsExtra: (String) -> Unit,
+    onDeferQueuedExtra: (String) -> Unit,
+    onAttachQueuedExtra: (String, Long) -> Unit,
     onRemoveQueued: (String) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
 ) {
@@ -13354,6 +13570,8 @@ fun CameraTab(
             }
         }
 
+        NetworkUsageSummaryCard()
+
         val queueItems = visibleQueueItems(uploadQueue)
         if (queueItems.isNotEmpty()) {
             Text("Upload-Queue", style = MaterialTheme.typography.titleMedium)
@@ -13387,9 +13605,25 @@ fun CameraTab(
                         if (item.lastError.isNotBlank()) {
                             Text(item.lastError, color = Color(0xFF8B0000), maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
+                        if (item.status == UploadQueueStatus.ACTION_REQUIRED && item.lastFailureClass == "extra_window_blocked") {
+                            Text("Entscheide, wie diese Aufnahme erhalten werden soll:", fontWeight = FontWeight.SemiBold)
+                            Button(onClick = { onDeferQueuedExtra(item.id) }, modifier = Modifier.fillMaxWidth()) {
+                                Text("Nach dem Daily-Fenster als Extra senden")
+                            }
+                            appendTargets.forEach { target ->
+                                OutlinedButton(
+                                    onClick = { onAttachQueuedExtra(item.id, target.photoId) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Als Anhang an ${target.label}")
+                                }
+                            }
+                        }
                         if (queueManualRetryAllowed(item.status)) {
-                            Button(onClick = { onRetryQueued(item.id) }, modifier = Modifier.fillMaxWidth()) {
-                                Text("Erneut versuchen")
+                            if (item.status != UploadQueueStatus.ACTION_REQUIRED) {
+                                Button(onClick = { onRetryQueued(item.id) }, modifier = Modifier.fillMaxWidth()) {
+                                    Text("Erneut versuchen")
+                                }
                             }
                             if (item.isPrompt && !canUpload) {
                                 Button(onClick = { onRetryQueuedAsExtra(item.id) }, modifier = Modifier.fillMaxWidth()) {
@@ -14570,6 +14804,7 @@ private fun PostCanvasCard(
 ) {
     val mediaItems = remember(item.photo) { item.photo.mediaItems() }
     val urls = remember(mediaItems) { mediaItems.map { it.url } }
+    val displayUrls = remember(mediaItems) { mediaItems.map { it.thumbnailUrl?.takeIf(String::isNotBlank) ?: it.url } }
     val reactions = remember(item.reactions) { item.reactions.orEmpty() }
     val photoMojis = remember(item.photoMojis) {
         item.photoMojis.orEmpty().sortedWith(compareBy<PhotoMojiItem>({ parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN }, { it.id }))
@@ -14728,7 +14963,7 @@ private fun PostCanvasCard(
                                     .padding(10.dp)
                             ) {
                                 AsyncImage(
-                                    model = urls[it],
+                                    model = displayUrls[it],
                                     contentDescription = "${item.user.username} Foto",
                                     modifier = Modifier
                                         .fillMaxSize()
@@ -14747,7 +14982,7 @@ private fun PostCanvasCard(
                                     .padding(10.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                urls.forEach { url ->
+                                displayUrls.forEach { url ->
                                     AsyncImage(
                                         model = url,
                                         contentDescription = "${item.user.username} Foto",
@@ -15800,7 +16035,9 @@ fun HubTab(
                                                 Text(formatDayLabel(stat.day), fontWeight = FontWeight.SemiBold)
                                                 Text("${stat.postCount} Posts · ${stat.participantCount} Personen", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                                             }
-                                            stat.featuredPhoto?.url?.takeIf { it.isNotBlank() }?.let { url ->
+                                            stat.featuredPhoto?.let { featured ->
+                                                (featured.thumbnailUrl?.takeIf { it.isNotBlank() } ?: featured.url).takeIf { it.isNotBlank() }
+                                            }?.let { url ->
                                                 AsyncImage(model = url, contentDescription = "Kalender-Vorschau", modifier = Modifier.size(52.dp), contentScale = ContentScale.Crop)
                                             }
                                         }
@@ -16177,7 +16414,9 @@ private fun HubCalendarPreviewRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            stat.featuredPhoto?.url?.takeIf { it.isNotBlank() }?.let { url ->
+            stat.featuredPhoto?.let { featured ->
+                (featured.thumbnailUrl?.takeIf { it.isNotBlank() } ?: featured.url).takeIf { it.isNotBlank() }
+            }?.let { url ->
                 AsyncImage(
                     model = url,
                     contentDescription = "Kalender-Vorschau",
@@ -16366,7 +16605,9 @@ private fun HubTimelineRow(
                     .clip(RoundedCornerShape(999.dp))
                     .background(accentColor.copy(alpha = if (item.unread || emphasized) 0.95f else 0.45f))
             )
-            item.photo?.url?.takeIf { it.isNotBlank() }?.let { url ->
+            item.photo?.let { photo ->
+                (photo.thumbnailUrl?.takeIf { it.isNotBlank() } ?: photo.url).takeIf { it.isNotBlank() }
+            }?.let { url ->
                 AsyncImage(
                     model = url,
                     contentDescription = "Hub-Ereignisbild",
@@ -16789,7 +17030,7 @@ fun CalendarTab(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 AsyncImage(
-                                    model = result.photo.url,
+                                    model = result.photo.thumbnailUrl?.takeIf { it.isNotBlank() } ?: result.photo.url,
                                     contentDescription = "Trefferbild",
                                     modifier = Modifier
                                         .size(58.dp)
@@ -16845,7 +17086,7 @@ fun CalendarTab(
                                 verticalAlignment = Alignment.Top
                             ) {
                                 AsyncImage(
-                                    model = item.photo.url,
+                                    model = item.photo.thumbnailUrl?.takeIf { it.isNotBlank() } ?: item.photo.url,
                                     contentDescription = "Gemerkter Beitrag",
                                     modifier = Modifier
                                         .size(84.dp)
@@ -16947,8 +17188,8 @@ fun CalendarTab(
                 }
             }
         }
-        if (mode != CalendarMode.BOOKMARKS)
-        items(days) { day ->
+        if (mode != CalendarMode.BOOKMARKS) {
+            items(days) { day ->
             val selectedDay = day == selected
             val stats = dayStats[day]
             val participantCount = stats?.participantCount
@@ -16997,7 +17238,7 @@ fun CalendarTab(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     AsyncImage(
-                                        model = it.url,
+                                        model = it.thumbnailUrl?.takeIf { value -> value.isNotBlank() } ?: it.url,
                                         contentDescription = "Kalender-Vorschau 1",
                                         modifier = Modifier
                                             .weight(1f)
@@ -17006,7 +17247,7 @@ fun CalendarTab(
                                         contentScale = ContentScale.Crop
                                     )
                                     AsyncImage(
-                                        model = it.secondUrl,
+                                        model = it.secondThumbnailUrl?.takeIf { value -> value.isNotBlank() } ?: it.secondUrl,
                                         contentDescription = "Kalender-Vorschau 2",
                                         modifier = Modifier
                                             .weight(1f)
@@ -17017,7 +17258,7 @@ fun CalendarTab(
                                 }
                             } else {
                                 AsyncImage(
-                                    model = it.url,
+                                    model = it.thumbnailUrl?.takeIf { value -> value.isNotBlank() } ?: it.url,
                                     contentDescription = "Kalender-Vorschau",
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -17053,7 +17294,7 @@ fun CalendarTab(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     AsyncImage(
-                                        model = entry.photo.url,
+                                        model = entry.photo.thumbnailUrl?.takeIf { it.isNotBlank() } ?: entry.photo.url,
                                         contentDescription = "Gemerkter Beitrag",
                                         modifier = Modifier.size(58.dp),
                                         contentScale = ContentScale.Crop
@@ -17108,6 +17349,7 @@ fun CalendarTab(
                         }
                     }
                 }
+            }
             }
         }
         }
@@ -18769,7 +19011,7 @@ fun ProfileTab(
 
                                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                         AsyncImage(
-                                            model = photo.url,
+                                            model = photo.thumbnailUrl?.takeIf { it.isNotBlank() } ?: photo.url,
                                             contentDescription = formatDayLabel(photo.day),
                                             modifier = imageModifier,
                                             contentScale = ContentScale.Crop
@@ -19772,6 +20014,42 @@ private fun themeModeValue(darkMode: Boolean, oledMode: Boolean): Int {
     return if (!darkMode) 0 else if (oledMode) 2 else 1
 }
 
+@Composable
+private fun NetworkUsageSummaryCard() {
+    val context = LocalContext.current
+    var refreshKey by remember { mutableStateOf(0) }
+    val summary = remember(refreshKey) { NetworkUsageLedger.summary(context) }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text("Datenverbrauch", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text("Heute: ${formatDataBytes(summary.rxBytesToday)} Download · ${formatDataBytes(summary.txBytesToday)} Upload")
+            Text("7 Tage: ${formatDataBytes(summary.rxBytesSevenDays)} Download · ${formatDataBytes(summary.txBytesSevenDays)} Upload")
+            Text("WLAN: ${formatDataBytes(summary.wifiBytesSevenDays)} · Mobilfunk: ${formatDataBytes(summary.cellularBytesSevenDays)}")
+            Text("Anfragen: ${summary.requestCountSevenDays} · Cache-Treffer: ${summary.cacheHitsSevenDays} · Wiederholungen: ${summary.retryCountSevenDays}")
+            Text("Geräte-Gegenprobe (UID): ${formatDataBytes(summary.uidRxBytesSevenDays)} Download · ${formatDataBytes(summary.uidTxBytesSevenDays)} Upload")
+            summary.topEndpoints.forEach { (endpoint, bytes) ->
+                Text("$endpoint: ${formatDataBytes(bytes)}", style = MaterialTheme.typography.bodySmall)
+            }
+            Text(
+                "Messung: Daily-HTTP plus unabhaengige Android-UID-Gegenmessung; lokale Details werden nach 14 Tagen entfernt.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            TextButton(onClick = { refreshKey++ }) { Text("Verbrauch aktualisieren") }
+        }
+    }
+}
+
+private fun formatDataBytes(bytes: Long): String {
+    val safe = bytes.coerceAtLeast(0L)
+    return when {
+        safe >= 1024L * 1024L * 1024L -> String.format(Locale.getDefault(), "%.2f GB", safe / (1024.0 * 1024.0 * 1024.0))
+        safe >= 1024L * 1024L -> String.format(Locale.getDefault(), "%.1f MB", safe / (1024.0 * 1024.0))
+        safe >= 1024L -> String.format(Locale.getDefault(), "%.1f KB", safe / 1024.0)
+        else -> "$safe B"
+    }
+}
+
 private fun themeModeLabel(mode: Int): String {
     return when (mode) {
         0 -> "Light"
@@ -19814,6 +20092,7 @@ private fun queueStatusLabel(item: QueuedUploadItem): String {
         UploadQueueStatus.AWAITING_SERVER_ACK -> "wartet auf Bestaetigung"
         UploadQueueStatus.FAILED_TRANSIENT -> "wird automatisch erneut versucht"
         UploadQueueStatus.FAILED_PERMANENT -> "Aktion erforderlich"
+        UploadQueueStatus.ACTION_REQUIRED -> "Entscheidung erforderlich"
         UploadQueueStatus.SUCCESS -> "erfolgreich hochgeladen"
         UploadQueueStatus.PAUSED -> "pausiert"
         else -> item.status
@@ -19832,21 +20111,26 @@ private fun visibleQueueItems(items: List<QueuedUploadItem>, nowMs: Long = Syste
                 else -> true
             }
         }
-        .sortedByDescending { it.updatedAtMs }
-        .take(6)
+        .sortedWith(
+            compareByDescending<QueuedUploadItem> {
+                it.status == UploadQueueStatus.ACTION_REQUIRED || it.status == UploadQueueStatus.FAILED_PERMANENT
+            }.thenByDescending { it.updatedAtMs }
+        )
+        .take(12)
         .toList()
 }
 
 private fun queueManualRetryAllowed(status: String): Boolean {
     return status == UploadQueueStatus.FAILED_TRANSIENT ||
         status == UploadQueueStatus.FAILED_PERMANENT ||
+        status == UploadQueueStatus.ACTION_REQUIRED ||
         status == UploadQueueStatus.WAITING_FOR_SECURE_NETWORK ||
         status == UploadQueueStatus.PAUSED
 }
 
 private fun nextRetryLabel(item: QueuedUploadItem, nowMs: Long = System.currentTimeMillis()): String? {
     if (item.status == UploadQueueStatus.SUCCESS || item.nextRetryAtMs <= 0L) return null
-    if (item.status == UploadQueueStatus.PAUSED || item.status == UploadQueueStatus.FAILED_PERMANENT) return null
+    if (item.status == UploadQueueStatus.PAUSED || item.status == UploadQueueStatus.FAILED_PERMANENT || item.status == UploadQueueStatus.ACTION_REQUIRED) return null
     return if (item.nextRetryAtMs <= nowMs) {
         "Naechster Versuch: jetzt"
     } else {

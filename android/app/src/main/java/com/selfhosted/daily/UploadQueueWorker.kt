@@ -84,6 +84,7 @@ object UploadQueueStatus {
     const val AWAITING_SERVER_ACK = "awaiting_server_ack"
     const val FAILED_TRANSIENT = "failed_transient"
     const val FAILED_PERMANENT = "failed_permanent"
+    const val ACTION_REQUIRED = "action_required"
     const val SUCCESS = "success"
     const val PAUSED = "paused"
 }
@@ -102,7 +103,8 @@ private data class QueuedUploadFailureInfo(
     val permanent: Boolean = false,
     val pauseQueue: Boolean = false,
     val overrideDelayMs: Long? = null,
-    val ackUncertain: Boolean = false
+    val ackUncertain: Boolean = false,
+    val actionRequired: Boolean = false
 )
 
 private const val queueRetryRetentionMs = 7L * 24L * 60L * 60L * 1000L
@@ -172,7 +174,7 @@ object UploadQueueManager {
         )
         val all = read(context).toMutableList()
         all.add(item)
-        write(context, prune(all))
+        check(write(context, prune(all))) { "upload queue persistence failed" }
         UploadQueueScheduler.enqueueNow(context)
         return item
     }
@@ -221,7 +223,7 @@ object UploadQueueManager {
         )
         val all = read(context).toMutableList()
         all.add(item)
-        write(context, prune(all))
+        check(write(context, prune(all))) { "upload queue persistence failed" }
         UploadQueueScheduler.enqueueNow(context)
         return item
     }
@@ -282,6 +284,71 @@ object UploadQueueManager {
             UploadQueueScheduler.enqueueNow(context)
         }
         return found
+    }
+
+    @Synchronized
+    fun deferExtraUntil(context: Context, id: String, retryAtMs: Long): Boolean {
+        val now = System.currentTimeMillis()
+        var found = false
+        val next = read(context).map { item ->
+            if (item.id == id && !item.isPrompt && item.uploadMode == UploadQueueMode.DUAL) {
+                found = true
+                item.copy(
+                    status = UploadQueueStatus.WAITING,
+                    attempts = 0,
+                    lastError = "Extra wird nach dem aktuellen Daily-Fenster automatisch gesendet.",
+                    nextRetryAtMs = retryAtMs.coerceAtLeast(now + 30_000L),
+                    updatedAtMs = now,
+                    lastFailureClass = "",
+                    lastHttpCode = null,
+                    retentionUntilMs = maxOf(item.retentionUntilMs, retryAtMs + queueRetryRetentionMs),
+                    leaseExpiresAtMs = 0L
+                )
+            } else item
+        }
+        if (found) {
+            write(context, prune(next))
+            UploadQueueScheduler.sync(context)
+        }
+        return found
+    }
+
+    @Synchronized
+    fun convertExtraToAttachments(context: Context, id: String, targetPhotoId: Long): Boolean {
+        if (targetPhotoId <= 0L) return false
+        val now = System.currentTimeMillis()
+        val all = read(context).toMutableList()
+        val index = all.indexOfFirst { it.id == id && !it.isPrompt && it.uploadMode == UploadQueueMode.DUAL }
+        if (index < 0) return false
+        val original = all.removeAt(index)
+        val paths = listOf(original.backPath, original.frontPath).filter { it.isNotBlank() && File(it).exists() }
+        if (paths.isEmpty()) return false
+        paths.forEachIndexed { fileIndex, path ->
+            all.add(
+                original.copy(
+                    id = UUID.randomUUID().toString(),
+                    backPath = path,
+                    frontPath = "",
+                    uploadClientId = if (fileIndex == 0) original.uploadClientId else UUID.randomUUID().toString(),
+                    uploadMode = UploadQueueMode.ATTACHMENT,
+                    appendTargetPhotoId = targetPhotoId,
+                    status = UploadQueueStatus.WAITING,
+                    attempts = 0,
+                    lastError = "",
+                    transferProgressPercent = 0,
+                    serverAckState = UploadQueueServerAckState.NONE,
+                    nextRetryAtMs = 0L,
+                    updatedAtMs = now,
+                    lastFailureClass = "",
+                    lastHttpCode = null,
+                    retentionUntilMs = now + queueRetryRetentionMs,
+                    leaseExpiresAtMs = 0L
+                )
+            )
+        }
+        write(context, prune(all))
+        UploadQueueScheduler.enqueueNow(context)
+        return true
     }
 
     @Synchronized
@@ -366,7 +433,7 @@ object UploadQueueManager {
             leaseExpiresAtMs = nowMs + queueLeaseMs
         )
         all[index] = claimed
-        write(context, prune(all))
+        if (!write(context, prune(all))) return null
         return claimed
     }
 
@@ -427,9 +494,9 @@ object UploadQueueManager {
     @Synchronized
     fun markSuccess(context: Context, id: String) {
         val now = System.currentTimeMillis()
+        val completedItem = read(context).firstOrNull { it.id == id }
         val next = read(context).map {
             if (it.id == id) {
-                deleteFilesForItem(it)
                 it.copy(
                     status = UploadQueueStatus.SUCCESS,
                     lastError = "",
@@ -444,7 +511,9 @@ object UploadQueueManager {
                 )
             } else it
         }
-        write(context, prune(next))
+        if (write(context, prune(next))) {
+            completedItem?.let(::deleteFilesForItem)
+        }
     }
 
     @Synchronized
@@ -512,6 +581,35 @@ object UploadQueueManager {
                     leaseExpiresAtMs = 0L
                 )
             } else it
+        }
+        write(context, prune(next))
+    }
+
+    @Synchronized
+    fun markActionRequired(
+        context: Context,
+        id: String,
+        error: String,
+        failureClass: String,
+        httpCode: Int?
+    ) {
+        val now = System.currentTimeMillis()
+        val next = read(context).map { item ->
+            if (item.id == id) {
+                item.copy(
+                    status = UploadQueueStatus.ACTION_REQUIRED,
+                    attempts = item.attempts + 1,
+                    lastError = error.take(300),
+                    transferProgressPercent = 0,
+                    serverAckState = UploadQueueServerAckState.NONE,
+                    nextRetryAtMs = 0L,
+                    updatedAtMs = now,
+                    lastAttemptFinishedAtMs = now,
+                    lastFailureClass = failureClass.take(64),
+                    lastHttpCode = httpCode,
+                    leaseExpiresAtMs = 0L
+                )
+            } else item
         }
         write(context, prune(next))
     }
@@ -593,6 +691,7 @@ object UploadQueueManager {
                 UploadQueueStatus.AWAITING_SERVER_ACK,
                 UploadQueueStatus.FAILED_TRANSIENT,
                 UploadQueueStatus.FAILED_PERMANENT,
+                UploadQueueStatus.ACTION_REQUIRED,
                 UploadQueueStatus.PAUSED -> oldStatus
                 else -> UploadQueueStatus.WAITING
             }
@@ -632,7 +731,7 @@ object UploadQueueManager {
         return out
     }
 
-    private fun write(context: Context, items: List<QueuedUploadItem>) {
+    private fun write(context: Context, items: List<QueuedUploadItem>): Boolean {
         val arr = JSONArray()
         items.forEach { item ->
             arr.put(
@@ -668,7 +767,10 @@ object UploadQueueManager {
                 }
             )
         }
-        prefs(context).edit().putString(PREF_KEY_ITEMS, arr.toString()).apply()
+        // Queue claims and acknowledgements must survive an immediate process
+        // death. commit() makes the read-modify-write lease durable before the
+        // worker starts transferring bytes.
+        return prefs(context).edit().putString(PREF_KEY_ITEMS, arr.toString()).commit()
     }
 
     private fun prune(items: List<QueuedUploadItem>): List<QueuedUploadItem> {
@@ -676,7 +778,15 @@ object UploadQueueManager {
         val keep = items.filterNot {
             it.status == UploadQueueStatus.SUCCESS && (now - it.updatedAtMs) > 24L * 60L * 60L * 1000L
         }
-        return keep.sortedByDescending { it.createdAtMs }.take(60)
+        val actionItems = keep.filter {
+            it.status == UploadQueueStatus.ACTION_REQUIRED ||
+                it.status == UploadQueueStatus.FAILED_PERMANENT ||
+                it.status == UploadQueueStatus.PAUSED
+        }
+        val boundedAutomaticItems = keep.filterNot { it in actionItems }
+            .sortedByDescending { it.createdAtMs }
+            .take(60)
+        return (actionItems + boundedAutomaticItems).distinctBy { it.id }.sortedByDescending { it.createdAtMs }
     }
 
     private fun deleteFilesForItem(item: QueuedUploadItem) {
@@ -716,7 +826,11 @@ class UploadQueueWorker(
             UploadQueueScheduler.sync(applicationContext)
             return Result.success()
         }
-        val repo = AppRepo(applicationContext, buildStandardHttpClient(timeoutProfile = QueueUploadHttpTimeoutProfile))
+        NetworkUsageLedger.recordUidBoundary(applicationContext, "worker_start")
+        if (item.attempts > 0) {
+            NetworkUsageLedger.recordUploadRetry(applicationContext)
+        }
+        val repo = AppRepo(applicationContext, buildStandardHttpClient(applicationContext, "worker", timeoutProfile = QueueUploadHttpTimeoutProfile))
         val probe = repo.measureUploadTelemetryProbe()
         appendDebugLog(
             context = applicationContext,
@@ -840,6 +954,21 @@ class UploadQueueWorker(
                         )
                     }
                 }
+                failureInfo.actionRequired -> {
+                    UploadQueueManager.markActionRequired(
+                        context = applicationContext,
+                        id = item.id,
+                        error = displayError,
+                        failureClass = failureInfo.reason,
+                        httpCode = failureInfo.httpCode
+                    )
+                    appendDebugLog(
+                        context = applicationContext,
+                        type = "upload_queue_action_required",
+                        message = displayError,
+                        meta = "source=queue;kind=extra;queueItemId=${item.id};uploadClientId=${item.uploadClientId};failureClass=${failureInfo.reason};http=${failureInfo.httpCode ?: -1};status=${UploadQueueStatus.ACTION_REQUIRED}"
+                    )
+                }
                 failureInfo.permanent -> {
                     UploadQueueManager.markFailedPermanent(
                         context = applicationContext,
@@ -906,6 +1035,7 @@ class UploadQueueWorker(
         }
 
         UploadQueueScheduler.sync(applicationContext)
+        NetworkUsageLedger.recordUidBoundary(applicationContext, "worker_end")
         return Result.success()
     }
 
@@ -920,7 +1050,8 @@ class UploadQueueWorker(
                 shareLocation = item.locationShared,
                 capturedAtOverride = item.capturedAtMs.takeIf { it > 0L }?.let {
                     OffsetDateTime.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault())
-                }
+                },
+                uploadClientIdOverride = item.uploadClientId
             ) { sent, _ ->
                 val percent = ((sent.coerceAtMost(totalBytes) * 100L) / totalBytes).toInt().coerceIn(0, 100)
                 UploadQueueManager.markProgress(applicationContext, item.id, percent)
@@ -1182,7 +1313,8 @@ private fun queuedUploadFailureInfo(throwable: Throwable): QueuedUploadFailureIn
             httpCode = throwable.code(),
             network = null,
             permanent = permanent,
-            pauseQueue = throwable.code() == 401
+            pauseQueue = throwable.code() == 401,
+            actionRequired = reason == "extra_window_blocked"
         )
     }
     if (throwable is IllegalStateException) {

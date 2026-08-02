@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,21 +77,85 @@ func (s *Server) handleHubTimeline(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "hub timeline state failed"})
 		return
 	}
-	items, unreadCount, err := s.hubTimelinePayload(user, now, limit, viewedAt, clearedAt)
+	offset, err := decodeHubTimelineOffsetCursor(strings.TrimSpace(c.Query("cursor")))
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid cursor"})
+		return
+	}
+	itemsWithLookahead, unreadCount, err := s.hubTimelinePayload(user, now, offset+limit+1, viewedAt, clearedAt)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "hub timeline failed"})
 		return
 	}
-	_ = s.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("hub_timeline_last_viewed_at", now.UTC()).Error
+	if offset > len(itemsWithLookahead) {
+		offset = len(itemsWithLookahead)
+	}
+	end := offset + limit
+	if end > len(itemsWithLookahead) {
+		end = len(itemsWithLookahead)
+	}
+	items := itemsWithLookahead[offset:end]
+	hasMore := end < len(itemsWithLookahead)
+	nextCursor := ""
+	if hasMore {
+		nextCursor = encodeHubTimelineOffsetCursor(end)
+	}
+	// APKs before timeline_v2 do not know the explicit viewed endpoint. Keep
+	// their historical GET-means-viewed behavior while v2 clients opt out.
+	if !strings.EqualFold(strings.TrimSpace(c.Query("explicit_viewed")), "true") {
+		_ = s.DB.Model(&models.User{}).Where("id = ?", user.ID).
+			Update("hub_timeline_last_viewed_at", now.UTC()).Error
+	}
+	revision := s.syncRevision(timelineRevisionScope)
+	etag := revisionETag("timeline", map[string]int64{"all": revision})
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "private, no-cache")
+	if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
+		c.Status(304)
+		return
+	}
 	c.JSON(200, gin.H{
-		"schemaVersion": "hub_timeline_v1",
+		"schemaVersion": "hub_timeline_v2",
 		"serverNow":     now,
 		"windowDays":    hubTimelineWindowDays,
+		"revision":      revision,
+		"nextCursor":    nextCursor,
+		"hasMore":       hasMore,
 		"unreadCount":   unreadCount,
 		"clearedAt":     clearedAt,
 		"viewedAt":      viewedAt,
 		"items":         items,
 	})
+}
+
+func encodeHubTimelineOffsetCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
+}
+
+func decodeHubTimelineOffsetCursor(value string) (int, error) {
+	if value == "" {
+		return 0, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return 0, err
+	}
+	offset, err := strconv.Atoi(string(raw))
+	if err != nil || offset < 0 || offset > hubTimelineMaxLimit*10 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
+
+func (s *Server) handleHubTimelineViewed(c *gin.Context) {
+	user, _ := userFromContext(c)
+	now := time.Now().In(s.Location).UTC()
+	if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).
+		Update("hub_timeline_last_viewed_at", now).Error; err != nil {
+		c.JSON(500, gin.H{"error": "hub timeline viewed state failed"})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "viewedAt": now})
 }
 
 func (s *Server) handleHubTimelineClear(c *gin.Context) {
@@ -102,6 +168,7 @@ func (s *Server) handleHubTimelineClear(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "hub timeline clear failed"})
 		return
 	}
+	s.bumpSyncRevision(timelineRevisionScope)
 	c.JSON(200, gin.H{"ok": true, "clearedAt": now})
 }
 
@@ -696,14 +763,18 @@ func (s *Server) EnsureHubVersionSystemEvent(now time.Time) error {
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "record not found") {
 		return err
 	}
-	return s.DB.Create(&models.HubSystemEvent{
+	if err := s.DB.Create(&models.HubSystemEvent{
 		EventType:  eventType,
 		Scope:      hubTimelineSystemEventScope,
 		Title:      title,
 		Body:       body,
 		OccurredAt: now.UTC(),
 		MetaJSON:   metaJSON,
-	}).Error
+	}).Error; err != nil {
+		return err
+	}
+	s.bumpSyncRevision(timelineRevisionScope)
+	return nil
 }
 
 func (s *Server) hubPostChangeItems(viewerID uint, now, from time.Time) ([]hubTimelineItem, error) {

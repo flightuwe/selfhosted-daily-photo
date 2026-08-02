@@ -208,6 +208,8 @@ fun buildApiService(baseUrl: String, httpClient: OkHttpClient): Api {
 }
 
 fun buildStandardHttpClient(
+    context: android.content.Context? = null,
+    usageContext: String = "app",
     extraInterceptors: List<Interceptor> = emptyList(),
     timeoutProfile: HttpTimeoutProfile = DefaultHttpTimeoutProfile
 ): OkHttpClient {
@@ -225,6 +227,7 @@ fun buildStandardHttpClient(
                 .build()
             chain.proceed(newReq)
         }
+    if (context != null) builder.addInterceptor(NetworkUsageLedger.interceptor(context.applicationContext, usageContext))
     extraInterceptors.forEach(builder::addInterceptor)
     return builder.build()
 }

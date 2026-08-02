@@ -96,6 +96,9 @@ internal fun evaluateConnectionHealth(inputs: ConnectionHealthInputs): Connectio
     val retrying = queue.count { it.status == UploadQueueStatus.FAILED_TRANSIENT }
     val awaitingAck = queue.count { it.status == UploadQueueStatus.AWAITING_SERVER_ACK }
     val waitingForNetwork = queue.count { it.status == UploadQueueStatus.WAITING_FOR_NETWORK }
+    val actionRequired = queue.count {
+        it.status == UploadQueueStatus.ACTION_REQUIRED || it.status == UploadQueueStatus.FAILED_PERMANENT
+    }
     val authPaused = queue.any {
         it.status == UploadQueueStatus.PAUSED &&
             (it.lastFailureClass == "auth_missing" || it.lastFailureClass == "http_401")
@@ -111,6 +114,7 @@ internal fun evaluateConnectionHealth(inputs: ConnectionHealthInputs): Connectio
             if (retrying > 0) parts += "$retrying im Retry"
             if (awaitingAck > 0) parts += "$awaitingAck wartet auf Bestaetigung"
             if (pausedQueue > 0) parts += "$pausedQueue pausiert"
+            if (actionRequired > 0) parts += "$actionRequired braucht Entscheidung"
             append(if (parts.isEmpty()) "keine Warnungen" else parts.joinToString(", "))
         }
     }
@@ -254,7 +258,7 @@ internal fun evaluateConnectionHealth(inputs: ConnectionHealthInputs): Connectio
         }
     }
 
-    if (secureWaiting > 0 || retrying > 0 || awaitingAck > 0 || pausedQueue > 0) {
+    if (secureWaiting > 0 || retrying > 0 || awaitingAck > 0 || pausedQueue > 0 || actionRequired > 0) {
         if (level != ConnectionHealthLevel.RED) {
             level = ConnectionHealthLevel.YELLOW
             title = "Verbindung eingeschraenkt"
@@ -264,6 +268,7 @@ internal fun evaluateConnectionHealth(inputs: ConnectionHealthInputs): Connectio
         if (retrying > 0) reasonLines += "Uploads werden erneut versucht"
         if (awaitingAck > 0) reasonLines += "Uploads warten auf Server-Bestaetigung"
         if (pausedQueue > 0 && !authPaused) reasonLines += "Uploads sind pausiert"
+        if (actionRequired > 0) reasonLines += "Uploads benoetigen eine Nutzerentscheidung"
     }
 
     if (inputs.lastPingMs != null && inputs.lastPingMs > 1500L && level == ConnectionHealthLevel.GREEN) {
