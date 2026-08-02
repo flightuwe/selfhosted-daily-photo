@@ -112,6 +112,7 @@ func (s *Server) handleHubTimeline(c *gin.Context) {
 	c.Header("Cache-Control", "private, no-cache")
 	if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
 		c.Status(304)
+		c.Writer.WriteHeaderNow()
 		return
 	}
 	c.JSON(200, gin.H{
@@ -1036,7 +1037,7 @@ func (s *Server) hubTimeCapsulesPayload(viewerID uint, now time.Time) (gin.H, er
 		if photo.CapsuleVisibleAt == nil {
 			continue
 		}
-		preview := s.photoJSONForViewer(viewerID, photo, decorations)
+		preview := s.timeCapsulePhotoJSONForViewer(viewerID, photo, decorations, now)
 		item := gin.H{
 			"photo":         preview,
 			"user":          s.userPublicJSON(viewerID, photo.User),

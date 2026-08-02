@@ -2528,6 +2528,7 @@ func (s *Server) handleFeedWindow(c *gin.Context) {
 	c.Header("Cache-Control", "private, no-cache")
 	if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
 		c.Status(http.StatusNotModified)
+		c.Writer.WriteHeaderNow()
 		return
 	}
 	knownRevisions := parseKnownFeedRevisions(c.Query("known_revisions"))
@@ -6788,7 +6789,11 @@ func (s *Server) timeCapsulePhotoJSONForViewer(viewerID uint, photo models.Photo
 	if locked {
 		row["url"] = ""
 		row["capsulePreviewUrl"] = ""
+		row["thumbnailUrl"] = ""
 		delete(row, "secondUrl")
+		delete(row, "secondThumbnailUrl")
+		row["media"] = []gin.H{}
+		row["mediaCount"] = 0
 		row["caption"] = ""
 		row["locationShared"] = false
 		row["locationDisplay"] = ""

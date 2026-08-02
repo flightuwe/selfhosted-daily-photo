@@ -59,16 +59,19 @@ func TestHubTimelineCursorPaginationETagAndExplicitViewedState(t *testing.T) {
 	if cursor == "" {
 		t.Fatal("expected next cursor")
 	}
+	firstETag := first.Header().Get("ETag")
+	if firstETag == "" {
+		t.Fatal("timeline response did not include an ETag")
+	}
+	unchanged, _ := requestPage("/api/hub/timeline?limit=2&explicit_viewed=true", firstETag)
+	if unchanged.Code != http.StatusNotModified {
+		t.Fatalf("unchanged timeline status = %d, want 304; sent=%q received=%q body=%s", unchanged.Code, firstETag, unchanged.Header().Get("ETag"), unchanged.Body.String())
+	}
 	second, secondPayload := requestPage("/api/hub/timeline?limit=2&explicit_viewed=true&cursor="+cursor, "")
 	secondItems, _ := secondPayload["items"].([]any)
 	if second.Code != http.StatusOK || len(secondItems) != 2 {
 		t.Fatalf("second page status/items = %d/%d", second.Code, len(secondItems))
 	}
-	unchanged, _ := requestPage("/api/hub/timeline?limit=2&explicit_viewed=true", first.Header().Get("ETag"))
-	if unchanged.Code != http.StatusNotModified {
-		t.Fatalf("unchanged timeline status = %d, want 304", unchanged.Code)
-	}
-
 	var stored models.User
 	if err := server.DB.First(&stored, viewer.ID).Error; err != nil {
 		t.Fatalf("reload viewer: %v", err)
