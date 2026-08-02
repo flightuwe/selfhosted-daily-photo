@@ -26,6 +26,14 @@ data class NetworkUsageSummary(
     val txBytesSevenDays: Long = 0L,
     val cellularBytesSevenDays: Long = 0L,
     val wifiBytesSevenDays: Long = 0L,
+    val cellularRxBytesToday: Long = 0L,
+    val cellularTxBytesToday: Long = 0L,
+    val wifiRxBytesToday: Long = 0L,
+    val wifiTxBytesToday: Long = 0L,
+    val cellularRxBytesSevenDays: Long = 0L,
+    val cellularTxBytesSevenDays: Long = 0L,
+    val wifiRxBytesSevenDays: Long = 0L,
+    val wifiTxBytesSevenDays: Long = 0L,
     val cacheHitsSevenDays: Int = 0,
     val requestCountSevenDays: Int = 0,
     val retryCountSevenDays: Int = 0,
@@ -224,6 +232,14 @@ object NetworkUsageLedger {
             txBytesSevenDays = seven.sumOf { it.txBytes },
             cellularBytesSevenDays = seven.filter { it.network == "cellular" }.sumOf { it.rxBytes + it.txBytes },
             wifiBytesSevenDays = seven.filter { it.network == "wifi" }.sumOf { it.rxBytes + it.txBytes },
+            cellularRxBytesToday = today.filter { it.network == "cellular" }.sumOf { it.rxBytes },
+            cellularTxBytesToday = today.filter { it.network == "cellular" }.sumOf { it.txBytes },
+            wifiRxBytesToday = today.filter { it.network == "wifi" }.sumOf { it.rxBytes },
+            wifiTxBytesToday = today.filter { it.network == "wifi" }.sumOf { it.txBytes },
+            cellularRxBytesSevenDays = seven.filter { it.network == "cellular" }.sumOf { it.rxBytes },
+            cellularTxBytesSevenDays = seven.filter { it.network == "cellular" }.sumOf { it.txBytes },
+            wifiRxBytesSevenDays = seven.filter { it.network == "wifi" }.sumOf { it.rxBytes },
+            wifiTxBytesSevenDays = seven.filter { it.network == "wifi" }.sumOf { it.txBytes },
             cacheHitsSevenDays = seven.count { it.cacheHit },
             requestCountSevenDays = seven.size,
             retryCountSevenDays = seven.sumOf { it.retries } + retryDetails.filter { it.atMs >= sevenStart }.sumOf { it.retries },
@@ -242,6 +258,14 @@ object NetworkUsageLedger {
             append(";networkUsage7dTx=").append(value.txBytesSevenDays)
             append(";networkUsage7dWifi=").append(value.wifiBytesSevenDays)
             append(";networkUsage7dCellular=").append(value.cellularBytesSevenDays)
+            append(";networkUsageTodayWifiRx=").append(value.wifiRxBytesToday)
+            append(";networkUsageTodayWifiTx=").append(value.wifiTxBytesToday)
+            append(";networkUsageTodayCellularRx=").append(value.cellularRxBytesToday)
+            append(";networkUsageTodayCellularTx=").append(value.cellularTxBytesToday)
+            append(";networkUsage7dWifiRx=").append(value.wifiRxBytesSevenDays)
+            append(";networkUsage7dWifiTx=").append(value.wifiTxBytesSevenDays)
+            append(";networkUsage7dCellularRx=").append(value.cellularRxBytesSevenDays)
+            append(";networkUsage7dCellularTx=").append(value.cellularTxBytesSevenDays)
             append(";networkUsage7dRequests=").append(value.requestCountSevenDays)
             append(";networkUsage7dCacheHits=").append(value.cacheHitsSevenDays)
             append(";networkUsage7dRetries=").append(value.retryCountSevenDays)
@@ -270,7 +294,7 @@ object NetworkUsageLedger {
         val now = System.currentTimeMillis()
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
         if (now - prefs.getLong(KEY_LAST_CLEANUP, 0L) >= 6L * 60L * 60L * 1000L) {
-            db.delete("usage_entries", "at_ms < ?", arrayOf((now - RETENTION_MS).toString()))
+            compactExpiredDetails(db, now)
             prefs.edit().putLong(KEY_LAST_CLEANUP, now).apply()
         }
     }
@@ -308,6 +332,39 @@ object NetworkUsageLedger {
         }
     }
 
+    private fun compactExpiredDetails(db: SQLiteDatabase, nowMs: Long) {
+        val cutoff = Calendar.getInstance().apply {
+            timeInMillis = nowMs - RETENTION_MS
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        db.rawQuery(
+            """
+            SELECT (at_ms / 86400000) * 86400000 AS day_start, network, source,
+                   SUM(tx_bytes), SUM(rx_bytes), COUNT(*), SUM(cache_hit), SUM(retries)
+            FROM usage_entries WHERE at_ms < ?
+            GROUP BY day_start, network, source
+            """.trimIndent(),
+            arrayOf(cutoff.toString())
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                db.insertWithOnConflict("usage_daily_aggregates", null, ContentValues().apply {
+                    put("day_start", cursor.getLong(0))
+                    put("network", cursor.getString(1).orEmpty())
+                    put("source", cursor.getString(2).orEmpty())
+                    put("tx_bytes", cursor.getLong(3))
+                    put("rx_bytes", cursor.getLong(4))
+                    put("request_count", cursor.getLong(5))
+                    put("cache_hits", cursor.getLong(6))
+                    put("retries", cursor.getLong(7))
+                }, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+        }
+        db.delete("usage_entries", "at_ms < ?", arrayOf(cutoff.toString()))
+    }
+
     private fun endpointClass(path: String, method: String): String = when {
         path.contains("/feed/window") -> "feed_window"
         path.contains("/hub/timeline") -> "hub_timeline"
@@ -341,7 +398,7 @@ object NetworkUsageLedger {
         response.headers.sumOf { it.first.length + it.second.length + 4 }.toLong() + 16L
 }
 
-private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context, "network_usage_ledger.db", null, 1) {
+private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context, "network_usage_ledger.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -362,9 +419,30 @@ private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context,
             """.trimIndent()
         )
         db.execSQL("CREATE INDEX idx_usage_entries_at_ms ON usage_entries(at_ms)")
+        createAggregateTable(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) createAggregateTable(db)
+    }
+
+    private fun createAggregateTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS usage_daily_aggregates (
+                day_start INTEGER NOT NULL,
+                network TEXT NOT NULL,
+                source TEXT NOT NULL,
+                tx_bytes INTEGER NOT NULL,
+                rx_bytes INTEGER NOT NULL,
+                request_count INTEGER NOT NULL,
+                cache_hits INTEGER NOT NULL,
+                retries INTEGER NOT NULL,
+                PRIMARY KEY(day_start, network, source)
+            )
+            """.trimIndent()
+        )
+    }
 }
 
 private class CountingResponseBody(

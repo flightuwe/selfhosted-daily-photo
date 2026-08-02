@@ -67,6 +67,9 @@ func TestHubTimelineCursorPaginationETagAndExplicitViewedState(t *testing.T) {
 	if unchanged.Code != http.StatusNotModified {
 		t.Fatalf("unchanged timeline status = %d, want 304; sent=%q received=%q body=%s", unchanged.Code, firstETag, unchanged.Header().Get("ETag"), unchanged.Body.String())
 	}
+	if unchanged.Body.Len() != 0 || unchanged.Body.Len()*10 > first.Body.Len()*3 {
+		t.Fatalf("unchanged timeline bytes = %d, full bytes = %d; want at least 70%% reduction", unchanged.Body.Len(), first.Body.Len())
+	}
 	second, secondPayload := requestPage("/api/hub/timeline?limit=2&explicit_viewed=true&cursor="+cursor, "")
 	secondItems, _ := secondPayload["items"].([]any)
 	if second.Code != http.StatusOK || len(secondItems) != 2 {

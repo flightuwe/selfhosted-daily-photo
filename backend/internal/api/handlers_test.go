@@ -959,14 +959,12 @@ func TestFeedWindowReturnsRevisionsDeltaAndNotModified(t *testing.T) {
 	if !ok || revision < 1 {
 		t.Fatalf("day revision missing: %#v", payload["dayRevisions"])
 	}
-	delta, deltaPayload := request(target+"&known_revisions="+day+":"+strconv.FormatInt(int64(revision), 10), "")
-	if delta.Code != http.StatusOK {
+	delta, _ := request(target+"&known_revisions="+day+":"+strconv.FormatInt(int64(revision), 10), "")
+	if delta.Code != http.StatusNotModified {
 		t.Fatalf("delta feed status = %d, body=%s", delta.Code, delta.Body.String())
 	}
-	days, _ := deltaPayload["days"].([]any)
-	unchanged, _ := deltaPayload["unchangedDays"].([]any)
-	if len(days) != 0 || len(unchanged) != 1 {
-		t.Fatalf("delta days/unchanged = %d/%d", len(days), len(unchanged))
+	if delta.Body.Len() != 0 || delta.Body.Len()*10 > first.Body.Len()*3 {
+		t.Fatalf("unchanged feed bytes = %d, full bytes = %d; want at least 70%% reduction", delta.Body.Len(), first.Body.Len())
 	}
 	notModified, _ := request(target, first.Header().Get("ETag"))
 	if notModified.Code != http.StatusNotModified {

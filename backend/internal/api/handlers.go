@@ -2532,6 +2532,19 @@ func (s *Server) handleFeedWindow(c *gin.Context) {
 		return
 	}
 	knownRevisions := parseKnownFeedRevisions(c.Query("known_revisions"))
+	allKnownUnchanged := len(selectedDays) > 0
+	for _, day := range selectedDays {
+		known, ok := knownRevisions[day]
+		if !ok || known != revisions[day] {
+			allKnownUnchanged = false
+			break
+		}
+	}
+	if allKnownUnchanged {
+		c.Status(http.StatusNotModified)
+		c.Writer.WriteHeaderNow()
+		return
+	}
 	unchangedDays := make([]string, 0, len(selectedDays))
 	items := make([]gin.H, 0, len(selectedDays))
 	for _, day := range selectedDays {
@@ -6017,6 +6030,7 @@ func (s *Server) handlePhotoBookmarkCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
@@ -6045,15 +6059,28 @@ func (s *Server) handlePhotoBookmarkDelete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
 func (s *Server) handlePhotoBookmarksClear(c *gin.Context) {
 	user, _ := userFromContext(c)
+	var affectedDays []string
+	if err := s.DB.Table("photo_bookmarks").
+		Select("DISTINCT photos.day").
+		Joins("JOIN photos ON photos.id = photo_bookmarks.photo_id").
+		Where("photo_bookmarks.user_id = ?", user.ID).
+		Pluck("photos.day", &affectedDays).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark query failed"})
+		return
+	}
 	result := s.DB.Where("user_id = ?", user.ID).Delete(&models.PhotoBookmark{})
 	if result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark clear failed"})
 		return
+	}
+	for _, day := range affectedDays {
+		s.invalidateFeedDayCache(day)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "deletedCount": result.RowsAffected})
 }
@@ -6115,6 +6142,7 @@ func (s *Server) handlePhotoNsfwCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
@@ -6155,6 +6183,7 @@ func (s *Server) handlePhotoNsfwDelete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
@@ -6275,6 +6304,7 @@ func (s *Server) handlePhotoMarkCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
@@ -6312,6 +6342,7 @@ func (s *Server) handlePhotoMarkDelete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
@@ -6406,6 +6437,7 @@ func (s *Server) handlePhotoPaintUpsert(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 
@@ -6443,6 +6475,7 @@ func (s *Server) handlePhotoPaintDelete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "photo decorations query failed"})
 		return
 	}
+	s.invalidateFeedDayCache(photo.Day)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewer(user.ID, photo, decorations)})
 }
 

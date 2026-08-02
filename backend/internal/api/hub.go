@@ -71,6 +71,18 @@ func (s *Server) handleHubTimeline(c *gin.Context) {
 			}
 		}
 	}
+	revision := s.syncRevision(timelineRevisionScope)
+	etag := revisionETag("timeline", map[string]int64{"all": revision})
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "private, no-cache")
+	// New clients keep a complete local timeline. Avoid all timeline queries
+	// when its monotone revision is unchanged; legacy clients do not send an
+	// ETag and retain the historical response and viewed-state behavior.
+	if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
+		c.Status(304)
+		c.Writer.WriteHeaderNow()
+		return
+	}
 
 	viewedAt, clearedAt, err := s.hubTimelineState(user.ID)
 	if err != nil {
@@ -105,15 +117,6 @@ func (s *Server) handleHubTimeline(c *gin.Context) {
 	if !strings.EqualFold(strings.TrimSpace(c.Query("explicit_viewed")), "true") {
 		_ = s.DB.Model(&models.User{}).Where("id = ?", user.ID).
 			Update("hub_timeline_last_viewed_at", now.UTC()).Error
-	}
-	revision := s.syncRevision(timelineRevisionScope)
-	etag := revisionETag("timeline", map[string]int64{"all": revision})
-	c.Header("ETag", etag)
-	c.Header("Cache-Control", "private, no-cache")
-	if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
-		c.Status(304)
-		c.Writer.WriteHeaderNow()
-		return
 	}
 	c.JSON(200, gin.H{
 		"schemaVersion": "hub_timeline_v2",

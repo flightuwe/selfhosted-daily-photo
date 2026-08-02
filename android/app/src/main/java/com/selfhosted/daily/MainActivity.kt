@@ -206,6 +206,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import coil.imageLoader
+import coil.request.ImageRequest
 import com.google.gson.Gson
 import com.google.android.gms.location.CurrentLocationRequest
 import com.google.android.gms.location.LocationServices
@@ -835,7 +837,8 @@ data class FeedWindowResponse(
     val mode: String? = null,
     val offset: Int = 0,
     val nextOffset: Int = 0,
-    val randomSeed: Long = 0L
+    val randomSeed: Long = 0L,
+    val notModified: Boolean = false
 )
 enum class FeedViewportAnchorKind {
     PHOTO,
@@ -1207,8 +1210,37 @@ data class HubTimelineResponse(
     val revision: Long = 0L,
     val nextCursor: String = "",
     val hasMore: Boolean = false,
-    val items: List<HubTimelineItem> = emptyList()
+    val items: List<HubTimelineItem> = emptyList(),
+    val notModified: Boolean = false
 )
+
+internal fun mergeCompleteTimelineDelta(
+    existing: List<HubTimelineItem>,
+    incoming: List<HubTimelineItem>,
+    limit: Int = 1_000
+): List<HubTimelineItem> {
+    val oldIndex = existing.mapIndexed { index, item -> item.id to index }.toMap()
+    val incomingDistinct = incoming.distinctBy { it.id }
+    val lastCoveredOldIndex = incomingDistinct.mapNotNull { oldIndex[it.id] }.maxOrNull()
+        ?: return incomingDistinct.take(limit)
+    return (incomingDistinct + existing.drop(lastCoveredOldIndex + 1))
+        .distinctBy { it.id }
+        .take(limit)
+}
+
+internal fun trimTimelineWindow(
+    items: List<HubTimelineItem>,
+    serverNow: String?,
+    windowDays: Int
+): List<HubTimelineItem> {
+    val now = serverNow?.let { runCatching { OffsetDateTime.parse(it) }.getOrNull() } ?: return items
+    val cutoff = now.minusDays((windowDays.coerceAtLeast(1) - 1).toLong()).toLocalDate()
+    return items.filter { item ->
+        val itemDate = item.occurredAt?.let { runCatching { OffsetDateTime.parse(it).toLocalDate() }.getOrNull() }
+            ?: item.day.takeIf(String::isNotBlank)?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+        itemDate == null || !itemDate.isBefore(cutoff)
+    }
+}
 
 data class HubDashboardPreview(
     val calendarPreview: List<DayStatItem> = emptyList(),
@@ -1447,6 +1479,7 @@ interface Api {
     @GET("hub/timeline")
     suspend fun hubTimeline(
         @Header("Authorization") token: String,
+        @Header("If-None-Match") ifNoneMatch: String? = null,
         @Query("limit") limit: Int = 80,
         @Query("cursor") cursor: String? = null,
         @Query("explicit_viewed") explicitViewed: Boolean = true
@@ -1763,6 +1796,18 @@ class AppRepo(
     private val httpClient: OkHttpClient
 ) {
     fun isMeteredNetwork(): Boolean = NetworkUsageLedger.isMetered(context)
+
+    fun preloadThumbnails(urls: Collection<String>) {
+        if (!shouldPreloadThumbnails(isMeteredNetwork())) return
+        urls.asSequence().map(String::trim).filter(String::isNotEmpty).distinct().take(24).forEach { url ->
+            context.imageLoader.enqueue(
+                ImageRequest.Builder(context)
+                    .data(url)
+                    .size(512)
+                    .build()
+            )
+        }
+    }
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     private val gson = Gson()
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(context) }
@@ -1798,11 +1843,12 @@ class AppRepo(
         if (userId <= 0L) return null
         val file = warmCacheFile(userId)
         if (!file.exists()) return null
-        return runCatching {
+        val decoded = runCatching {
             gson.fromJson(file.readText(), AppWarmCacheEnvelope::class.java)
-        }.getOrNull()?.takeIf { envelope ->
-            envelope.schemaVersion in setOf("app_warm_cache_v1", warmCacheSchemaVersion) && envelope.userId == userId
-        }?.copy(schemaVersion = warmCacheSchemaVersion)
+        }.getOrNull()
+        return migrateWarmCacheEnvelope(decoded, userId).also { migrated ->
+            if (migrated == null) runCatching { file.delete() }
+        }
     }
 
     private fun writeWarmCacheEnvelope(userId: Long, transform: (AppWarmCacheEnvelope) -> AppWarmCacheEnvelope) {
@@ -3129,17 +3175,49 @@ class AppRepo(
     }
     suspend fun hubBootstrap(): HubBootstrapResponse =
         authorizedCall("/api/hub/bootstrap") { token -> api.hubBootstrap(token) }
-    suspend fun hubTimeline(limit: Int = 1_000): HubTimelineResponse {
+    suspend fun hubTimeline(
+        limit: Int = 1_000,
+        cachedItems: List<HubTimelineItem> = emptyList(),
+        cachedRevision: Long = 0L,
+        cachedComplete: Boolean = false
+    ): HubTimelineResponse {
         val all = mutableListOf<HubTimelineItem>()
         var cursor: String? = null
         var latest: HubTimelineResponse? = null
+        val cachedIds = cachedItems.mapTo(mutableSetOf()) { it.id }
         do {
-            val page = authorizedCall("/api/hub/timeline") { token ->
-                api.hubTimeline(token, limit.coerceAtMost(80), cursor)
+            val page = try {
+                authorizedCall("/api/hub/timeline") { token ->
+                    api.hubTimeline(
+                        token = token,
+                        ifNoneMatch = if (cursor == null && cachedRevision > 0L) "W/\"timeline:all=$cachedRevision\"" else null,
+                        limit = limit.coerceAtMost(80),
+                        cursor = cursor
+                    )
+                }
+            } catch (http: HttpException) {
+                if (http.code() != 304 || cursor != null || cachedRevision <= 0L) throw http
+                return HubTimelineResponse(
+                    revision = cachedRevision,
+                    items = cachedItems.take(limit),
+                    hasMore = !cachedComplete,
+                    notModified = true
+                )
             }
             latest = page
             val known = all.mapTo(mutableSetOf()) { it.id }
             all += page.items.filter { known.add(it.id) }
+            if (cachedComplete && all.any { it.id in cachedIds }) {
+                return page.copy(
+                    items = trimTimelineWindow(
+                        mergeCompleteTimelineDelta(cachedItems, all, limit),
+                        serverNow = page.serverNow,
+                        windowDays = page.windowDays
+                    ),
+                    hasMore = false,
+                    nextCursor = ""
+                )
+            }
             cursor = page.nextCursor.takeIf { page.hasMore && it.isNotBlank() }
         } while (cursor != null && all.size < limit)
         val base = latest ?: HubTimelineResponse()
@@ -3176,13 +3254,25 @@ class AppRepo(
         afterDays: Int = 2,
         focusPhotoId: Long? = null,
         knownRevisions: Map<String, Long> = emptyMap()
-    ): FeedWindowResponse = authorizedCall("/api/feed/window") { token ->
+    ): FeedWindowResponse {
         val encodedKnown = knownRevisions.entries
             .filter { it.value > 0L }
             .sortedByDescending { it.key }
             .joinToString(",") { "${it.key}:${it.value}" }
             .ifBlank { null }
-        api.feedWindow(token, anchorDay, beforeDays, afterDays, focusPhotoId, encodedKnown)
+        return try {
+            authorizedCall("/api/feed/window") { token ->
+                api.feedWindow(token, anchorDay, beforeDays, afterDays, focusPhotoId, encodedKnown)
+            }
+        } catch (http: HttpException) {
+            if (http.code() != 304 || encodedKnown == null) throw http
+            FeedWindowResponse(
+                schemaVersion = "feed_window_v2",
+                anchorDay = anchorDay,
+                dayRevisions = knownRevisions,
+                notModified = true
+            )
+        }
     }
     suspend fun feedDiscover(
         mode: FeedOrderMode,
@@ -4307,6 +4397,20 @@ data class AppWarmCacheEnvelope(
     val feed: FeedWarmCacheSnapshot? = null
 )
 
+internal fun migrateWarmCacheEnvelope(envelope: AppWarmCacheEnvelope?, expectedUserId: Long): AppWarmCacheEnvelope? {
+    if (envelope == null || envelope.userId != expectedUserId) return null
+    if (envelope.schemaVersion !in setOf("app_warm_cache_v1", "app_warm_cache_v2")) return null
+    return envelope.copy(schemaVersion = "app_warm_cache_v2")
+}
+
+internal fun shouldApplyTimelinePreview(timelineComplete: Boolean, timelineItemsEmpty: Boolean): Boolean =
+    !timelineComplete && timelineItemsEmpty
+
+internal fun feedAutoRefreshBoundsMs(metered: Boolean): LongRange =
+    if (metered) 300_000L..360_000L else 90_000L..120_000L
+
+internal fun shouldPreloadThumbnails(metered: Boolean): Boolean = !metered
+
 data class UiState(
     val token: String = "",
     val user: User? = null,
@@ -4345,6 +4449,7 @@ data class UiState(
     val hubTimelineClearedAt: String? = null,
     val hubTimelineViewedAt: String? = null,
     val hubTimelineComplete: Boolean = false,
+    val hubTimelineRevision: Long = 0L,
     val hubTimeCapsulesLocked: List<HubTimeCapsuleEntry> = emptyList(),
     val hubTimeCapsulesReleased: List<HubTimeCapsuleEntry> = emptyList(),
     val hubTimeCapsulesLoading: Boolean = false,
@@ -4575,10 +4680,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val recentDashboardFailureAt = mutableMapOf<String, Long>()
     private val pendingChatWindowMs = 4_000L
     private val refreshAllCooldownMs = 2_000L
-    private val feedAutoRefreshWifiBaseMs = 90_000L
-    private val feedAutoRefreshWifiJitterMs = 30_000L
-    private val feedAutoRefreshMeteredBaseMs = 300_000L
-    private val feedAutoRefreshMeteredJitterMs = 60_000L
     private val globalRefreshSuccessBaseMs = 45_000L
     private val globalRefreshSuccessJitterMs = 30_000L
     private val globalRefreshActiveBaseMs = 20_000L
@@ -5234,6 +5335,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             hubTimelineItems = if (hasTimeline) timelineItems else state.hubTimelineItems,
             hubTimelineUnreadCount = if (hasTimeline) timelineUnread else state.hubTimelineUnreadCount,
             hubTimelineComplete = snapshot.timelineLite?.isComplete == true,
+            hubTimelineRevision = snapshot.timelineLite?.revision ?: state.hubTimelineRevision,
             hubTimelineLoadState = if (hasTimeline) {
                 SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.timelineLite?.savedAtEpochMs ?: snapshot.savedAtEpochMs, "cache")
             } else {
@@ -6922,7 +7024,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     items = bootstrap.timeline.items,
                     unreadCount = bootstrap.timeline.unreadCount
                 )
-                val useTimelinePreview = !state.hubTimelineComplete && state.hubTimelineItems.isEmpty()
+                val useTimelinePreview = shouldApplyTimelinePreview(
+                    timelineComplete = state.hubTimelineComplete,
+                    timelineItemsEmpty = state.hubTimelineItems.isEmpty()
+                )
                 state = state.copy(
                     hubBootstrap = bootstrap,
                     hubTimelineItems = if (useTimelinePreview) bootstrap.timeline.items else state.hubTimelineItems,
@@ -6990,7 +7095,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 loading = true
             )
         )
-        runCatching { repo.hubTimeline() }
+        runCatching {
+            repo.hubTimeline(
+                cachedItems = state.hubTimelineItems,
+                cachedRevision = state.hubTimelineRevision,
+                cachedComplete = state.hubTimelineComplete
+            )
+        }
             .onSuccess { response ->
                 logHubTimelineDiagnostics(
                     source = "timeline_refresh",
@@ -6998,18 +7109,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     unreadCount = response.unreadCount
                 )
                 state = state.copy(
-                    hubTimelineItems = response.items,
-                    hubTimelineUnreadCount = response.unreadCount,
-                    hubTimelineClearedAt = response.clearedAt,
-                    hubTimelineViewedAt = response.viewedAt,
-                    hubTimelineComplete = !response.hasMore,
+                    hubTimelineItems = if (response.notModified) state.hubTimelineItems else response.items,
+                    hubTimelineUnreadCount = if (response.notModified) state.hubTimelineUnreadCount else response.unreadCount,
+                    hubTimelineClearedAt = if (response.notModified) state.hubTimelineClearedAt else response.clearedAt,
+                    hubTimelineViewedAt = if (response.notModified) state.hubTimelineViewedAt else response.viewedAt,
+                    hubTimelineComplete = if (response.notModified) state.hubTimelineComplete else !response.hasMore,
+                    hubTimelineRevision = response.revision.takeIf { it > 0L } ?: state.hubTimelineRevision,
                     hubTimelineLoading = false,
                     hubTimelineLoadState = surfaceLoadStateFor(
-                        hasContent = response.items.isNotEmpty(),
-                        loading = false
+                        hasContent = if (response.notModified) state.hubTimelineItems.isNotEmpty() else response.items.isNotEmpty(),
+                        loading = false,
+                        detail = if (response.notModified) "not_modified" else "delta"
                     )
                 )
-                state.user?.id?.let { repo.saveTimelineWarmCache(it, response) }
+                if (!response.notModified) {
+                    state.user?.id?.let { repo.saveTimelineWarmCache(it, response) }
+                }
             }
             .onFailure {
                 repo.logDebug(
@@ -7078,6 +7193,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     hubTimelineItems = emptyList(),
                     hubTimelineUnreadCount = 0,
                     hubTimelineComplete = false,
+                    hubTimelineRevision = 0L,
                     hubTimelineLoading = false
                 )
                 refreshHubBootstrap(force = true)
@@ -8921,6 +9037,20 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         appendOlder: Boolean = false,
         mergeDirection: FeedWindowMergeDirection = FeedWindowMergeDirection.CENTER
     ): Int {
+        if (window.notModified) {
+            state = state.copy(
+                feedJumpLoadingDay = null,
+                feedPaging = false,
+                feedWindowReloadInFlight = false,
+                feedRefreshing = false
+            )
+            repo.logFeedDebug(
+                type = "feed_window_not_modified",
+                message = "feed window unchanged",
+                meta = "requestedAnchor=$requestedAnchorDay;knownRevisions=${window.dayRevisions.size}"
+            )
+            return 0
+        }
         val previousVisibleDays = state.feedDays
         val currentNewestDay = previousVisibleDays.firstOrNull()
         val currentOldestDay = previousVisibleDays.lastOrNull()
@@ -9038,6 +9168,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 revisions = state.feedDayRevisions
             )
         }
+        repo.preloadThumbnails(
+            finalVisibleDays.take(2).flatMap { day ->
+                finalFeedByDay[day].orEmpty().flatMap { feedItem ->
+                    feedItem.photo.mediaItems().mapNotNull { media -> media.thumbnailUrl?.takeIf(String::isNotBlank) }
+                }
+            }
+        )
         val anchorPresentAfterApply = finalVisibleDays.contains(requestedAnchorDay) || finalVisibleDays.contains(effectiveWindow.anchorDay)
         val insertedDays = finalVisibleDays.filterNot { previousVisibleDays.contains(it) }
         repo.logFeedDebug(
@@ -9797,10 +9934,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
-    fun feedAutoRefreshIntervalMs(): Long = if (repo.isMeteredNetwork()) {
-        feedAutoRefreshMeteredBaseMs + Random.nextLong(feedAutoRefreshMeteredJitterMs + 1L)
-    } else {
-        feedAutoRefreshWifiBaseMs + Random.nextLong(feedAutoRefreshWifiJitterMs + 1L)
+    fun feedAutoRefreshIntervalMs(): Long {
+        val bounds = feedAutoRefreshBoundsMs(repo.isMeteredNetwork())
+        return Random.nextLong(bounds.first, bounds.last + 1L)
     }
 
     fun globalRefreshIntervalMs(): Long {
@@ -20022,16 +20158,19 @@ private fun NetworkUsageSummaryCard() {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text("Datenverbrauch", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text("Heute: ${formatDataBytes(summary.rxBytesToday)} Download · ${formatDataBytes(summary.txBytesToday)} Upload")
-            Text("7 Tage: ${formatDataBytes(summary.rxBytesSevenDays)} Download · ${formatDataBytes(summary.txBytesSevenDays)} Upload")
-            Text("WLAN: ${formatDataBytes(summary.wifiBytesSevenDays)} · Mobilfunk: ${formatDataBytes(summary.cellularBytesSevenDays)}")
-            Text("Anfragen: ${summary.requestCountSevenDays} · Cache-Treffer: ${summary.cacheHitsSevenDays} · Wiederholungen: ${summary.retryCountSevenDays}")
-            Text("Geräte-Gegenprobe (UID): ${formatDataBytes(summary.uidRxBytesSevenDays)} Download · ${formatDataBytes(summary.uidTxBytesSevenDays)} Upload")
+            Text("Heute gesamt: ${formatDataBytes(summary.rxBytesToday)} Download / ${formatDataBytes(summary.txBytesToday)} Upload")
+            Text("Heute WLAN: ${formatDataBytes(summary.wifiRxBytesToday)} Download / ${formatDataBytes(summary.wifiTxBytesToday)} Upload")
+            Text("Heute Mobilfunk: ${formatDataBytes(summary.cellularRxBytesToday)} Download / ${formatDataBytes(summary.cellularTxBytesToday)} Upload")
+            Text("7 Tage gesamt: ${formatDataBytes(summary.rxBytesSevenDays)} Download / ${formatDataBytes(summary.txBytesSevenDays)} Upload")
+            Text("7 Tage WLAN: ${formatDataBytes(summary.wifiRxBytesSevenDays)} Download / ${formatDataBytes(summary.wifiTxBytesSevenDays)} Upload")
+            Text("7 Tage Mobilfunk: ${formatDataBytes(summary.cellularRxBytesSevenDays)} Download / ${formatDataBytes(summary.cellularTxBytesSevenDays)} Upload")
+            Text("Anfragen: ${summary.requestCountSevenDays} / Cache-Treffer: ${summary.cacheHitsSevenDays} / Wiederholungen: ${summary.retryCountSevenDays}")
+            Text("Geraete-Gegenprobe (UID): ${formatDataBytes(summary.uidRxBytesSevenDays)} Download / ${formatDataBytes(summary.uidTxBytesSevenDays)} Upload")
             summary.topEndpoints.forEach { (endpoint, bytes) ->
                 Text("$endpoint: ${formatDataBytes(bytes)}", style = MaterialTheme.typography.bodySmall)
             }
             Text(
-                "Messung: Daily-HTTP plus unabhaengige Android-UID-Gegenmessung; lokale Details werden nach 14 Tagen entfernt.",
+                "Messung: Daily-HTTP plus unabhaengige Android-UID-Gegenmessung; lokale Details werden nach 14 Tagen zu Tageswerten verdichtet.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

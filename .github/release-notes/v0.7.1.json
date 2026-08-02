@@ -1,0 +1,11 @@
+{
+  "version": "v0.7.1",
+  "title": "Vollstaendiger Delta-Sync und Cache-Abnahme",
+  "items": [
+    "Die Hub-Timeline nutzt ihren vollstaendigen lokalen Stand jetzt wirklich als Delta-Cache: unveraenderte Revisionen enden mit 304, neue Seiten werden nur bis zur Cache-Ueberschneidung geladen und sauber dedupliziert.",
+    "Alle feed-sichtbaren Mutationen invalidieren nun dieselbe Tages- und Timeline-Revision, einschliesslich Bookmarks, NSFW-Status, Markierungen und Paints.",
+    "Thumbnail-Prefetch erfolgt ausschliesslich im WLAN; der Mediencache wird im Sieben-Tage-Zyklus erneuert und Originale werden weiterhin erst im Viewer geladen.",
+    "Die Datenverbrauchsansicht trennt Download und Upload fuer WLAN und Mobilfunk jeweils fuer Heute und sieben Tage. Detailmessungen werden nach 14 Tagen zu technischen Tageswerten verdichtet.",
+    "Neue Lebenszyklus-Tests decken Queue-Leases, verlorene Serverantworten, Prozessabbruch, alle drei Konfliktaktionen, Cache-Migration, Preview-Schutz, Delta-Merge und Mobilfunk-Sparregeln ab."
+  ]
+}
