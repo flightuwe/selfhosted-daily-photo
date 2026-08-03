@@ -1,0 +1,9 @@
+{
+  "version": "v0.8.3",
+  "title": "AVIF-Fallbacks und Pipeline-Schutz",
+  "items": [
+    "Format-Tags spiegeln das tatsächlich gerenderte Bild einschließlich Fallback wider.",
+    "Der AVIF-Adminbereich zeigt Post, Ersteller und Auslieferungszeit je Konvertierung.",
+    "AVIF pausiert sich nach wiederholten Encoderfehlern automatisch; Fallback-Formate bleiben aktiv."
+  ]
+}
