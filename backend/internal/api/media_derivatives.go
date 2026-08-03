@@ -48,12 +48,15 @@ var baseMediaVariants = []mediaVariantSpec{
 	{Name: "feed-jpeg-720", Purpose: "feed", Format: "jpeg", Width: 720, Quality: 80, Ext: ".jpg", Priority: 60},
 }
 
-var avifMediaVariant = mediaVariantSpec{Name: "feed-avif-720", Purpose: "feed", Format: "avif", Width: 720, Quality: 55, Ext: ".avif", Priority: 50}
+var avifMediaVariants = []mediaVariantSpec{
+	{Name: "preview-avif-320", Purpose: "preview", Format: "avif", Width: 320, Quality: 50, Ext: ".avif", Priority: 55},
+	{Name: "feed-avif-720", Purpose: "feed", Format: "avif", Width: 720, Quality: 55, Ext: ".avif", Priority: 50},
+}
 
 func (s *Server) mediaVariantSpecs() []mediaVariantSpec {
 	items := append([]mediaVariantSpec{}, baseMediaVariants...)
 	if s.Config.MediaAVIFEnabled {
-		items = append(items, avifMediaVariant)
+		items = append(items, avifMediaVariants...)
 	}
 	return items
 }
@@ -80,6 +83,9 @@ func (s *Server) mediaRenditionsJSON(sourcePath string) []gin.H {
 	out := make([]gin.H, 0, len(rows))
 	for _, row := range rows {
 		if row.Status != mediaDerivativeReady {
+			continue
+		}
+		if row.Format == "avif" && !s.Config.MediaAVIFEnabled {
 			continue
 		}
 		out = append(out, gin.H{

@@ -8,6 +8,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.TrafficStats
 import android.os.Process
+import java.util.UUID
 import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.Response
@@ -43,8 +44,15 @@ data class NetworkUsageSummary(
     val cacheSources: Map<String, Int> = emptyMap(),
     val suppressedFeedDuplicates: Int = 0,
     val negativeFeedCacheHits: Int = 0,
-    val topEndpoints: List<Pair<String, Long>> = emptyList()
+    val topEndpoints: List<Pair<String, Long>> = emptyList(),
+    val logicalRxBytesSevenDays: Long = 0L,
+    val compressedRxBytesSevenDays: Long = 0L,
+    val unknownRxBytesToday: Long = 0L,
+    val unknownTxBytesToday: Long = 0L,
+    val dailyDeviceUsage: List<DailyDeviceUsage> = emptyList()
 )
+
+data class DailyDeviceUsage(val dayStartMs: Long, val wifiBytes: Long, val cellularBytes: Long, val unknownBytes: Long)
 
 private data class NetworkUsageEntry(
     val atMs: Long,
@@ -62,7 +70,9 @@ private data class NetworkUsageEntry(
     val compressedRxBytes: Long = rxBytes,
     val protocol: String = "",
     val contentEncoding: String = "",
-    val cacheSource: String = if (cacheHit) "http_disk" else "network"
+    val cacheSource: String = if (cacheHit) "http_disk" else "network",
+    val sessionId: String = "",
+    val appVersion: String = ""
 )
 
 object NetworkUsageLedger {
@@ -70,14 +80,31 @@ object NetworkUsageLedger {
     private const val KEY_UID_RX = "uid_rx"
     private const val KEY_UID_TX = "uid_tx"
     private const val KEY_UID_LABEL = "uid_label"
+    private const val KEY_UID_NETWORK = "uid_network"
+    private const val KEY_SESSION_ID = "session_id"
     private const val KEY_LAST_CLEANUP = "last_cleanup"
-    private const val RETENTION_MS = 14L * 24L * 60L * 60L * 1000L
+    private const val DETAIL_RETENTION_MS = 7L * 24L * 60L * 60L * 1000L
+    private const val AGGREGATE_RETENTION_MS = 30L * 24L * 60L * 60L * 1000L
 
     @Volatile
     private var databaseHelper: NetworkUsageDbHelper? = null
 
     @Volatile
     private var appInForeground: Boolean = false
+
+    /** Starts a new process session. It intentionally never resets the UID baseline. */
+    fun beginSession(context: Context) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+            .putString(KEY_SESSION_ID, "net_${UUID.randomUUID()}")
+            .apply()
+    }
+
+    private fun sessionId(context: Context): String {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_SESSION_ID, "").orEmpty().ifBlank {
+            "net_${UUID.randomUUID()}".also { prefs.edit().putString(KEY_SESSION_ID, it).apply() }
+        }
+    }
 
     fun setAppInForeground(context: Context, foreground: Boolean) {
         appInForeground = foreground
@@ -138,6 +165,9 @@ object NetworkUsageLedger {
     fun interceptor(context: Context, requestContext: String = "app"): Interceptor = Interceptor { chain ->
         val startedAt = System.currentTimeMillis()
         val request = chain.request()
+        // Capture the network at request start: completion may happen after a network handover.
+        val requestNetwork = networkClass(context)
+        val capturedContext = currentRequestContext(requestContext)
         val txBytes = runCatching { estimateRequestBytes(request) }.getOrDefault(0L)
         try {
             val response = chain.proceed(request)
@@ -158,8 +188,8 @@ object NetworkUsageLedger {
                     NetworkUsageEntry(
                         atMs = startedAt,
                         endpoint = endpointClass(request.url.encodedPath, request.method),
-                        context = currentRequestContext(requestContext),
-                        network = networkClass(context),
+                        context = capturedContext,
+                        network = requestNetwork,
                         txBytes = txBytes,
                         rxBytes = fixedRxBytes,
                         status = response.code,
@@ -178,8 +208,8 @@ object NetworkUsageLedger {
                             NetworkUsageEntry(
                                 atMs = startedAt,
                                 endpoint = endpointClass(request.url.encodedPath, request.method),
-                                context = currentRequestContext(requestContext),
-                                network = networkClass(context),
+                                context = capturedContext,
+                                network = requestNetwork,
                                 txBytes = txBytes,
                                 rxBytes = fixedRxBytes + (compressedLength ?: consumed),
                                 status = response.code,
@@ -203,8 +233,8 @@ object NetworkUsageLedger {
                 NetworkUsageEntry(
                     atMs = startedAt,
                     endpoint = endpointClass(request.url.encodedPath, request.method),
-                    context = currentRequestContext(requestContext),
-                    network = networkClass(context),
+                    context = capturedContext,
+                    network = requestNetwork,
                     txBytes = txBytes,
                     rxBytes = 0L,
                     status = -1,
@@ -235,7 +265,7 @@ object NetworkUsageLedger {
                     atMs = System.currentTimeMillis(),
                     endpoint = "uid:$previousLabel-$label",
                     context = currentRequestContext(),
-                    network = networkClass(context),
+                    network = prefs.getString(KEY_UID_NETWORK, "unknown").orEmpty().ifBlank { "unknown" },
                     txBytes = tx - previousTx,
                     rxBytes = rx - previousRx,
                     status = 0,
@@ -246,7 +276,26 @@ object NetworkUsageLedger {
                 )
             )
         }
-        prefs.edit().putLong(KEY_UID_RX, rx).putLong(KEY_UID_TX, tx).putString(KEY_UID_LABEL, label).apply()
+        prefs.edit().putLong(KEY_UID_RX, rx).putLong(KEY_UID_TX, tx)
+            .putString(KEY_UID_LABEL, label)
+            .putString(KEY_UID_NETWORK, networkClass(context))
+            .apply()
+    }
+
+    /** Deletes only device-side consumption accounting and establishes a fresh UID baseline. */
+    @Synchronized
+    fun reset(context: Context) {
+        val db = database(context).writableDatabase
+        db.delete("usage_entries", null, null)
+        db.delete("usage_daily_aggregates", null, null)
+        val uid = Process.myUid()
+        val rx = TrafficStats.getUidRxBytes(uid).coerceAtLeast(0L)
+        val tx = TrafficStats.getUidTxBytes(uid).coerceAtLeast(0L)
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+            .putLong(KEY_UID_RX, rx).putLong(KEY_UID_TX, tx)
+            .putString(KEY_UID_LABEL, "reset")
+            .putString(KEY_UID_NETWORK, networkClass(context))
+            .apply()
     }
 
     @Synchronized
@@ -267,6 +316,18 @@ object NetworkUsageLedger {
         val sevenStart = nowMs - 7L * 24L * 60L * 60L * 1000L
         val today = details.filter { it.atMs >= todayStart }
         val seven = details.filter { it.atMs >= sevenStart }
+        val uidSeven = uidDetails.filter { it.atMs >= sevenStart }
+        fun uidTotal(network: String, since: Long, until: Long) = uidDetails.filter { it.atMs >= since && it.atMs < until && it.network == network }
+            .sumOf { it.rxBytes + it.txBytes }
+        val days = (0 until 7).map { offset ->
+            val day = Calendar.getInstance().apply {
+                timeInMillis = nowMs
+                add(Calendar.DAY_OF_YEAR, -(6 - offset))
+                set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+            val end = if (offset == 6) nowMs + 1 else day + 24L * 60L * 60L * 1000L
+            DailyDeviceUsage(day, uidTotal("wifi", day, end), uidTotal("cellular", day, end), uidTotal("unknown", day, end))
+        }
         val top = seven.groupBy { it.endpoint }
             .mapValues { (_, entries) -> entries.sumOf { it.rxBytes + it.txBytes } }
             .entries.sortedByDescending { it.value }.take(5).map { it.key to it.value }
@@ -288,14 +349,19 @@ object NetworkUsageLedger {
             cacheHitsSevenDays = seven.count { it.cacheHit } + cacheDetails.count { it.atMs >= sevenStart },
             requestCountSevenDays = seven.size,
             retryCountSevenDays = seven.sumOf { it.retries } + retryDetails.filter { it.atMs >= sevenStart }.sumOf { it.retries },
-            uidRxBytesSevenDays = uidDetails.filter { it.atMs >= sevenStart }.sumOf { it.rxBytes },
-            uidTxBytesSevenDays = uidDetails.filter { it.atMs >= sevenStart }.sumOf { it.txBytes },
-            httpUidDifferenceRxSevenDays = uidDetails.filter { it.atMs >= sevenStart }.sumOf { it.rxBytes } - seven.sumOf { it.rxBytes },
+            uidRxBytesSevenDays = uidSeven.sumOf { it.rxBytes },
+            uidTxBytesSevenDays = uidSeven.sumOf { it.txBytes },
+            httpUidDifferenceRxSevenDays = uidSeven.sumOf { it.rxBytes } - seven.sumOf { it.rxBytes },
             cacheSources = (seven + cacheDetails.filter { it.atMs >= sevenStart }).filter { it.cacheHit }
                 .groupingBy { it.cacheSource }.eachCount(),
             suppressedFeedDuplicates = coordinatorDetails.count { it.atMs >= sevenStart && it.cacheSource == "duplicate" },
             negativeFeedCacheHits = coordinatorDetails.count { it.atMs >= sevenStart && it.cacheSource == "negative_cache" },
-            topEndpoints = top
+            topEndpoints = top,
+            logicalRxBytesSevenDays = seven.sumOf { it.logicalRxBytes },
+            compressedRxBytesSevenDays = seven.sumOf { it.compressedRxBytes },
+            unknownRxBytesToday = uidDetails.filter { it.atMs >= todayStart && it.network == "unknown" }.sumOf { it.rxBytes },
+            unknownTxBytesToday = uidDetails.filter { it.atMs >= todayStart && it.network == "unknown" }.sumOf { it.txBytes },
+            dailyDeviceUsage = days
         )
     }
 
@@ -345,6 +411,8 @@ object NetworkUsageLedger {
             put("protocol", entry.protocol)
             put("content_encoding", entry.contentEncoding)
             put("cache_source", entry.cacheSource)
+            put("session_id", entry.sessionId.ifBlank { sessionId(context) })
+            put("app_version", entry.appVersion.ifBlank { BuildConfig.VERSION_NAME })
         })
         val now = System.currentTimeMillis()
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -359,7 +427,7 @@ object NetworkUsageLedger {
             "usage_entries",
             arrayOf("at_ms", "endpoint", "context_name", "network", "tx_bytes", "rx_bytes", "status", "duration_ms", "cache_hit", "retries", "source", "logical_rx_bytes", "compressed_rx_bytes", "protocol", "content_encoding", "cache_source"),
             "at_ms >= ?",
-            arrayOf((System.currentTimeMillis() - RETENTION_MS).toString()),
+            arrayOf((System.currentTimeMillis() - DETAIL_RETENTION_MS).toString()),
             null,
             null,
             "at_ms ASC"
@@ -392,7 +460,7 @@ object NetworkUsageLedger {
 
     private fun compactExpiredDetails(db: SQLiteDatabase, nowMs: Long) {
         val cutoff = Calendar.getInstance().apply {
-            timeInMillis = nowMs - RETENTION_MS
+            timeInMillis = nowMs - DETAIL_RETENTION_MS
             set(Calendar.HOUR_OF_DAY, 0)
             set(Calendar.MINUTE, 0)
             set(Calendar.SECOND, 0)
@@ -421,6 +489,7 @@ object NetworkUsageLedger {
             }
         }
         db.delete("usage_entries", "at_ms < ?", arrayOf(cutoff.toString()))
+        db.delete("usage_daily_aggregates", "day_start < ?", arrayOf((nowMs - AGGREGATE_RETENTION_MS).toString()))
     }
 
     private fun endpointClass(path: String, method: String): String = when {
@@ -456,7 +525,7 @@ object NetworkUsageLedger {
         response.headers.sumOf { it.first.length + it.second.length + 4 }.toLong() + 16L
 }
 
-private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context, "network_usage_ledger.db", null, 3) {
+private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context, "network_usage_ledger.db", null, 4) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -477,6 +546,7 @@ private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context,
             """.trimIndent()
         )
         addVersion3Columns(db)
+        addVersion4Columns(db)
         db.execSQL("CREATE INDEX idx_usage_entries_at_ms ON usage_entries(at_ms)")
         createAggregateTable(db)
     }
@@ -484,6 +554,7 @@ private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context,
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createAggregateTable(db)
         if (oldVersion < 3) addVersion3Columns(db)
+        if (oldVersion < 4) addVersion4Columns(db)
     }
 
     private fun createAggregateTable(db: SQLiteDatabase) {
@@ -511,6 +582,11 @@ private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context,
         db.execSQL("ALTER TABLE usage_entries ADD COLUMN protocol TEXT NOT NULL DEFAULT ''")
         db.execSQL("ALTER TABLE usage_entries ADD COLUMN content_encoding TEXT NOT NULL DEFAULT ''")
         db.execSQL("ALTER TABLE usage_entries ADD COLUMN cache_source TEXT NOT NULL DEFAULT 'network'")
+    }
+
+    private fun addVersion4Columns(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE usage_entries ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE usage_entries ADD COLUMN app_version TEXT NOT NULL DEFAULT ''")
     }
 }
 

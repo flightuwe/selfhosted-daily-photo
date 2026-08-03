@@ -1,0 +1,11 @@
+{
+  "version": "v0.8.1",
+  "title": "Diagnosebereinigung und Medienformatwahl",
+  "items": [
+    "Verbrauchsmessung trennt Gerätebilanz, komprimierte HTTP-Übertragung und verarbeitete Inhaltsgröße.",
+    "Die Kamera-Verbindungsansicht zeigt WLAN, Mobilfunk und Sieben-Tage-Verlauf grafisch.",
+    "Diagnose-Sessions sind pro App-Start getrennt und alte Versionsdaten bleiben aus aktuellen Exporten heraus.",
+    "Medien & Daten bietet Automatisch, AVIF, WebP und JPEG als persönliche Anzeigepräferenz mit sicheren Fallbacks.",
+    "AVIF bleibt serverseitig zunächst deaktiviert und wird erst nach echter Geräteprüfung freigegeben."
+  ]
+}

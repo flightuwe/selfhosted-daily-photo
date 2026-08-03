@@ -85,6 +85,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.AccessTime
@@ -457,6 +459,7 @@ data class User(
     val postNumberInPushEnabled: Boolean = false,
     val yoloModeEnabled: Boolean = false,
     val mediaDataMode: String = "normal",
+    val mediaFormatPreference: String = "auto",
     val allowPhotoDownload: Boolean = false,
     val allowCommunityNsfwMarking: Boolean = false,
     val showNsfwByDefault: Boolean = false,
@@ -522,7 +525,8 @@ data class PreferencesUpdateRequest(
     val locationShareDefaultEnabled: Boolean? = null,
     val diagnosticsConsentGranted: Boolean? = null,
     val diagnosticsConsentSource: String? = null,
-    val mediaDataMode: String? = null
+    val mediaDataMode: String? = null,
+    val mediaFormatPreference: String? = null
 )
 data class UserPromptRule(
     val id: String,
@@ -761,15 +765,27 @@ internal fun selectFeedMediaCandidates(
     mediaDataMode: String = "normal",
     metered: Boolean,
     sdkInt: Int,
-    avifDisabled: Boolean
+    avifDisabled: Boolean,
+    mediaFormatPreference: String = "auto",
+    avifServerEnabled: Boolean = true
 ): List<String> {
     val saver = mediaDataMode == "data_saver" || (mediaDataMode == "automatic" && metered)
     if (!saver) return listOf(media.url).filter(String::isNotBlank)
     val feed = media.renditions.filter { it.purpose == "feed" && it.url.isNotBlank() }
     val ordered = buildList {
-        if (sdkInt >= Build.VERSION_CODES.S && !avifDisabled) addAll(feed.filter { it.format == "avif" }.map { it.url })
-        addAll(feed.filter { it.format == "webp" }.map { it.url })
-        addAll(feed.filter { it.format == "jpeg" || it.format == "jpg" }.map { it.url })
+        val avifAllowed = sdkInt >= Build.VERSION_CODES.S && !avifDisabled && avifServerEnabled
+        when (mediaFormatPreference) {
+            "jpeg" -> addAll(feed.filter { it.format == "jpeg" || it.format == "jpg" }.map { it.url })
+            "webp" -> {
+                addAll(feed.filter { it.format == "webp" }.map { it.url })
+                addAll(feed.filter { it.format == "jpeg" || it.format == "jpg" }.map { it.url })
+            }
+            else -> {
+                if (avifAllowed) addAll(feed.filter { it.format == "avif" }.map { it.url })
+                addAll(feed.filter { it.format == "webp" }.map { it.url })
+                addAll(feed.filter { it.format == "jpeg" || it.format == "jpg" }.map { it.url })
+            }
+        }
         media.thumbnailUrl?.takeIf(String::isNotBlank)?.let(::add)
         media.previewUrl?.takeIf(String::isNotBlank)?.let(::add)
         media.url.takeIf(String::isNotBlank)?.let(::add)
@@ -1116,11 +1132,13 @@ data class SpecialMomentStatus(
 )
 data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
 data class HealthFeatures(val chatDelete: Boolean = false, val commentDelete: Boolean = false)
+data class MediaCapabilities(val renditions: Boolean = false, val formats: List<String> = emptyList(), val avifEnabled: Boolean = false)
 data class HealthResponse(
     val ok: Boolean,
     val version: String = "unknown",
     val provider: String = "unknown",
-    val features: HealthFeatures = HealthFeatures()
+    val features: HealthFeatures = HealthFeatures(),
+    val mediaCapabilities: MediaCapabilities = MediaCapabilities()
 )
 data class MigrationInfo(
     val enabled: Boolean = false,
@@ -1309,7 +1327,9 @@ data class DebugLogEntry(
     val createdAt: String,
     val aggregateCount: Int = 1,
     val firstSeenAt: String = createdAt,
-    val lastSeenAt: String = createdAt
+    val lastSeenAt: String = createdAt,
+    val sessionId: String = "",
+    val appVersion: String = ""
 )
 
 data class UploadTelemetryProbe(
@@ -1867,12 +1887,14 @@ class AppRepo(
     private val diagnosticsConsentLocalKey = "diagnostics_consent_local"
     private val diagnosticsConsentPendingKey = "diagnostics_consent_pending"
     private val diagnosticsSessionIdKey = "diagnostics_session_id"
+    private val processDiagnosticsSessionId = "sess_${UUID.randomUUID()}"
     private val promptSeenVersionPrefix = "user_prompt_seen_version_"
     private val warmCacheLastUserIdKey = "warm_cache_last_user_id_v1"
     private val warmCacheSchemaVersion = "app_warm_cache_v2"
-    private val debugMaxEntries = 500
+    private val debugMaxEntries = 400
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
-    private val debugAggregateWindowMs = 10 * 60 * 1000L
+    private val debugAggregateWindowMs = 15 * 60 * 1000L
+    private val debugRetentionMs = 7L * 24L * 60L * 60L * 1000L
     @Volatile
     private var lastAuthTransitionReason: String = "startup"
 
@@ -2279,11 +2301,9 @@ class AppRepo(
     }
 
     fun diagnosticsSessionId(): String {
-        val existing = prefs.getString(diagnosticsSessionIdKey, "")?.trim().orEmpty()
-        if (existing.isNotBlank()) return existing
-        val generated = "sess_${UUID.randomUUID()}"
-        prefs.edit().putString(diagnosticsSessionIdKey, generated).apply()
-        return generated
+        // Kept in preferences only for backwards-compatible tooling; each process gets a new ID.
+        prefs.edit().putString(diagnosticsSessionIdKey, processDiagnosticsSessionId).apply()
+        return processDiagnosticsSessionId
     }
 
     fun lastSecurityAdviceShownAtMs(): Long = prefs.getLong(diagnosticsSecurityAdviceLastShownAtKey, 0L)
@@ -2317,7 +2337,9 @@ class AppRepo(
             "dashboard_refresh_degraded",
             "network_snapshot",
             "partial_day_reload_fallback",
-            "refresh_circuit_open" -> true
+            "refresh_circuit_open",
+            "refresh_skipped",
+            "viewport_summary" -> true
             else -> false
         }
     }
@@ -2328,10 +2350,7 @@ class AppRepo(
 
     private fun currentSessionDebugRows(source: List<DebugLogEntry>): List<DebugLogEntry> {
         if (source.isEmpty()) return source
-        val sessionStartIdx = source.indexOfLast { row ->
-            row.type == "perf_event" && row.meta.contains("event=app_start")
-        }
-        return if (sessionStartIdx >= 0) source.drop(sessionStartIdx) else source
+        return source.filter { it.sessionId == diagnosticsSessionId() }
     }
 
     private fun appendAggregateFields(meta: String, entry: DebugLogEntry): String {
@@ -2357,11 +2376,13 @@ class AppRepo(
                         createdAt = obj.optString("createdAt", ""),
                         aggregateCount = obj.optInt("aggregateCount", 1).coerceAtLeast(1),
                         firstSeenAt = obj.optString("firstSeenAt", obj.optString("createdAt", "")),
-                        lastSeenAt = obj.optString("lastSeenAt", obj.optString("createdAt", ""))
+                        lastSeenAt = obj.optString("lastSeenAt", obj.optString("createdAt", "")),
+                        sessionId = obj.optString("sessionId", ""),
+                        appVersion = obj.optString("appVersion", "")
                     )
                 )
             }
-            out
+            out.filter { parseIsoInstantMs(it.lastSeenAt.ifBlank { it.createdAt }) >= System.currentTimeMillis() - debugRetentionMs }.toMutableList()
         }.getOrElse { mutableListOf() }
     }
 
@@ -2377,6 +2398,8 @@ class AppRepo(
             obj.put("aggregateCount", item.aggregateCount.coerceAtLeast(1))
             obj.put("firstSeenAt", item.firstSeenAt.ifBlank { item.createdAt })
             obj.put("lastSeenAt", item.lastSeenAt.ifBlank { item.createdAt })
+            obj.put("sessionId", item.sessionId)
+            obj.put("appVersion", item.appVersion)
             arr.put(obj)
         }
         prefs.edit().putString(debugLogsPrefKey, arr.toString()).apply()
@@ -2384,6 +2407,15 @@ class AppRepo(
 
     fun recentDebugLogs(limit: Int = 80): List<DebugLogEntry> =
         readDebugLogsInternal().takeLast(limit).reversed()
+
+    fun clearDebugLogs() { prefs.edit().remove(debugLogsPrefKey).apply() }
+
+    fun clearAllLocalDiagnostics() {
+        clearDebugLogs()
+        NetworkUsageLedger.reset(context)
+        clearNotificationDebugData(keepMode = true)
+        File(context.cacheDir, "diagnostics").listFiles()?.forEach { runCatching { it.delete() } }
+    }
 
     fun logDetailedDebug(type: String, message: String, meta: String = "") {
         if (!debugMasterEnabled()) return
@@ -2409,13 +2441,16 @@ class AppRepo(
             createdAt = createdAt,
             aggregateCount = 1,
             firstSeenAt = createdAt,
-            lastSeenAt = createdAt
+            lastSeenAt = createdAt,
+            sessionId = diagnosticsSessionId(),
+            appVersion = BuildConfig.VERSION_NAME
         )
         if (shouldAggregateDebugType(cleanType)) {
             val signature = aggregateMetaSignature(cleanType, cleanMeta)
             val nowMs = parseIsoInstantMs(createdAt)
             val idx = current.indexOfLast { existing ->
                 existing.type == cleanType &&
+                    existing.sessionId == diagnosticsSessionId() &&
                     aggregateMetaSignature(existing.type, existing.meta) == signature &&
                     (nowMs - parseIsoInstantMs(existing.lastSeenAt.ifBlank { existing.createdAt })) <= debugAggregateWindowMs
             }
@@ -2491,6 +2526,8 @@ class AppRepo(
         val file = File(exportDir, "daily-diagnose-${System.currentTimeMillis()}.txt")
         val allRows = recentDebugLogs(400).reversed()
         val rows = currentSessionDebugRows(allRows)
+        val olderVersionsExcluded = allRows.count { it.appVersion.isNotBlank() && it.appVersion != BuildConfig.VERSION_NAME }
+        NetworkUsageLedger.recordUidBoundary(context, "diagnostics_export")
         val families = linkedMapOf(
             "dns" to 0,
             "no_active_network" to 0,
@@ -2523,6 +2560,7 @@ class AppRepo(
             appendLine("Diagnostics upload: ${diagnosticsUploadEnabled()}")
             appendLine("Session rows: ${rows.size}")
             appendLine("Total rows kept locally: ${allRows.size}")
+            appendLine("Ausgeschlossen (andere App-Version): $olderVersionsExcluded")
             appendLine("")
             appendLine("Zusammenfassung")
             appendLine("- DNS-Fehler: ${families["dns"] ?: 0}x")
@@ -2558,7 +2596,7 @@ class AppRepo(
         val now = System.currentTimeMillis()
         val last = prefs.getLong(debugLastUploadAtKey, 0L)
         if (!force && now-last < debugUploadMinIntervalMs) return 0
-        val rows = recentDebugLogs(20)
+        val rows = recentDebugLogs(80).filter { it.sessionId == diagnosticsSessionId() }
         if (rows.isEmpty()) return 0
         var sent = 0
         val sessionId = diagnosticsSessionId()
@@ -2838,6 +2876,13 @@ class AppRepo(
 
     fun setMediaDataModeLocal(mode: String) {
         prefs.edit().putString("media_data_mode_local", mode).apply()
+    }
+
+    fun mediaFormatPreferenceLocal(): String = prefs.getString("media_format_preference_local", "auto")
+        ?.takeIf { it in setOf("auto", "avif", "webp", "jpeg") } ?: "auto"
+
+    fun setMediaFormatPreferenceLocal(preference: String) {
+        prefs.edit().putString("media_format_preference_local", preference).apply()
     }
 
     fun appliedYoloFeatureIds(): Set<String> {
@@ -3141,7 +3186,8 @@ class AppRepo(
         locationShareDefaultEnabled: Boolean? = null,
         diagnosticsConsentGranted: Boolean? = null,
         diagnosticsConsentSource: String? = null,
-        mediaDataMode: String? = null
+        mediaDataMode: String? = null,
+        mediaFormatPreference: String? = null
     ): User {
         val response = authorizedCall("/api/me/preferences") { token -> api.updatePreferences(
             token,
@@ -3166,7 +3212,8 @@ class AppRepo(
                 locationShareDefaultEnabled = locationShareDefaultEnabled,
                 diagnosticsConsentGranted = diagnosticsConsentGranted,
                 diagnosticsConsentSource = diagnosticsConsentSource,
-                mediaDataMode = mediaDataMode
+                mediaDataMode = mediaDataMode,
+                mediaFormatPreference = mediaFormatPreference
             )
         ) }
         val user = response.user
@@ -3201,6 +3248,7 @@ class AppRepo(
             check("locationShareDefaultEnabled", locationShareDefaultEnabled, user.locationShareDefaultEnabled)
             check("diagnosticsConsentGranted", diagnosticsConsentGranted, user.diagnosticsConsentGranted)
             checkText("mediaDataMode", mediaDataMode, user.mediaDataMode)
+            checkText("mediaFormatPreference", mediaFormatPreference, user.mediaFormatPreference)
         }
         if (mismatches.isNotEmpty()) {
             logDebug(
@@ -4643,6 +4691,7 @@ data class UiState(
     val postNumberInPushEnabled: Boolean = false,
     val yoloModeEnabled: Boolean = false,
     val mediaDataMode: String = "normal",
+    val mediaFormatPreference: String = "auto",
     val allowCommunityNsfwMarking: Boolean = false,
     val showNsfwByDefault: Boolean = false,
     val locationFeatureEnabled: Boolean = false,
@@ -4904,6 +4953,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             postNumberInPushEnabled = repo.postNumberInPushLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             mediaDataMode = repo.mediaDataModeLocal(),
+            mediaFormatPreference = repo.mediaFormatPreferenceLocal(),
             feedOrderMode = repo.feedOrderMode(),
             randomFeedSeed = repo.randomFeedSeed(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
@@ -8376,6 +8426,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setPostNumberInPushLocalEnabled(me.postNumberInPushEnabled)
             repo.setYoloModeLocalEnabled(me.yoloModeEnabled)
             repo.setMediaDataModeLocal(me.mediaDataMode)
+            repo.setMediaFormatPreferenceLocal(me.mediaFormatPreference)
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
             val pollPushEnabled = repo.pollPushLocalEnabled()
@@ -8428,6 +8479,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 postNumberInPushEnabled = postNumberInPushEnabled,
                 yoloModeEnabled = me.yoloModeEnabled,
                 mediaDataMode = me.mediaDataMode,
+                mediaFormatPreference = me.mediaFormatPreference,
                 showPublicPostNumbers = repo.showPublicPostNumbers(),
                 preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
                 notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled, postChangePushEnabled),
@@ -11668,6 +11720,28 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             state = state.copy(loading = false, message = apiError(it, "Medienmodus konnte nicht gespeichert werden"))
         }
     }
+
+    suspend fun setMediaFormatPreference(preference: String) {
+        val normalized = preference.takeIf { it in setOf("auto", "avif", "webp", "jpeg") } ?: return
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                chatPushEnabled = current.chatPushEnabled,
+                pollPushEnabled = current.pollPushEnabled,
+                inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
+                photoReactionPushEnabled = current.photoReactionPushEnabled,
+                photoCommentPushEnabled = current.photoCommentPushEnabled,
+                allowPhotoDownload = current.allowPhotoDownload,
+                mediaFormatPreference = normalized
+            )
+        }.onSuccess { user ->
+            repo.setMediaFormatPreferenceLocal(user.mediaFormatPreference)
+            state = state.copy(user = user, mediaFormatPreference = user.mediaFormatPreference, loading = false, message = "Bildformat gespeichert")
+        }.onFailure {
+            state = state.copy(loading = false, message = apiError(it, "Bildformat konnte nicht gespeichert werden"))
+        }
+    }
 }
 
 class MainVmFactory(private val repo: AppRepo) : ViewModelProvider.Factory {
@@ -12949,6 +13023,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     preferSwipeForTwoImagePosts = state.preferSwipeForTwoImagePosts,
                     showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
                     mediaDataMode = state.mediaDataMode,
+                    mediaFormatPreference = state.mediaFormatPreference,
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
                     onRefresh = { scope.launch { vm.refreshFeed() } },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
@@ -13128,6 +13203,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     postNumberInPushEnabled = state.user?.postNumberInPushEnabled ?: state.postNumberInPushEnabled,
                     yoloModeEnabled = state.user?.yoloModeEnabled ?: state.yoloModeEnabled,
                     mediaDataMode = state.mediaDataMode,
+                    mediaFormatPreference = state.mediaFormatPreference,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     allowCommunityNsfwMarking = state.user?.allowCommunityNsfwMarking ?: false,
                     showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
@@ -13189,6 +13265,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onPostNumberInPushEnabledChange = { scope.launch { vm.setPostNumberInPushEnabled(it) } },
                     onYoloModeEnabledChange = { scope.launch { vm.setYoloModeEnabled(it) } },
                     onMediaDataModeChange = { scope.launch { vm.setMediaDataMode(it) } },
+                    onMediaFormatPreferenceChange = { scope.launch { vm.setMediaFormatPreference(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onAllowCommunityNsfwMarkingChange = { scope.launch { vm.setAllowCommunityNsfwMarkingEnabled(it) } },
                     onShowNsfwByDefaultChange = { scope.launch { vm.setShowNsfwByDefaultEnabled(it) } },
@@ -14145,6 +14222,7 @@ fun FeedTab(
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
     mediaDataMode: String,
+    mediaFormatPreference: String,
     onTakePhoto: () -> Unit,
     onRefresh: () -> Unit,
     onLoadOlder: () -> Unit,
@@ -14649,6 +14727,7 @@ fun FeedTab(
                         preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
                         showNsfwByDefault = showNsfwByDefault,
                         mediaDataMode = mediaDataMode,
+                        mediaFormatPreference = mediaFormatPreference,
                         nsfwRevealed = revealedNsfwPhotoIds.contains(item.photo.id),
                         highlightedCommentId = if (highlightedPhotoId == item.photo.id) highlightedCommentId else null,
                         highlightedPhotoMojiId = if (highlightedPhotoId == item.photo.id) highlightedPhotoMojiId else null,
@@ -14898,6 +14977,7 @@ private fun FeedPostCard(
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
     mediaDataMode: String,
+    mediaFormatPreference: String,
     nsfwRevealed: Boolean,
     highlightedCommentId: Long?,
     highlightedPhotoMojiId: Long?,
@@ -14930,6 +15010,7 @@ private fun FeedPostCard(
         preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
         showNsfwByDefault = showNsfwByDefault,
         mediaDataMode = mediaDataMode,
+        mediaFormatPreference = mediaFormatPreference,
         nsfwRevealed = nsfwRevealed,
         highlightedCommentId = highlightedCommentId,
         highlightedPhotoMojiId = highlightedPhotoMojiId,
@@ -15060,6 +15141,7 @@ private fun PostCanvasCard(
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
     mediaDataMode: String = "normal",
+    mediaFormatPreference: String = "auto",
     nsfwRevealed: Boolean,
     highlightedCommentId: Long?,
     highlightedPhotoMojiId: Long?,
@@ -15084,8 +15166,8 @@ private fun PostCanvasCard(
         context.getSharedPreferences("app", Context.MODE_PRIVATE)
             .getInt("avif_decode_disabled_version", -1) == BuildConfig.VERSION_CODE
     }
-    val displayCandidates = remember(mediaItems, mediaDataMode, metered, avifDisabled) {
-        mediaItems.map { selectFeedMediaCandidates(it, mediaDataMode, metered, Build.VERSION.SDK_INT, avifDisabled) }
+    val displayCandidates = remember(mediaItems, mediaDataMode, mediaFormatPreference, metered, avifDisabled) {
+        mediaItems.map { selectFeedMediaCandidates(it, mediaDataMode, metered, Build.VERSION.SDK_INT, avifDisabled, mediaFormatPreference) }
     }
     val reactions = remember(item.reactions) { item.reactions.orEmpty() }
     val photoMojis = remember(item.photoMojis) {
@@ -18190,6 +18272,7 @@ fun ProfileTab(
     postNumberInPushEnabled: Boolean,
     yoloModeEnabled: Boolean,
     mediaDataMode: String,
+    mediaFormatPreference: String,
     allowPhotoDownload: Boolean,
     allowCommunityNsfwMarking: Boolean,
     showNsfwByDefault: Boolean,
@@ -18251,6 +18334,7 @@ fun ProfileTab(
     onPostNumberInPushEnabledChange: (Boolean) -> Unit,
     onYoloModeEnabledChange: (Boolean) -> Unit,
     onMediaDataModeChange: (String) -> Unit,
+    onMediaFormatPreferenceChange: (String) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onAllowCommunityNsfwMarkingChange: (Boolean) -> Unit,
     onShowNsfwByDefaultChange: (Boolean) -> Unit,
@@ -18330,6 +18414,7 @@ fun ProfileTab(
     var deleteCandidate by remember { mutableStateOf<PromptPhoto?>(null) }
     var showAllowDownloadWarning by remember { mutableStateOf(false) }
     var showLocationEnableWarning by remember { mutableStateOf(false) }
+    var diagnosticClearAction by remember { mutableStateOf("") }
     var showLocationDisableWarning by remember { mutableStateOf(false) }
     var showYoloEnableWarning by remember { mutableStateOf(false) }
     var showYoloDisableWarning by remember { mutableStateOf(false) }
@@ -18954,6 +19039,25 @@ fun ProfileTab(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                Text("Bevorzugtes Bildformat", fontWeight = FontWeight.SemiBold)
+                listOf(
+                    "auto" to "Automatisch",
+                    "avif" to "AVIF bevorzugen",
+                    "webp" to "WebP bevorzugen",
+                    "jpeg" to "JPEG bevorzugen"
+                ).forEach { (format, label) ->
+                    FilterChip(
+                        selected = mediaFormatPreference == format,
+                        onClick = { if (mediaFormatPreference != format) onMediaFormatPreferenceChange(format) },
+                        label = { Text(label) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                Text(
+                    "Gilt nur für deine Anzeige regenerierbarer Vorschauen. AVIF nutzt die App nur auf geeigneten Geräten und nur, wenn es serverseitig freigegeben ist; sonst folgt WebP/JPEG automatisch.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 val mediaCacheDir = context.cacheDir.resolve("daily_media_cache")
                 val metadataDir = context.filesDir.resolve("warm-cache")
                 val mediaCacheBytes = remember(mediaDataMode) { directorySizeBytes(mediaCacheDir) }
@@ -19748,6 +19852,14 @@ fun ProfileTab(
                           }
                       }
                       SettingsSubsection(
+                          title = "Lokale Diagnosedaten",
+                          subtitle = "Diese Aktionen löschen niemals Upload-Queue, unveröffentlichte Aufnahmen oder Medien-/Feedcache."
+                      ) {
+                          OutlinedButton(onClick = { diagnosticClearAction = "logs" }, modifier = Modifier.fillMaxWidth()) { Text("Fehlerlogs löschen") }
+                          OutlinedButton(onClick = { diagnosticClearAction = "usage" }, modifier = Modifier.fillMaxWidth()) { Text("Verbrauchsmessung zurücksetzen") }
+                          OutlinedButton(onClick = { diagnosticClearAction = "all" }, modifier = Modifier.fillMaxWidth()) { Text("Alle lokalen Diagnosedaten löschen") }
+                      }
+                      SettingsSubsection(
                           title = "Notification-Debug",
                           subtitle = "Vereinfachte Push-Testwerkzeuge fuer reproduzierbare Notification-Faelle."
                       ) {
@@ -20051,6 +20163,35 @@ fun ProfileTab(
               },
               title = { Text("Wirklich abmelden?") },
               text = { Text("Willst du dich wirklich abmelden?") }
+          )
+      }
+      if (diagnosticClearAction.isNotBlank()) {
+          val label = when (diagnosticClearAction) {
+              "logs" -> "Fehlerlogs"
+              "usage" -> "Verbrauchsmessung"
+              else -> "alle lokalen Diagnosedaten"
+          }
+          AlertDialog(
+              onDismissRequest = { diagnosticClearAction = "" },
+              title = { Text("$label löschen?") },
+              text = { Text("Die Upload-Queue, unveröffentlichte Aufnahmen und alle Feed-/Mediencaches bleiben erhalten.") },
+              confirmButton = {
+                  TextButton(onClick = {
+                      when (diagnosticClearAction) {
+                          "logs" -> appPrefs.edit().remove("debug_logs_v1").apply()
+                          "usage" -> NetworkUsageLedger.reset(context)
+                          else -> {
+                              appPrefs.edit().remove("debug_logs_v1").apply()
+                              NetworkUsageLedger.reset(context)
+                              PushNotificationDiagnostics.clearStoredState(context, keepMode = true)
+                              context.cacheDir.resolve("diagnostics").listFiles()?.forEach { runCatching { it.delete() } }
+                          }
+                      }
+                      diagnosticClearAction = ""
+                      onRefreshDebugLogs()
+                  }) { Text("Löschen") }
+              },
+              dismissButton = { TextButton(onClick = { diagnosticClearAction = "" }) { Text("Abbrechen") } }
           )
       }
 }
@@ -20388,21 +20529,29 @@ internal fun NetworkUsageSummaryCard() {
     var refreshKey by remember { mutableStateOf(0) }
     val summary = remember(refreshKey) { NetworkUsageLedger.summary(context) }
     var showDetails by rememberSaveable { mutableStateOf(false) }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f))
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Datenverbrauch", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text("Heute WLAN: ${formatDataBytes(summary.wifiRxBytesToday)} Download / ${formatDataBytes(summary.wifiTxBytesToday)} Upload")
-            Text("Heute Mobilfunk: ${formatDataBytes(summary.cellularRxBytesToday)} Download / ${formatDataBytes(summary.cellularTxBytesToday)} Upload")
-            Text("7 Tage gesamt: ${formatDataBytes(summary.rxBytesSevenDays)} Download / ${formatDataBytes(summary.txBytesSevenDays)} Upload")
-            Text("Differenz HTTP zu UID: ${formatDataBytes(kotlin.math.abs(summary.httpUidDifferenceRxSevenDays))}")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                UsageNetworkTile("WLAN heute", summary.wifiRxBytesToday, summary.wifiTxBytesToday, Color(0xFF3B82F6), Modifier.weight(1f))
+                UsageNetworkTile("Mobilfunk heute", summary.cellularRxBytesToday, summary.cellularTxBytesToday, Color(0xFFF59E0B), Modifier.weight(1f))
+            }
+            Text("7 Tage Gerätebilanz: ${formatDataBytes(summary.uidRxBytesSevenDays + summary.uidTxBytesSevenDays)}", style = MaterialTheme.typography.titleSmall)
+            UsageSevenDayChart(summary.dailyDeviceUsage)
             TextButton(onClick = { showDetails = !showDetails }) { Text(if (showDetails) "Details einklappen" else "Details anzeigen") }
             AnimatedVisibility(visible = showDetails) {
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("Gerätebilanz (maßgeblich): ${formatDataBytes(summary.uidRxBytesSevenDays)} Download / ${formatDataBytes(summary.uidTxBytesSevenDays)} Upload")
+                    Text("HTTP-Übertragung (komprimierte Nutzdaten): ${formatDataBytes(summary.compressedRxBytesSevenDays)} Download")
+                    Text("Inhaltsgröße (von der App entpackt): ${formatDataBytes(summary.logicalRxBytesSevenDays)} Download")
+                    Text("Differenz HTTP zu UID: ${formatDataBytes(kotlin.math.abs(summary.httpUidDifferenceRxSevenDays))} – enthält u. a. TLS, DNS und Protokolloverhead")
                     Text("7 Tage WLAN: ${formatDataBytes(summary.wifiRxBytesSevenDays)} Download / ${formatDataBytes(summary.wifiTxBytesSevenDays)} Upload")
                     Text("7 Tage Mobilfunk: ${formatDataBytes(summary.cellularRxBytesSevenDays)} Download / ${formatDataBytes(summary.cellularTxBytesSevenDays)} Upload")
                     Text("Anfragen: ${summary.requestCountSevenDays} / Cache-Treffer: ${summary.cacheHitsSevenDays} / Wiederholungen: ${summary.retryCountSevenDays}")
                     Text("Feed-Duplikate unterdrueckt: ${summary.suppressedFeedDuplicates} / negative Kanten: ${summary.negativeFeedCacheHits}")
-                    Text("Geraete-Gegenprobe (UID): ${formatDataBytes(summary.uidRxBytesSevenDays)} Download / ${formatDataBytes(summary.uidTxBytesSevenDays)} Upload")
                     summary.cacheSources.forEach { (source, count) -> Text("Cache $source: $count", style = MaterialTheme.typography.bodySmall) }
                     summary.topEndpoints.forEach { (endpoint, bytes) -> Text("$endpoint: ${formatDataBytes(bytes)}", style = MaterialTheme.typography.bodySmall) }
                     Text("Technische Aggregate; keine URLs, Tokens, Dateinamen, Bilder oder Bodies.", style = MaterialTheme.typography.bodySmall)
@@ -20410,6 +20559,39 @@ internal fun NetworkUsageSummaryCard() {
             }
             TextButton(onClick = { refreshKey++ }) { Text("Verbrauch aktualisieren") }
         }
+    }
+}
+
+@Composable
+private fun UsageNetworkTile(title: String, rx: Long, tx: Long, color: Color, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.background(color.copy(alpha = 0.16f), MaterialTheme.shapes.medium).padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Text(title, style = MaterialTheme.typography.labelMedium, color = color)
+        Text(formatDataBytes(rx + tx), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text("↓ ${formatDataBytes(rx)} · ↑ ${formatDataBytes(tx)}", style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+private fun UsageSevenDayChart(days: List<DailyDeviceUsage>) {
+    val wifi = Color(0xFF3B82F6); val cellular = Color(0xFFF59E0B); val unknown = Color(0xFF94A3B8)
+    val max = days.maxOfOrNull { it.wifiBytes + it.cellularBytes + it.unknownBytes }?.coerceAtLeast(1L) ?: 1L
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Canvas(modifier = Modifier.fillMaxWidth().height(68.dp).semantics { contentDescription = "Gestapelter Datenverbrauch der letzten sieben Tage: WLAN, Mobilfunk und nicht zuordenbar." }) {
+            val gap = size.width * 0.035f
+            val barWidth = (size.width - gap * (days.size - 1)) / days.size.coerceAtLeast(1)
+            days.forEachIndexed { index, day ->
+                var bottom = size.height
+                listOf(day.wifiBytes to wifi, day.cellularBytes to cellular, day.unknownBytes to unknown).forEach { (bytes, color) ->
+                    val height = size.height * bytes.toFloat() / max.toFloat()
+                    drawRect(color = color, topLeft = androidx.compose.ui.geometry.Offset(index * (barWidth + gap), bottom - height), size = androidx.compose.ui.geometry.Size(barWidth, height))
+                    bottom -= height
+                }
+            }
+        }
+        Text("WLAN · Mobilfunk · nicht zuordenbar", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

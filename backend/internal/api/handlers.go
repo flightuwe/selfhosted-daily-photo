@@ -219,6 +219,15 @@ func normalizeMediaDataMode(v string) string {
 	}
 }
 
+func normalizeMediaFormatPreference(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "avif", "webp", "jpeg":
+		return strings.ToLower(strings.TrimSpace(v))
+	default:
+		return "auto"
+	}
+}
+
 func creativeModeAllowsMark(v string) bool {
 	mode := normalizeCreativePostMode(v)
 	return mode == "mark" || mode == "both"
@@ -885,6 +894,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		PostNumberInPushEnabled             *bool   `json:"postNumberInPushEnabled"`
 		YoloModeEnabled                     *bool   `json:"yoloModeEnabled"`
 		MediaDataMode                       *string `json:"mediaDataMode"`
+		MediaFormatPreference               *string `json:"mediaFormatPreference"`
 		AllowPhotoDownload                  *bool   `json:"allowPhotoDownload"`
 		AllowCommunityNsfwMarking           *bool   `json:"allowCommunityNsfwMarking"`
 		ShowNsfwByDefault                   *bool   `json:"showNsfwByDefault"`
@@ -945,6 +955,14 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 			return
 		}
 		updates["media_data_mode"] = mode
+	}
+	if req.MediaFormatPreference != nil {
+		preference := normalizeMediaFormatPreference(*req.MediaFormatPreference)
+		if preference != strings.ToLower(strings.TrimSpace(*req.MediaFormatPreference)) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mediaFormatPreference"})
+			return
+		}
+		updates["media_format_preference"] = preference
 	}
 	if req.AllowPhotoDownload != nil {
 		updates["allow_photo_download"] = *req.AllowPhotoDownload
@@ -8981,6 +8999,10 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 }
 
 func (s *Server) handleHealth(c *gin.Context) {
+	formats := []string{"jpeg", "webp"}
+	if s.Config.MediaAVIFEnabled {
+		formats = append(formats, "avif")
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"ok":       true,
 		"version":  s.Config.AppVersion,
@@ -8988,6 +9010,11 @@ func (s *Server) handleHealth(c *gin.Context) {
 		"features": gin.H{
 			"chatDelete":    true,
 			"commentDelete": true,
+		},
+		"mediaCapabilities": gin.H{
+			"renditions":  s.Config.MediaRenditionsEnabled,
+			"formats":     formats,
+			"avifEnabled": s.Config.MediaAVIFEnabled,
 		},
 	})
 }
@@ -11596,6 +11623,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"postNumberInPushEnabled":             u.PostNumberInPushEnabled,
 		"yoloModeEnabled":                     u.YoloModeEnabled,
 		"mediaDataMode":                       normalizeMediaDataMode(u.MediaDataMode),
+		"mediaFormatPreference":               normalizeMediaFormatPreference(u.MediaFormatPreference),
 		"allowPhotoDownload":                  u.AllowPhotoDownload,
 		"allowCommunityNsfwMarking":           u.AllowCommunityNsfwMarking,
 		"showNsfwByDefault":                   u.ShowNsfwByDefault,
@@ -11642,6 +11670,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"postNumberInPushEnabled":             false,
 		"yoloModeEnabled":                     false,
 		"mediaDataMode":                       "normal",
+		"mediaFormatPreference":               "auto",
 		"allowPhotoDownload":                  u.AllowPhotoDownload,
 		"allowCommunityNsfwMarking":           false,
 		"showNsfwByDefault":                   false,

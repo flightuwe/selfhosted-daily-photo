@@ -22,6 +22,7 @@ type User struct {
 	PostNumberInPushEnabled             bool       `gorm:"default:false" json:"postNumberInPushEnabled"`
 	YoloModeEnabled                     bool       `gorm:"default:false" json:"yoloModeEnabled"`
 	MediaDataMode                       string     `gorm:"size:16;default:'normal'" json:"mediaDataMode"`
+	MediaFormatPreference               string     `gorm:"size:16;default:'auto'" json:"mediaFormatPreference"`
 	AllowPhotoDownload                  bool       `gorm:"default:false" json:"allowPhotoDownload"`
 	AllowCommunityNsfwMarking           bool       `gorm:"default:false" json:"allowCommunityNsfwMarking"`
 	ShowNsfwByDefault                   bool       `gorm:"default:false" json:"showNsfwByDefault"`
