@@ -2088,6 +2088,9 @@ func (s *Server) handleUpload(c *gin.Context) {
 	}
 
 	s.invalidateFeedDayCache(photo.Day)
+	// New uploads are the most likely media to be opened next. Queue their
+	// regenerable variants now instead of waiting for a later feed response.
+	s.enqueueMediaDerivatives(filepath.ToSlash(filepath.Clean(relPath)), 8_000, false)
 	s.notifyPostCreated(user, photo)
 	c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo), "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 }
@@ -6919,7 +6922,10 @@ func (s *Server) calendarPayload(viewerID uint, scope string, targetUserID uint,
 	outPhotosByDay := make(map[string][]gin.H, len(days))
 	outItems := make([]gin.H, 0, len(filteredPhotos))
 	for _, photo := range filteredPhotos {
-		photoRow := s.photoJSONForViewer(viewerID, photo, decorations)
+		// Calendar payloads can contain up to a year of posts. They expose any
+		// already-ready variants for compatibility, but must never enqueue an
+		// entire historic rendition backlog merely because the calendar opened.
+		photoRow := s.photoJSONForViewerWithoutDerivativeQueue(viewerID, photo, decorations)
 		userRow := s.userPublicJSON(viewerID, photo.User)
 		row := gin.H{
 			"photo": photoRow,
@@ -8936,6 +8942,8 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 	}
 
 	s.invalidateFeedDayCache(photo.Day)
+	s.enqueueMediaDerivatives(filepath.ToSlash(filepath.Clean(backPath)), 8_000, false)
+	s.enqueueMediaDerivatives(filepath.ToSlash(filepath.Clean(frontPath)), 8_000, false)
 	s.notifyPostCreated(user, photo)
 	c.JSON(http.StatusCreated, gin.H{"photo": s.photoJSON(photo), "acceptedViaOfflineGrace": acceptedViaOfflineGrace})
 }
@@ -9093,6 +9101,7 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 		return
 	}
 	s.invalidateFeedDayCache(photo.Day)
+	s.enqueueMediaDerivatives(filepath.ToSlash(filepath.Clean(savedPath)), 8_000, false)
 	s.notifyPhotoAttachmentAppended(user, photo)
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
 	if err != nil {
@@ -11399,7 +11408,11 @@ func (s *Server) photoAttachmentsByPhotoIDs(photoIDs []uint) map[uint][]models.P
 	return out
 }
 
-func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttachment) []gin.H {
+func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttachment, queueMissing ...bool) []gin.H {
+	shouldQueueMissing := true
+	if len(queueMissing) > 0 {
+		shouldQueueMissing = queueMissing[0]
+	}
 	media := make([]gin.H, 0, 2+len(attachments))
 	if strings.TrimSpace(p.FilePath) != "" {
 		item := gin.H{
@@ -11411,7 +11424,7 @@ func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttach
 		if thumbnailURL := s.photoThumbnailURL(p.FilePath); thumbnailURL != "" {
 			item["thumbnailUrl"] = thumbnailURL
 		}
-		item["renditions"] = s.mediaRenditionsJSON(p.FilePath)
+		item["renditions"] = s.mediaRenditionsJSONWithQueue(p.FilePath, shouldQueueMissing)
 		if strings.TrimSpace(p.CapsulePreviewPath) != "" {
 			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsulePreviewPath)
 		}
@@ -11427,7 +11440,7 @@ func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttach
 		if thumbnailURL := s.photoThumbnailURL(p.SecondPath); thumbnailURL != "" {
 			item["thumbnailUrl"] = thumbnailURL
 		}
-		item["renditions"] = s.mediaRenditionsJSON(p.SecondPath)
+		item["renditions"] = s.mediaRenditionsJSONWithQueue(p.SecondPath, shouldQueueMissing)
 		if strings.TrimSpace(p.CapsuleSecondPreviewPath) != "" {
 			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsuleSecondPreviewPath)
 		}
@@ -11443,7 +11456,7 @@ func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttach
 		if thumbnailURL := s.photoThumbnailURL(attachment.FilePath); thumbnailURL != "" {
 			item["thumbnailUrl"] = thumbnailURL
 		}
-		item["renditions"] = s.mediaRenditionsJSON(attachment.FilePath)
+		item["renditions"] = s.mediaRenditionsJSONWithQueue(attachment.FilePath, shouldQueueMissing)
 		if strings.TrimSpace(attachment.PreviewPath) != "" {
 			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, attachment.PreviewPath)
 		}
@@ -11457,7 +11470,11 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 	return s.photoJSONWithAttachments(p, attachmentMap[p.ID])
 }
 
-func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.PhotoAttachment) gin.H {
+func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.PhotoAttachment, queueMissing ...bool) gin.H {
+	shouldQueueMissing := true
+	if len(queueMissing) > 0 {
+		shouldQueueMissing = queueMissing[0]
+	}
 	effectiveAt := photoEffectiveTime(p)
 	publicNumber := ""
 	if p.PublicNumber != nil {
@@ -11515,7 +11532,7 @@ func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.P
 			out["secondThumbnailUrl"] = thumbnailURL
 		}
 	}
-	media := s.photoMediaJSON(p, attachments)
+	media := s.photoMediaJSON(p, attachments, shouldQueueMissing)
 	out["media"] = media
 	out["mediaCount"] = len(media)
 	if strings.TrimSpace(p.CapsulePreviewPath) != "" {
@@ -11534,8 +11551,17 @@ func (s *Server) photoJSONForViewer(viewerID uint, p models.Photo, decorations *
 	return s.photoJSONForViewerWithAttachments(viewerID, p, decorations, attachmentMap[p.ID])
 }
 
+func (s *Server) photoJSONForViewerWithoutDerivativeQueue(viewerID uint, p models.Photo, decorations *viewerPhotoDecorations) gin.H {
+	attachmentMap := s.photoAttachmentsByPhotoIDs([]uint{p.ID})
+	return s.photoJSONForViewerWithAttachmentsAndQueue(viewerID, p, decorations, attachmentMap[p.ID], false)
+}
+
 func (s *Server) photoJSONForViewerWithAttachments(viewerID uint, p models.Photo, decorations *viewerPhotoDecorations, attachments []models.PhotoAttachment) gin.H {
-	row := s.photoJSONWithAttachments(p, attachments)
+	return s.photoJSONForViewerWithAttachmentsAndQueue(viewerID, p, decorations, attachments, true)
+}
+
+func (s *Server) photoJSONForViewerWithAttachmentsAndQueue(viewerID uint, p models.Photo, decorations *viewerPhotoDecorations, attachments []models.PhotoAttachment, queueMissing bool) gin.H {
+	row := s.photoJSONWithAttachments(p, attachments, queueMissing)
 	creativeMode := normalizeCreativePostMode(strings.TrimSpace(p.User.CreativePostMode))
 	if decorations != nil {
 		if decorations.bookmarkMap != nil {

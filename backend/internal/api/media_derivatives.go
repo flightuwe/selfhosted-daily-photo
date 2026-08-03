@@ -62,6 +62,13 @@ func (s *Server) mediaVariantSpecs() []mediaVariantSpec {
 }
 
 func (s *Server) mediaRenditionsJSON(sourcePath string) []gin.H {
+	return s.mediaRenditionsJSONWithQueue(sourcePath, true)
+}
+
+// mediaRenditionsJSONWithQueue keeps legacy payloads compatible while letting
+// metadata-only surfaces (notably the 365-day legacy calendar) return existing
+// renditions without turning a read into a global conversion request.
+func (s *Server) mediaRenditionsJSONWithQueue(sourcePath string, queueMissing bool) []gin.H {
 	if s == nil || s.DB == nil || !s.Config.MediaRenditionsEnabled || strings.TrimSpace(sourcePath) == "" {
 		return []gin.H{}
 	}
@@ -73,7 +80,9 @@ func (s *Server) mediaRenditionsJSON(sourcePath string) []gin.H {
 	if err := s.DB.Where("source_path = ?", clean).Order("width asc, format asc").Find(&rows).Error; err != nil {
 		return []gin.H{}
 	}
-	if len(rows) < len(s.mediaVariantSpecs()) {
+	if queueMissing && len(rows) < len(s.mediaVariantSpecs()) {
+		// A response which contains this medium is an immediate, user-visible
+		// demand. It must never sit behind the best-effort historic backfill.
 		s.enqueueMediaDerivatives(clean, 0, true)
 		_ = s.DB.Where("source_path = ?", clean).Order("width asc, format asc").Find(&rows).Error
 	} else {
@@ -104,6 +113,20 @@ func (s *Server) enqueueMediaDerivatives(clean string, priorityAdjustment int, r
 	for _, spec := range s.mediaVariantSpecs() {
 		output := mediaDerivativeRelativePath(clean, spec)
 		priority := maxInt(1, spec.Priority+priorityAdjustment)
+		if requested {
+			// Keep all fallbacks close together, but make the requested AVIF
+			// rendition available first on capable clients. The old queue used
+			// the static WebP/JPEG priorities and could delay AVIF for days.
+			priority = 10_000
+			switch spec.Format {
+			case "avif":
+				priority += 30
+			case "webp":
+				priority += 20
+			case "jpeg":
+				priority += 10
+			}
+		}
 		row := models.MediaDerivative{
 			SourcePath: clean, Variant: spec.Name, Purpose: spec.Purpose, Format: spec.Format,
 			Width: spec.Width, Quality: spec.Quality, OutputPath: output,
@@ -138,8 +161,12 @@ func (s *Server) RunMediaDerivativeLoop(ctx context.Context, interval time.Durat
 		interval = 5 * time.Second
 	}
 	_ = s.recoverInterruptedMediaDerivatives()
-	_ = s.enqueueRecentMediaDerivativeBackfill()
-	_ = s.enqueueOlderMediaDerivativeBatch(50)
+	// Previous versions enqueued every medium from the last 30 days at once.
+	// That created tens of thousands of rows and starved AVIF. Derivatives are
+	// disposable, so discard only untouched background rows on upgrade and let
+	// visible requests repopulate them at high priority.
+	_ = s.discardBackgroundDerivativeQueue()
+	_ = s.enqueueOlderMediaDerivativeBatch(1)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	cleanupTicker := time.NewTicker(time.Hour)
@@ -153,7 +180,9 @@ func (s *Server) RunMediaDerivativeLoop(ctx context.Context, interval time.Durat
 				log.Printf("media derivative worker: %v", err)
 			}
 		case <-cleanupTicker.C:
-			_ = s.enqueueOlderMediaDerivativeBatch(50)
+			// One source per hour is deliberately a backfill, not a second
+			// foreground encoder. New and visible media always win by priority.
+			_ = s.enqueueOlderMediaDerivativeBatch(1)
 			if err := s.cleanupMediaDerivatives(); err != nil {
 				log.Printf("media derivative cleanup: %v", err)
 			}
@@ -161,22 +190,39 @@ func (s *Server) RunMediaDerivativeLoop(ctx context.Context, interval time.Durat
 	}
 }
 
+func (s *Server) discardBackgroundDerivativeQueue() error {
+	return s.DB.Model(&models.MediaDerivative{}).
+		Where("status = ? AND priority < ? AND last_requested_at IS NULL", mediaDerivativeQueued, 1_000).
+		Updates(map[string]any{
+			"status": mediaDerivativeEvicted, "next_attempt_at": nil,
+			"last_error": "superseded background backfill",
+		}).Error
+}
+
 func (s *Server) enqueueRecentMediaDerivativeBackfill() error {
 	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	var photos []models.Photo
-	if err := s.DB.Select("id", "file_path", "second_path").Where("created_at >= ?", cutoff).Order("created_at desc").Find(&photos).Error; err != nil {
+	// This is called after an operator enables AVIF. Keep it intentionally
+	// bounded; visible requests fill gaps immediately and the hourly worker
+	// advances the historic backlog without creating a second large queue.
+	if err := s.DB.Select("id", "file_path", "second_path").Where("created_at >= ?", cutoff).Order("created_at desc").Limit(5).Find(&photos).Error; err != nil {
 		return err
 	}
+	photoIDs := make([]uint, 0, len(photos))
 	for _, photo := range photos {
+		photoIDs = append(photoIDs, photo.ID)
 		for _, source := range []string{photo.FilePath, photo.SecondPath} {
 			if clean := strings.TrimSpace(source); clean != "" {
 				s.enqueueMediaDerivatives(filepath.ToSlash(filepath.Clean(clean)), -35, false)
 			}
 		}
 	}
+	if len(photoIDs) == 0 {
+		return nil
+	}
 	var attachments []models.PhotoAttachment
 	if err := s.DB.Select("photo_attachments.file_path").Joins("JOIN photos ON photos.id = photo_attachments.photo_id").
-		Where("photos.created_at >= ?", cutoff).Order("photos.created_at desc").Find(&attachments).Error; err != nil {
+		Where("photo_attachments.photo_id IN ?", photoIDs).Order("photos.created_at desc").Find(&attachments).Error; err != nil {
 		return err
 	}
 	for _, attachment := range attachments {

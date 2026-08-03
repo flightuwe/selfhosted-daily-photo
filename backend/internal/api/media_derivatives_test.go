@@ -28,6 +28,48 @@ func TestMediaDerivativePathIsDeterministicAndRooted(t *testing.T) {
 	}
 }
 
+func TestVisibleMediaDerivativeRequestPrioritizesAVIF(t *testing.T) {
+	server := newSearchTestServer(t)
+	server.Config.MediaRenditionsEnabled = true
+	server.Config.MediaAVIFEnabled = true
+	if err := server.DB.Create(&models.AppSettings{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	server.enqueueMediaDerivatives("photos/visible.jpg", 0, true)
+	var rows []models.MediaDerivative
+	if err := server.DB.Where("source_path = ?", "photos/visible.jpg").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	priorities := map[string]int{}
+	for _, row := range rows {
+		priorities[row.Format] = row.Priority
+	}
+	if priorities["avif"] <= priorities["webp"] || priorities["webp"] <= priorities["jpeg"] {
+		t.Fatalf("visible priorities = %#v, want avif > webp > jpeg", priorities)
+	}
+}
+
+func TestDiscardBackgroundDerivativeQueueKeepsVisibleWork(t *testing.T) {
+	server := newSearchTestServer(t)
+	background := models.MediaDerivative{SourcePath: "photos/background.jpg", Variant: "feed-webp-720", Purpose: "feed", Format: "webp", Width: 720, Quality: 75, OutputPath: "renditions/a/background.webp", Status: mediaDerivativeQueued, Priority: 70}
+	visible := models.MediaDerivative{SourcePath: "photos/visible.jpg", Variant: "feed-avif-720", Purpose: "feed", Format: "avif", Width: 720, Quality: 55, OutputPath: "renditions/a/visible.avif", Status: mediaDerivativeQueued, Priority: 10030}
+	if err := server.DB.Create(&background).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := server.DB.Create(&visible).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := server.discardBackgroundDerivativeQueue(); err != nil {
+		t.Fatal(err)
+	}
+	var gotBackground, gotVisible models.MediaDerivative
+	_ = server.DB.First(&gotBackground, background.ID).Error
+	_ = server.DB.First(&gotVisible, visible.ID).Error
+	if gotBackground.Status != mediaDerivativeEvicted || gotVisible.Status != mediaDerivativeQueued {
+		t.Fatalf("unexpected queue states background=%s visible=%s", gotBackground.Status, gotVisible.Status)
+	}
+}
+
 func TestParseRenditionAccessLineDropsPersonalPath(t *testing.T) {
 	day, format, status, bytes, ok := parseRenditionAccessLine(`127.0.0.1 - - [03/Aug/2026:11:22:33 +0000] "GET /uploads/renditions/ab/cd/private-name_feed-avif-720.avif HTTP/1.1" 200 12345 "-" "Daily"`)
 	if !ok || day != "2026-08-03" || format != "avif" || status != 200 || bytes != 12345 {

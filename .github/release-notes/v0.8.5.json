@@ -1,0 +1,9 @@
+{
+  "version": "v0.8.5",
+  "title": "Schnellere AVIF-Auslieferung",
+  "items": [
+    "Sichtbare Bilder werden bei der Erzeugung von AVIF-, WebP- und JPEG-Varianten priorisiert.",
+    "Historische Hintergrundjobs können neue Medienformate nicht mehr blockieren.",
+    "Feed-Diagnosen zeigen Auswahl, Renderformat und Fallbackgrund ohne Medien-URLs."
+  ]
+}

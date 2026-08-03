@@ -330,6 +330,11 @@ fun appendLocalDebugLog(context: Context, type: String, message: String, meta: S
             put("message", message.trim().ifBlank { "unknown" }.take(500))
             put("meta", meta.trim().take(4000))
             put("createdAt", OffsetDateTime.now().toString())
+            // This helper is also used from Compose image callbacks. Persist
+            // the same session/version fields as repository logs so these
+            // entries remain visible in the current-session export.
+            put("sessionId", prefs.getString("diagnostics_session_id", "").orEmpty())
+            put("appVersion", BuildConfig.VERSION_NAME)
         }
     )
     val arr = JSONArray()
@@ -16239,6 +16244,22 @@ private fun FeedRenditionImage(
     val context = LocalContext.current
     var candidateIndex by remember(candidates) { mutableStateOf(0) }
     val candidate = candidates.getOrNull(candidateIndex)
+    val candidateFormats = remember(candidates) {
+        candidates.map { url ->
+            url.substringBefore('?').substringAfterLast('.', "original").lowercase(Locale.ROOT)
+        }.distinct()
+    }
+    LaunchedEffect(candidates) {
+        // Keep URLs and post content out of diagnostics. The format chain is
+        // enough to distinguish missing server renditions from client decode
+        // and network fallbacks.
+        appendFeedTraceLog(
+            context,
+            "media_selection_candidates",
+            "media rendition candidates prepared",
+            "formats=${candidateFormats.joinToString(",")};count=${candidates.size}"
+        )
+    }
     AsyncImage(
         model = candidate,
         contentDescription = contentDescription,
@@ -16247,6 +16268,12 @@ private fun FeedRenditionImage(
         onSuccess = { state ->
             val actualFormat = candidate?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()
             onFormatResolved(actualFormat)
+            appendFeedTraceLog(
+                context,
+                "media_selection_resolved",
+                "media rendition rendered",
+                "format=${actualFormat.ifBlank { "unknown" }};candidateIndex=$candidateIndex;chain=${candidateFormats.joinToString(",")};source=${state.result.dataSource}"
+            )
             NetworkUsageLedger.recordMediaCacheResult(
                 context,
                 state.result.dataSource.toString(),
@@ -16261,6 +16288,14 @@ private fun FeedRenditionImage(
                 context.getSharedPreferences("app", Context.MODE_PRIVATE)
                     .edit().putInt("avif_decode_disabled_version", BuildConfig.VERSION_CODE).apply()
             }
+            val nextFormat = candidates.getOrNull(candidateIndex + 1)
+                ?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()
+            appendFeedTraceLog(
+                context,
+                "media_selection_fallback",
+                "media rendition failed; trying fallback",
+                "format=${candidate?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()};next=${nextFormat.ifBlank { "none" }};decodeFailure=$decodeFailure;status=render_error"
+            )
             if (candidateIndex < candidates.lastIndex) candidateIndex++
         }
     )
