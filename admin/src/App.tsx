@@ -3211,7 +3211,7 @@ export function App() {
               <CardStat title="Tage aktiv" value={stats.runningDays} />
               <CardStat title="Bilder gesamt" value={stats.totalImages} />
               <CardStat
-                title="Speicher gesamt"
+                title="Upload-Speicher"
                 value={formatBytes(stats.storageBytes)}
               />
               <CardStat
@@ -3259,6 +3259,50 @@ export function App() {
                     </p>
                   </div>
                 </article>
+
+                <h3>Speicherbilanz</h3>
+                <div className="grid4">
+                  <CardStat
+                    title="Volume frei"
+                    value={formatBytes(systemHealth.storage?.filesystemFreeBytes || 0)}
+                  />
+                  <CardStat
+                    title="Volume belegt"
+                    value={formatBytes(systemHealth.storage?.filesystemUsedBytes || 0)}
+                  />
+                  <CardStat
+                    title="Originale"
+                    value={formatBytes(systemHealth.storage?.originalBytes || 0)}
+                  />
+                  <CardStat
+                    title="Renditions"
+                    value={formatBytes(systemHealth.storage?.renditionBytes || 0)}
+                  />
+                  <CardStat
+                    title="SQLite inkl. WAL"
+                    value={formatBytes(
+                      (systemHealth.storage?.databaseBytes || 0) +
+                        (systemHealth.storage?.databaseWalBytes || 0) +
+                        (systemHealth.storage?.databaseShmBytes || 0),
+                    )}
+                  />
+                  <CardStat
+                    title="Backend-Logs"
+                    value={formatBytes(systemHealth.storage?.backendLogBytes || 0)}
+                  />
+                  <CardStat
+                    title="Gateway-Logs"
+                    value={formatBytes(systemHealth.storage?.gatewayLogBytes || 0)}
+                  />
+                  <CardStat
+                    title="Andere Upload-Dateien"
+                    value={formatBytes(systemHealth.storage?.otherUploadBytes || 0)}
+                  />
+                </div>
+                <p className="small">
+                  Docker-Images und Build-Cache werden bewusst nur im
+                  eingeschraenkten Host-Report erfasst. {systemHealth.storage?.dockerNote || ""}
+                </p>
 
                 <h3>Komponenten</h3>
                 <table className="table">

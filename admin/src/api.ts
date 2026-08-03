@@ -815,6 +815,22 @@ export type SystemHealth = {
   provider: string;
   time: string;
   uploadSizeBytes: number;
+  storage?: {
+    filesystemTotalBytes: number;
+    filesystemFreeBytes: number;
+    filesystemUsedBytes: number;
+    uploadBytes: number;
+    originalBytes: number;
+    renditionBytes: number;
+    otherUploadBytes: number;
+    databaseBytes: number;
+    databaseWalBytes: number;
+    databaseShmBytes: number;
+    backendLogBytes: number;
+    gatewayLogBytes: number;
+    dockerBytesAvailable: boolean;
+    dockerNote?: string;
+  };
   latestPrompt?: {
     day?: string;
     triggeredAt?: string | null;

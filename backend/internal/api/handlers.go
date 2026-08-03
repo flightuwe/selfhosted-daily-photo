@@ -4146,22 +4146,20 @@ func (s *Server) handleAdminStats(c *gin.Context) {
 	_ = s.DB.Model(&models.User{}).Where("diagnostics_consent_granted = ?", true).Count(&diagnosticsConsentUsers).Error
 	_ = s.DB.Raw("SELECT COALESCE(SUM(CASE WHEN second_path IS NOT NULL AND second_path <> '' THEN 2 ELSE 1 END),0) FROM photos").Scan(&totalImages).Error
 
-	var startedAt *time.Time
+	var firstActivityDay string
 	_ = s.DB.Raw(`
-SELECT MIN(created_at) FROM (
-    SELECT MIN(created_at) AS created_at FROM users
-    UNION ALL SELECT MIN(created_at) FROM photos
-    UNION ALL SELECT MIN(created_at) FROM daily_prompts
-    UNION ALL SELECT MIN(created_at) FROM app_settings
+SELECT MIN(day) FROM (
+    SELECT day FROM photos WHERE day <> ''
+    UNION ALL SELECT day FROM daily_prompts WHERE day <> ''
 ) t
-WHERE created_at IS NOT NULL
-`).Scan(&startedAt).Error
-	if startedAt != nil && !startedAt.IsZero() {
-		d := int64(time.Now().In(s.Location).Sub(startedAt.In(s.Location)).Hours() / 24)
-		if d < 0 {
-			d = 0
+`).Scan(&firstActivityDay).Error
+	if firstDay, err := time.ParseInLocation("2006-01-02", firstActivityDay, s.Location); err == nil {
+		today := time.Now().In(s.Location)
+		currentDay := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, s.Location)
+		d := int64(currentDay.Sub(firstDay).Hours() / 24)
+		if d >= 0 {
+			runningDays = d + 1
 		}
-		runningDays = d + 1
 	}
 
 	_ = filepath.Walk(s.Config.UploadDir, func(_ string, info os.FileInfo, err error) error {
