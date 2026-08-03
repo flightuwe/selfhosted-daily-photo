@@ -434,6 +434,7 @@ object UploadQueueManager {
         )
         all[index] = claimed
         if (!write(context, prune(all))) return null
+        UploadQueueScheduler.scheduleRecoveryCheck(context, queueLeaseMs)
         return claimed
     }
 
@@ -612,6 +613,11 @@ object UploadQueueManager {
             } else item
         }
         write(context, prune(next))
+        // A process can disappear after all request bytes have been handed to
+        // the socket but before Retrofit receives the response. Persist a
+        // separate watchdog so this state is recovered without requiring the
+        // user to open the app again.
+        UploadQueueScheduler.scheduleRecoveryCheck(context, queueLeaseMs)
     }
 
     @Synchronized
@@ -668,6 +674,21 @@ object UploadQueueManager {
         if (immediate) return 5L
         val minNext = items.minOfOrNull { it.nextRetryAtMs } ?: return 20L
         return ((minNext - now) / 1000L).coerceAtLeast(5L)
+    }
+
+    @Synchronized
+    fun nextLeaseRecoveryDelaySeconds(context: Context, nowMs: Long = System.currentTimeMillis()): Long? {
+        val earliestLease = read(context)
+            .asSequence()
+            .filter {
+                (it.status == UploadQueueStatus.RUNNING || it.status == UploadQueueStatus.AWAITING_SERVER_ACK) &&
+                    it.leaseExpiresAtMs > 0L &&
+                    (it.retentionUntilMs <= 0L || it.retentionUntilMs > nowMs)
+            }
+            .map { it.leaseExpiresAtMs }
+            .minOrNull()
+            ?: return null
+        return ((earliestLease - nowMs + 999L) / 1000L).coerceAtLeast(0L)
     }
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -1399,6 +1420,20 @@ private class QueueProgressRequestBody(
     }
 }
 
+// This worker is deliberately independent from the upload worker. WorkManager
+// can then execute recovery after an app/process death even though the original
+// upload work never reached its normal scheduler path.
+class UploadQueueRecoveryWorker(
+    appContext: Context,
+    params: WorkerParameters
+) : CoroutineWorker(appContext, params) {
+    override suspend fun doWork(): Result {
+        UploadQueueManager.recoverStaleEntries(applicationContext)
+        UploadQueueScheduler.sync(applicationContext)
+        return Result.success()
+    }
+}
+
 object UploadQueueScheduler {
     private val constraints = Constraints.Builder()
         .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -1406,6 +1441,7 @@ object UploadQueueScheduler {
 
     fun sync(context: Context) {
         UploadQueueManager.recoverStaleEntries(context)
+        syncRecoveryCheck(context)
         val nextDelay = UploadQueueManager.nextDelaySeconds(context)
         if (hasRunningWork(context)) {
             return
@@ -1427,6 +1463,29 @@ object UploadQueueScheduler {
 
     fun scheduleIn(context: Context, delaySeconds: Long) {
         scheduleInternal(context, delaySeconds.coerceAtLeast(0L))
+    }
+
+    fun scheduleRecoveryCheck(context: Context, delayMs: Long) {
+        val request = OneTimeWorkRequestBuilder<UploadQueueRecoveryWorker>()
+            .setInitialDelay(delayMs.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            RECOVERY_WORK_NAME,
+            // The lease is refreshed while an upload makes progress. Replace
+            // an earlier watchdog so it always fires after the newest lease,
+            // rather than quietly completing before that lease expires.
+            ExistingWorkPolicy.REPLACE,
+            request
+        )
+    }
+
+    private fun syncRecoveryCheck(context: Context) {
+        val delaySeconds = UploadQueueManager.nextLeaseRecoveryDelaySeconds(context)
+        if (delaySeconds == null) {
+            WorkManager.getInstance(context).cancelUniqueWork(RECOVERY_WORK_NAME)
+        } else {
+            scheduleRecoveryCheck(context, delaySeconds * 1000L)
+        }
     }
 
     @Synchronized
@@ -1476,6 +1535,7 @@ object UploadQueueScheduler {
     }
 
     private const val WORK_NAME = "daily_upload_queue_worker"
+    private const val RECOVERY_WORK_NAME = "daily_upload_queue_recovery"
     private const val PREF_KEY_NEXT_SCHEDULED_AT_MS = "upload_queue_next_scheduled_at_ms"
 }
 

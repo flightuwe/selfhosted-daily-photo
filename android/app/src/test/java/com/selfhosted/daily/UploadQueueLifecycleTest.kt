@@ -42,6 +42,7 @@ class UploadQueueLifecycleTest {
         val claimed = UploadQueueManager.claimNextRunnable(context, 10_000L)
         assertNotNull(claimed)
         assertNull("a durable lease must prevent a second worker claim", UploadQueueManager.claimNextRunnable(context, 10_001L))
+        assertEquals(600L, UploadQueueManager.nextLeaseRecoveryDelaySeconds(context, 10_000L))
         UploadQueueManager.markAwaitingServerAck(context, item.id)
 
         val afterLease = System.currentTimeMillis() + 11L * 60L * 1000L
