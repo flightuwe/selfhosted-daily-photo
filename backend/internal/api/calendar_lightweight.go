@@ -21,6 +21,73 @@ func (s *Server) calendarPublicCompactPayload(viewerID uint, now time.Time) (gin
 	return s.calendarPublicCompactPayloadForDays(viewerID, now, 365)
 }
 
+// calendarPublicIndexPayload is deliberately media-free. It is the complete
+// day index used by the calendar jump control, so opening the calendar can
+// expose every visible day without downloading card metadata or image URLs for
+// the whole history.
+func (s *Server) calendarPublicIndexPayload(viewerID uint, now time.Time) (gin.H, error) {
+	type indexRow struct {
+		Day              string `gorm:"column:day"`
+		PostCount        int64  `gorm:"column:post_count"`
+		ParticipantCount int64  `gorm:"column:participant_count"`
+	}
+	var rows []indexRow
+	if err := s.DB.Model(&models.Photo{}).
+		Select("day, COUNT(*) AS post_count, COUNT(DISTINCT user_id) AS participant_count").
+		Where("user_id = ? OR capsule_visible_at IS NULL OR capsule_visible_at <= ?", viewerID, now).
+		Group("day").
+		Order("day desc").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	days := make([]string, 0, len(rows))
+	stats := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		days = append(days, row.Day)
+		stats = append(stats, gin.H{
+			"day": row.Day, "count": row.PostCount, "postCount": row.PostCount,
+			"participantCount": row.ParticipantCount, "featuredPhoto": nil,
+		})
+	}
+	return gin.H{"days": days, "dayStats": stats, "items": []gin.H{}}, nil
+}
+
+// calendarPublicCompactWindowPayload returns card details only for a small
+// consecutive calendar window. The index endpoint owns the complete day list.
+func (s *Server) calendarPublicCompactWindowPayload(viewerID uint, now time.Time, before string, limit int) (gin.H, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 30 {
+		limit = 30
+	}
+	query := s.DB.Model(&models.Photo{}).
+		Select("day").
+		Where("user_id = ? OR capsule_visible_at IS NULL OR capsule_visible_at <= ?", viewerID, now)
+	if strings.TrimSpace(before) != "" {
+		query = query.Where("day <= ?", before)
+	}
+	var dayRows []string
+	if err := query.Group("day").Order("day desc").Limit(limit+1).Pluck("day", &dayRows).Error; err != nil {
+		return nil, err
+	}
+	hasMore := len(dayRows) > limit
+	if hasMore {
+		dayRows = dayRows[:limit]
+	}
+	payload, err := s.calendarPublicCompactPayloadForDayList(viewerID, now, dayRows)
+	if err != nil {
+		return nil, err
+	}
+	nextCursor := ""
+	if hasMore && len(dayRows) > 0 {
+		nextCursor = dayRows[len(dayRows)-1]
+	}
+	payload["hasMore"] = hasMore
+	payload["nextCursor"] = nextCursor
+	return payload, nil
+}
+
 // calendarPublicCompactPayloadForDays keeps the public calendar response
 // bounded for consumers which only render a recent preview. The full calendar
 // deliberately continues to use the 365-day product window above.
@@ -38,9 +105,20 @@ func (s *Server) calendarPublicCompactPayloadForDays(viewerID uint, now time.Tim
 		Order("day desc").
 		Limit(maxDays)
 
+	var days []string
+	if err := visibleDays.Pluck("day", &days).Error; err != nil {
+		return nil, err
+	}
+	return s.calendarPublicCompactPayloadForDayList(viewerID, now, days)
+}
+
+func (s *Server) calendarPublicCompactPayloadForDayList(viewerID uint, now time.Time, days []string) (gin.H, error) {
+	if len(days) == 0 {
+		return gin.H{"days": []string{}, "dayStats": []gin.H{}, "photosByDay": map[string][]gin.H{}, "users": []gin.H{}, "items": []gin.H{}}, nil
+	}
 	var photos []models.Photo
 	if err := s.DB.Preload("User").
-		Where("photos.day IN (?)", visibleDays).
+		Where("photos.day IN ?", days).
 		Where("photos.user_id = ? OR photos.capsule_visible_at IS NULL OR photos.capsule_visible_at <= ?", viewerID, now).
 		Order("photos.day desc, photos.created_at desc, photos.id desc").
 		Find(&photos).Error; err != nil {
@@ -48,15 +126,9 @@ func (s *Server) calendarPublicCompactPayloadForDays(viewerID uint, now time.Tim
 	}
 	sortPhotosForFeed(photos)
 
-	days := make([]string, 0, maxDays)
-	daySeen := make(map[string]struct{}, maxDays)
 	photoIDs := make([]uint, 0, len(photos))
 	for _, photo := range photos {
 		photoIDs = append(photoIDs, photo.ID)
-		if _, exists := daySeen[photo.Day]; !exists {
-			daySeen[photo.Day] = struct{}{}
-			days = append(days, photo.Day)
-		}
 	}
 
 	reactionCounts, err := s.calendarAggregateCounts("photo_reactions", photoIDs)

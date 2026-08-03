@@ -1291,6 +1291,59 @@ func TestCompactCalendarPreviewBoundsRecentDays(t *testing.T) {
 	}
 }
 
+func TestCalendarPublicIndexIsCompleteAndMediaFree(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "calendar-index", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	for index := 0; index < 80; index++ {
+		photo := models.Photo{UserID: user.ID, Day: now.AddDate(0, 0, -index).Format("2006-01-02"), FilePath: fmt.Sprintf("photos/index-%d.jpg", index), CreatedAt: now}
+		if err := server.DB.Create(&photo).Error; err != nil {
+			t.Fatalf("create photo %d: %v", index, err)
+		}
+	}
+	payload, err := server.calendarPublicIndexPayload(user.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	days := payload["days"].([]string)
+	if len(days) != 80 || days[0] != "2026-08-03" || days[len(days)-1] != "2026-05-16" {
+		t.Fatalf("index days = %d (%q..%q), want complete descending 80-day index", len(days), days[0], days[len(days)-1])
+	}
+	encoded, _ := json.Marshal(payload)
+	if bytes.Contains(encoded, []byte("photosByDay")) || bytes.Contains(encoded, []byte("thumbnailUrl")) || bytes.Contains(encoded, []byte("/uploads/")) {
+		t.Fatalf("media-free index leaked card payload: %s", encoded)
+	}
+}
+
+func TestCalendarPublicWindowBoundsCardsToRequestedDays(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "calendar-window", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	for index := 0; index < 20; index++ {
+		photo := models.Photo{UserID: user.ID, Day: now.AddDate(0, 0, -index).Format("2006-01-02"), FilePath: fmt.Sprintf("photos/window-%d.jpg", index), CreatedAt: now}
+		if err := server.DB.Create(&photo).Error; err != nil {
+			t.Fatalf("create photo %d: %v", index, err)
+		}
+	}
+	payload, err := server.calendarPublicCompactWindowPayload(user.ID, now, "2026-07-29", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	days := payload["days"].([]string)
+	if len(days) != 5 || days[0] != "2026-07-29" || days[4] != "2026-07-25" {
+		t.Fatalf("window days = %#v, want requested five-day window", days)
+	}
+	if !payload["hasMore"].(bool) || payload["nextCursor"] != "2026-07-25" {
+		t.Fatalf("window paging = hasMore=%#v nextCursor=%#v, want true/2026-07-25", payload["hasMore"], payload["nextCursor"])
+	}
+}
+
 func TestHandleUpdatePreferencesPersistsAutoSubscribeInteractedPostsEnabled(t *testing.T) {
 	server := newSearchTestServer(t)
 	user := models.User{Username: "tester", PasswordHash: "x"}

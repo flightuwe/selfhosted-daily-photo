@@ -6090,10 +6090,37 @@ func (s *Server) handleCalendarPublic(c *gin.Context) {
 	user, _ := userFromContext(c)
 	now := time.Now().In(s.Location)
 	compact := strings.EqualFold(strings.TrimSpace(c.Query("compact")), "true")
+	view := strings.ToLower(strings.TrimSpace(c.Query("view")))
+	if view != "" && view != "index" && view != "window" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported calendar view"})
+		return
+	}
+	before := strings.TrimSpace(c.Query("before"))
+	if view == "window" && before != "" {
+		if _, err := time.Parse("2006-01-02", before); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid calendar cursor"})
+			return
+		}
+	}
+	limit := 14
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid calendar limit"})
+			return
+		}
+		limit = parsed
+	}
 	revision := int64(0)
 	if compact {
 		revision = s.syncRevision(calendarRevisionScope)
-		etag := revisionETag("calendar-public", map[string]int64{"all": revision})
+		etagScope := "all"
+		if view == "index" {
+			etagScope = "index"
+		} else if view == "window" {
+			etagScope = view + ":before=" + before + ":limit=" + strconv.Itoa(limit)
+		}
+		etag := revisionETag("calendar-public", map[string]int64{etagScope: revision})
 		c.Header("ETag", etag)
 		c.Header("Cache-Control", "private, no-cache")
 		if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
@@ -6105,7 +6132,15 @@ func (s *Server) handleCalendarPublic(c *gin.Context) {
 	var payload gin.H
 	var err error
 	if compact {
-		payload, err = s.calendarPublicCompactPayload(user.ID, now)
+		switch view {
+		case "index":
+			payload, err = s.calendarPublicIndexPayload(user.ID, now)
+		case "window":
+			payload, err = s.calendarPublicCompactWindowPayload(user.ID, now, before, limit)
+		default:
+			// Legacy compact consumers keep the historical complete-card response.
+			payload, err = s.calendarPublicCompactPayload(user.ID, now)
+		}
 	} else {
 		payload, err = s.calendarPayload(user.ID, "public", 0, now)
 	}
@@ -6114,11 +6149,22 @@ func (s *Server) handleCalendarPublic(c *gin.Context) {
 		return
 	}
 	if compact {
-		payload["schemaVersion"] = "calendar_public_v2"
+		payload["schemaVersion"] = ifThenCalendarSchema(view)
 		payload["revision"] = revision
 		payload["serverNow"] = now.UTC()
 	}
 	c.JSON(http.StatusOK, payload)
+}
+
+func ifThenCalendarSchema(view string) string {
+	switch view {
+	case "index":
+		return "calendar_public_index_v1"
+	case "window":
+		return "calendar_public_window_v1"
+	default:
+		return "calendar_public_v2"
+	}
 }
 
 // compactCalendarPublicPayload keeps the calendar metadata and image references

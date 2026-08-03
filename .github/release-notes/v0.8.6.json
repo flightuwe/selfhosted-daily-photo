@@ -1,0 +1,9 @@
+{
+  "version": "v0.8.6",
+  "title": "Vollständiger, schlanker Kalender",
+  "items": [
+    "Der Tag-Sprung lädt beim Öffnen einen vollständigen, bildfreien Kalenderindex – auch nach einem Warmstart.",
+    "Kalenderkarten und ihre komprimierten Vorschauen laden nur noch in kleinen sichtbaren Tagesfenstern nach.",
+    "App-Start und Hub-Aktualisierung laden den Kalender nicht mehr vorsorglich im Hintergrund."
+  ]
+}

@@ -1002,7 +1002,9 @@ data class CalendarPayloadResponse(
     val users: List<CalendarUserOption> = emptyList(),
     val items: List<FeedItem> = emptyList(),
     val lockedCount: Int = 0,
-    val releasedCount: Int = 0
+    val releasedCount: Int = 0,
+    val hasMore: Boolean = false,
+    val nextCursor: String = ""
 )
 data class CalendarSearchMatchItem(
     val photo: PromptPhoto,
@@ -1608,7 +1610,10 @@ interface Api {
     suspend fun calendarPublic(
         @Header("Authorization") token: String,
         @Header("If-None-Match") ifNoneMatch: String? = null,
-        @Query("compact") compact: Boolean = true
+        @Query("compact") compact: Boolean = true,
+        @Query("view") view: String? = null,
+        @Query("before") before: String? = null,
+        @Query("limit") limit: Int? = null
     ): CalendarPayloadResponse
 
     @GET("calendar/user/{id}")
@@ -2026,7 +2031,8 @@ class AppRepo(
                     days = trimmedDays,
                     dayStats = trimmedDays.mapNotNull(dataset.dayStats::get),
                     photosByDay = trimmedDays.associateWith { day -> dataset.photosByDay[day].orEmpty().take(3) },
-                    revision = dataset.revision
+                    revision = dataset.revision,
+                    isComplete = false
                 )
             )
         }
@@ -3465,6 +3471,22 @@ class AppRepo(
             if (http.code() != 304 || knownRevision <= 0L) throw http
             CalendarPayloadResponse(revision = knownRevision, notModified = true)
         }
+
+    suspend fun calendarPublicIndex(knownRevision: Long = 0L): CalendarPayloadResponse =
+        try {
+            authorizedCall("/api/calendar/public?view=index") { token ->
+                val etag = knownRevision.takeIf { it > 0L }?.let { "W/\"calendar-public:index=$it\"" }
+                api.calendarPublic(token, etag, compact = true, view = "index")
+            }
+        } catch (http: HttpException) {
+            if (http.code() != 304 || knownRevision <= 0L) throw http
+            CalendarPayloadResponse(revision = knownRevision, notModified = true)
+        }
+
+    suspend fun calendarPublicWindow(before: String, limit: Int = 14): CalendarPayloadResponse =
+        authorizedCall("/api/calendar/public?view=window") { token ->
+            api.calendarPublic(token, compact = true, view = "window", before = before, limit = limit)
+        }
     suspend fun calendarBookmarks(scope: BookmarkCalendarFilter = BookmarkCalendarFilter.MINE): CalendarPayloadResponse =
         authorizedCall("/api/calendar/bookmarks") { token ->
             api.calendarBookmarks(
@@ -4552,7 +4574,10 @@ data class CalendarPublicSnapshotLite(
     val days: List<String> = emptyList(),
     val dayStats: List<DayStatItem> = emptyList(),
     val photosByDay: Map<String, List<CalendarPhotoItem>> = emptyMap(),
-    val revision: Long = 0L
+    val revision: Long = 0L,
+    // The warm snapshot intentionally holds only recent card details. It must
+    // never be treated as the complete day index.
+    val isComplete: Boolean = false
 )
 
 data class AppWarmCacheEnvelope(
@@ -4629,6 +4654,7 @@ data class UiState(
     val calendarTimeCapsuleFilter: TimeCapsuleFilter = TimeCapsuleFilter.ALL,
     val calendarLoading: Boolean = false,
     val calendarPublicLoadState: SurfaceLoadState = SurfaceLoadState(),
+    val calendarPublicIndexComplete: Boolean = false,
     val calendarModeLoadState: SurfaceLoadState = SurfaceLoadState(),
     val communityStats: CommunityStatsResponse? = null,
     val communityStatsLoading: Boolean = false,
@@ -5534,6 +5560,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state.hubTimeCapsulesLoadState
             },
             calendarPublicData = if (hasCalendar) calendarDataset else state.calendarPublicData,
+            calendarPublicIndexComplete = false,
             calendarPublicLoadState = if (hasCalendar) {
                 SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.calendarPublicLite?.savedAtEpochMs ?: snapshot.savedAtEpochMs, "cache")
             } else {
@@ -6503,7 +6530,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (healthOk && repo.token().isNotBlank()) {
             viewModelScope.launch {
                 refreshHubBootstrap(force = true)
-                prefetchCalendarPublic(force = false)
             }
         }
         logPerfEvent(
@@ -7096,9 +7122,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (tab == AppTab.CALENDAR) {
             state = state.copy(activeTab = tab)
             viewModelScope.launch {
-                if (!isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)) {
-                    ensureCalendarModeLoaded(state.calendarMode, force = false)
-                }
+                ensureCalendarModeLoaded(state.calendarMode, force = false)
                 if (!isFreshLoadState(state.hubBootstrapLoadState, hubBootstrapFreshMs)) {
                     refreshHubBootstrap(force = false)
                 }
@@ -7135,23 +7159,33 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     runCatching { repo.markHubTimelineViewed() }
                 }
                 HubSection.TIME_CAPSULES -> refreshHubTimeCapsules(force = false)
-                HubSection.CALENDAR -> if (!isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs)) {
-                    ensureCalendarModeLoaded(CalendarMode.PUBLIC, force = false)
-                }
+                HubSection.CALENDAR -> ensureCalendarModeLoaded(CalendarMode.PUBLIC, force = false)
                 HubSection.SEARCH -> ensureCalendarModeLoaded(CalendarMode.SEARCH, force = false)
                 HubSection.BOOKMARKS -> ensureCalendarModeLoaded(CalendarMode.BOOKMARKS, force = false)
             }
         }
     }
 
-    private suspend fun prefetchCalendarPublic(force: Boolean) {
-        val hasCached = state.calendarPublicData.days.isNotEmpty()
-        if (!force && (hasCached || isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs))) return
-        runCatching { repo.calendarPublic(state.calendarPublicData.revision) }
+    private suspend fun ensureCalendarPublicIndexLoaded(force: Boolean) {
+        if (!force && state.calendarPublicIndexComplete && isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs)) {
+            ensureCalendarPublicWindowLoaded(state.calendarSelectedDay ?: state.calendarPublicData.days.firstOrNull())
+            return
+        }
+        state = state.copy(
+            calendarLoading = true,
+            calendarPublicLoadState = surfaceLoadStateFor(
+                hasContent = state.calendarPublicData.days.isNotEmpty(),
+                loading = true
+            )
+        )
+        val knownRevision = state.calendarPublicData.revision.takeIf { state.calendarPublicIndexComplete } ?: 0L
+        runCatching { repo.calendarPublicIndex(knownRevision) }
             .onSuccess { payload ->
-                val dataset = if (payload.notModified) state.calendarPublicData else payload.toDataset(source = "calendar_public_prefetch")
+                val dataset = if (payload.notModified) state.calendarPublicData else mergeCalendarPublicIndex(payload.toDataset(source = "calendar_public_index"))
                 state = state.copy(
                     calendarPublicData = dataset,
+                    calendarPublicIndexComplete = true,
+                    calendarLoading = false,
                     calendarPublicLoadState = surfaceLoadStateFor(
                         hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
                         loading = false
@@ -7161,20 +7195,23 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     applyCalendarDataset(dataset)
                     state = state.copy(calendarModeLoadState = state.calendarPublicLoadState)
                 }
-                if (!payload.notModified) state.user?.id?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
                 repo.logDebug(
-                    type = "calendar_prefetch_applied",
-                    message = "calendar public prefetch applied",
-                    meta = "days=${dataset.days.size};dayStats=${dataset.dayStats.size};forced=$force"
+                    type = "calendar_index_applied",
+                    message = "calendar day index applied",
+                    meta = "days=${dataset.days.size};cachedCards=${dataset.photosByDay.size};forced=$force;notModified=${payload.notModified}"
                 )
+                viewModelScope.launch {
+                    ensureCalendarPublicWindowLoaded(state.calendarSelectedDay ?: dataset.days.firstOrNull())
+                }
             }
             .onFailure {
                 repo.logDebug(
-                    type = "calendar_prefetch_failed",
-                    message = apiError(it, "Kalender-Vorladen fehlgeschlagen"),
+                    type = "calendar_index_failed",
+                    message = apiError(it, "Kalenderindex konnte nicht geladen werden"),
                     meta = "forced=$force;hasCache=${state.calendarPublicData.days.isNotEmpty()}"
                 )
                 state = state.copy(
+                    calendarLoading = false,
                     calendarPublicLoadState = surfaceLoadStateFor(
                         hasContent = state.calendarPublicData.days.isNotEmpty() || state.calendarPublicData.dayStats.isNotEmpty(),
                         loading = false,
@@ -7421,6 +7458,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun selectCalendarDay(day: String) {
         state = state.copy(calendarSelectedDay = day)
+        if (state.calendarMode == CalendarMode.PUBLIC) {
+            viewModelScope.launch { ensureCalendarPublicWindowLoaded(day) }
+        }
+    }
+
+    fun ensureVisibleCalendarDay(day: String) {
+        if (state.calendarMode == CalendarMode.PUBLIC) {
+            viewModelScope.launch { ensureCalendarPublicWindowLoaded(day) }
+        }
     }
 
     fun setCalendarMode(mode: CalendarMode) {
@@ -7460,7 +7506,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private suspend fun ensureCalendarModeLoaded(mode: CalendarMode, force: Boolean) {
         if (!force) {
             when (mode) {
-                CalendarMode.PUBLIC -> if (isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs)) return
+                CalendarMode.PUBLIC -> if (state.calendarPublicIndexComplete && isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs)) {
+                    ensureCalendarPublicWindowLoaded(state.calendarSelectedDay ?: state.calendarPublicData.days.firstOrNull())
+                    return
+                }
                 CalendarMode.BOOKMARKS,
                 CalendarMode.SEARCH,
                 CalendarMode.TIME_CAPSULES -> if (isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)) return
@@ -7483,35 +7532,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         try {
             when (mode) {
                 CalendarMode.PUBLIC -> {
-                    if (!force && state.calendarPublicData.days.isNotEmpty() && isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs)) {
-                        applyCalendarDataset(state.calendarPublicData)
-                        state = state.copy(
-                            calendarPublicLoadState = surfaceLoadStateFor(
-                                hasContent = true,
-                                loading = false
-                            ),
-                            calendarModeLoadState = surfaceLoadStateFor(
-                                hasContent = true,
-                                loading = false
-                            )
-                        )
-                    } else {
-                        val payload = repo.calendarPublic(state.calendarPublicData.revision)
-                        val dataset = if (payload.notModified) state.calendarPublicData else payload.toDataset(source = "calendar_public")
-                        state = state.copy(
-                            calendarPublicData = dataset,
-                            calendarPublicLoadState = surfaceLoadStateFor(
-                                hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
-                                loading = false
-                            ),
-                            calendarModeLoadState = surfaceLoadStateFor(
-                                hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
-                                loading = false
-                            )
-                        )
-                        applyCalendarDataset(dataset)
-                        if (!payload.notModified) state.user?.id?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
-                    }
+                    ensureCalendarPublicIndexLoaded(force)
                 }
                 CalendarMode.BOOKMARKS -> {
                     if (!force && state.calendarBookmarksData.days.isNotEmpty() && isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)) {
@@ -7837,6 +7858,33 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
     }
 
+    private suspend fun ensureCalendarPublicWindowLoaded(anchorDay: String?) {
+        val day = anchorDay?.takeIf { it.isNotBlank() } ?: return
+        if (state.calendarPublicData.photosByDay.containsKey(day) || state.calendarLoading) return
+        state = state.copy(calendarLoading = true)
+        runCatching { repo.calendarPublicWindow(day) }
+            .onSuccess { payload ->
+                val dataset = mergeCalendarPublicWindow(payload)
+                state = state.copy(
+                    calendarPublicData = dataset,
+                    calendarLoading = false,
+                    calendarPublicLoadState = surfaceLoadStateFor(hasContent = dataset.days.isNotEmpty(), loading = false),
+                    calendarModeLoadState = surfaceLoadStateFor(hasContent = dataset.days.isNotEmpty(), loading = false)
+                )
+                if (state.calendarMode == CalendarMode.PUBLIC) applyCalendarDataset(dataset)
+                state.user?.id?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
+                repo.logDebug(
+                    type = "calendar_window_applied",
+                    message = "calendar cards loaded",
+                    meta = "anchor=$day;days=${payload.days.size};hasMore=${payload.hasMore};cachedCards=${dataset.photosByDay.size}"
+                )
+            }
+            .onFailure {
+                state = state.copy(calendarLoading = false)
+                repo.logDebug(type = "calendar_window_failed", message = apiError(it, "Kalenderkarten konnten nicht geladen werden"), meta = "anchor=$day")
+            }
+    }
+
     private fun findFeedItemByPhotoId(photoId: Long): FeedItem? =
         state.feedByDay.values.firstNotNullOfOrNull { items -> items.firstOrNull { it.photo.id == photoId } }
 
@@ -7906,6 +7954,28 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 cleanPhotoMojiId != null -> "Die FotoMoji konnte im Feed noch nicht sichtbar geladen werden."
                 else -> "Die Reaktion konnte im Feed noch nicht sichtbar geladen werden."
             }
+        )
+    }
+
+    private fun mergeCalendarPublicIndex(index: CalendarDataset): CalendarDataset {
+        val current = state.calendarPublicData
+        val visibleDays = index.days.toSet()
+        val retainedCards = current.photosByDay.filterKeys(visibleDays::contains)
+        val mergedStats = index.dayStats.mapValues { (day, stat) ->
+            current.dayStats[day]?.featuredPhoto?.let { stat.copy(featuredPhoto = it) } ?: stat
+        }
+        return index.copy(dayStats = mergedStats, photosByDay = retainedCards)
+    }
+
+    private fun mergeCalendarPublicWindow(payload: CalendarPayloadResponse): CalendarDataset {
+        val current = state.calendarPublicData
+        val window = payload.toDataset(source = "calendar_public_window")
+        val days = if (current.days.isNotEmpty()) current.days else window.days
+        return current.copy(
+            revision = payload.revision.takeIf { it > 0L } ?: current.revision,
+            days = days,
+            dayStats = current.dayStats + window.dayStats,
+            photosByDay = current.photosByDay + window.photosByDay
         )
     }
 
@@ -8532,21 +8602,6 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             if (me.yoloModeEnabled) {
                 runCatching { applyYoloFeatures(forceAll = false, reason = "refresh_all") }
                     .onFailure { state = state.copy(message = apiError(it, "YOLO-Feature-Sync fehlgeschlagen")) }
-            }
-            runCatching { repo.calendarPublic(state.calendarPublicData.revision) }.getOrNull()?.let { publicCalendar ->
-                val dataset = if (publicCalendar.notModified) state.calendarPublicData else publicCalendar.toDataset(source = "calendar_public_refresh")
-                state = state.copy(
-                    calendarPublicData = dataset,
-                    calendarPublicLoadState = surfaceLoadStateFor(
-                        hasContent = dataset.days.isNotEmpty() || dataset.dayStats.isNotEmpty(),
-                        loading = false
-                    )
-                )
-                if (state.calendarMode == CalendarMode.PUBLIC) {
-                    applyCalendarDataset(dataset)
-                    state = state.copy(calendarModeLoadState = state.calendarPublicLoadState)
-                }
-                if (!publicCalendar.notModified) me.id.takeIf { it > 0L }?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
             }
             repo.setDiagnosticsConsentLocal(me.diagnosticsConsentGranted)
             if (!me.diagnosticsConsentGranted && state.diagnosticsUploadEnabled) {
@@ -13161,6 +13216,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onSearchSubmit = { vm.submitCalendarSearch() },
                     onOpenHashtagSearch = { vm.openCalendarSearch(it) },
                     onSelect = { day -> vm.selectCalendarDay(day) },
+                    onCalendarDayVisible = vm::ensureVisibleCalendarDay,
                     onOpenDayInFeed = { day -> scope.launch { vm.jumpToDay(day) } },
                     onOpenPhotoInFeed = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
                     onOpenHubTarget = { target -> scope.launch { vm.jumpToHubTarget(target) } }
@@ -16378,6 +16434,7 @@ fun HubTab(
     onSearchSubmit: () -> Unit,
     onOpenHashtagSearch: (String) -> Unit,
     onSelect: (String) -> Unit,
+    onCalendarDayVisible: (String) -> Unit,
     onOpenDayInFeed: (String) -> Unit,
     onOpenPhotoInFeed: (String, Long) -> Unit,
     onOpenHubTarget: (HubTarget) -> Unit
@@ -16660,6 +16717,7 @@ fun HubTab(
                     onSearchSubmit = onSearchSubmit,
                     onOpenHashtagSearch = onOpenHashtagSearch,
                     onSelect = onSelect,
+                    onCalendarDayVisible = onCalendarDayVisible,
                     onOpenDayInFeed = onOpenDayInFeed,
                     onOpenPhotoInFeed = onOpenPhotoInFeed
                 )
@@ -16904,9 +16962,7 @@ private fun HubCalendarPreviewRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            stat.featuredPhoto?.let { featured ->
-                (featured.thumbnailUrl?.takeIf { it.isNotBlank() } ?: featured.url).takeIf { it.isNotBlank() }
-            }?.let { url ->
+            stat.featuredPhoto?.thumbnailUrl?.takeIf { it.isNotBlank() }?.let { url ->
                 AsyncImage(
                     model = url,
                     contentDescription = "Kalender-Vorschau",
@@ -17233,6 +17289,7 @@ fun CalendarTab(
     onSearchSubmit: () -> Unit,
     onOpenHashtagSearch: (String) -> Unit,
     onSelect: (String) -> Unit,
+    onCalendarDayVisible: (String) -> Unit,
     onOpenDayInFeed: (String) -> Unit,
     onOpenPhotoInFeed: (String, Long) -> Unit
 ) {
@@ -17280,6 +17337,12 @@ fun CalendarTab(
     LaunchedEffect(selectedIndex, days.size) {
         if (days.isNotEmpty() && selectedIndex in days.indices) {
             listState.animateScrollToItem(dayListStartIndex + selectedIndex)
+        }
+    }
+    LaunchedEffect(visibleRange.value, dayListStartIndex, days, mode) {
+        if (mode == CalendarMode.PUBLIC) {
+            val visibleDayIndex = (visibleRange.value.first - dayListStartIndex).coerceAtLeast(0)
+            days.getOrNull(visibleDayIndex)?.let(onCalendarDayVisible)
         }
     }
     val hubScopedMode = when (hubSectionContext) {
@@ -17727,39 +17790,25 @@ fun CalendarTab(
                                         },
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    AsyncImage(
-                                        model = it.thumbnailUrl?.takeIf { value -> value.isNotBlank() } ?: it.url,
-                                        contentDescription = "Kalender-Vorschau 1",
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(88.dp)
-                                            .clip(RoundedCornerShape(16.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                    AsyncImage(
-                                        model = it.secondThumbnailUrl?.takeIf { value -> value.isNotBlank() } ?: it.secondUrl,
-                                        contentDescription = "Kalender-Vorschau 2",
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(88.dp)
-                                            .clip(RoundedCornerShape(16.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
+                                    it.thumbnailUrl?.takeIf { value -> value.isNotBlank() }?.let { thumbnail ->
+                                        AsyncImage(model = thumbnail, contentDescription = "Kalender-Vorschau 1", modifier = Modifier.weight(1f).height(88.dp).clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Crop)
+                                    }
+                                    it.secondThumbnailUrl?.takeIf { value -> value.isNotBlank() }?.let { thumbnail ->
+                                        AsyncImage(model = thumbnail, contentDescription = "Kalender-Vorschau 2", modifier = Modifier.weight(1f).height(88.dp).clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Crop)
+                                    }
                                 }
                             } else {
-                                AsyncImage(
-                                    model = it.thumbnailUrl?.takeIf { value -> value.isNotBlank() } ?: it.url,
-                                    contentDescription = "Kalender-Vorschau",
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(120.dp)
-                                        .clip(RoundedCornerShape(18.dp))
-                                        .clickable {
+                                it.thumbnailUrl?.takeIf { value -> value.isNotBlank() }?.let { thumbnail ->
+                                    AsyncImage(
+                                        model = thumbnail,
+                                        contentDescription = "Kalender-Vorschau",
+                                        modifier = Modifier.fillMaxWidth().height(120.dp).clip(RoundedCornerShape(18.dp)).clickable {
                                             onSelect(day)
                                             onOpenPhotoInFeed(day, it.photoId)
                                         },
-                                    contentScale = ContentScale.Crop
-                                )
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
                             }
                             Text(
                                 "${it.reactionCount} Reaktionen · ${it.commentCount} Kommentare",
