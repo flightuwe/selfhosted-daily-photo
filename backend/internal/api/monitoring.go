@@ -744,14 +744,7 @@ func (s *Server) handleAdminSystemHealth(c *gin.Context) {
 	}
 	_ = s.DB.Table("daily_prompts").Select("day, triggered_at, upload_until, trigger_source, requested_by").Order("day desc").Limit(1).Scan(&latestPrompt).Error
 
-	var dataSizeBytes int64
-	_ = filepath.Walk(s.Config.UploadDir, func(_ string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || info.IsDir() {
-			return nil
-		}
-		dataSizeBytes += info.Size()
-		return nil
-	})
+	storage := s.storageReport()
 
 	resp := gin.H{
 		"ok":              allOK,
@@ -760,7 +753,8 @@ func (s *Server) handleAdminSystemHealth(c *gin.Context) {
 		"time":            time.Now().In(s.Location),
 		"components":      components,
 		"latestPrompt":    latestPrompt,
-		"uploadSizeBytes": dataSizeBytes,
+		"uploadSizeBytes": storage.UploadBytes,
+		"storage":         storage,
 		"cors": gin.H{
 			"allowedOrigins": s.Config.AllowedOrigins,
 			"publicBaseUrl":  s.Config.PublicBaseURL,

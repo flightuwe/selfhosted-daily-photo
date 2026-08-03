@@ -222,7 +222,10 @@ func (s *Server) hubBootstrapPayload(user models.User, now time.Time) (gin.H, er
 }
 
 func (s *Server) dashboardSummaryForHub(userID uint, now time.Time) (gin.H, error) {
-	calendar, err := s.calendarPublicCompactPayload(userID, now)
+	// The hub only renders its first six calendar days and eight feed entries.
+	// Building the complete 365-day calendar here duplicated the work of the
+	// dedicated calendar request and was the main source of bootstrap long tails.
+	calendar, err := s.calendarPublicCompactPayloadForDays(userID, now, 60)
 	if err != nil {
 		return nil, err
 	}

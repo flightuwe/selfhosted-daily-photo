@@ -1202,6 +1202,41 @@ func (s *Server) handleClientDebugLog(c *gin.Context) {
 			entry.RequestID = strings.TrimSpace(fmt.Sprint(reqID))
 		}
 	}
+	// Debug uploads are retried by mobile clients. A request ID identifies the
+	// local aggregate: retries replace that aggregate instead of creating a new
+	// row, while a higher aggregateCount still reaches the diagnostics views.
+	if entry.RequestID != "" {
+		var existing models.ClientDebugLog
+		if err := s.DB.Where("user_id = ? AND request_id = ?", user.ID, entry.RequestID).First(&existing).Error; err == nil {
+			if existing.Type == entry.Type &&
+				existing.Message == entry.Message &&
+				existing.Meta == entry.Meta &&
+				existing.AppVersion == entry.AppVersion &&
+				existing.DeviceName == entry.DeviceName &&
+				existing.SessionID == entry.SessionID {
+				// Older clients may send an already acknowledged batch again. The
+				// read above is enough to prove idempotence; avoid a needless write.
+				c.JSON(http.StatusOK, gin.H{"ok": true, "deduplicated": true})
+				return
+			}
+			if err := s.DB.Model(&existing).Updates(map[string]any{
+				"type":        entry.Type,
+				"message":     entry.Message,
+				"meta":        entry.Meta,
+				"app_version": entry.AppVersion,
+				"device_name": entry.DeviceName,
+				"session_id":  entry.SessionID,
+			}).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "log update failed"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"ok": true, "deduplicated": true})
+			return
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "log lookup failed"})
+			return
+		}
+	}
 	if err := s.DB.Create(&entry).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log save failed"})
 		return
@@ -1228,6 +1263,34 @@ func debugMetaPairs(meta string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+// debugSignalCategory separates actionable operational failures from expected
+// mobile lifecycle and connectivity states. The latter are useful diagnostics,
+// but must never turn a healthy day into a high-severity incident on their own.
+func debugSignalCategory(row models.ClientDebugLog) string {
+	kind := strings.ToLower(strings.TrimSpace(row.Type))
+	meta := debugMetaPairs(row.Meta)
+	family := strings.ToLower(strings.TrimSpace(meta["failureClass"]))
+	if family == "" || family == "none" {
+		family = strings.ToLower(strings.TrimSpace(debugFailureFamily(row)))
+	}
+	if !strings.Contains(kind, "failed") && !strings.Contains(kind, "error") && !strings.Contains(kind, "crash") {
+		return ""
+	}
+	if strings.Contains(kind, "crash") || strings.Contains(family, "illegalstate") {
+		return "crash"
+	}
+	if strings.HasPrefix(family, "http_5") || family == "http5xx" || family == "http_502" {
+		return "server"
+	}
+	switch family {
+	case "no_active_network", "dns", "unknownhostexception", "timeout", "sockettimeoutexception", "connectexception", "interruptedioexception":
+		return "connectivity"
+	case "jobcancellationexception", "leftcompositioncancellationexception", "worker_cancelled":
+		return "cancelled"
+	}
+	return "client"
 }
 
 func debugMetaInt(meta map[string]string, key string) *int64 {
@@ -4146,22 +4209,20 @@ func (s *Server) handleAdminStats(c *gin.Context) {
 	_ = s.DB.Model(&models.User{}).Where("diagnostics_consent_granted = ?", true).Count(&diagnosticsConsentUsers).Error
 	_ = s.DB.Raw("SELECT COALESCE(SUM(CASE WHEN second_path IS NOT NULL AND second_path <> '' THEN 2 ELSE 1 END),0) FROM photos").Scan(&totalImages).Error
 
-	var startedAt *time.Time
+	var firstActivityDay string
 	_ = s.DB.Raw(`
-SELECT MIN(created_at) FROM (
-    SELECT MIN(created_at) AS created_at FROM users
-    UNION ALL SELECT MIN(created_at) FROM photos
-    UNION ALL SELECT MIN(created_at) FROM daily_prompts
-    UNION ALL SELECT MIN(created_at) FROM app_settings
+SELECT MIN(day) FROM (
+    SELECT day FROM photos WHERE day <> ''
+    UNION ALL SELECT day FROM daily_prompts WHERE day <> ''
 ) t
-WHERE created_at IS NOT NULL
-`).Scan(&startedAt).Error
-	if startedAt != nil && !startedAt.IsZero() {
-		d := int64(time.Now().In(s.Location).Sub(startedAt.In(s.Location)).Hours() / 24)
-		if d < 0 {
-			d = 0
+`).Scan(&firstActivityDay).Error
+	if firstDay, err := time.ParseInLocation("2006-01-02", firstActivityDay, s.Location); err == nil {
+		today := time.Now().In(s.Location)
+		currentDay := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, s.Location)
+		d := int64(currentDay.Sub(firstDay).Hours() / 24)
+		if d >= 0 {
+			runningDays = d + 1
 		}
-		runningDays = d + 1
 	}
 
 	_ = filepath.Walk(s.Config.UploadDir, func(_ string, info os.FileInfo, err error) error {
@@ -4778,20 +4839,26 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 	}
 
 	type dayMetrics struct {
-		postedUsers       map[uint]struct{}
-		promptUsers       map[uint]struct{}
-		extraUsers        map[uint]struct{}
-		photoCount        int
-		dailyMomentPhotos int
-		extraPhotos       int
-		timeCapsules      int
-		privateCapsules   int
-		commentCount      int
-		reactionCount     int
-		chatMessageCount  int
-		debugErrorCount   int
-		onlineUsers       map[uint]struct{}
-		userActivity      map[uint]gin.H
+		postedUsers            map[uint]struct{}
+		promptUsers            map[uint]struct{}
+		extraUsers             map[uint]struct{}
+		photoCount             int
+		dailyMomentPhotos      int
+		extraPhotos            int
+		timeCapsules           int
+		privateCapsules        int
+		commentCount           int
+		reactionCount          int
+		chatMessageCount       int
+		debugErrorCount        int
+		debugConnectivityCount int
+		debugCancelledCount    int
+		debugServerCount       int
+		debugCrashCount        int
+		debugClientCount       int
+		debugSignalUsers       map[string]map[uint]struct{}
+		onlineUsers            map[uint]struct{}
+		userActivity           map[uint]gin.H
 	}
 
 	metricsByDay := make(map[string]*dayMetrics, len(dayList))
@@ -4800,11 +4867,12 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			return existing
 		}
 		created := &dayMetrics{
-			postedUsers:  make(map[uint]struct{}),
-			promptUsers:  make(map[uint]struct{}),
-			extraUsers:   make(map[uint]struct{}),
-			onlineUsers:  make(map[uint]struct{}),
-			userActivity: make(map[uint]gin.H),
+			postedUsers:      make(map[uint]struct{}),
+			promptUsers:      make(map[uint]struct{}),
+			extraUsers:       make(map[uint]struct{}),
+			onlineUsers:      make(map[uint]struct{}),
+			userActivity:     make(map[uint]gin.H),
+			debugSignalUsers: make(map[string]map[uint]struct{}),
 		}
 		metricsByDay[day] = created
 		return created
@@ -4842,10 +4910,30 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 		metrics.chatMessageCount++
 	}
 	for _, row := range debugLogs {
-		kind := strings.ToLower(strings.TrimSpace(row.Type))
-		if strings.Contains(kind, "failed") || strings.Contains(kind, "error") || strings.Contains(kind, "crash") {
-			metrics := getMetrics(row.CreatedAt.In(s.Location).Format("2006-01-02"))
-			metrics.debugErrorCount++
+		category := debugSignalCategory(row)
+		if category == "" {
+			continue
+		}
+		metrics := getMetrics(row.CreatedAt.In(s.Location).Format("2006-01-02"))
+		if metrics.debugSignalUsers[category] == nil {
+			metrics.debugSignalUsers[category] = make(map[uint]struct{})
+		}
+		metrics.debugSignalUsers[category][row.UserID] = struct{}{}
+		count := int(debugMetaCount(debugMetaPairs(row.Meta)))
+		switch category {
+		case "connectivity":
+			metrics.debugConnectivityCount += count
+		case "cancelled":
+			metrics.debugCancelledCount += count
+		case "server":
+			metrics.debugServerCount += count
+			metrics.debugErrorCount += count
+		case "crash":
+			metrics.debugCrashCount += count
+			metrics.debugErrorCount += count
+		default:
+			metrics.debugClientCount += count
+			metrics.debugErrorCount += count
 		}
 	}
 	for _, row := range activities {
@@ -4914,6 +5002,8 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 	totalExtraUsers := 0
 	totalOnlineUsers := 0
 	totalDebugErrors := 0
+	totalDebugConnectivity := 0
+	totalDebugCancelled := 0
 	totalDaysWithPosts := 0
 	totalDaysOnTime := 0
 	totalDaysWithTriggerPerformance := 0
@@ -5000,6 +5090,11 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			"reactionCount":               metrics.reactionCount,
 			"chatMessageCount":            metrics.chatMessageCount,
 			"debugErrorCount":             metrics.debugErrorCount,
+			"debugConnectivityCount":      metrics.debugConnectivityCount,
+			"debugCancelledCount":         metrics.debugCancelledCount,
+			"debugServerCount":            metrics.debugServerCount,
+			"debugCrashCount":             metrics.debugCrashCount,
+			"debugClientCount":            metrics.debugClientCount,
 			"onlineTrackingAvailable":     onlineTrackingAvailable,
 			"triggerAttemptCount":         triggerAuditByDay[day].Attempts,
 			"triggerBlockedCount":         triggerAuditByDay[day].Blocked,
@@ -5079,6 +5174,8 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 		totalExtraUsers += len(metrics.extraUsers)
 		totalOnlineUsers += onlineUsersCount
 		totalDebugErrors += metrics.debugErrorCount
+		totalDebugConnectivity += metrics.debugConnectivityCount
+		totalDebugCancelled += metrics.debugCancelledCount
 		totalRequestsAllDays += totalRequests
 		if metrics.photoCount > 0 {
 			totalDaysWithPosts++
@@ -5114,12 +5211,19 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 				"details":  fmt.Sprintf("delay=%dmin", triggerDelayMinutes),
 			})
 		}
-		if metrics.debugErrorCount >= 5 {
+		if metrics.debugServerCount > 0 || metrics.debugCrashCount > 0 {
 			anomalies = append(anomalies, gin.H{
 				"day":      day,
 				"severity": "high",
-				"reason":   "elevated error indicators",
-				"details":  fmt.Sprintf("debugErrorCount=%d", metrics.debugErrorCount),
+				"reason":   "server or crash signal observed",
+				"details":  fmt.Sprintf("server=%d crash=%d", metrics.debugServerCount, metrics.debugCrashCount),
+			})
+		} else if metrics.debugClientCount >= 3 && len(metrics.debugSignalUsers["client"]) >= 2 {
+			anomalies = append(anomalies, gin.H{
+				"day":      day,
+				"severity": "medium",
+				"reason":   "repeated client failures across users",
+				"details":  fmt.Sprintf("client=%d users=%d", metrics.debugClientCount, len(metrics.debugSignalUsers["client"])),
 			})
 		}
 	}
@@ -5265,6 +5369,8 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 		"avgAbsoluteTriggerDelayMinutes": avgAbsoluteTriggerDelay,
 		"debugErrorIndicators":           totalDebugErrors,
 		"errorIndicatorRatePerDay":       safeRatio(totalDebugErrors, maxInt(1, len(items))),
+		"connectivityIndicators":         totalDebugConnectivity,
+		"cancelledIndicators":            totalDebugCancelled,
 		"avgPostedUsersPerDay":           avgPostedUsersPerDay,
 		"avgOnlineUsersPerDay":           avgOnlineUsersPerDay,
 		"avgRequestsPerOnlineUser":       avgRequestsPerOnlineUser,

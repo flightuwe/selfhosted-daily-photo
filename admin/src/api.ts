@@ -436,6 +436,11 @@ export type AdminHistoryDay = {
   reactionCount: number;
   chatMessageCount: number;
   debugErrorCount?: number;
+  debugConnectivityCount?: number;
+  debugCancelledCount?: number;
+  debugServerCount?: number;
+  debugCrashCount?: number;
+  debugClientCount?: number;
   triggerAttemptCount?: number;
   triggerBlockedCount?: number;
   triggerFailedCount?: number;
@@ -699,6 +704,8 @@ export type AdminHistoryReliability = {
   avgAbsoluteTriggerDelayMinutes: number;
   debugErrorIndicators: number;
   errorIndicatorRatePerDay: number;
+  connectivityIndicators?: number;
+  cancelledIndicators?: number;
   avgPostedUsersPerDay: number;
   avgOnlineUsersPerDay: number;
   avgRequestsPerOnlineUser: number;
@@ -815,6 +822,22 @@ export type SystemHealth = {
   provider: string;
   time: string;
   uploadSizeBytes: number;
+  storage?: {
+    filesystemTotalBytes: number;
+    filesystemFreeBytes: number;
+    filesystemUsedBytes: number;
+    uploadBytes: number;
+    originalBytes: number;
+    renditionBytes: number;
+    otherUploadBytes: number;
+    databaseBytes: number;
+    databaseWalBytes: number;
+    databaseShmBytes: number;
+    backendLogBytes: number;
+    gatewayLogBytes: number;
+    dockerBytesAvailable: boolean;
+    dockerNote?: string;
+  };
   latestPrompt?: {
     day?: string;
     triggeredAt?: string | null;

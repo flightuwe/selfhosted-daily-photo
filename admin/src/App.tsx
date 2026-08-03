@@ -3211,7 +3211,7 @@ export function App() {
               <CardStat title="Tage aktiv" value={stats.runningDays} />
               <CardStat title="Bilder gesamt" value={stats.totalImages} />
               <CardStat
-                title="Speicher gesamt"
+                title="Upload-Speicher"
                 value={formatBytes(stats.storageBytes)}
               />
               <CardStat
@@ -3259,6 +3259,50 @@ export function App() {
                     </p>
                   </div>
                 </article>
+
+                <h3>Speicherbilanz</h3>
+                <div className="grid4">
+                  <CardStat
+                    title="Volume frei"
+                    value={formatBytes(systemHealth.storage?.filesystemFreeBytes || 0)}
+                  />
+                  <CardStat
+                    title="Volume belegt"
+                    value={formatBytes(systemHealth.storage?.filesystemUsedBytes || 0)}
+                  />
+                  <CardStat
+                    title="Originale"
+                    value={formatBytes(systemHealth.storage?.originalBytes || 0)}
+                  />
+                  <CardStat
+                    title="Renditions"
+                    value={formatBytes(systemHealth.storage?.renditionBytes || 0)}
+                  />
+                  <CardStat
+                    title="SQLite inkl. WAL"
+                    value={formatBytes(
+                      (systemHealth.storage?.databaseBytes || 0) +
+                        (systemHealth.storage?.databaseWalBytes || 0) +
+                        (systemHealth.storage?.databaseShmBytes || 0),
+                    )}
+                  />
+                  <CardStat
+                    title="Backend-Logs"
+                    value={formatBytes(systemHealth.storage?.backendLogBytes || 0)}
+                  />
+                  <CardStat
+                    title="Gateway-Logs"
+                    value={formatBytes(systemHealth.storage?.gatewayLogBytes || 0)}
+                  />
+                  <CardStat
+                    title="Andere Upload-Dateien"
+                    value={formatBytes(systemHealth.storage?.otherUploadBytes || 0)}
+                  />
+                </div>
+                <p className="small">
+                  Docker-Images und Build-Cache werden bewusst nur im
+                  eingeschraenkten Host-Report erfasst. {systemHealth.storage?.dockerNote || ""}
+                </p>
 
                 <h3>Komponenten</h3>
                 <table className="table">
@@ -4671,25 +4715,33 @@ export function App() {
             </div>
             <div className="grid4">
               <article className="stat">
-                <h3>Zuverlaessig (Top 5)</h3>
-                <p>{historyReliableTop.length}</p>
-              </article>
-              <article className="stat">
-                <h3>Extra-lastig (Top 5)</h3>
-                <p>{historyExtraHeavyTop.length}</p>
-              </article>
-              <article className="stat">
-                <h3>Warnungen</h3>
-                <p>{historyAnomalies.length}</p>
-              </article>
-              <article className="stat">
-                <h3>Fehlerindikatoren</h3>
+                <h3>Operative Fehler</h3>
                 <p>
                   {historyItems.reduce(
                     (acc, row) => acc + Number(row.debugErrorCount || 0),
                     0,
                   )}
                 </p>
+              </article>
+              <article className="stat">
+                <h3>Server / Crash</h3>
+                <p>
+                  {historyItems.reduce(
+                    (acc, row) =>
+                      acc +
+                      Number(row.debugServerCount || 0) +
+                      Number(row.debugCrashCount || 0),
+                    0,
+                  )}
+                </p>
+              </article>
+              <article className="stat">
+                <h3>Netzwerk-Signale</h3>
+                <p>{historyReliability.connectivityIndicators ?? 0}</p>
+              </article>
+              <article className="stat">
+                <h3>Abgebrochene Arbeit</h3>
+                <p>{historyReliability.cancelledIndicators ?? 0}</p>
               </article>
             </div>
             <div className="grid4">
@@ -4706,7 +4758,7 @@ export function App() {
                 value={historyReliability.avgRequestsPerOnlineUser.toFixed(2)}
               />
               <CardStat
-                title="Error Rate/Tag"
+                title="Operative Fehler/Tag"
                 value={historyReliability.errorIndicatorRatePerDay.toFixed(2)}
               />
             </div>
@@ -4916,6 +4968,24 @@ export function App() {
                                 <CardStat
                                   title="Capsules"
                                   value={`${item.timeCapsuleCount} / privat ${item.privateCapsuleCount}`}
+                                />
+                              </div>
+                              <div className="grid4">
+                                <CardStat
+                                  title="Operative Fehler"
+                                  value={item.debugErrorCount ?? 0}
+                                />
+                                <CardStat
+                                  title="Server / Crash"
+                                  value={`${item.debugServerCount ?? 0} / ${item.debugCrashCount ?? 0}`}
+                                />
+                                <CardStat
+                                  title="Netzwerk-Signale"
+                                  value={item.debugConnectivityCount ?? 0}
+                                />
+                                <CardStat
+                                  title="Abgebrochen"
+                                  value={item.debugCancelledCount ?? 0}
                                 />
                               </div>
                               {item.analytics && (

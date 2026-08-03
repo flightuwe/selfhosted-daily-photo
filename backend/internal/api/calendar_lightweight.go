@@ -18,12 +18,25 @@ type calendarCountRow struct {
 // photoDecorationsForViewer. Those paths hydrate comments, reactions, marks and
 // paint paths and were the dominant source of calendar response size and CPU.
 func (s *Server) calendarPublicCompactPayload(viewerID uint, now time.Time) (gin.H, error) {
+	return s.calendarPublicCompactPayloadForDays(viewerID, now, 365)
+}
+
+// calendarPublicCompactPayloadForDays keeps the public calendar response
+// bounded for consumers which only render a recent preview. The full calendar
+// deliberately continues to use the 365-day product window above.
+func (s *Server) calendarPublicCompactPayloadForDays(viewerID uint, now time.Time, maxDays int) (gin.H, error) {
+	if maxDays < 1 {
+		maxDays = 1
+	}
+	if maxDays > 365 {
+		maxDays = 365
+	}
 	visibleDays := s.DB.Model(&models.Photo{}).
 		Select("day").
 		Where("user_id = ? OR capsule_visible_at IS NULL OR capsule_visible_at <= ?", viewerID, now).
 		Group("day").
 		Order("day desc").
-		Limit(365)
+		Limit(maxDays)
 
 	var photos []models.Photo
 	if err := s.DB.Preload("User").
@@ -35,8 +48,8 @@ func (s *Server) calendarPublicCompactPayload(viewerID uint, now time.Time) (gin
 	}
 	sortPhotosForFeed(photos)
 
-	days := make([]string, 0, 365)
-	daySeen := make(map[string]struct{}, 365)
+	days := make([]string, 0, maxDays)
+	daySeen := make(map[string]struct{}, maxDays)
 	photoIDs := make([]uint, 0, len(photos))
 	for _, photo := range photos {
 		photoIDs = append(photoIDs, photo.ID)

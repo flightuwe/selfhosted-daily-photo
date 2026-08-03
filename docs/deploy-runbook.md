@@ -144,6 +144,17 @@ Expected response shape:
 - `provider: "fcm"`
 - `version` shows the current GHCR runtime build, for example `srv-249.1`
 
+## Storage Operations
+
+- Persistent Daily data lives under `/opt/daily/backend-data`, not inside
+  `/opt/daily/stack`.
+- Install `deploy/logrotate/daily-nginx` in the LXC as
+  `/etc/logrotate.d/daily-nginx`; it retains 14 compressed daily gateway logs.
+- For a complete storage report including Docker, use the constrained
+  node-side `pct exec 9204` report. The backend API only reports its mounted
+  data volume; it cannot safely inspect the Docker daemon.
+- See `docs/storage-operations.md` for thresholds and validation.
+
 Recovered reference rollout on 2026-04-17:
 
 - commit on `main`: `67967f3`

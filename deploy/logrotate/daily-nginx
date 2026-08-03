@@ -1,0 +1,16 @@
+# Install on the Daily LXC host as /etc/logrotate.d/daily-nginx.
+# copytruncate keeps the bind-mounted access.log path stable for the backend's
+# forensic reader. The reader resets its saved offset when a truncated file is
+# shorter than the stored position.
+/opt/daily/logs/nginx/*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    dateext
+    dateformat -%Y%m%d
+    su root root
+}
