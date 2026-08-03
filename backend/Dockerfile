@@ -10,7 +10,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -ldflags "-X main.buildVersion=${APP_VERSI
 
 FROM alpine:3.21
 WORKDIR /app
-RUN apk add --no-cache tzdata && adduser -D app
+RUN apk add --no-cache tzdata libwebp-tools libavif-apps && adduser -D app
 COPY --from=builder /out/server /app/server
 USER app
 EXPOSE 8080

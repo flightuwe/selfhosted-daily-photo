@@ -1,0 +1,13 @@
+{
+  "version": "v0.8.0",
+  "title": "Daten-, Medien- und Cache-Optimierung",
+  "items": [
+    "Kalender und Hub laden deutlich kleinere, echte Lightweight-Daten statt versteckter Vollantworten; ETag, Revision und Altclient-Kompatibilitaet bleiben erhalten.",
+    "Der neue profilgebundene Medienmodus bietet Normal, Datensparen und Automatisch. YOLO veraendert diese Auswahl nicht.",
+    "Datensparen nutzt kompatible 720-px-Renditions mit AVIF-, WebP-, JPEG- und Original-Fallback. Originaldateien bleiben dauerhaft unveraendert erhalten.",
+    "Der Mediencache arbeitet jetzt adaptiv mit 128 bis 512 MB und LRU, ohne den bisherigen Sieben-Tage-Komplettreset. Upload-Queue und unveroeffentlichte Aufnahmen sind von Cacheaktionen ausgeschlossen.",
+    "Identische Feed-Fenster werden zusammengefuehrt, leere Kanten kurz negativ gecacht und Netzwerkwechsel entprellt, damit Scrollen und Wiederaufrufe weniger doppelte Requests ausloesen.",
+    "Die Verbrauchsanzeige bleibt im Kamera-Verbindungsdialog, zeigt zuerst eine kompakte Bilanz und klappt Cachequellen, Wiederholungen, Endpunkte und Feed-Koordinatorwerte erst auf Wunsch aus.",
+    "Backend-Dashboard und Gateway-Gegenprobe erfassen Compact-/Delta-/304-Quoten, App-Versionen, Rendition-Queue, Encoderfehler und anonymisierte JPEG-/WebP-/AVIF-Auslieferungsbytes."
+  ]
+}

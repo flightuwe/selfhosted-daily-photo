@@ -222,17 +222,33 @@ func (s *Server) hubBootstrapPayload(user models.User, now time.Time) (gin.H, er
 }
 
 func (s *Server) dashboardSummaryForHub(userID uint, now time.Time) (gin.H, error) {
-	calendar, err := s.calendarPayload(userID, "public", 0, now)
+	calendar, err := s.calendarPublicCompactPayload(userID, now)
 	if err != nil {
 		return nil, err
 	}
-	items, _ := calendar["items"].([]gin.H)
-	if items == nil {
-		items = []gin.H{}
+	items := make([]gin.H, 0, 8)
+	days, _ := calendar["days"].([]string)
+	photosByDay, _ := calendar["photosByDay"].(map[string][]gin.H)
+	for _, day := range days {
+		for _, row := range photosByDay[day] {
+			items = append(items, gin.H{
+				"isEarly": false, "isLate": false, "capsuleLocked": false, "capsuleReleased": false,
+				"photo": row["photo"], "user": row["user"], "reactions": []gin.H{}, "comments": []gin.H{}, "photoMojis": []gin.H{},
+			})
+			if len(items) >= 8 {
+				break
+			}
+		}
+		if len(items) >= 8 {
+			break
+		}
 	}
 	dayStats, _ := calendar["dayStats"].([]gin.H)
 	if dayStats == nil {
 		dayStats = []gin.H{}
+	}
+	if len(dayStats) > 60 {
+		dayStats = dayStats[:60]
 	}
 	return gin.H{
 		"calendarPreview": dayStats,

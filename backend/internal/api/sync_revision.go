@@ -10,7 +10,10 @@ import (
 	"gorm.io/gorm"
 )
 
-const timelineRevisionScope = "timeline"
+const (
+	timelineRevisionScope = "timeline"
+	calendarRevisionScope = "calendar:public"
+)
 
 func feedRevisionScope(day string) string {
 	return "feed:" + strings.TrimSpace(day)

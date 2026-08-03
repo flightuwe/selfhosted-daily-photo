@@ -906,7 +906,22 @@ export type AdminPerformanceOverview = {
   dataSync?: {
     feed?: AdminDataSyncEndpoint;
     timeline?: AdminDataSyncEndpoint;
+    calendar?: AdminDataSyncEndpoint;
+    hubBootstrap?: AdminDataSyncEndpoint;
     uploads?: AdminDataSyncEndpoint & { clientRetrySignals?: number };
+    renditions?: {
+      queued?: number;
+      running?: number;
+      ready?: number;
+      failed?: number;
+      bytes?: number;
+      maxBytes?: number;
+      enabled?: boolean;
+      avifEnabled?: boolean;
+      deliveriesSevenDays?: Record<string, { requests?: number; bytes?: number }>;
+    };
+    legacyRequestRate?: number;
+    capabilities?: Array<{ surface: string; mode: string; outcome: string; appVersion: string; requests: number; responseBytes: number; maxLatencyMs: number }>;
   };
   summary?: {
     requests: number;

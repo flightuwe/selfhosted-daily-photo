@@ -224,6 +224,7 @@ fun buildStandardHttpClient(
             val requestId = "req_${UUID.randomUUID()}"
             val newReq = chain.request().newBuilder()
                 .header("X-Request-ID", requestId)
+                .header("X-Daily-App-Version", BuildConfig.VERSION_NAME)
                 .build()
             chain.proceed(newReq)
         }

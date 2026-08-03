@@ -832,6 +832,9 @@ class UploadQueueWorker(
         }
         val repo = AppRepo(applicationContext, buildStandardHttpClient(applicationContext, "worker", timeoutProfile = QueueUploadHttpTimeoutProfile))
         val probe = repo.measureUploadTelemetryProbe()
+        // Capture before markSuccess removes the queue files. The completion log
+        // must report the transmitted size, not the now-deleted files as 1 byte.
+        val uploadBytesTotal = (File(item.backPath).length() + File(item.frontPath).length()).coerceAtLeast(1L)
         appendDebugLog(
             context = applicationContext,
             type = "upload_queue_attempt_started",
@@ -842,7 +845,7 @@ class UploadQueueWorker(
                 append(";uploadClientId=").append(item.uploadClientId)
                 append(";queueItemId=").append(item.id)
                 append(";attempt=").append(item.attempts + 1)
-                append(";bytesTotal=").append((File(item.backPath).length() + File(item.frontPath).length()).coerceAtLeast(1L))
+                append(";bytesTotal=").append(uploadBytesTotal)
                 append(";networkStable=").append(probe.networkStable)
                 if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)
                 if (probe.pingFailure.isNotBlank()) append(";pingFailure=").append(probe.pingFailure)
@@ -901,7 +904,7 @@ class UploadQueueWorker(
                     append(";uploadClientId=").append(item.uploadClientId)
                     append(";queueItemId=").append(item.id)
                     append(";attempt=").append(item.attempts + 1)
-                    append(";bytesTotal=").append((File(item.backPath).length() + File(item.frontPath).length()).coerceAtLeast(1L))
+                    append(";bytesTotal=").append(uploadBytesTotal)
                     append(";http=200")
                     append(";networkStable=").append(probe.networkStable)
                     if (probe.pingMs != null) append(";pingMs=").append(probe.pingMs)

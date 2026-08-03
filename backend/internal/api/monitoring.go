@@ -628,7 +628,57 @@ func (s *Server) metricsMiddleware() gin.HandlerFunc {
 			BytesOut:  int64(c.Writer.Size()),
 		}
 		s.Monitor.RecordRequest(metric)
+		s.recordSyncCapabilityMetric(c, metric)
 	}
+}
+
+func (s *Server) recordSyncCapabilityMetric(c *gin.Context, metric RequestMetric) {
+	if s.DB == nil {
+		return
+	}
+	path := c.Request.URL.Path
+	surface := ""
+	switch {
+	case strings.Contains(path, "/calendar"):
+		surface = "calendar"
+	case strings.Contains(path, "/hub/bootstrap"):
+		surface = "hub"
+	case strings.Contains(path, "/hub/timeline"):
+		surface = "timeline"
+	case strings.Contains(path, "/feed"):
+		surface = "feed"
+	case strings.Contains(path, "/upload") || strings.Contains(path, "/attachments"):
+		surface = "upload"
+	default:
+		return
+	}
+	mode := "legacy"
+	if c.Query("compact") == "true" {
+		mode = "compact"
+	} else if c.Query("cursor") != "" || c.Query("known_revisions") != "" || strings.Contains(path, "/window") {
+		mode = "delta"
+	}
+	outcome := "full"
+	if metric.Status == http.StatusNotModified {
+		outcome = "304"
+	} else if mode == "delta" {
+		outcome = "delta"
+	}
+	appVersion := strings.TrimSpace(c.GetHeader("X-Daily-App-Version"))
+	if appVersion == "" {
+		appVersion = "legacy"
+	}
+	row := models.SyncCapabilityMetric{
+		Minute: metric.At.UTC().Truncate(time.Minute), Surface: surface, Mode: mode, Outcome: outcome,
+		AppVersion: appVersion, Requests: 1, BytesOut: metric.BytesOut, MaxLatency: metric.LatencyMs,
+	}
+	_ = s.DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "minute"}, {Name: "surface"}, {Name: "mode"}, {Name: "outcome"}, {Name: "app_version"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"requests": gorm.Expr("requests + 1"), "bytes_out": gorm.Expr("bytes_out + ?", row.BytesOut),
+			"max_latency": gorm.Expr("MAX(max_latency, ?)", row.MaxLatency), "updated_at": time.Now(),
+		}),
+	}).Create(&row).Error
 }
 
 func (s *Server) handleLiveHealth(c *gin.Context) {

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/gin-contrib/cors"
+	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/yosho/selfhosted-bereal/backend/internal/auth"
 	"github.com/yosho/selfhosted-bereal/backend/internal/config"
@@ -209,6 +210,15 @@ func normalizeCreativePostMode(v string) string {
 	}
 }
 
+func normalizeMediaDataMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "data_saver", "automatic":
+		return strings.ToLower(strings.TrimSpace(v))
+	default:
+		return "normal"
+	}
+}
+
 func creativeModeAllowsMark(v string) bool {
 	mode := normalizeCreativePostMode(v)
 	return mode == "mark" || mode == "both"
@@ -233,11 +243,12 @@ func canViewerUnmarkNsfwPhoto(viewer models.User, photo models.Photo) bool {
 func (s *Server) Router() *gin.Engine {
 	r := gin.Default()
 	r.Use(s.requestIDMiddleware(), s.responseMetaMiddleware(), s.metricsMiddleware())
+	r.Use(gzip.Gzip(gzip.DefaultCompression))
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     s.Config.AllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-ID"},
-		ExposeHeaders:    []string{"Content-Length", "X-Request-ID", "X-Server-Instance", "X-App-Version"},
+		ExposeHeaders:    []string{"Content-Length", "ETag", "X-Request-ID", "X-Server-Instance", "X-App-Version"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
@@ -846,6 +857,8 @@ func (s *Server) handleUpdateProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
 		return
 	}
+	s.bumpSyncRevision(calendarRevisionScope)
+	s.bumpSyncRevision(timelineRevisionScope)
 
 	var updated models.User
 	if err := s.DB.First(&updated, user.ID).Error; err != nil {
@@ -871,6 +884,7 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		OwnPostNumberInPushEnabled          *bool   `json:"ownPostNumberInPushEnabled"`
 		PostNumberInPushEnabled             *bool   `json:"postNumberInPushEnabled"`
 		YoloModeEnabled                     *bool   `json:"yoloModeEnabled"`
+		MediaDataMode                       *string `json:"mediaDataMode"`
 		AllowPhotoDownload                  *bool   `json:"allowPhotoDownload"`
 		AllowCommunityNsfwMarking           *bool   `json:"allowCommunityNsfwMarking"`
 		ShowNsfwByDefault                   *bool   `json:"showNsfwByDefault"`
@@ -923,6 +937,14 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 	}
 	if req.YoloModeEnabled != nil {
 		updates["yolo_mode_enabled"] = *req.YoloModeEnabled
+	}
+	if req.MediaDataMode != nil {
+		mode := normalizeMediaDataMode(*req.MediaDataMode)
+		if mode != strings.ToLower(strings.TrimSpace(*req.MediaDataMode)) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mediaDataMode"})
+			return
+		}
+		updates["media_data_mode"] = mode
 	}
 	if req.AllowPhotoDownload != nil {
 		updates["allow_photo_download"] = *req.AllowPhotoDownload
@@ -5938,12 +5960,74 @@ func (s *Server) handleFeedDayStats(c *gin.Context) {
 func (s *Server) handleCalendarPublic(c *gin.Context) {
 	user, _ := userFromContext(c)
 	now := time.Now().In(s.Location)
-	payload, err := s.calendarPayload(user.ID, "public", 0, now)
+	compact := strings.EqualFold(strings.TrimSpace(c.Query("compact")), "true")
+	revision := int64(0)
+	if compact {
+		revision = s.syncRevision(calendarRevisionScope)
+		etag := revisionETag("calendar-public", map[string]int64{"all": revision})
+		c.Header("ETag", etag)
+		c.Header("Cache-Control", "private, no-cache")
+		if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
+			c.Status(http.StatusNotModified)
+			c.Writer.WriteHeaderNow()
+			return
+		}
+	}
+	var payload gin.H
+	var err error
+	if compact {
+		payload, err = s.calendarPublicCompactPayload(user.ID, now)
+	} else {
+		payload, err = s.calendarPayload(user.ID, "public", 0, now)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
+	if compact {
+		payload["schemaVersion"] = "calendar_public_v2"
+		payload["revision"] = revision
+		payload["serverNow"] = now.UTC()
+	}
 	c.JSON(http.StatusOK, payload)
+}
+
+// compactCalendarPublicPayload keeps the calendar metadata and image references
+// but removes the duplicated feed representation and large interactive drawing
+// payloads. Feed details are fetched through the revisioned feed endpoint.
+func compactCalendarPublicPayload(payload gin.H) gin.H {
+	result := gin.H{}
+	for key, value := range payload {
+		result[key] = value
+	}
+	result["items"] = []gin.H{}
+	photosByDay, ok := payload["photosByDay"].(map[string][]gin.H)
+	if !ok {
+		return result
+	}
+	compactDays := make(map[string][]gin.H, len(photosByDay))
+	for day, rows := range photosByDay {
+		compactRows := make([]gin.H, 0, len(rows))
+		for _, row := range rows {
+			copyRow := gin.H{}
+			for key, value := range row {
+				copyRow[key] = value
+			}
+			if photo, photoOK := row["photo"].(gin.H); photoOK {
+				copyPhoto := gin.H{}
+				for key, value := range photo {
+					copyPhoto[key] = value
+				}
+				delete(copyPhoto, "marks")
+				delete(copyPhoto, "paints")
+				copyRow["photo"] = copyPhoto
+			}
+			compactRows = append(compactRows, copyRow)
+		}
+		compactDays[day] = compactRows
+	}
+	result["photosByDay"] = compactDays
+	return result
 }
 
 func (s *Server) handleCalendarUser(c *gin.Context) {
@@ -11192,6 +11276,7 @@ func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttach
 		if thumbnailURL := s.photoThumbnailURL(p.FilePath); thumbnailURL != "" {
 			item["thumbnailUrl"] = thumbnailURL
 		}
+		item["renditions"] = s.mediaRenditionsJSON(p.FilePath)
 		if strings.TrimSpace(p.CapsulePreviewPath) != "" {
 			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsulePreviewPath)
 		}
@@ -11207,6 +11292,7 @@ func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttach
 		if thumbnailURL := s.photoThumbnailURL(p.SecondPath); thumbnailURL != "" {
 			item["thumbnailUrl"] = thumbnailURL
 		}
+		item["renditions"] = s.mediaRenditionsJSON(p.SecondPath)
 		if strings.TrimSpace(p.CapsuleSecondPreviewPath) != "" {
 			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.CapsuleSecondPreviewPath)
 		}
@@ -11222,6 +11308,7 @@ func (s *Server) photoMediaJSON(p models.Photo, attachments []models.PhotoAttach
 		if thumbnailURL := s.photoThumbnailURL(attachment.FilePath); thumbnailURL != "" {
 			item["thumbnailUrl"] = thumbnailURL
 		}
+		item["renditions"] = s.mediaRenditionsJSON(attachment.FilePath)
 		if strings.TrimSpace(attachment.PreviewPath) != "" {
 			item["previewUrl"] = fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, attachment.PreviewPath)
 		}
@@ -11508,6 +11595,7 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"ownPostNumberInPushEnabled":          u.OwnPostNumberInPushEnabled,
 		"postNumberInPushEnabled":             u.PostNumberInPushEnabled,
 		"yoloModeEnabled":                     u.YoloModeEnabled,
+		"mediaDataMode":                       normalizeMediaDataMode(u.MediaDataMode),
 		"allowPhotoDownload":                  u.AllowPhotoDownload,
 		"allowCommunityNsfwMarking":           u.AllowCommunityNsfwMarking,
 		"showNsfwByDefault":                   u.ShowNsfwByDefault,
@@ -11553,6 +11641,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"ownPostNumberInPushEnabled":          false,
 		"postNumberInPushEnabled":             false,
 		"yoloModeEnabled":                     false,
+		"mediaDataMode":                       "normal",
 		"allowPhotoDownload":                  u.AllowPhotoDownload,
 		"allowCommunityNsfwMarking":           false,
 		"showNsfwByDefault":                   false,
@@ -12274,6 +12363,7 @@ func (s *Server) invalidateFeedDayCache(day string) {
 	}
 	s.bumpSyncRevision(feedRevisionScope(day))
 	s.bumpSyncRevision(timelineRevisionScope)
+	s.bumpSyncRevision(calendarRevisionScope)
 }
 
 func photoVisibleToViewer(userID uint, photo models.Photo, now time.Time) bool {

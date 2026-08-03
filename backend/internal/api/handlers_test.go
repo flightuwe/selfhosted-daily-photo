@@ -467,6 +467,97 @@ func TestCalendarPayloadIncludesInteractionPreviewMetadata(t *testing.T) {
 	}
 }
 
+func TestCompactCalendarPublicPayloadRemovesDuplicatedAndHeavyData(t *testing.T) {
+	payload := gin.H{
+		"days":  []string{"2026-08-03"},
+		"items": []gin.H{{"photo": gin.H{"id": uint(7), "paints": []gin.H{{"pathsJson": strings.Repeat("x", 4096)}}}}},
+		"photosByDay": map[string][]gin.H{
+			"2026-08-03": {{
+				"photo": gin.H{
+					"id":           uint(7),
+					"url":          "https://example.invalid/uploads/photo.jpg",
+					"thumbnailUrl": "https://example.invalid/uploads/thumb.jpg",
+					"marks":        []gin.H{{"id": 1}},
+					"paints":       []gin.H{{"pathsJson": strings.Repeat("x", 4096)}},
+				},
+				"user": gin.H{"id": uint(2), "username": "author"},
+			}},
+		},
+	}
+
+	compact := compactCalendarPublicPayload(payload)
+	items, ok := compact["items"].([]gin.H)
+	if !ok || len(items) != 0 {
+		t.Fatalf("compact items = %#v, want empty list", compact["items"])
+	}
+	rows := compact["photosByDay"].(map[string][]gin.H)["2026-08-03"]
+	photo := rows[0]["photo"].(gin.H)
+	if _, exists := photo["marks"]; exists {
+		t.Fatal("compact photo still contains marks")
+	}
+	if _, exists := photo["paints"]; exists {
+		t.Fatal("compact photo still contains paints")
+	}
+	if got := photo["thumbnailUrl"]; got != "https://example.invalid/uploads/thumb.jpg" {
+		t.Fatalf("thumbnailUrl = %#v, want preserved", got)
+	}
+	legacyPhoto := payload["photosByDay"].(map[string][]gin.H)["2026-08-03"][0]["photo"].(gin.H)
+	if _, exists := legacyPhoto["paints"]; !exists {
+		t.Fatal("compact conversion mutated the legacy payload")
+	}
+}
+
+func TestInvalidateFeedDayCacheBumpsCalendarRevision(t *testing.T) {
+	server := newSearchTestServer(t)
+	before := server.syncRevision(calendarRevisionScope)
+	server.invalidateFeedDayCache("2026-08-03")
+	after := server.syncRevision(calendarRevisionScope)
+	if after <= before {
+		t.Fatalf("calendar revision = %d after invalidation, want > %d", after, before)
+	}
+}
+
+func TestCalendarPublicCompactUsesETagAndReturnsNotModified(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "calendar-etag-viewer", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+
+	firstRecorder := httptest.NewRecorder()
+	firstContext, _ := gin.CreateTestContext(firstRecorder)
+	firstContext.Request = httptest.NewRequest(http.MethodGet, "/api/calendar/public?compact=true", nil)
+	firstContext.Set("user", viewer)
+	server.handleCalendarPublic(firstContext)
+	if firstRecorder.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200; body=%s", firstRecorder.Code, firstRecorder.Body.String())
+	}
+	etag := firstRecorder.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("compact calendar response has no ETag")
+	}
+	var body map[string]any
+	if err := json.Unmarshal(firstRecorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode compact calendar: %v", err)
+	}
+	if got := body["schemaVersion"]; got != "calendar_public_v2" {
+		t.Fatalf("schemaVersion = %#v, want calendar_public_v2", got)
+	}
+
+	secondRecorder := httptest.NewRecorder()
+	secondContext, _ := gin.CreateTestContext(secondRecorder)
+	secondContext.Request = httptest.NewRequest(http.MethodGet, "/api/calendar/public?compact=true", nil)
+	secondContext.Request.Header.Set("If-None-Match", etag)
+	secondContext.Set("user", viewer)
+	server.handleCalendarPublic(secondContext)
+	if secondRecorder.Code != http.StatusNotModified {
+		t.Fatalf("second status = %d, want 304; body=%s", secondRecorder.Code, secondRecorder.Body.String())
+	}
+	if secondRecorder.Body.Len() != 0 {
+		t.Fatalf("304 body length = %d, want 0", secondRecorder.Body.Len())
+	}
+}
+
 func TestSortPhotosForFeedUsesEffectiveTime(t *testing.T) {
 	uploadA := time.Date(2026, 3, 12, 18, 0, 0, 0, time.UTC)
 	capturedA := uploadA.Add(-10 * time.Minute)
@@ -1056,6 +1147,66 @@ func TestHandleUpdatePreferencesPersistsYoloMode(t *testing.T) {
 	}
 	if !updated.YoloModeEnabled {
 		t.Fatal("expected yoloModeEnabled to persist as true")
+	}
+}
+
+func TestHandleUpdatePreferencesPersistsMediaDataModeIndependentlyFromYolo(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "media-mode", PasswordHash: "x", YoloModeEnabled: true}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/me/preferences", strings.NewReader(`{"mediaDataMode":"data_saver"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", user)
+	server.handleUpdatePreferences(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var updated models.User
+	if err := server.DB.First(&updated, user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.MediaDataMode != "data_saver" || !updated.YoloModeEnabled {
+		t.Fatalf("unexpected preferences: mode=%q yolo=%v", updated.MediaDataMode, updated.YoloModeEnabled)
+	}
+}
+
+func TestCompactCalendarOmitsInteractionPayloadAndIsMateriallySmaller(t *testing.T) {
+	server := newSearchTestServer(t)
+	server.Config.MediaRenditionsEnabled = false
+	user := models.User{Username: "calendar-compact", PasswordHash: "x", FavoriteColor: "#123456"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	photo := models.Photo{UserID: user.ID, User: user, Day: "2026-08-03", FilePath: "photos/compact.jpg", Caption: strings.Repeat("caption", 30), CreatedAt: time.Now().UTC()}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 20; index++ {
+		clientID := fmt.Sprintf("compact-comment-%d", index)
+		comment := models.PhotoComment{PhotoID: photo.ID, UserID: user.ID, Body: strings.Repeat("interaction-payload-", 20), ClientCommentID: &clientID}
+		if err := server.DB.Create(&comment).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy, err := server.calendarPayload(user.ID, "public", 0, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := server.calendarPublicCompactPayload(user.ID, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyJSON, _ := json.Marshal(legacy)
+	compactJSON, _ := json.Marshal(compact)
+	if bytes.Contains(compactJSON, []byte("interaction-payload")) || bytes.Contains(compactJSON, []byte(`"comments"`)) || bytes.Contains(compactJSON, []byte(`"paints"`)) || bytes.Contains(compactJSON, []byte(`"marks"`)) {
+		t.Fatalf("compact response leaked interaction payload: %s", compactJSON)
+	}
+	if len(compactJSON)*5 > len(legacyJSON) {
+		t.Fatalf("compact response is not at least 80%% smaller: compact=%d legacy=%d", len(compactJSON), len(legacyJSON))
 	}
 }
 

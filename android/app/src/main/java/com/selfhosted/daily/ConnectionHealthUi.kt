@@ -17,6 +17,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -41,6 +45,7 @@ fun ConnectionHealthDialog(
     snapshot: ConnectionHealthSnapshot,
     onDismiss: () -> Unit
 ) {
+    var showNetworkUsage by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
@@ -71,6 +76,12 @@ fun ConnectionHealthDialog(
                 StatusSection("Uploads", listOf(snapshot.uploadLine.removePrefix("Uploads: ")))
                 snapshot.lastErrorLine?.let {
                     StatusSection("Letzter Fehler", listOf(it.removePrefix("Letzter Fehler: ")))
+                }
+                TextButton(onClick = { showNetworkUsage = !showNetworkUsage }) {
+                    Text(if (showNetworkUsage) "Datenverbrauch ausblenden" else "Datenverbrauch anzeigen")
+                }
+                if (showNetworkUsage) {
+                    NetworkUsageSummaryCard()
                 }
             }
         }

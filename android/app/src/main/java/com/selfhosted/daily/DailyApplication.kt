@@ -9,12 +9,7 @@ import coil.memory.MemoryCache
 class DailyApplication : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader {
         val mediaCacheDir = cacheDir.resolve("daily_media_cache")
-        val cachePrefs = getSharedPreferences("daily_media_cache_policy", MODE_PRIVATE)
-        val now = System.currentTimeMillis()
-        if (now - cachePrefs.getLong("last_reset_at", 0L) >= MEDIA_CACHE_RETENTION_MS) {
-            runCatching { mediaCacheDir.deleteRecursively() }
-            cachePrefs.edit().putLong("last_reset_at", now).commit()
-        }
+        val cacheBudgetBytes = (cacheDir.usableSpace / 20L).coerceIn(MIN_MEDIA_CACHE_BYTES, MAX_MEDIA_CACHE_BYTES)
         return ImageLoader.Builder(this)
         .memoryCache {
             MemoryCache.Builder(this)
@@ -24,7 +19,7 @@ class DailyApplication : Application(), ImageLoaderFactory {
         .diskCache {
             DiskCache.Builder()
                 .directory(mediaCacheDir)
-                .maxSizePercent(0.15)
+                .maxSizeBytes(cacheBudgetBytes)
                 .build()
         }
         .okHttpClient {
@@ -35,6 +30,7 @@ class DailyApplication : Application(), ImageLoaderFactory {
     }
 
     private companion object {
-        const val MEDIA_CACHE_RETENTION_MS = 7L * 24L * 60L * 60L * 1000L
+        const val MIN_MEDIA_CACHE_BYTES = 128L * 1024L * 1024L
+        const val MAX_MEDIA_CACHE_BYTES = 512L * 1024L * 1024L
     }
 }

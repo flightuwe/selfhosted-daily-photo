@@ -31,6 +31,10 @@ type Config struct {
 	MigrationReportTarget    string
 	MigrationReportSecret    string
 	MigrationReportSource    string
+	MediaRenditionsEnabled   bool
+	MediaAVIFEnabled         bool
+	MediaDerivativeMaxBytes  int64
+	RenditionLogOffsetPath   string
 }
 
 func Load() Config {
@@ -64,6 +68,10 @@ func Load() Config {
 		MigrationReportTarget:    getEnv("MIGRATION_REPORT_TARGET", ""),
 		MigrationReportSecret:    getEnv("MIGRATION_REPORT_SECRET", ""),
 		MigrationReportSource:    getEnv("MIGRATION_REPORT_SOURCE", ""),
+		MediaRenditionsEnabled:   getBool("MEDIA_RENDITIONS_ENABLED", true),
+		MediaAVIFEnabled:         getBool("MEDIA_AVIF_ENABLED", false),
+		MediaDerivativeMaxBytes:  getInt64("MEDIA_DERIVATIVE_MAX_BYTES", 5*1024*1024*1024),
+		RenditionLogOffsetPath:   getEnv("RENDITION_LOG_OFFSET_PATH", "/app/data/rendition-gateway.offset"),
 	}
 }
 
@@ -195,6 +203,18 @@ func getInt(key string, fallback int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func getInt64(key string, fallback int64) int64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
 		return fallback
 	}
 	return n

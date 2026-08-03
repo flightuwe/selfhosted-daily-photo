@@ -672,6 +672,8 @@ func (s *Server) buildDataSyncPerformance(rows []models.APIMinuteMetric, from, t
 	}
 	feed := totals{}
 	timeline := totals{}
+	calendar := totals{}
+	hub := totals{}
 	upload := totals{}
 	for _, row := range rows {
 		var target *totals
@@ -680,6 +682,10 @@ func (s *Server) buildDataSyncPerformance(rows []models.APIMinuteMetric, from, t
 			target = &feed
 		case strings.Contains(row.Route, "/hub/timeline"):
 			target = &timeline
+		case strings.Contains(row.Route, "/calendar/public"):
+			target = &calendar
+		case strings.Contains(row.Route, "/hub/bootstrap"):
+			target = &hub
 		case strings.Contains(row.Route, "/uploads") || strings.Contains(row.Route, "/attachments"):
 			target = &upload
 		}
@@ -709,9 +715,28 @@ func (s *Server) buildDataSyncPerformance(rows []models.APIMinuteMetric, from, t
 			"p95PeakMs":       value.p95Peak,
 		}
 	}
+	var capabilityRows []models.SyncCapabilityMetric
+	_ = s.DB.Where("minute >= ? AND minute <= ?", from, to).Order("requests desc").Limit(500).Find(&capabilityRows).Error
+	var legacyRequests, capabilityRequests int64
+	capabilities := make([]gin.H, 0, len(capabilityRows))
+	for _, row := range capabilityRows {
+		capabilityRequests += row.Requests
+		if row.AppVersion == "legacy" {
+			legacyRequests += row.Requests
+		}
+		capabilities = append(capabilities, gin.H{
+			"surface": row.Surface, "mode": row.Mode, "outcome": row.Outcome, "appVersion": row.AppVersion,
+			"requests": row.Requests, "responseBytes": row.BytesOut, "maxLatencyMs": row.MaxLatency,
+		})
+	}
 	return gin.H{
-		"feed":     toJSON(feed),
-		"timeline": toJSON(timeline),
+		"feed":              toJSON(feed),
+		"timeline":          toJSON(timeline),
+		"calendar":          toJSON(calendar),
+		"hubBootstrap":      toJSON(hub),
+		"renditions":        s.mediaDerivativeStats(),
+		"capabilities":      capabilities,
+		"legacyRequestRate": perfRoundFloat(safeRate(legacyRequests, capabilityRequests), 4),
 		"uploads": gin.H{
 			"requests":           upload.requests,
 			"responseBytes":      upload.bytesOut,

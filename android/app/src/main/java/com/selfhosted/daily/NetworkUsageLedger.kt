@@ -39,6 +39,10 @@ data class NetworkUsageSummary(
     val retryCountSevenDays: Int = 0,
     val uidRxBytesSevenDays: Long = 0L,
     val uidTxBytesSevenDays: Long = 0L,
+    val httpUidDifferenceRxSevenDays: Long = 0L,
+    val cacheSources: Map<String, Int> = emptyMap(),
+    val suppressedFeedDuplicates: Int = 0,
+    val negativeFeedCacheHits: Int = 0,
     val topEndpoints: List<Pair<String, Long>> = emptyList()
 )
 
@@ -53,7 +57,12 @@ private data class NetworkUsageEntry(
     val durationMs: Long,
     val cacheHit: Boolean,
     val retries: Int,
-    val source: String
+    val source: String,
+    val logicalRxBytes: Long = rxBytes,
+    val compressedRxBytes: Long = rxBytes,
+    val protocol: String = "",
+    val contentEncoding: String = "",
+    val cacheSource: String = if (cacheHit) "http_disk" else "network"
 )
 
 object NetworkUsageLedger {
@@ -104,6 +113,28 @@ object NetworkUsageLedger {
         )
     }
 
+    fun recordMediaCacheResult(context: Context, dataSource: String, format: String) {
+        val normalized = when (dataSource.lowercase()) {
+            "memory_cache" -> "memory"
+            "disk" -> "coil_disk"
+            else -> return
+        }
+        record(context, NetworkUsageEntry(
+            atMs = System.currentTimeMillis(), endpoint = "media:$format", context = currentRequestContext(),
+            network = networkClass(context), txBytes = 0L, rxBytes = 0L, status = 200, durationMs = 0L,
+            cacheHit = true, retries = 0, source = "media_cache", cacheSource = normalized
+        ))
+    }
+
+    fun recordFeedCoordinatorEvent(context: Context, event: String) {
+        if (event != "duplicate" && event != "negative_cache") return
+        record(context, NetworkUsageEntry(
+            atMs = System.currentTimeMillis(), endpoint = "feed_window", context = currentRequestContext(),
+            network = networkClass(context), txBytes = 0L, rxBytes = 0L, status = 0, durationMs = 0L,
+            cacheHit = true, retries = 0, source = "coordinator", cacheSource = event
+        ))
+    }
+
     fun interceptor(context: Context, requestContext: String = "app"): Interceptor = Interceptor { chain ->
         val startedAt = System.currentTimeMillis()
         val request = chain.request()
@@ -113,6 +144,13 @@ object NetworkUsageLedger {
             val fixedRxBytes = estimateResponseHeaderBytes(response)
             val retries = generateSequence(response.priorResponse) { it.priorResponse }.count()
             val cacheHit = response.cacheResponse != null || response.code == 304
+            val cacheSource = when {
+                response.code == 304 -> "304"
+                response.cacheResponse != null -> "http_disk"
+                else -> "network"
+            }
+            val contentEncoding = response.header("Content-Encoding").orEmpty()
+            val compressedLength = response.header("Content-Length")?.toLongOrNull()?.coerceAtLeast(0L)
             val body = response.body
             if (body == null) {
                 record(
@@ -143,12 +181,17 @@ object NetworkUsageLedger {
                                 context = currentRequestContext(requestContext),
                                 network = networkClass(context),
                                 txBytes = txBytes,
-                                rxBytes = fixedRxBytes + consumed,
+                                rxBytes = fixedRxBytes + (compressedLength ?: consumed),
                                 status = response.code,
                                 durationMs = System.currentTimeMillis() - startedAt,
                                 cacheHit = cacheHit,
                                 retries = retries,
-                                source = "http"
+                                source = "http",
+                                logicalRxBytes = fixedRxBytes + consumed,
+                                compressedRxBytes = fixedRxBytes + (compressedLength ?: consumed),
+                                protocol = response.protocol.toString(),
+                                contentEncoding = contentEncoding,
+                                cacheSource = cacheSource
                             )
                         )
                     }
@@ -210,6 +253,8 @@ object NetworkUsageLedger {
     fun summary(context: Context, nowMs: Long = System.currentTimeMillis()): NetworkUsageSummary {
         val all = read(context)
         val details = all.filter { it.source == "http" }
+        val cacheDetails = all.filter { it.source == "media_cache" }
+        val coordinatorDetails = all.filter { it.source == "coordinator" }
         val uidDetails = all.filter { it.source == "uid" }
         val retryDetails = all.filter { it.source == "retry" }
         val todayStart = Calendar.getInstance().apply {
@@ -240,11 +285,16 @@ object NetworkUsageLedger {
             cellularTxBytesSevenDays = seven.filter { it.network == "cellular" }.sumOf { it.txBytes },
             wifiRxBytesSevenDays = seven.filter { it.network == "wifi" }.sumOf { it.rxBytes },
             wifiTxBytesSevenDays = seven.filter { it.network == "wifi" }.sumOf { it.txBytes },
-            cacheHitsSevenDays = seven.count { it.cacheHit },
+            cacheHitsSevenDays = seven.count { it.cacheHit } + cacheDetails.count { it.atMs >= sevenStart },
             requestCountSevenDays = seven.size,
             retryCountSevenDays = seven.sumOf { it.retries } + retryDetails.filter { it.atMs >= sevenStart }.sumOf { it.retries },
             uidRxBytesSevenDays = uidDetails.filter { it.atMs >= sevenStart }.sumOf { it.rxBytes },
             uidTxBytesSevenDays = uidDetails.filter { it.atMs >= sevenStart }.sumOf { it.txBytes },
+            httpUidDifferenceRxSevenDays = uidDetails.filter { it.atMs >= sevenStart }.sumOf { it.rxBytes } - seven.sumOf { it.rxBytes },
+            cacheSources = (seven + cacheDetails.filter { it.atMs >= sevenStart }).filter { it.cacheHit }
+                .groupingBy { it.cacheSource }.eachCount(),
+            suppressedFeedDuplicates = coordinatorDetails.count { it.atMs >= sevenStart && it.cacheSource == "duplicate" },
+            negativeFeedCacheHits = coordinatorDetails.count { it.atMs >= sevenStart && it.cacheSource == "negative_cache" },
             topEndpoints = top
         )
     }
@@ -290,6 +340,11 @@ object NetworkUsageLedger {
             put("cache_hit", if (entry.cacheHit) 1 else 0)
             put("retries", entry.retries)
             put("source", entry.source)
+            put("logical_rx_bytes", entry.logicalRxBytes)
+            put("compressed_rx_bytes", entry.compressedRxBytes)
+            put("protocol", entry.protocol)
+            put("content_encoding", entry.contentEncoding)
+            put("cache_source", entry.cacheSource)
         })
         val now = System.currentTimeMillis()
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -302,7 +357,7 @@ object NetworkUsageLedger {
     private fun read(context: Context): List<NetworkUsageEntry> {
         val cursor = database(context).readableDatabase.query(
             "usage_entries",
-            arrayOf("at_ms", "endpoint", "context_name", "network", "tx_bytes", "rx_bytes", "status", "duration_ms", "cache_hit", "retries", "source"),
+            arrayOf("at_ms", "endpoint", "context_name", "network", "tx_bytes", "rx_bytes", "status", "duration_ms", "cache_hit", "retries", "source", "logical_rx_bytes", "compressed_rx_bytes", "protocol", "content_encoding", "cache_source"),
             "at_ms >= ?",
             arrayOf((System.currentTimeMillis() - RETENTION_MS).toString()),
             null,
@@ -317,7 +372,10 @@ object NetworkUsageLedger {
                             atMs = it.getLong(0), endpoint = it.getString(1).orEmpty(), context = it.getString(2).orEmpty(),
                             network = it.getString(3).orEmpty(), txBytes = it.getLong(4), rxBytes = it.getLong(5),
                             status = it.getInt(6), durationMs = it.getLong(7), cacheHit = it.getInt(8) != 0,
-                            retries = it.getInt(9), source = it.getString(10).orEmpty().ifBlank { "http" }
+                            retries = it.getInt(9), source = it.getString(10).orEmpty().ifBlank { "http" },
+                            logicalRxBytes = it.getLong(11), compressedRxBytes = it.getLong(12),
+                            protocol = it.getString(13).orEmpty(), contentEncoding = it.getString(14).orEmpty(),
+                            cacheSource = it.getString(15).orEmpty().ifBlank { if (it.getInt(8) != 0) "http_disk" else "network" }
                         )
                     )
                 }
@@ -398,7 +456,7 @@ object NetworkUsageLedger {
         response.headers.sumOf { it.first.length + it.second.length + 4 }.toLong() + 16L
 }
 
-private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context, "network_usage_ledger.db", null, 2) {
+private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context, "network_usage_ledger.db", null, 3) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -418,12 +476,14 @@ private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context,
             )
             """.trimIndent()
         )
+        addVersion3Columns(db)
         db.execSQL("CREATE INDEX idx_usage_entries_at_ms ON usage_entries(at_ms)")
         createAggregateTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createAggregateTable(db)
+        if (oldVersion < 3) addVersion3Columns(db)
     }
 
     private fun createAggregateTable(db: SQLiteDatabase) {
@@ -442,6 +502,15 @@ private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context,
             )
             """.trimIndent()
         )
+    }
+
+
+    private fun addVersion3Columns(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE usage_entries ADD COLUMN logical_rx_bytes INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE usage_entries ADD COLUMN compressed_rx_bytes INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE usage_entries ADD COLUMN protocol TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE usage_entries ADD COLUMN content_encoding TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE usage_entries ADD COLUMN cache_source TEXT NOT NULL DEFAULT 'network'")
     }
 }
 

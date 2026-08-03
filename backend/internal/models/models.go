@@ -21,6 +21,7 @@ type User struct {
 	OwnPostNumberInPushEnabled          bool       `gorm:"default:false" json:"ownPostNumberInPushEnabled"`
 	PostNumberInPushEnabled             bool       `gorm:"default:false" json:"postNumberInPushEnabled"`
 	YoloModeEnabled                     bool       `gorm:"default:false" json:"yoloModeEnabled"`
+	MediaDataMode                       string     `gorm:"size:16;default:'normal'" json:"mediaDataMode"`
 	AllowPhotoDownload                  bool       `gorm:"default:false" json:"allowPhotoDownload"`
 	AllowCommunityNsfwMarking           bool       `gorm:"default:false" json:"allowCommunityNsfwMarking"`
 	ShowNsfwByDefault                   bool       `gorm:"default:false" json:"showNsfwByDefault"`
@@ -32,7 +33,7 @@ type User struct {
 	StatusText                          string     `gorm:"size:120" json:"statusText"`
 	StatusEmoji                         string     `gorm:"size:16" json:"statusEmoji"`
 	StatusExpiresAt                     *time.Time `json:"statusExpiresAt"`
-	ProfileVisible                      bool       `gorm:"default:false" json:"profileVisible"`
+	ProfileVisible                      bool       `gorm:"default:false;index" json:"profileVisible"`
 	AvatarVisible                       bool       `gorm:"default:false" json:"avatarVisible"`
 	BioVisible                          bool       `gorm:"default:false" json:"bioVisible"`
 	StatusVisible                       bool       `gorm:"default:false" json:"statusVisible"`
@@ -229,6 +230,55 @@ type APIMinuteMetric struct {
 	UpdatedAt   time.Time
 }
 
+type SyncCapabilityMetric struct {
+	ID         uint      `gorm:"primaryKey"`
+	Minute     time.Time `gorm:"not null;uniqueIndex:idx_sync_capability_bucket,priority:1"`
+	Surface    string    `gorm:"size:24;not null;uniqueIndex:idx_sync_capability_bucket,priority:2"`
+	Mode       string    `gorm:"size:16;not null;uniqueIndex:idx_sync_capability_bucket,priority:3"`
+	Outcome    string    `gorm:"size:16;not null;uniqueIndex:idx_sync_capability_bucket,priority:4"`
+	AppVersion string    `gorm:"size:40;not null;uniqueIndex:idx_sync_capability_bucket,priority:5"`
+	Requests   int64
+	BytesOut   int64
+	MaxLatency float64
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// MediaDerivative is a disposable, reproducible rendition of an immutable
+// uploaded source. SourcePath always points at the original upload; deleting a
+// derivative never deletes or rewrites that source.
+type MediaDerivative struct {
+	ID              uint       `gorm:"primaryKey" json:"id"`
+	SourcePath      string     `gorm:"size:255;not null;uniqueIndex:idx_media_derivative_source_variant,priority:1" json:"sourcePath"`
+	Variant         string     `gorm:"size:32;not null;uniqueIndex:idx_media_derivative_source_variant,priority:2;index" json:"variant"`
+	Purpose         string     `gorm:"size:16;not null;index" json:"purpose"`
+	Format          string     `gorm:"size:8;not null;index" json:"format"`
+	Width           int        `gorm:"not null" json:"width"`
+	Quality         int        `gorm:"not null" json:"quality"`
+	OutputPath      string     `gorm:"size:255;not null" json:"outputPath"`
+	Status          string     `gorm:"size:16;not null;default:'queued';index" json:"status"`
+	Priority        int        `gorm:"not null;default:0;index" json:"priority"`
+	Attempts        int        `gorm:"not null;default:0" json:"attempts"`
+	ByteSize        int64      `gorm:"not null;default:0" json:"byteSize"`
+	LastError       string     `gorm:"size:500" json:"lastError"`
+	NextAttemptAt   *time.Time `gorm:"index" json:"nextAttemptAt"`
+	LastRequestedAt *time.Time `gorm:"index" json:"lastRequestedAt"`
+	CompletedAt     *time.Time `json:"completedAt"`
+	CreatedAt       time.Time  `gorm:"index" json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
+}
+
+type MediaDeliveryMetric struct {
+	ID        uint   `gorm:"primaryKey"`
+	Day       string `gorm:"size:10;not null;uniqueIndex:idx_media_delivery_bucket,priority:1"`
+	Format    string `gorm:"size:8;not null;uniqueIndex:idx_media_delivery_bucket,priority:2"`
+	Status    int    `gorm:"not null;uniqueIndex:idx_media_delivery_bucket,priority:3"`
+	Requests  int64
+	BytesOut  int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type SystemMinuteMetric struct {
 	ID                 uint      `gorm:"primaryKey"`
 	Minute             time.Time `gorm:"not null;uniqueIndex"`
@@ -301,7 +351,7 @@ type Photo struct {
 	ID                       uint       `gorm:"primaryKey" json:"id"`
 	UserID                   uint       `gorm:"index;not null" json:"userId"`
 	User                     User       `json:"user"`
-	Day                      string     `gorm:"index;size:10;not null" json:"day"`
+	Day                      string     `gorm:"index;index:idx_photo_day_created,priority:1;size:10;not null" json:"day"`
 	PromptOnly               bool       `gorm:"default:false" json:"promptOnly"`
 	MomentKind               string     `gorm:"size:16;index" json:"momentKind"`
 	UploadClientID           string     `gorm:"size:64;index:idx_photo_user_upload_client" json:"uploadClientId"`
@@ -313,7 +363,7 @@ type Photo struct {
 	CapsuleSecondPreviewPath string     `gorm:"size:255" json:"capsuleSecondPreviewPath"`
 	Caption                  string     `gorm:"size:255" json:"caption"`
 	CapsuleMode              string     `gorm:"size:16" json:"capsuleMode"`
-	CapsuleVisibleAt         *time.Time `json:"capsuleVisibleAt"`
+	CapsuleVisibleAt         *time.Time `gorm:"index" json:"capsuleVisibleAt"`
 	CapsulePrivate           bool       `gorm:"default:false" json:"capsulePrivate"`
 	CapsuleGroupRemind       bool       `gorm:"default:false" json:"capsuleGroupRemind"`
 	LocationShared           bool       `gorm:"default:false;index" json:"locationShared"`
@@ -324,7 +374,7 @@ type Photo struct {
 	NsfwMarkedAt             *time.Time `json:"nsfwMarkedAt"`
 	PublicNumber             *string    `gorm:"size:9;uniqueIndex" json:"publicNumber"`
 	CapturedAt               *time.Time `gorm:"index" json:"capturedAt"`
-	CreatedAt                time.Time  `json:"createdAt"`
+	CreatedAt                time.Time  `gorm:"index:idx_photo_day_created,priority:2" json:"createdAt"`
 }
 
 type PhotoAttachment struct {

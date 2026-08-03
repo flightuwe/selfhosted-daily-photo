@@ -16,6 +16,41 @@ import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 class SyncCacheLogicTest {
+    @Test
+    fun mediaSelectionUsesOriginalInNormalMode() {
+        val media = PostMediaItem(
+            url = "original.jpg",
+            thumbnailUrl = "thumb.jpg",
+            renditions = listOf(MediaRendition("feed", "avif", 720, "feed.avif"), MediaRendition("feed", "webp", 720, "feed.webp"))
+        )
+
+        assertEquals(listOf("original.jpg"), selectFeedMediaCandidates(media, "normal", metered = true, sdkInt = 34, avifDisabled = false))
+    }
+
+    @Test
+    fun mediaSelectionUsesCompatibleFallbackMatrix() {
+        val media = PostMediaItem(
+            url = "original.jpg",
+            thumbnailUrl = "thumb.jpg",
+            renditions = listOf(
+                MediaRendition("feed", "jpeg", 720, "feed.jpg"),
+                MediaRendition("feed", "webp", 720, "feed.webp"),
+                MediaRendition("feed", "avif", 720, "feed.avif")
+            )
+        )
+
+        assertEquals(listOf("feed.webp", "feed.jpg", "thumb.jpg", "original.jpg"), selectFeedMediaCandidates(media, "data_saver", true, 26, false))
+        assertEquals(listOf("feed.avif", "feed.webp", "feed.jpg", "thumb.jpg", "original.jpg"), selectFeedMediaCandidates(media, "automatic", true, 31, false))
+        assertEquals(listOf("feed.webp", "feed.jpg", "thumb.jpg", "original.jpg"), selectFeedMediaCandidates(media, "automatic", true, 34, true))
+        assertEquals(listOf("original.jpg"), selectFeedMediaCandidates(media, "automatic", false, 34, false))
+    }
+
+    @Test
+    fun todayFeedIsRetainedWhenServerAlreadyHasItemsButPromptIsStale() {
+        assertTrue(shouldRetainTodayFeed(promptReportsVisiblePost = false, serverItemCount = 1))
+        assertTrue(shouldRetainTodayFeed(promptReportsVisiblePost = true, serverItemCount = 0))
+        assertFalse(shouldRetainTodayFeed(promptReportsVisiblePost = false, serverItemCount = 0))
+    }
     private lateinit var context: Context
 
     @Before

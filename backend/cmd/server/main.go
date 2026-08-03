@@ -87,6 +87,7 @@ func main() {
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 	defer runtimeCancel()
 	go server.RunAutoBookmarkCleanupLoop(runtimeCtx, 30*time.Minute)
+	go server.RunMediaDerivativeLoop(runtimeCtx, 5*time.Second)
 	if fixed, cleanupErr := server.CleanupInvalidPromptOnlyPhotosRecent(14); cleanupErr != nil {
 		log.Printf("prompt cleanup failed: %v", cleanupErr)
 	} else if fixed > 0 {

@@ -5203,6 +5203,36 @@ export function App() {
               </div>
               <div className="grid4">
                 <CardStat
+                  title="Kalender 304-Quote"
+                  value={`${(Number(performanceOverview?.dataSync?.calendar?.notModifiedRate || 0) * 100).toFixed(1)}%`}
+                />
+                <CardStat
+                  title="Kalender Response-Bytes"
+                  value={formatBytes(Number(performanceOverview?.dataSync?.calendar?.responseBytes || 0))}
+                />
+                <CardStat
+                  title="Hub Response-Bytes"
+                  value={formatBytes(Number(performanceOverview?.dataSync?.hubBootstrap?.responseBytes || 0))}
+                />
+                <CardStat
+                  title="Rendition-Cache"
+                  value={formatBytes(Number(performanceOverview?.dataSync?.renditions?.bytes || 0))}
+                />
+              </div>
+              <div className="grid4">
+                <CardStat title="Renditions bereit" value={Number(performanceOverview?.dataSync?.renditions?.ready || 0)} />
+                <CardStat title="Renditions wartend" value={Number(performanceOverview?.dataSync?.renditions?.queued || 0)} />
+                <CardStat title="Encoderfehler" value={Number(performanceOverview?.dataSync?.renditions?.failed || 0)} />
+                <CardStat title="AVIF" value={performanceOverview?.dataSync?.renditions?.avifEnabled ? "aktiv" : "aus"} />
+              </div>
+              <div className="grid4">
+                <CardStat title="Alte APKs" value={`${(Number(performanceOverview?.dataSync?.legacyRequestRate || 0) * 100).toFixed(1)}%`} />
+                <CardStat title="JPEG ausgeliefert" value={formatBytes(Number(performanceOverview?.dataSync?.renditions?.deliveriesSevenDays?.jpeg?.bytes || 0))} />
+                <CardStat title="WebP ausgeliefert" value={formatBytes(Number(performanceOverview?.dataSync?.renditions?.deliveriesSevenDays?.webp?.bytes || 0))} />
+                <CardStat title="AVIF ausgeliefert" value={formatBytes(Number(performanceOverview?.dataSync?.renditions?.deliveriesSevenDays?.avif?.bytes || 0))} />
+              </div>
+              <div className="grid4">
+                <CardStat
                   title="Feed P95"
                   value={`${Number(performanceOverview?.dataSync?.feed?.p95PeakMs || 0).toFixed(1)} ms`}
                 />

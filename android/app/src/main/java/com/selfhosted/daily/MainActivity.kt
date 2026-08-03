@@ -219,7 +219,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -454,6 +456,7 @@ data class User(
     val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
     val yoloModeEnabled: Boolean = false,
+    val mediaDataMode: String = "normal",
     val allowPhotoDownload: Boolean = false,
     val allowCommunityNsfwMarking: Boolean = false,
     val showNsfwByDefault: Boolean = false,
@@ -518,7 +521,8 @@ data class PreferencesUpdateRequest(
     val locationFeatureEnabled: Boolean? = null,
     val locationShareDefaultEnabled: Boolean? = null,
     val diagnosticsConsentGranted: Boolean? = null,
-    val diagnosticsConsentSource: String? = null
+    val diagnosticsConsentSource: String? = null,
+    val mediaDataMode: String? = null
 )
 data class UserPromptRule(
     val id: String,
@@ -605,7 +609,15 @@ data class PostMediaItem(
     val previewUrl: String? = null,
     val thumbnailUrl: String? = null,
     val capturedAt: String? = null,
-    val sourceKind: String = "attachment"
+    val sourceKind: String = "attachment",
+    val renditions: List<MediaRendition> = emptyList()
+)
+data class MediaRendition(
+    val purpose: String = "",
+    val format: String = "",
+    val width: Int = 0,
+    val url: String = "",
+    val byteSize: Long = 0L
 )
 data class PromptPhoto(
     val id: Long,
@@ -743,6 +755,27 @@ private fun PromptPhoto.mediaItems(): List<PostMediaItem> {
 }
 
 private fun PromptPhoto.mediaUrls(): List<String> = mediaItems().map { it.url }
+
+internal fun selectFeedMediaCandidates(
+    media: PostMediaItem,
+    mediaDataMode: String = "normal",
+    metered: Boolean,
+    sdkInt: Int,
+    avifDisabled: Boolean
+): List<String> {
+    val saver = mediaDataMode == "data_saver" || (mediaDataMode == "automatic" && metered)
+    if (!saver) return listOf(media.url).filter(String::isNotBlank)
+    val feed = media.renditions.filter { it.purpose == "feed" && it.url.isNotBlank() }
+    val ordered = buildList {
+        if (sdkInt >= Build.VERSION_CODES.S && !avifDisabled) addAll(feed.filter { it.format == "avif" }.map { it.url })
+        addAll(feed.filter { it.format == "webp" }.map { it.url })
+        addAll(feed.filter { it.format == "jpeg" || it.format == "jpg" }.map { it.url })
+        media.thumbnailUrl?.takeIf(String::isNotBlank)?.let(::add)
+        media.previewUrl?.takeIf(String::isNotBlank)?.let(::add)
+        media.url.takeIf(String::isNotBlank)?.let(::add)
+    }
+    return ordered.distinct()
+}
 
 private data class PaintEditorTarget(
     val item: FeedItem,
@@ -939,6 +972,9 @@ data class CalendarUserOption(
     val favoriteColor: String = "#1F5FBF"
 )
 data class CalendarPayloadResponse(
+    val schemaVersion: String = "",
+    val revision: Long = 0L,
+    val notModified: Boolean = false,
     val days: List<String> = emptyList(),
     val dayStats: List<DayStatItem> = emptyList(),
     val photosByDay: Map<String, List<CalendarPhotoItem>> = emptyMap(),
@@ -1543,7 +1579,11 @@ interface Api {
     ): DayStatsResponse
 
     @GET("calendar/public")
-    suspend fun calendarPublic(@Header("Authorization") token: String): CalendarPayloadResponse
+    suspend fun calendarPublic(
+        @Header("Authorization") token: String,
+        @Header("If-None-Match") ifNoneMatch: String? = null,
+        @Query("compact") compact: Boolean = true
+    ): CalendarPayloadResponse
 
     @GET("calendar/user/{id}")
     suspend fun calendarUser(@Header("Authorization") token: String, @Path("id") id: Long): CalendarPayloadResponse
@@ -1815,6 +1855,9 @@ class AppRepo(
     private var api: Api = buildApiService(resolveApiBaseUrl(context), httpClient)
     private val maxUploadDimensionPx = 1600
     private val debugLogsPrefKey = "debug_logs_v1"
+    private val feedWindowCoordinatorMutex = Mutex()
+    private val feedWindowInFlight = mutableMapOf<String, CompletableDeferred<Result<FeedWindowResponse>>>()
+    private val feedWindowNegativeCache = mutableMapOf<String, Pair<Long, FeedWindowResponse>>()
     private val debugUploadEnabledKey = "debug_upload_enabled"
     private val debugLastUploadAtKey = "debug_last_upload_at"
     private val debugMasterEnabledKey = DEBUG_MASTER_ENABLED_KEY
@@ -1954,7 +1997,8 @@ class AppRepo(
                     savedAtEpochMs = System.currentTimeMillis(),
                     days = trimmedDays,
                     dayStats = trimmedDays.mapNotNull(dataset.dayStats::get),
-                    photosByDay = trimmedDays.associateWith { day -> dataset.photosByDay[day].orEmpty().take(3) }
+                    photosByDay = trimmedDays.associateWith { day -> dataset.photosByDay[day].orEmpty().take(3) },
+                    revision = dataset.revision
                 )
             )
         }
@@ -2789,6 +2833,13 @@ class AppRepo(
         prefs.edit().putBoolean("yolo_mode_enabled_local", enabled).apply()
     }
 
+    fun mediaDataModeLocal(): String = prefs.getString("media_data_mode_local", "normal")
+        ?.takeIf { it == "normal" || it == "data_saver" || it == "automatic" } ?: "normal"
+
+    fun setMediaDataModeLocal(mode: String) {
+        prefs.edit().putString("media_data_mode_local", mode).apply()
+    }
+
     fun appliedYoloFeatureIds(): Set<String> {
         val raw = prefs.getString("yolo_applied_feature_ids", "") ?: ""
         if (raw.isBlank()) return emptySet()
@@ -3089,7 +3140,8 @@ class AppRepo(
         locationFeatureEnabled: Boolean? = null,
         locationShareDefaultEnabled: Boolean? = null,
         diagnosticsConsentGranted: Boolean? = null,
-        diagnosticsConsentSource: String? = null
+        diagnosticsConsentSource: String? = null,
+        mediaDataMode: String? = null
     ): User {
         val response = authorizedCall("/api/me/preferences") { token -> api.updatePreferences(
             token,
@@ -3113,7 +3165,8 @@ class AppRepo(
                 locationFeatureEnabled = locationFeatureEnabled,
                 locationShareDefaultEnabled = locationShareDefaultEnabled,
                 diagnosticsConsentGranted = diagnosticsConsentGranted,
-                diagnosticsConsentSource = diagnosticsConsentSource
+                diagnosticsConsentSource = diagnosticsConsentSource,
+                mediaDataMode = mediaDataMode
             )
         ) }
         val user = response.user
@@ -3147,6 +3200,7 @@ class AppRepo(
             check("locationFeatureEnabled", locationFeatureEnabled, user.locationFeatureEnabled)
             check("locationShareDefaultEnabled", locationShareDefaultEnabled, user.locationShareDefaultEnabled)
             check("diagnosticsConsentGranted", diagnosticsConsentGranted, user.diagnosticsConsentGranted)
+            checkText("mediaDataMode", mediaDataMode, user.mediaDataMode)
         }
         if (mismatches.isNotEmpty()) {
             logDebug(
@@ -3260,19 +3314,46 @@ class AppRepo(
             .sortedByDescending { it.key }
             .joinToString(",") { "${it.key}:${it.value}" }
             .ifBlank { null }
-        return try {
-            authorizedCall("/api/feed/window") { token ->
-                api.feedWindow(token, anchorDay, beforeDays, afterDays, focusPhotoId, encodedKnown)
+        val key = "$anchorDay|$beforeDays|$afterDays|${focusPhotoId ?: 0}|${encodedKnown.orEmpty()}"
+        var owner = false
+        val pending = feedWindowCoordinatorMutex.withLock {
+            feedWindowNegativeCache[key]?.takeIf { System.currentTimeMillis() - it.first < 15_000L }?.let {
+                NetworkUsageLedger.recordFeedCoordinatorEvent(context, "negative_cache")
+                return it.second
             }
-        } catch (http: HttpException) {
-            if (http.code() != 304 || encodedKnown == null) throw http
-            FeedWindowResponse(
-                schemaVersion = "feed_window_v2",
-                anchorDay = anchorDay,
-                dayRevisions = knownRevisions,
-                notModified = true
-            )
+            feedWindowInFlight[key] ?: CompletableDeferred<Result<FeedWindowResponse>>().also {
+                feedWindowInFlight[key] = it
+                owner = true
+            }
         }
+        if (!owner) {
+            NetworkUsageLedger.recordFeedCoordinatorEvent(context, "duplicate")
+            return pending.await().getOrThrow()
+        }
+        val result = runCatching {
+            try {
+                authorizedCall("/api/feed/window") { token ->
+                    api.feedWindow(token, anchorDay, beforeDays, afterDays, focusPhotoId, encodedKnown)
+                }
+            } catch (http: HttpException) {
+                if (http.code() != 304 || encodedKnown == null) throw http
+                FeedWindowResponse(
+                    schemaVersion = "feed_window_v2",
+                    anchorDay = anchorDay,
+                    dayRevisions = knownRevisions,
+                    notModified = true
+                )
+            }
+        }
+        feedWindowCoordinatorMutex.withLock {
+            feedWindowInFlight.remove(key)
+            result.getOrNull()?.takeIf { it.days.isEmpty() && !it.notModified }?.let {
+                feedWindowNegativeCache[key] = System.currentTimeMillis() to it
+            }
+            feedWindowNegativeCache.entries.removeAll { System.currentTimeMillis() - it.value.first >= 15_000L }
+        }
+        pending.complete(result)
+        return result.getOrThrow()
     }
     suspend fun feedDiscover(
         mode: FeedOrderMode,
@@ -3297,8 +3378,16 @@ class AppRepo(
         }
     suspend fun feedDayStats(from: String? = null, to: String? = null): List<DayStatItem> =
         authorizedCall("/api/feed/day-stats") { token -> api.feedDayStats(token, from, to).items }
-    suspend fun calendarPublic(): CalendarPayloadResponse =
-        authorizedCall("/api/calendar/public") { token -> api.calendarPublic(token) }
+    suspend fun calendarPublic(knownRevision: Long = 0L): CalendarPayloadResponse =
+        try {
+            authorizedCall("/api/calendar/public") { token ->
+                val etag = knownRevision.takeIf { it > 0L }?.let { "W/\"calendar-public:all=$it\"" }
+                api.calendarPublic(token, etag, compact = true)
+            }
+        } catch (http: HttpException) {
+            if (http.code() != 304 || knownRevision <= 0L) throw http
+            CalendarPayloadResponse(revision = knownRevision, notModified = true)
+        }
     suspend fun calendarBookmarks(scope: BookmarkCalendarFilter = BookmarkCalendarFilter.MINE): CalendarPayloadResponse =
         authorizedCall("/api/calendar/bookmarks") { token ->
             api.calendarBookmarks(
@@ -4318,6 +4407,7 @@ private class ProgressRequestBody(
 }
 
 data class CalendarDataset(
+    val revision: Long = 0L,
     val days: List<String> = emptyList(),
     val dayStats: Map<String, DayStatItem> = emptyMap(),
     val photosByDay: Map<String, List<CalendarPhotoItem>> = emptyMap(),
@@ -4384,7 +4474,8 @@ data class CalendarPublicSnapshotLite(
     val savedAtEpochMs: Long = 0L,
     val days: List<String> = emptyList(),
     val dayStats: List<DayStatItem> = emptyList(),
-    val photosByDay: Map<String, List<CalendarPhotoItem>> = emptyMap()
+    val photosByDay: Map<String, List<CalendarPhotoItem>> = emptyMap(),
+    val revision: Long = 0L
 )
 
 data class AppWarmCacheEnvelope(
@@ -4405,6 +4496,9 @@ internal fun migrateWarmCacheEnvelope(envelope: AppWarmCacheEnvelope?, expectedU
 
 internal fun shouldApplyTimelinePreview(timelineComplete: Boolean, timelineItemsEmpty: Boolean): Boolean =
     !timelineComplete && timelineItemsEmpty
+
+internal fun shouldRetainTodayFeed(promptReportsVisiblePost: Boolean, serverItemCount: Int): Boolean =
+    promptReportsVisiblePost || serverItemCount > 0
 
 internal fun feedAutoRefreshBoundsMs(metered: Boolean): LongRange =
     if (metered) 300_000L..360_000L else 90_000L..120_000L
@@ -4548,6 +4642,7 @@ data class UiState(
     val ownPostNumberInPushEnabled: Boolean = false,
     val postNumberInPushEnabled: Boolean = false,
     val yoloModeEnabled: Boolean = false,
+    val mediaDataMode: String = "normal",
     val allowCommunityNsfwMarking: Boolean = false,
     val showNsfwByDefault: Boolean = false,
     val locationFeatureEnabled: Boolean = false,
@@ -4725,12 +4820,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private val staleFeedPhotoIds = mutableSetOf<Long>()
     private val stalePhotoInteractionIds = mutableSetOf<Long>()
     private var lastFeedAnchorDebugSignature = ""
+    private var lastFeedAnchorDebugAtMs = 0L
     private var lastFeedJumpAnchorBefore: FeedViewportAnchor? = null
     private var pendingFeedRestoreFailureReason: String = ""
     private var pendingFeedRestoreFailureAnchor: String = ""
     private var activePhotoInteractionsLoadPhotoId: Long? = null
     private val profileSectionIds = listOf(
         "display",
+        "media_data",
         "yolo_mode",
         "notifications",
         "fotomojis",
@@ -4806,6 +4903,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             ownPostNumberInPushEnabled = repo.ownPostNumberInPushLocalEnabled(),
             postNumberInPushEnabled = repo.postNumberInPushLocalEnabled(),
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
+            mediaDataMode = repo.mediaDataModeLocal(),
             feedOrderMode = repo.feedOrderMode(),
             randomFeedSeed = repo.randomFeedSeed(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
@@ -4967,17 +5065,19 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val identityChanged =
             previous.day != normalized.day ||
                 previous.photoId != normalized.photoId ||
-                previous.kind != normalized.kind ||
-                previous.rowIndex != normalized.rowIndex
+                previous.kind != normalized.kind
         val shouldUpdateOffset = previousOffsetBucket != nextOffsetBucket
         if (identityChanged || shouldUpdateOffset || state.feedVisibleAnchorDay != normalized.day) {
             state = state.copy(
                 feedViewportAnchor = normalized,
                 feedVisibleAnchorDay = normalized.day
             )
-            val signature = "${normalized.day}|${normalized.photoId}|${normalized.kind}|${normalized.rowIndex}|$nextOffsetBucket"
-            if (signature != lastFeedAnchorDebugSignature) {
+            val coarseOffsetBucket = normalized.rowOffsetPx / 768
+            val signature = "${normalized.day}|${normalized.photoId}|${normalized.kind}|$coarseOffsetBucket"
+            val nowMs = System.currentTimeMillis()
+            if (signature != lastFeedAnchorDebugSignature && (identityChanged || nowMs - lastFeedAnchorDebugAtMs >= 2_000L)) {
                 lastFeedAnchorDebugSignature = signature
+                lastFeedAnchorDebugAtMs = nowMs
                 logFeedDecision(
                     type = "feed_viewport_anchor_changed",
                     message = "viewport anchor updated",
@@ -5204,6 +5304,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     private fun CalendarPayloadResponse.toDataset(source: String): CalendarDataset =
         CalendarDataset(
+            revision = revision,
             days = days,
             dayStats = dayStats.associateBy { it.day },
             photosByDay = photosByDay,
@@ -5288,6 +5389,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     private fun CalendarPublicSnapshotLite.toDataset(): CalendarDataset =
         CalendarDataset(
+            revision = revision,
             days = days,
             dayStats = dayStats.associateBy { it.day },
             photosByDay = photosByDay
@@ -6961,9 +7063,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private suspend fun prefetchCalendarPublic(force: Boolean) {
         val hasCached = state.calendarPublicData.days.isNotEmpty()
         if (!force && (hasCached || isFreshLoadState(state.calendarPublicLoadState, calendarPublicFreshMs))) return
-        runCatching { repo.calendarPublic() }
+        runCatching { repo.calendarPublic(state.calendarPublicData.revision) }
             .onSuccess { payload ->
-                val dataset = payload.toDataset(source = "calendar_public_prefetch")
+                val dataset = if (payload.notModified) state.calendarPublicData else payload.toDataset(source = "calendar_public_prefetch")
                 state = state.copy(
                     calendarPublicData = dataset,
                     calendarPublicLoadState = surfaceLoadStateFor(
@@ -6975,7 +7077,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     applyCalendarDataset(dataset)
                     state = state.copy(calendarModeLoadState = state.calendarPublicLoadState)
                 }
-                state.user?.id?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
+                if (!payload.notModified) state.user?.id?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
                 repo.logDebug(
                     type = "calendar_prefetch_applied",
                     message = "calendar public prefetch applied",
@@ -7310,8 +7412,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                             )
                         )
                     } else {
-                        val payload = repo.calendarPublic()
-                        val dataset = payload.toDataset(source = "calendar_public")
+                        val payload = repo.calendarPublic(state.calendarPublicData.revision)
+                        val dataset = if (payload.notModified) state.calendarPublicData else payload.toDataset(source = "calendar_public")
                         state = state.copy(
                             calendarPublicData = dataset,
                             calendarPublicLoadState = surfaceLoadStateFor(
@@ -7324,7 +7426,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                             )
                         )
                         applyCalendarDataset(dataset)
-                        state.user?.id?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
+                        if (!payload.notModified) state.user?.id?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
                     }
                 }
                 CalendarMode.BOOKMARKS -> {
@@ -8273,6 +8375,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.setOwnPostNumberInPushLocalEnabled(me.ownPostNumberInPushEnabled)
             repo.setPostNumberInPushLocalEnabled(me.postNumberInPushEnabled)
             repo.setYoloModeLocalEnabled(me.yoloModeEnabled)
+            repo.setMediaDataModeLocal(me.mediaDataMode)
             val notificationMaster = repo.notificationMasterEnabled()
             val feedPostPushEnabled = repo.feedPostPushEnabled()
             val pollPushEnabled = repo.pollPushLocalEnabled()
@@ -8324,6 +8427,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 ownPostNumberInPushEnabled = ownPostNumberInPushEnabled,
                 postNumberInPushEnabled = postNumberInPushEnabled,
                 yoloModeEnabled = me.yoloModeEnabled,
+                mediaDataMode = me.mediaDataMode,
                 showPublicPostNumbers = repo.showPublicPostNumbers(),
                 preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
                 notificationMasterEnabled = computeNotificationMaster(notificationMaster && autoUpdateEnabled, me.chatPushEnabled, feedPostPushEnabled, pollPushEnabled, inviteRegistrationPushEnabled, photoReactionPushEnabled, photoCommentPushEnabled, bookmarkedPhotoPushEnabled, postChangePushEnabled),
@@ -8343,8 +8447,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 runCatching { applyYoloFeatures(forceAll = false, reason = "refresh_all") }
                     .onFailure { state = state.copy(message = apiError(it, "YOLO-Feature-Sync fehlgeschlagen")) }
             }
-            runCatching { repo.calendarPublic() }.getOrNull()?.let { publicCalendar ->
-                val dataset = publicCalendar.toDataset(source = "calendar_public_refresh")
+            runCatching { repo.calendarPublic(state.calendarPublicData.revision) }.getOrNull()?.let { publicCalendar ->
+                val dataset = if (publicCalendar.notModified) state.calendarPublicData else publicCalendar.toDataset(source = "calendar_public_refresh")
                 state = state.copy(
                     calendarPublicData = dataset,
                     calendarPublicLoadState = surfaceLoadStateFor(
@@ -8356,7 +8460,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     applyCalendarDataset(dataset)
                     state = state.copy(calendarModeLoadState = state.calendarPublicLoadState)
                 }
-                me.id.takeIf { it > 0L }?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
+                if (!publicCalendar.notModified) me.id.takeIf { it > 0L }?.let { repo.saveCalendarPublicWarmCache(it, dataset) }
             }
             repo.setDiagnosticsConsentLocal(me.diagnosticsConsentGranted)
             if (!me.diagnosticsConsentGranted && state.diagnosticsUploadEnabled) {
@@ -8851,6 +8955,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             return
         }
         val base = state.feedDays.firstOrNull() ?: return
+        val today = state.prompt?.day ?: LocalDate.now().toString()
+        if (state.feedTodayLocked && base != today && state.calendarDays.firstOrNull() == today) return
         var all = state.calendarDays
         var idx = all.indexOf(base)
         if (idx <= 0 && state.feedIndexHasNewer) {
@@ -9124,8 +9230,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val visibleDays = mergeVisibleFeedDays(windowDays, replaceVisibleDays = replaceVisibleDays, appendOlder = appendOlder)
         val prunedCache = pruneFeedCaches(cacheMap, promptMap, recapMap, visibleDays, requestedAnchorDay)
         val today = state.prompt?.day ?: LocalDate.now().toString()
-        val postedToday = state.prompt?.hasVisiblePostToday == true
-        val hasVisibleTodayFeed = postedToday && prunedCache.feedByDay[today].orEmpty().isNotEmpty()
+        val serverHasVisibleToday = prunedCache.feedByDay[today].orEmpty().isNotEmpty()
+        val postedToday = shouldRetainTodayFeed(
+            promptReportsVisiblePost = state.prompt?.hasVisiblePostToday == true,
+            serverItemCount = prunedCache.feedByDay[today].orEmpty().size
+        )
+        val hasVisibleTodayFeed = postedToday && serverHasVisibleToday
         val todayLocked = !postedToday && !hasVisibleTodayFeed
         val finalFeedByDay = if (!postedToday) prunedCache.feedByDay - today else prunedCache.feedByDay
         val finalPromptMeta = if (!postedToday) prunedCache.promptMetaByDay + (today to PromptMeta(day = today)) else prunedCache.promptMetaByDay
@@ -11536,6 +11646,28 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
         }
     }
+
+    suspend fun setMediaDataMode(mode: String) {
+        val normalized = mode.takeIf { it == "normal" || it == "data_saver" || it == "automatic" } ?: return
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching {
+            repo.updatePreferences(
+                chatPushEnabled = current.chatPushEnabled,
+                pollPushEnabled = current.pollPushEnabled,
+                inviteRegistrationPushEnabled = current.inviteRegistrationPushEnabled,
+                photoReactionPushEnabled = current.photoReactionPushEnabled,
+                photoCommentPushEnabled = current.photoCommentPushEnabled,
+                allowPhotoDownload = current.allowPhotoDownload,
+                mediaDataMode = normalized
+            )
+        }.onSuccess { user ->
+            repo.setMediaDataModeLocal(user.mediaDataMode)
+            state = state.copy(user = user, mediaDataMode = user.mediaDataMode, loading = false, message = "Medienmodus gespeichert")
+        }.onFailure {
+            state = state.copy(loading = false, message = apiError(it, "Medienmodus konnte nicht gespeichert werden"))
+        }
+    }
 }
 
 class MainVmFactory(private val repo: AppRepo) : ViewModelProvider.Factory {
@@ -12816,6 +12948,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     showPublicPostNumbers = state.showPublicPostNumbers,
                     preferSwipeForTwoImagePosts = state.preferSwipeForTwoImagePosts,
                     showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
+                    mediaDataMode = state.mediaDataMode,
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
                     onRefresh = { scope.launch { vm.refreshFeed() } },
                     onLoadOlder = { scope.launch { vm.loadOlderFeedDays() } },
@@ -12994,6 +13127,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     ownPostNumberInPushEnabled = state.user?.ownPostNumberInPushEnabled ?: state.ownPostNumberInPushEnabled,
                     postNumberInPushEnabled = state.user?.postNumberInPushEnabled ?: state.postNumberInPushEnabled,
                     yoloModeEnabled = state.user?.yoloModeEnabled ?: state.yoloModeEnabled,
+                    mediaDataMode = state.mediaDataMode,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     allowCommunityNsfwMarking = state.user?.allowCommunityNsfwMarking ?: false,
                     showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
@@ -13054,6 +13188,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onOwnPostNumberInPushEnabledChange = { scope.launch { vm.setOwnPostNumberInPushEnabled(it) } },
                     onPostNumberInPushEnabledChange = { scope.launch { vm.setPostNumberInPushEnabled(it) } },
                     onYoloModeEnabledChange = { scope.launch { vm.setYoloModeEnabled(it) } },
+                    onMediaDataModeChange = { scope.launch { vm.setMediaDataMode(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onAllowCommunityNsfwMarkingChange = { scope.launch { vm.setAllowCommunityNsfwMarkingEnabled(it) } },
                     onShowNsfwByDefaultChange = { scope.launch { vm.setShowNsfwByDefaultEnabled(it) } },
@@ -13706,8 +13841,6 @@ fun CameraTab(
             }
         }
 
-        NetworkUsageSummaryCard()
-
         val queueItems = visibleQueueItems(uploadQueue)
         if (queueItems.isNotEmpty()) {
             Text("Upload-Queue", style = MaterialTheme.typography.titleMedium)
@@ -14011,6 +14144,7 @@ fun FeedTab(
     showPublicPostNumbers: Boolean,
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
+    mediaDataMode: String,
     onTakePhoto: () -> Unit,
     onRefresh: () -> Unit,
     onLoadOlder: () -> Unit,
@@ -14514,6 +14648,7 @@ fun FeedTab(
                         showPublicPostNumbers = showPublicPostNumbers,
                         preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
                         showNsfwByDefault = showNsfwByDefault,
+                        mediaDataMode = mediaDataMode,
                         nsfwRevealed = revealedNsfwPhotoIds.contains(item.photo.id),
                         highlightedCommentId = if (highlightedPhotoId == item.photo.id) highlightedCommentId else null,
                         highlightedPhotoMojiId = if (highlightedPhotoId == item.photo.id) highlightedPhotoMojiId else null,
@@ -14762,6 +14897,7 @@ private fun FeedPostCard(
     showPublicPostNumbers: Boolean,
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
+    mediaDataMode: String,
     nsfwRevealed: Boolean,
     highlightedCommentId: Long?,
     highlightedPhotoMojiId: Long?,
@@ -14793,6 +14929,7 @@ private fun FeedPostCard(
         showPublicPostNumbers = showPublicPostNumbers,
         preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
         showNsfwByDefault = showNsfwByDefault,
+        mediaDataMode = mediaDataMode,
         nsfwRevealed = nsfwRevealed,
         highlightedCommentId = highlightedCommentId,
         highlightedPhotoMojiId = highlightedPhotoMojiId,
@@ -14922,6 +15059,7 @@ private fun PostCanvasCard(
     showPublicPostNumbers: Boolean,
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
+    mediaDataMode: String = "normal",
     nsfwRevealed: Boolean,
     highlightedCommentId: Long?,
     highlightedPhotoMojiId: Long?,
@@ -14940,7 +15078,15 @@ private fun PostCanvasCard(
 ) {
     val mediaItems = remember(item.photo) { item.photo.mediaItems() }
     val urls = remember(mediaItems) { mediaItems.map { it.url } }
-    val displayUrls = remember(mediaItems) { mediaItems.map { it.thumbnailUrl?.takeIf(String::isNotBlank) ?: it.url } }
+    val context = LocalContext.current
+    val metered = remember { NetworkUsageLedger.isMetered(context) }
+    val avifDisabled = remember {
+        context.getSharedPreferences("app", Context.MODE_PRIVATE)
+            .getInt("avif_decode_disabled_version", -1) == BuildConfig.VERSION_CODE
+    }
+    val displayCandidates = remember(mediaItems, mediaDataMode, metered, avifDisabled) {
+        mediaItems.map { selectFeedMediaCandidates(it, mediaDataMode, metered, Build.VERSION.SDK_INT, avifDisabled) }
+    }
     val reactions = remember(item.reactions) { item.reactions.orEmpty() }
     val photoMojis = remember(item.photoMojis) {
         item.photoMojis.orEmpty().sortedWith(compareBy<PhotoMojiItem>({ parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN }, { it.id }))
@@ -15098,8 +15244,8 @@ private fun PostCanvasCard(
                                     .fillMaxSize()
                                     .padding(10.dp)
                             ) {
-                                AsyncImage(
-                                    model = displayUrls[it],
+                                FeedRenditionImage(
+                                    candidates = displayCandidates[it],
                                     contentDescription = "${item.user.username} Foto",
                                     modifier = Modifier
                                         .fillMaxSize()
@@ -15118,9 +15264,9 @@ private fun PostCanvasCard(
                                     .padding(10.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                displayUrls.forEach { url ->
-                                    AsyncImage(
-                                        model = url,
+                                displayCandidates.forEach { candidates ->
+                                    FeedRenditionImage(
+                                        candidates = candidates,
                                         contentDescription = "${item.user.username} Foto",
                                         modifier = Modifier
                                             .weight(1f)
@@ -15943,6 +16089,41 @@ private fun HashtagText(
             annotated.getStringAnnotations("hashtag", offset, offset)
                 .firstOrNull()
                 ?.let { onHashtagClick(it.item) }
+        }
+    )
+}
+
+@Composable
+private fun FeedRenditionImage(
+    candidates: List<String>,
+    contentDescription: String?,
+    modifier: Modifier,
+    contentScale: ContentScale
+) {
+    val context = LocalContext.current
+    var candidateIndex by remember(candidates) { mutableStateOf(0) }
+    val candidate = candidates.getOrNull(candidateIndex)
+    AsyncImage(
+        model = candidate,
+        contentDescription = contentDescription,
+        modifier = modifier,
+        contentScale = contentScale,
+        onSuccess = { state ->
+            NetworkUsageLedger.recordMediaCacheResult(
+                context,
+                state.result.dataSource.toString(),
+                candidate?.substringBefore('?')?.substringAfterLast('.', "unknown") ?: "unknown"
+            )
+        },
+        onError = { state ->
+            val isAvif = candidate?.substringBefore('?')?.endsWith(".avif", ignoreCase = true) == true
+            val throwableName = state.result.throwable.toString().lowercase(Locale.ROOT)
+            val decodeFailure = "decode" in throwableName || "bitmap" in throwableName || "image decoder" in throwableName
+            if (isAvif && decodeFailure) {
+                context.getSharedPreferences("app", Context.MODE_PRIVATE)
+                    .edit().putInt("avif_decode_disabled_version", BuildConfig.VERSION_CODE).apply()
+            }
+            if (candidateIndex < candidates.lastIndex) candidateIndex++
         }
     )
 }
@@ -18008,6 +18189,7 @@ fun ProfileTab(
     ownPostNumberInPushEnabled: Boolean,
     postNumberInPushEnabled: Boolean,
     yoloModeEnabled: Boolean,
+    mediaDataMode: String,
     allowPhotoDownload: Boolean,
     allowCommunityNsfwMarking: Boolean,
     showNsfwByDefault: Boolean,
@@ -18068,6 +18250,7 @@ fun ProfileTab(
     onOwnPostNumberInPushEnabledChange: (Boolean) -> Unit,
     onPostNumberInPushEnabledChange: (Boolean) -> Unit,
     onYoloModeEnabledChange: (Boolean) -> Unit,
+    onMediaDataModeChange: (String) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onAllowCommunityNsfwMarkingChange: (Boolean) -> Unit,
     onShowNsfwByDefaultChange: (Boolean) -> Unit,
@@ -18740,6 +18923,55 @@ fun ProfileTab(
                         }
                     }
                 }
+            }
+        }
+        item {
+            CollapsibleSection(
+                title = "Medien & Daten",
+                subtitle = "Bildqualitaet, Datenverbrauch und lokaler Cache",
+                expanded = sectionExpanded("media_data"),
+                onExpandedChange = { onProfileSectionExpandedChange("media_data", it) }
+            ) {
+                Text("Der Medienmodus ist profilgebunden und unabhaengig vom YOLO-Modus.")
+                listOf(
+                    "normal" to "Normal",
+                    "data_saver" to "Datensparen",
+                    "automatic" to "Automatisch"
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = mediaDataMode == mode,
+                        onClick = { if (mediaDataMode != mode) onMediaDataModeChange(mode) },
+                        label = { Text(label) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        when (mode) {
+                            "normal" -> "Feedbilder in Originalqualitaet; kleine Karten nutzen effiziente Vorschauen."
+                            "data_saver" -> "720-px-Renditions; Original erst im Viewer."
+                            else -> "Ungetaktetes WLAN wie Normal, Mobilfunk und getaktete Netze wie Datensparen."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                val mediaCacheDir = context.cacheDir.resolve("daily_media_cache")
+                val metadataDir = context.filesDir.resolve("warm-cache")
+                val mediaCacheBytes = remember(mediaDataMode) { directorySizeBytes(mediaCacheDir) }
+                Text("Mediencache: ${formatDataBytes(mediaCacheBytes)}", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { mediaCacheDir.listFiles()?.forEach { it.deleteRecursively() } },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Medien leeren") }
+                    OutlinedButton(
+                        onClick = { metadataDir.listFiles()?.forEach { it.deleteRecursively() } },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Metadaten neu") }
+                }
+                Text(
+                    "Upload-Queue und unveroeffentlichte Aufnahmen werden von beiden Aktionen nie beruehrt.",
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         }
         item {
@@ -20151,29 +20383,31 @@ private fun themeModeValue(darkMode: Boolean, oledMode: Boolean): Int {
 }
 
 @Composable
-private fun NetworkUsageSummaryCard() {
+internal fun NetworkUsageSummaryCard() {
     val context = LocalContext.current
     var refreshKey by remember { mutableStateOf(0) }
     val summary = remember(refreshKey) { NetworkUsageLedger.summary(context) }
+    var showDetails by rememberSaveable { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text("Datenverbrauch", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text("Heute gesamt: ${formatDataBytes(summary.rxBytesToday)} Download / ${formatDataBytes(summary.txBytesToday)} Upload")
             Text("Heute WLAN: ${formatDataBytes(summary.wifiRxBytesToday)} Download / ${formatDataBytes(summary.wifiTxBytesToday)} Upload")
             Text("Heute Mobilfunk: ${formatDataBytes(summary.cellularRxBytesToday)} Download / ${formatDataBytes(summary.cellularTxBytesToday)} Upload")
             Text("7 Tage gesamt: ${formatDataBytes(summary.rxBytesSevenDays)} Download / ${formatDataBytes(summary.txBytesSevenDays)} Upload")
-            Text("7 Tage WLAN: ${formatDataBytes(summary.wifiRxBytesSevenDays)} Download / ${formatDataBytes(summary.wifiTxBytesSevenDays)} Upload")
-            Text("7 Tage Mobilfunk: ${formatDataBytes(summary.cellularRxBytesSevenDays)} Download / ${formatDataBytes(summary.cellularTxBytesSevenDays)} Upload")
-            Text("Anfragen: ${summary.requestCountSevenDays} / Cache-Treffer: ${summary.cacheHitsSevenDays} / Wiederholungen: ${summary.retryCountSevenDays}")
-            Text("Geraete-Gegenprobe (UID): ${formatDataBytes(summary.uidRxBytesSevenDays)} Download / ${formatDataBytes(summary.uidTxBytesSevenDays)} Upload")
-            summary.topEndpoints.forEach { (endpoint, bytes) ->
-                Text("$endpoint: ${formatDataBytes(bytes)}", style = MaterialTheme.typography.bodySmall)
+            Text("Differenz HTTP zu UID: ${formatDataBytes(kotlin.math.abs(summary.httpUidDifferenceRxSevenDays))}")
+            TextButton(onClick = { showDetails = !showDetails }) { Text(if (showDetails) "Details einklappen" else "Details anzeigen") }
+            AnimatedVisibility(visible = showDetails) {
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("7 Tage WLAN: ${formatDataBytes(summary.wifiRxBytesSevenDays)} Download / ${formatDataBytes(summary.wifiTxBytesSevenDays)} Upload")
+                    Text("7 Tage Mobilfunk: ${formatDataBytes(summary.cellularRxBytesSevenDays)} Download / ${formatDataBytes(summary.cellularTxBytesSevenDays)} Upload")
+                    Text("Anfragen: ${summary.requestCountSevenDays} / Cache-Treffer: ${summary.cacheHitsSevenDays} / Wiederholungen: ${summary.retryCountSevenDays}")
+                    Text("Feed-Duplikate unterdrueckt: ${summary.suppressedFeedDuplicates} / negative Kanten: ${summary.negativeFeedCacheHits}")
+                    Text("Geraete-Gegenprobe (UID): ${formatDataBytes(summary.uidRxBytesSevenDays)} Download / ${formatDataBytes(summary.uidTxBytesSevenDays)} Upload")
+                    summary.cacheSources.forEach { (source, count) -> Text("Cache $source: $count", style = MaterialTheme.typography.bodySmall) }
+                    summary.topEndpoints.forEach { (endpoint, bytes) -> Text("$endpoint: ${formatDataBytes(bytes)}", style = MaterialTheme.typography.bodySmall) }
+                    Text("Technische Aggregate; keine URLs, Tokens, Dateinamen, Bilder oder Bodies.", style = MaterialTheme.typography.bodySmall)
+                }
             }
-            Text(
-                "Messung: Daily-HTTP plus unabhaengige Android-UID-Gegenmessung; lokale Details werden nach 14 Tagen zu Tageswerten verdichtet.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
             TextButton(onClick = { refreshKey++ }) { Text("Verbrauch aktualisieren") }
         }
     }
@@ -20188,6 +20422,10 @@ private fun formatDataBytes(bytes: Long): String {
         else -> "$safe B"
     }
 }
+
+private fun directorySizeBytes(root: File): Long = runCatching {
+    if (!root.exists()) 0L else root.walkTopDown().filter(File::isFile).sumOf(File::length)
+}.getOrDefault(0L)
 
 private fun themeModeLabel(mode: Int): String {
     return when (mode) {
