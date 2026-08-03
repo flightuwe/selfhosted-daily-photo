@@ -71,6 +71,44 @@ type performanceErrorClassRow struct {
 	Ratio      float64 `json:"ratio"`
 }
 
+type performanceCacheEntry struct {
+	expiresAt time.Time
+	payload   gin.H
+}
+
+// performanceCached keeps expensive analysis reads out of the SQLite hot path
+// when the admin UI renders several panels or retries a slow request.
+func (s *Server) performanceCached(key string, ttl time.Duration, build func() (gin.H, error)) (gin.H, error) {
+	now := time.Now()
+	s.performanceCacheMu.Lock()
+	if entry, ok := s.performanceCache[key]; ok && now.Before(entry.expiresAt) {
+		s.performanceCacheMu.Unlock()
+		return entry.payload, nil
+	}
+	s.performanceCacheMu.Unlock()
+
+	payload, err := build()
+	if err != nil {
+		return nil, err
+	}
+	s.performanceCacheMu.Lock()
+	if s.performanceCache == nil {
+		s.performanceCache = make(map[string]performanceCacheEntry)
+	}
+	s.performanceCache[key] = performanceCacheEntry{expiresAt: now.Add(ttl), payload: payload}
+	for cacheKey, entry := range s.performanceCache {
+		if !now.Before(entry.expiresAt) {
+			delete(s.performanceCache, cacheKey)
+		}
+	}
+	s.performanceCacheMu.Unlock()
+	return payload, nil
+}
+
+func performanceCacheKey(name string, from, to time.Time, suffix string) string {
+	return name + ":" + from.UTC().Format(time.RFC3339) + ":" + to.UTC().Format(time.RFC3339) + ":" + suffix
+}
+
 func (s *Server) handleAdminPerformanceTracking(c *gin.Context) {
 	settings, activeSpike, latestSpike, err := s.performanceTrackingState()
 	if err != nil {
@@ -317,26 +355,31 @@ func (s *Server) handleAdminPerformanceOverview(c *gin.Context) {
 		step = 5 * time.Minute
 	}
 
-	rows, err := s.loadMinuteMetrics(from, to, 50000)
+	payload, err := s.performanceCached(performanceCacheKey("overview", from, to, bucket), 20*time.Second, func() (gin.H, error) {
+		return s.buildAdminPerformanceOverview(from, to, bucket, step)
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "performance query failed"})
 		return
 	}
-	systemRows, err := s.loadSystemMinuteMetrics(from, to, 50000)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "system metrics query failed"})
-		return
-	}
-	dbRows, err := s.loadDBQueryMinuteMetrics(from, to, 70000)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db metrics query failed"})
-		return
-	}
+	c.JSON(http.StatusOK, payload)
+}
 
+func (s *Server) buildAdminPerformanceOverview(from, to time.Time, bucket string, step time.Duration) (gin.H, error) {
+	rows, err := s.loadMinuteMetrics(from, to, 20000)
+	if err != nil {
+		return nil, err
+	}
+	systemRows, err := s.loadSystemMinuteMetrics(from, to, 10000)
+	if err != nil {
+		return nil, err
+	}
+	dbRows, err := s.loadDBQueryMinuteMetrics(from, to, 20000)
+	if err != nil {
+		return nil, err
+	}
 	buckets := aggregateMinuteRows(rows, step, s.Location)
-	systemBuckets := aggregateSystemRows(systemRows, step, s.Location)
-	hotspots := aggregateDBHotspots(dbRows, 12)
-	errorClasses := s.collectPerformanceErrorClasses(from, to, 90000)
+	errorClasses := s.collectPerformanceErrorClasses(from, to, 10000)
 	var throttleCount int64
 	for _, item := range errorClasses {
 		if item.ErrorClass == "http_429" || item.ErrorClass == "rate_limited" || item.ErrorClass == "feed_rate_limited" {
@@ -344,34 +387,19 @@ func (s *Server) handleAdminPerformanceOverview(c *gin.Context) {
 		}
 	}
 	totalRequests := sumInt64FromBuckets(buckets, func(item performanceBucketRow) int64 { return item.Requests })
-	totalErrors := sumInt64FromBuckets(buckets, func(item performanceBucketRow) int64 { return item.Errors })
-	throttleRate := safeRate(throttleCount, totalRequests)
-	windowMinutes := int(to.Sub(from) / time.Minute)
-	if windowMinutes < 1 {
-		windowMinutes = 1
-	}
-	slo := buildSLOState(rows, time.Now().In(s.Location), s.Location, windowMinutes)
-	dataSync := s.buildDataSyncPerformance(rows, from, to)
-	c.JSON(http.StatusOK, gin.H{
-		"schemaVersion": "1.2",
-		"from":          from,
-		"to":            to,
-		"bucket":        bucket,
-		"items":         buckets,
-		"system":        systemBuckets,
-		"dbHotspots":    hotspots,
-		"errorClasses":  errorClasses,
-		"slo":           slo,
-		"dataSync":      dataSync,
+	windowMinutes := maxInt(1, int(to.Sub(from)/time.Minute))
+	return gin.H{
+		"schemaVersion": "1.3", "from": from, "to": to, "bucket": bucket, "items": buckets,
+		"system": aggregateSystemRows(systemRows, step, s.Location), "dbHotspots": aggregateDBHotspots(dbRows, 12),
+		"errorClasses": errorClasses, "slo": buildSLOState(rows, time.Now().In(s.Location), s.Location, windowMinutes),
+		"dataSync": s.buildDataSyncPerformance(rows, from, to),
 		"summary": gin.H{
-			"requests":      totalRequests,
-			"errors":        totalErrors,
+			"requests": totalRequests, "errors": sumInt64FromBuckets(buckets, func(item performanceBucketRow) int64 { return item.Errors }),
 			"p95Peak":       maxFloatFromBuckets(buckets, func(item performanceBucketRow) float64 { return item.P95Ms }),
 			"p99Peak":       maxFloatFromBuckets(buckets, func(item performanceBucketRow) float64 { return item.P99Ms }),
-			"throttleCount": throttleCount,
-			"throttleRate":  perfRoundFloat(throttleRate, 4),
+			"throttleCount": throttleCount, "throttleRate": perfRoundFloat(safeRate(throttleCount, totalRequests), 4),
 		},
-	})
+	}, nil
 }
 
 func (s *Server) handleAdminPerformanceRoutes(c *gin.Context) {
@@ -389,18 +417,18 @@ func (s *Server) handleAdminPerformanceRoutes(c *gin.Context) {
 		top = n
 	}
 
-	rows, err := s.loadMinuteMetrics(from, to, 70000)
+	payload, err := s.performanceCached(performanceCacheKey("routes", from, to, strconv.Itoa(top)), 20*time.Second, func() (gin.H, error) {
+		rows, loadErr := s.loadMinuteMetrics(from, to, 20000)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		return gin.H{"from": from, "to": to, "top": top, "items": aggregateRouteHotspots(rows, top)}, nil
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
-	items := aggregateRouteHotspots(rows, top)
-	c.JSON(http.StatusOK, gin.H{
-		"from":  from,
-		"to":    to,
-		"top":   top,
-		"items": items,
-	})
+	c.JSON(http.StatusOK, payload)
 }
 
 func (s *Server) handleAdminPerformanceSpikes(c *gin.Context) {

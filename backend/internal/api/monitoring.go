@@ -40,11 +40,14 @@ type Monitor struct {
 	ThrottleTotal     int64
 	ThrottleByReason  map[string]int64
 
-	minuteBuckets     map[minuteBucketKey]*minuteBucket
-	dbQueryBuckets    map[dbQueryBucketKey]*dbQueryBucket
-	activeSpike       *spikeWindow
-	lastMaintenanceAt time.Time
-	lastSystemMinute  time.Time
+	minuteBuckets      map[minuteBucketKey]*minuteBucket
+	dbQueryBuckets     map[dbQueryBucketKey]*dbQueryBucket
+	syncBuckets        map[syncCapabilityBucketKey]*syncCapabilityBucket
+	persistenceQueue   chan func()
+	persistenceDropped int64
+	activeSpike        *spikeWindow
+	lastMaintenanceAt  time.Time
+	lastSystemMinute   time.Time
 }
 
 type RequestMetric struct {
@@ -93,6 +96,23 @@ type dbQueryBucket struct {
 	Max       float64
 }
 
+// Sync capability metrics are useful for capacity planning, but they must
+// never perform a SQLite write on a user-facing request path.
+type syncCapabilityBucketKey struct {
+	Minute     time.Time
+	Surface    string
+	Mode       string
+	Outcome    string
+	AppVersion string
+}
+
+type syncCapabilityBucket struct {
+	Key        syncCapabilityBucketKey
+	Requests   int64
+	BytesOut   int64
+	MaxLatency float64
+}
+
 type spikeWindow struct {
 	EventID       uint
 	Day           string
@@ -105,7 +125,7 @@ type spikeWindow struct {
 }
 
 func NewMonitor(database *gorm.DB, loc *time.Location) *Monitor {
-	return &Monitor{
+	monitor := &Monitor{
 		DB:               database,
 		Location:         loc,
 		StartedAt:        time.Now(),
@@ -113,7 +133,30 @@ func NewMonitor(database *gorm.DB, loc *time.Location) *Monitor {
 		RecentRequests:   make([]RequestMetric, 0, 300),
 		minuteBuckets:    make(map[minuteBucketKey]*minuteBucket),
 		dbQueryBuckets:   make(map[dbQueryBucketKey]*dbQueryBucket),
+		syncBuckets:      make(map[syncCapabilityBucketKey]*syncCapabilityBucket),
+		persistenceQueue: make(chan func(), 256),
 		ThrottleByReason: make(map[string]int64, 4),
+	}
+	go monitor.runPersistenceWorker()
+	return monitor
+}
+
+func (m *Monitor) runPersistenceWorker() {
+	for task := range m.persistenceQueue {
+		task()
+	}
+}
+
+// enqueuePersistence is deliberately bounded. Losing a best-effort metric is
+// preferable to making the photo, chat, or bootstrap path wait behind SQLite.
+func (m *Monitor) enqueuePersistence(task func()) {
+	if m == nil || m.DB == nil || task == nil {
+		return
+	}
+	select {
+	case m.persistenceQueue <- task:
+	default:
+		m.persistenceDropped++
 	}
 }
 
@@ -177,9 +220,34 @@ func (m *Monitor) RecordRequest(metric RequestMetric) {
 
 	m.flushCompletedMinuteBucketsLocked(minute)
 	m.flushCompletedDBQueryBucketsLocked(minute)
+	m.flushCompletedSyncCapabilityBucketsLocked(minute)
 	m.recordSystemMinuteSnapshotLocked(minute)
 	m.runMaintenanceLocked(now)
 	m.recordSpikeRequestLocked(metric, now)
+}
+
+func (m *Monitor) RecordSyncCapabilityMetric(minute time.Time, surface, mode, outcome, appVersion string, bytesOut int64, latencyMs float64) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if minute.IsZero() {
+		minute = time.Now()
+	}
+	minute = minute.UTC().Truncate(time.Minute)
+	key := syncCapabilityBucketKey{Minute: minute, Surface: surface, Mode: mode, Outcome: outcome, AppVersion: appVersion}
+	bucket, ok := m.syncBuckets[key]
+	if !ok {
+		bucket = &syncCapabilityBucket{Key: key}
+		m.syncBuckets[key] = bucket
+	}
+	bucket.Requests++
+	bucket.BytesOut += maxInt64(bytesOut, 0)
+	if latencyMs > bucket.MaxLatency {
+		bucket.MaxLatency = latencyMs
+	}
+	m.flushCompletedSyncCapabilityBucketsLocked(minute)
 }
 
 func (m *Monitor) RecordDBQuery(route, queryGroup string, duration time.Duration) {
@@ -273,7 +341,10 @@ func (m *Monitor) recordSpikeRequestLocked(metric RequestMetric, now time.Time) 
 		updates["p95_peak_ms"] = spike.P95PeakMs
 		spike.LastPersistAt = now
 	}
-	_ = m.DB.Model(&models.DailySpikeEvent{}).Where("id = ?", spike.EventID).Updates(updates).Error
+	id := spike.EventID
+	m.enqueuePersistence(func() {
+		_ = m.DB.Model(&models.DailySpikeEvent{}).Where("id = ?", id).Updates(updates).Error
+	})
 }
 
 func (m *Monitor) finalizeSpikeLocked(now time.Time) {
@@ -282,11 +353,13 @@ func (m *Monitor) finalizeSpikeLocked(now time.Time) {
 	}
 	if m.DB != nil && m.activeSpike.EventID != 0 {
 		finalizedAt := now
-		_ = m.DB.Model(&models.DailySpikeEvent{}).Where("id = ?", m.activeSpike.EventID).Updates(map[string]any{
-			"p95_peak_ms":  m.activeSpike.P95PeakMs,
-			"finalized_at": &finalizedAt,
-			"updated_at":   now,
-		}).Error
+		id := m.activeSpike.EventID
+		p95 := m.activeSpike.P95PeakMs
+		m.enqueuePersistence(func() {
+			_ = m.DB.Model(&models.DailySpikeEvent{}).Where("id = ?", id).Updates(map[string]any{
+				"p95_peak_ms": p95, "finalized_at": &finalizedAt, "updated_at": now,
+			}).Error
+		})
 	}
 	m.activeSpike = nil
 }
@@ -312,24 +385,17 @@ func (m *Monitor) flushCompletedMinuteBucketsLocked(currentMinute time.Time) {
 			BytesIn:     bucket.BytesIn,
 			BytesOut:    bucket.BytesOut,
 		}
-		_ = m.DB.Clauses(clause.OnConflict{
-			Columns: []clause.Column{
-				{Name: "minute"},
-				{Name: "route"},
-				{Name: "method"},
-				{Name: "status_class"},
-			},
-			DoUpdates: clause.Assignments(map[string]any{
-				"count":       gorm.Expr("count + ?", record.Count),
-				"p50_latency": record.P50Latency,
-				"p95_latency": record.P95Latency,
-				"p99_latency": record.P99Latency,
-				"max_latency": gorm.Expr("MAX(max_latency, ?)", record.MaxLatency),
-				"bytes_in":    gorm.Expr("bytes_in + ?", record.BytesIn),
-				"bytes_out":   gorm.Expr("bytes_out + ?", record.BytesOut),
-				"updated_at":  time.Now(),
-			}),
-		}).Create(&record).Error
+		m.enqueuePersistence(func() {
+			_ = m.DB.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "minute"}, {Name: "route"}, {Name: "method"}, {Name: "status_class"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"count": gorm.Expr("count + ?", record.Count), "p50_latency": record.P50Latency,
+					"p95_latency": record.P95Latency, "p99_latency": record.P99Latency,
+					"max_latency": gorm.Expr("MAX(max_latency, ?)", record.MaxLatency),
+					"bytes_in":    gorm.Expr("bytes_in + ?", record.BytesIn), "bytes_out": gorm.Expr("bytes_out + ?", record.BytesOut), "updated_at": time.Now(),
+				}),
+			}).Create(&record).Error
+		})
 		delete(m.minuteBuckets, key)
 	}
 }
@@ -352,21 +418,15 @@ func (m *Monitor) flushCompletedDBQueryBucketsLocked(currentMinute time.Time) {
 			P99Ms:      percentile(bucket.Latencies, 99),
 			MaxMs:      bucket.Max,
 		}
-		_ = m.DB.Clauses(clause.OnConflict{
-			Columns: []clause.Column{
-				{Name: "minute"},
-				{Name: "route"},
-				{Name: "query_group"},
-			},
-			DoUpdates: clause.Assignments(map[string]any{
-				"count":      gorm.Expr("count + ?", record.Count),
-				"p50_ms":     record.P50Ms,
-				"p95_ms":     record.P95Ms,
-				"p99_ms":     record.P99Ms,
-				"max_ms":     gorm.Expr("MAX(max_ms, ?)", record.MaxMs),
-				"updated_at": time.Now(),
-			}),
-		}).Create(&record).Error
+		m.enqueuePersistence(func() {
+			_ = m.DB.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "minute"}, {Name: "route"}, {Name: "query_group"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"count": gorm.Expr("count + ?", record.Count), "p50_ms": record.P50Ms, "p95_ms": record.P95Ms,
+					"p99_ms": record.P99Ms, "max_ms": gorm.Expr("MAX(max_ms, ?)", record.MaxMs), "updated_at": time.Now(),
+				}),
+			}).Create(&record).Error
+		})
 		delete(m.dbQueryBuckets, key)
 	}
 }
@@ -404,22 +464,40 @@ func (m *Monitor) recordSystemMinuteSnapshotLocked(minute time.Time) {
 		DBWaitCount:        int64(dbStats.WaitCount),
 		DBWaitDurationMs:   float64(dbStats.WaitDuration.Microseconds()) / 1000.0,
 	}
-	_ = m.DB.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "minute"}},
-		DoUpdates: clause.Assignments(map[string]any{
-			"mem_alloc_bytes":       record.MemAllocBytes,
-			"mem_sys_bytes":         record.MemSysBytes,
-			"num_goroutine":         record.NumGoroutine,
-			"gc_pause_total_ms":     record.GCPauseTotalMs,
-			"last_gc_pause_ms":      record.LastGCPauseMs,
-			"db_open_connections":   record.DBOpenConnections,
-			"db_in_use_connections": record.DBInUseConnections,
-			"db_idle_connections":   record.DBIdleConnections,
-			"db_wait_count":         record.DBWaitCount,
-			"db_wait_duration_ms":   record.DBWaitDurationMs,
-			"updated_at":            time.Now(),
-		}),
-	}).Create(&record).Error
+	m.enqueuePersistence(func() {
+		_ = m.DB.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "minute"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"mem_alloc_bytes": record.MemAllocBytes, "mem_sys_bytes": record.MemSysBytes, "num_goroutine": record.NumGoroutine,
+				"gc_pause_total_ms": record.GCPauseTotalMs, "last_gc_pause_ms": record.LastGCPauseMs,
+				"db_open_connections": record.DBOpenConnections, "db_in_use_connections": record.DBInUseConnections,
+				"db_idle_connections": record.DBIdleConnections, "db_wait_count": record.DBWaitCount,
+				"db_wait_duration_ms": record.DBWaitDurationMs, "updated_at": time.Now(),
+			}),
+		}).Create(&record).Error
+	})
+}
+
+func (m *Monitor) flushCompletedSyncCapabilityBucketsLocked(currentMinute time.Time) {
+	if m.DB == nil {
+		return
+	}
+	for key, bucket := range m.syncBuckets {
+		if !key.Minute.Before(currentMinute) {
+			continue
+		}
+		record := models.SyncCapabilityMetric{Minute: key.Minute, Surface: key.Surface, Mode: key.Mode, Outcome: key.Outcome, AppVersion: key.AppVersion, Requests: bucket.Requests, BytesOut: bucket.BytesOut, MaxLatency: bucket.MaxLatency}
+		m.enqueuePersistence(func() {
+			_ = m.DB.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "minute"}, {Name: "surface"}, {Name: "mode"}, {Name: "outcome"}, {Name: "app_version"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"requests": gorm.Expr("requests + ?", record.Requests), "bytes_out": gorm.Expr("bytes_out + ?", record.BytesOut),
+					"max_latency": gorm.Expr("MAX(max_latency, ?)", record.MaxLatency), "updated_at": time.Now(),
+				}),
+			}).Create(&record).Error
+		})
+		delete(m.syncBuckets, key)
+	}
 }
 
 func (m *Monitor) runMaintenanceLocked(now time.Time) {
@@ -436,11 +514,13 @@ func (m *Monitor) runMaintenanceLocked(now time.Time) {
 	systemCutoff := now.Add(-30 * 24 * time.Hour)
 	spikeCutoff := now.Add(-120 * 24 * time.Hour)
 	triggerAuditCutoff := now.Add(-30 * 24 * time.Hour)
-	_ = m.DB.Where("minute < ?", minuteCutoff).Delete(&models.APIMinuteMetric{}).Error
-	_ = m.DB.Where("minute < ?", queryCutoff).Delete(&models.DBQueryMinuteMetric{}).Error
-	_ = m.DB.Where("minute < ?", systemCutoff).Delete(&models.SystemMinuteMetric{}).Error
-	_ = m.DB.Where("window_end < ?", spikeCutoff).Delete(&models.DailySpikeEvent{}).Error
-	_ = m.DB.Where("occurred_at < ?", triggerAuditCutoff).Delete(&models.DailyTriggerAuditEvent{}).Error
+	m.enqueuePersistence(func() {
+		_ = m.DB.Where("minute < ?", minuteCutoff).Delete(&models.APIMinuteMetric{}).Error
+		_ = m.DB.Where("minute < ?", queryCutoff).Delete(&models.DBQueryMinuteMetric{}).Error
+		_ = m.DB.Where("minute < ?", systemCutoff).Delete(&models.SystemMinuteMetric{}).Error
+		_ = m.DB.Where("window_end < ?", spikeCutoff).Delete(&models.DailySpikeEvent{}).Error
+		_ = m.DB.Where("occurred_at < ?", triggerAuditCutoff).Delete(&models.DailyTriggerAuditEvent{}).Error
+	})
 }
 
 func (m *Monitor) RecordPush(sent, failed, invalid int, hadError bool) {
@@ -453,11 +533,12 @@ func (m *Monitor) RecordPush(sent, failed, invalid int, hadError bool) {
 		m.PushErrors++
 	}
 	if m.DB != nil && m.activeSpike != nil && m.activeSpike.EventID != 0 {
-		_ = m.DB.Model(&models.DailySpikeEvent{}).Where("id = ?", m.activeSpike.EventID).Updates(map[string]any{
-			"push_sent":    gorm.Expr("push_sent + ?", sent),
-			"updated_at":   time.Now().In(m.Location),
-			"finalized_at": nil,
-		}).Error
+		id := m.activeSpike.EventID
+		m.enqueuePersistence(func() {
+			_ = m.DB.Model(&models.DailySpikeEvent{}).Where("id = ?", id).Updates(map[string]any{
+				"push_sent": gorm.Expr("push_sent + ?", sent), "updated_at": time.Now().In(m.Location), "finalized_at": nil,
+			}).Error
+		})
 	}
 }
 
@@ -570,7 +651,11 @@ func (m *Monitor) Snapshot() gin.H {
 		"errorRatePercent":  roundFloat(errRate, 3),
 		"p95LatencyMs":      roundFloat(p95, 3),
 		"recentRequestsCnt": len(recent),
-		"spike":             spike,
+		"persistence": gin.H{
+			"queued":  len(m.persistenceQueue),
+			"dropped": m.persistenceDropped,
+		},
+		"spike": spike,
 		"throttle": gin.H{
 			"total":    m.ThrottleTotal,
 			"byReason": throttleReasons,
@@ -633,7 +718,7 @@ func (s *Server) metricsMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) recordSyncCapabilityMetric(c *gin.Context, metric RequestMetric) {
-	if s.DB == nil {
+	if s.Monitor == nil {
 		return
 	}
 	path := c.Request.URL.Path
@@ -668,17 +753,7 @@ func (s *Server) recordSyncCapabilityMetric(c *gin.Context, metric RequestMetric
 	if appVersion == "" {
 		appVersion = "legacy"
 	}
-	row := models.SyncCapabilityMetric{
-		Minute: metric.At.UTC().Truncate(time.Minute), Surface: surface, Mode: mode, Outcome: outcome,
-		AppVersion: appVersion, Requests: 1, BytesOut: metric.BytesOut, MaxLatency: metric.LatencyMs,
-	}
-	_ = s.DB.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "minute"}, {Name: "surface"}, {Name: "mode"}, {Name: "outcome"}, {Name: "app_version"}},
-		DoUpdates: clause.Assignments(map[string]any{
-			"requests": gorm.Expr("requests + 1"), "bytes_out": gorm.Expr("bytes_out + ?", row.BytesOut),
-			"max_latency": gorm.Expr("MAX(max_latency, ?)", row.MaxLatency), "updated_at": time.Now(),
-		}),
-	}).Create(&row).Error
+	s.Monitor.RecordSyncCapabilityMetric(metric.At, surface, mode, outcome, appVersion, metric.BytesOut, metric.LatencyMs)
 }
 
 func (s *Server) handleLiveHealth(c *gin.Context) {

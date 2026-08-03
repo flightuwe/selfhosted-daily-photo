@@ -92,6 +92,9 @@ func Connect(path string) (*gorm.DB, error) {
 	if err := ensurePhotoSearchIndex(database); err != nil {
 		return nil, err
 	}
+	if err := ensureCalendarQueryIndexes(database); err != nil {
+		return nil, err
+	}
 	if err := ensurePhotoPublicNumbers(database); err != nil {
 		return nil, err
 	}
@@ -107,8 +110,11 @@ func configureSQLite(database *gorm.DB) error {
 	if err := applySQLitePragmas(sqlDB); err != nil {
 		return err
 	}
-	maxOpen := envInt("SQLITE_MAX_OPEN_CONNS", 1, 1, 2)
-	maxIdle := envInt("SQLITE_MAX_IDLE_CONNS", 1, 1, 2)
+	// WAL permits a reader beside the short writer transactions. Two connections
+	// keep a slow read-only dashboard query from serialising every API read;
+	// writes remain deliberately bounded to this tiny pool.
+	maxOpen := envInt("SQLITE_MAX_OPEN_CONNS", 2, 1, 2)
+	maxIdle := envInt("SQLITE_MAX_IDLE_CONNS", 2, 1, 2)
 	if maxIdle > maxOpen {
 		maxIdle = maxOpen
 	}
@@ -192,6 +198,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS photo_search USING fts5(
     body,
     tokenize = "unicode61 remove_diacritics 2 tokenchars '#_'"
 );`)
+	return nil
+}
+
+// ensureCalendarQueryIndexes supports the two visibility branches used by the
+// complete calendar index. Keeping them explicit also makes EXPLAIN QUERY PLAN
+// verifyable in the database test suite after future query changes.
+func ensureCalendarQueryIndexes(database *gorm.DB) error {
+	stmts := []string{
+		`CREATE INDEX IF NOT EXISTS idx_photos_calendar_user_day ON photos(user_id, day DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_photos_calendar_visibility_day ON photos(capsule_visible_at, day DESC, user_id);`,
+	}
+	for _, stmt := range stmts {
+		if err := database.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

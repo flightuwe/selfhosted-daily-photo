@@ -1,0 +1,9 @@
+{
+  "version": "v0.8.7",
+  "title": "Stabilere Aktualisierung und offline Diagnose",
+  "items": [
+    "Normale App-Aufrufe haben ein klares 20-Sekunden-Limit statt endlos zu laden.",
+    "Gekapselte Compose-Abbrüche werden nicht mehr fälschlich als Feed-Fehler behandelt.",
+    "Der Diagnose-Export enthält eine lokal gespeicherte HTTP-Endpoint-Timeline, auch nach Offline-Fehlern."
+  ]
+}

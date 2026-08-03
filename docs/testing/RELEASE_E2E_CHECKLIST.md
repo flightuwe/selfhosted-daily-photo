@@ -40,12 +40,16 @@ Diese Checkliste ist verbindlich vor und nach einem App-Tag-Release.
    - zweiter Prompt -> `409`
 4. Netzfehler:
    - DNS/Timeout/Offline erzeugt Backoff statt Request-Sturm
+   - Feed/Chat/Bootstrap zeigen nach spaetestens 20 Sekunden den lokalen Stand
+     oder einen klaren Fehler statt dauerhaft zu laden
+   - Diagnose-Export funktioniert ohne Verbindung und enthaelt langsame bzw.
+     fehlgeschlagene HTTP-Endpoints mit Dauer und Request-ID
 5. Queue:
    - Fehlermeldungen enthalten Fehlerklasse
 
 ## 4) Daily-Spike Test (15-30 min)
 
-1. 10-20 parallele Clients/Burst gegen Feed + Upload + Kommentare
+1. 10-20 parallele Clients/Burst gegen Bootstrap + Hub + Kalenderindex + Feed + Upload + Kommentare
 2. Erwartung:
    - keine 5xx-Spitze
    - kontrollierte `429` (mit `Retry-After`/reason)

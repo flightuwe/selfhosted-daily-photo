@@ -52,20 +52,22 @@ type userPromptRule struct {
 }
 
 type Server struct {
-	DB                *gorm.DB
-	Config            config.Config
-	Auth              *auth.Manager
-	Store             *storage.LocalStore
-	Notifier          notify.Sender
-	Prompt            *scheduler.DailyPromptService
-	Location          *time.Location
-	Monitor           *Monitor
-	FeedCache         *FeedDayCache
-	FeedLimiter       *FeedPollLimiter
-	activityTouchMu   sync.Mutex
-	activityTouchLast map[uint]time.Time
-	photoSearchMu     sync.Mutex
-	photoSearchReady  bool
+	DB                 *gorm.DB
+	Config             config.Config
+	Auth               *auth.Manager
+	Store              *storage.LocalStore
+	Notifier           notify.Sender
+	Prompt             *scheduler.DailyPromptService
+	Location           *time.Location
+	Monitor            *Monitor
+	FeedCache          *FeedDayCache
+	FeedLimiter        *FeedPollLimiter
+	activityTouchMu    sync.Mutex
+	activityTouchLast  map[uint]time.Time
+	photoSearchMu      sync.Mutex
+	photoSearchReady   bool
+	performanceCacheMu sync.Mutex
+	performanceCache   map[string]performanceCacheEntry
 }
 
 const photoTimeShiftThreshold = 5 * time.Minute
