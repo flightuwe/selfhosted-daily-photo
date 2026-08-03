@@ -5,6 +5,18 @@
 - Server release: implicit on each `main` push via GHCR image publish
 - Android release: explicit via semantic Git tag `vX.Y.Z`
 
+## Versioning Policy
+
+Daily uses semantic version numbers conservatively while the product is below `1.0`:
+
+- Prefer patch releases within the current minor line (`0.8.0` -> `0.8.1` -> `0.8.2`) for fixes, optimizations, UI refinements and ordinary feature additions.
+- Do not increment the minor version merely because several changes are bundled into one release.
+- Increment the minor version (`0.8.x` -> `0.9.0`) only for a clearly substantial product or architecture milestone, such as a major persistence/sync redesign, a broad compatibility boundary or a similarly large coordinated change.
+- Record the reason for every minor-version increment in the release notes before creating the tag.
+- Major version `1.0.0` remains an explicit product-readiness decision and is never inferred from release count.
+
+Historical decision: `v0.8.0` was accepted as an exceptional minor increment for the combined media, cache, synchronization and data-usage architecture release. Subsequent releases should normally remain on the `0.8.x` line until another comparably significant milestone is deliberately approved.
+
 ## Server Release Path
 
 1. Merge to `main`.
