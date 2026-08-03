@@ -55,7 +55,7 @@ var avifMediaVariants = []mediaVariantSpec{
 
 func (s *Server) mediaVariantSpecs() []mediaVariantSpec {
 	items := append([]mediaVariantSpec{}, baseMediaVariants...)
-	if s.Config.MediaAVIFEnabled {
+	if s.mediaAVIFEnabled() {
 		items = append(items, avifMediaVariants...)
 	}
 	return items
@@ -85,7 +85,7 @@ func (s *Server) mediaRenditionsJSON(sourcePath string) []gin.H {
 		if row.Status != mediaDerivativeReady {
 			continue
 		}
-		if row.Format == "avif" && !s.Config.MediaAVIFEnabled {
+		if row.Format == "avif" && !s.mediaAVIFEnabled() {
 			continue
 		}
 		out = append(out, gin.H{
@@ -328,7 +328,7 @@ func (s *Server) encodeMediaDerivative(ctx context.Context, row models.MediaDeri
 			return 0, err
 		}
 	case "avif":
-		if !s.Config.MediaAVIFEnabled {
+		if !s.mediaAVIFEnabled() {
 			return 0, errors.New("avif disabled")
 		}
 		if err := runDerivativeCommand(ctx, "avifenc", "-q", strconv.Itoa(row.Quality), "-s", "6", "-j", "1", intermediatePath, tempPath); err != nil {
@@ -504,7 +504,7 @@ func (s *Server) mediaDerivativeStats() gin.H {
 		}
 	}
 	stats["enabled"] = s.Config.MediaRenditionsEnabled
-	stats["avifEnabled"] = s.Config.MediaAVIFEnabled
+	stats["avifEnabled"] = s.mediaAVIFEnabled()
 	stats["maxBytes"] = s.Config.MediaDerivativeMaxBytes
 	stats["deliveriesSevenDays"] = s.mediaDeliveryStats()
 	return stats

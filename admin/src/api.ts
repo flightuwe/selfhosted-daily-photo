@@ -52,6 +52,16 @@ export type Settings = {
   migrationBaselineUserCount?: number;
 };
 
+export type AdminMediaRenditions = {
+  runtimeAvailable: boolean;
+  avifEnabled: boolean;
+  operatorDisabled: boolean;
+  renditions: Record<string, any>;
+  recentConversions: Array<{ id: number; sourcePath: string; variant: string; purpose: string; format: string; width: number; status: string; byteSize: number; attempts: number; lastError?: string; createdAt: string; updatedAt: string; completedAt?: string | null }>;
+  viewerPreferences: Array<{ preference: string; users: number }>;
+  serverNow: string;
+};
+
 export type AdminStats = {
   users: number;
   photos: number;
@@ -1349,6 +1359,16 @@ export async function updateSettings(
   });
   const data = await parse<any>(res);
   return normalizeSettings(data);
+}
+
+export async function getAdminMediaRenditions(token: string): Promise<AdminMediaRenditions> {
+  const res = await fetch(`${apiBase}/admin/media/renditions`, { headers: { Authorization: `Bearer ${token}` } });
+  return parse<AdminMediaRenditions>(res);
+}
+
+export async function updateAdminMediaRenditions(token: string, avifEnabled: boolean): Promise<Pick<AdminMediaRenditions, "runtimeAvailable" | "avifEnabled" | "operatorDisabled">> {
+  const res = await fetch(`${apiBase}/admin/media/renditions`, { method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ avifEnabled }) });
+  return parse(res);
 }
 
 export async function getStats(token: string): Promise<AdminStats> {

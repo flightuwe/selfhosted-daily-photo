@@ -359,6 +359,8 @@ func (s *Server) Router() *gin.Engine {
 		{
 			admin.GET("/settings", s.handleGetSettings)
 			admin.PUT("/settings", s.handleUpdateSettings)
+			admin.GET("/media/renditions", s.handleAdminMediaRenditions)
+			admin.PUT("/media/renditions", s.handleAdminMediaRenditionsUpdate)
 			admin.GET("/stats", s.handleAdminStats)
 			admin.GET("/feed", s.handleAdminFeed)
 			admin.GET("/locations", s.handleAdminLocations)
@@ -9000,7 +9002,7 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 
 func (s *Server) handleHealth(c *gin.Context) {
 	formats := []string{"jpeg", "webp"}
-	if s.Config.MediaAVIFEnabled {
+	if s.mediaAVIFEnabled() {
 		formats = append(formats, "avif")
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -9014,7 +9016,7 @@ func (s *Server) handleHealth(c *gin.Context) {
 		"mediaCapabilities": gin.H{
 			"renditions":  s.Config.MediaRenditionsEnabled,
 			"formats":     formats,
-			"avifEnabled": s.Config.MediaAVIFEnabled,
+			"avifEnabled": s.mediaAVIFEnabled(),
 		},
 	})
 }

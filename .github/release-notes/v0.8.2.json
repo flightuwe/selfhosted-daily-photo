@@ -1,0 +1,10 @@
+{
+  "version": "v0.8.2",
+  "title": "AVIF-Steuerung und sichtbare Medienformate",
+  "items": [
+    "Neuer Adminbereich für AVIF, Rendition-Queue, Konvertierungen, Fehler und Nutzerpräferenzen.",
+    "AVIF ist aktiv, bleibt aber immer durch WebP, JPEG und Originale abgesichert.",
+    "Profil → Anzeige kann das tatsächlich verwendete Medienformat am Post sichtbar machen.",
+    "YOLO aktiviert die Format-Markierung standardmäßig."
+  ]
+}

@@ -84,6 +84,8 @@ import {
   updateChatCommand,
   updateReport,
   updateSettings,
+  getAdminMediaRenditions,
+  updateAdminMediaRenditions,
   updateUser,
   type AdminReportItem,
   type AdminPerformanceOverview,
@@ -127,6 +129,7 @@ import {
   type UploadTimelineResponse,
   type MonthlyRecap,
   type Settings,
+  type AdminMediaRenditions,
   type SystemHealth,
   type UserPromptRule,
 } from "./api";
@@ -152,7 +155,8 @@ type Tab =
   | "upload_timeline"
   | "settings"
   | "migration"
-  | "locations";
+  | "locations"
+  | "media";
 type AdminArea = "operations" | "analytics" | "config";
 type OperationsSubtab =
   | "cockpit"
@@ -172,7 +176,7 @@ type AnalyticsSubtab =
   | "upload_timeline"
   | "debug"
   | "system";
-type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration";
+type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration" | "media";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
 
 type SavedView = {
@@ -276,6 +280,7 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
     commands: "commands",
     settings: "settings",
     migration: "migration",
+    media: "media",
   },
 };
 
@@ -309,6 +314,7 @@ const areaSubtabs: Record<
     { key: "commands", label: "Chat-Commands" },
     { key: "settings", label: "Einstellungen" },
     { key: "migration", label: "Migration" },
+    { key: "media", label: "Medien & AVIF" },
   ],
 };
 
@@ -561,6 +567,7 @@ export function App() {
   const [password, setPassword] = useState("");
   const [settings, setSettings] = useState<Settings>(emptySettings);
   const [savedSettings, setSavedSettings] = useState<Settings>(emptySettings);
+  const [mediaRenditions, setMediaRenditions] = useState<AdminMediaRenditions | null>(null);
   const [stats, setStats] = useState<AdminStats>(emptyStats);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
@@ -1367,6 +1374,7 @@ export function App() {
 
   async function loadAdminData(authToken: string) {
     try {
+      void getAdminMediaRenditions(authToken).then(setMediaRenditions).catch(() => setMediaRenditions(null));
       const [
         s,
         st,
@@ -7496,6 +7504,37 @@ export function App() {
                 Export CSV
               </button>
             </div>
+          </div>
+        )}
+
+        {activeTab === "media" && (
+          <div className="stack">
+            <article className="settings-current">
+              <h2>Medien-Pipeline & AVIF</h2>
+              {!mediaRenditions ? <p>Rendition-Status wird geladen …</p> : <>
+                <div className="settings-grid">
+                  <CardStat title="AVIF Laufzeit" value={mediaRenditions.runtimeAvailable ? "verfügbar" : "Image/Env fehlt"} />
+                  <CardStat title="AVIF Auslieferung" value={mediaRenditions.avifEnabled ? "aktiv" : "pausiert"} />
+                  <CardStat title="Bereit" value={Number(mediaRenditions.renditions?.ready || 0)} />
+                  <CardStat title="Wartend / Fehler" value={`${Number(mediaRenditions.renditions?.queued || 0)} / ${Number(mediaRenditions.renditions?.failed || 0)}`} />
+                </div>
+                <p>AVIF ist eine regenerierbare Ansicht. WebP, JPEG und die Originale bleiben immer als Fallback erhalten.</p>
+                <button disabled={!mediaRenditions.runtimeAvailable} onClick={async () => {
+                  try { await updateAdminMediaRenditions(token, !mediaRenditions.avifEnabled); setMediaRenditions(await getAdminMediaRenditions(token)); setMessage("AVIF-Konfiguration gespeichert; Backfill wurde eingeplant."); }
+                  catch (error) { setMessage(error instanceof Error ? error.message : "AVIF-Konfiguration fehlgeschlagen"); }
+                }}>{mediaRenditions.avifEnabled ? "AVIF-Auslieferung pausieren" : "AVIF-Auslieferung aktivieren"}</button>
+              </>}
+            </article>
+            <article className="settings-current">
+              <h2>Genutzte Anzeigepräferenzen</h2>
+              <div className="settings-grid">{mediaRenditions?.viewerPreferences.map((item) => <CardStat key={item.preference} title={item.preference.toUpperCase()} value={item.users} />)}</div>
+            </article>
+            <article className="settings-current">
+              <h2>Letzte Konvertierungen</h2>
+              <div className="table-wrap"><table><thead><tr><th>Zeit</th><th>Variante</th><th>Status</th><th>Größe</th><th>Quelle</th></tr></thead><tbody>
+                {mediaRenditions?.recentConversions.map((item) => <tr key={item.id}><td>{new Date(item.updatedAt).toLocaleString()}</td><td>{item.variant}</td><td>{item.status}{item.lastError ? ` · ${item.lastError}` : ""}</td><td>{formatBytes(Number(item.byteSize || 0))}</td><td><code>{item.sourcePath}</code></td></tr>)}
+              </tbody></table></div>
+            </article>
           </div>
         )}
 

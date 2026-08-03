@@ -2912,6 +2912,12 @@ class AppRepo(
         prefs.edit().putBoolean("prefer_swipe_for_two_image_posts", enabled).apply()
     }
 
+    fun showMediaFormatBadge(): Boolean = prefs.getBoolean("show_media_format_badge", false)
+
+    fun setShowMediaFormatBadge(enabled: Boolean) {
+        prefs.edit().putBoolean("show_media_format_badge", enabled).apply()
+    }
+
     fun showConnectionHealthIndicator(): Boolean = prefs.getBoolean("show_connection_health_indicator", false)
 
     fun setShowConnectionHealthIndicator(enabled: Boolean) {
@@ -4698,6 +4704,7 @@ data class UiState(
     val locationShareDefaultEnabled: Boolean = false,
     val showPublicPostNumbers: Boolean = false,
     val preferSwipeForTwoImagePosts: Boolean = false,
+    val showMediaFormatBadge: Boolean = false,
     val showConnectionHealthIndicator: Boolean = false,
     val connectionHealthSnapshot: ConnectionHealthSnapshot = ConnectionHealthSnapshot(),
     val lastApiSuccessAtMs: Long = 0L,
@@ -4763,6 +4770,7 @@ private data class YoloPreferenceState(
     var useFotomojiReactions: Boolean,
     var showPublicPostNumbers: Boolean,
     var preferSwipeForTwoImagePosts: Boolean,
+    var showMediaFormatBadge: Boolean,
     var chatPushEnabled: Boolean,
     var pollPushEnabled: Boolean,
     var specialMomentPushEnabled: Boolean,
@@ -4919,6 +4927,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         YoloFeatureDefinition("use_fotomoji_reactions_v1", "0.6.0", "FotoMoji statt Emoji-Reaktion", "interactions") { it.useFotomojiReactions = true },
         YoloFeatureDefinition("show_public_post_numbers_v1", "0.6.0", "Postnummern anzeigen", "display") { it.showPublicPostNumbers = true },
         YoloFeatureDefinition("prefer_swipe_for_two_image_posts_v1", "0.6.0", "2-Bild-Posts als Wischansicht", "display") { it.preferSwipeForTwoImagePosts = true }
+        ,YoloFeatureDefinition("show_media_format_badge_v1", "0.8.2", "Medienformat-Anzeige", "display") { it.showMediaFormatBadge = true }
     )
 
     init {
@@ -4958,6 +4967,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             randomFeedSeed = repo.randomFeedSeed(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
+            showMediaFormatBadge = repo.showMediaFormatBadge(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             debugMasterEnabled = repo.debugMasterEnabled(),
@@ -6451,6 +6461,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             yoloModeEnabled = repo.yoloModeLocalEnabled(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
+            showMediaFormatBadge = repo.showMediaFormatBadge(),
             customNotificationToneEnabled = repo.customNotificationToneEnabled(),
             customNotificationToneUri = repo.customNotificationToneUri(),
             showConnectionHealthIndicator = repo.showConnectionHealthIndicator(),
@@ -10541,6 +10552,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = refreshConnectionHealthState(state.copy(preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts()))
     }
 
+    fun setShowMediaFormatBadge(enabled: Boolean) {
+        repo.setShowMediaFormatBadge(enabled)
+        state = refreshConnectionHealthState(state.copy(showMediaFormatBadge = repo.showMediaFormatBadge()))
+    }
+
     fun setShowConnectionHealthIndicator(enabled: Boolean) {
         repo.setShowConnectionHealthIndicator(enabled)
         state = refreshConnectionHealthState(state.copy(showConnectionHealthIndicator = repo.showConnectionHealthIndicator()))
@@ -10723,6 +10739,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             useFotomojiReactions = repo.useFotomojiReactions(),
             showPublicPostNumbers = repo.showPublicPostNumbers(),
             preferSwipeForTwoImagePosts = repo.preferSwipeForTwoImagePosts(),
+            showMediaFormatBadge = repo.showMediaFormatBadge(),
             chatPushEnabled = current?.chatPushEnabled ?: repo.chatPushLocalEnabled(),
             pollPushEnabled = current?.pollPushEnabled ?: repo.pollPushLocalEnabled(),
             specialMomentPushEnabled = current?.specialMomentPushEnabled ?: repo.specialMomentPushLocalEnabled(),
@@ -10750,6 +10767,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.setUseFotomojiReactions(preferences.useFotomojiReactions)
         repo.setShowPublicPostNumbers(preferences.showPublicPostNumbers)
         repo.setPreferSwipeForTwoImagePosts(preferences.preferSwipeForTwoImagePosts)
+        repo.setShowMediaFormatBadge(preferences.showMediaFormatBadge)
         repo.setChatPushLocalEnabled(preferences.chatPushEnabled)
         repo.setPollPushLocalEnabled(preferences.pollPushEnabled)
         repo.setSpecialMomentPushLocalEnabled(preferences.specialMomentPushEnabled)
@@ -13021,6 +13039,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     feedOrderMode = state.feedOrderMode,
                     showPublicPostNumbers = state.showPublicPostNumbers,
                     preferSwipeForTwoImagePosts = state.preferSwipeForTwoImagePosts,
+                    showMediaFormatBadge = state.showMediaFormatBadge,
                     showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
                     mediaDataMode = state.mediaDataMode,
                     mediaFormatPreference = state.mediaFormatPreference,
@@ -13214,6 +13233,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     feedPostPushEnabled = state.feedPostPushEnabled,
                     showPublicPostNumbers = state.showPublicPostNumbers,
                     preferSwipeForTwoImagePosts = state.preferSwipeForTwoImagePosts,
+                    showMediaFormatBadge = state.showMediaFormatBadge,
                     showConnectionHealthIndicator = state.showConnectionHealthIndicator,
                     customNotificationToneEnabled = state.customNotificationToneEnabled,
                     customNotificationToneUri = state.customNotificationToneUri,
@@ -13378,6 +13398,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onApplyServerBaseUrlOverride = { input -> scope.launch { vm.applyServerBaseUrlOverride(input) } },
                     onShowPublicPostNumbersChange = { vm.setShowPublicPostNumbers(it) },
                     onPreferSwipeForTwoImagePostsChange = { vm.setPreferSwipeForTwoImagePosts(it) },
+                    onShowMediaFormatBadgeChange = { vm.setShowMediaFormatBadge(it) },
                     onShowConnectionHealthIndicatorChange = { vm.setShowConnectionHealthIndicator(it) },
                     onClearAllBookmarks = { scope.launch { vm.clearAllBookmarks() } },
                     onRollInviteCode = { scope.launch { vm.rollInviteCode() } },
@@ -14220,6 +14241,7 @@ fun FeedTab(
     feedOrderMode: FeedOrderMode,
     showPublicPostNumbers: Boolean,
     preferSwipeForTwoImagePosts: Boolean,
+    showMediaFormatBadge: Boolean,
     showNsfwByDefault: Boolean,
     mediaDataMode: String,
     mediaFormatPreference: String,
@@ -15377,6 +15399,16 @@ private fun PostCanvasCard(
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
+                        }
+                        if (context.getSharedPreferences("app", Context.MODE_PRIVATE).getBoolean("show_media_format_badge", false)) {
+                            val selected = displayCandidates.getOrNull(pagerState?.currentPage ?: 0)?.firstOrNull().orEmpty().lowercase()
+                            val (label, color) = when {
+                                selected.contains(".avif") -> "AVIF" to Color(0xFF7C3AED)
+                                selected.contains(".webp") -> "WebP" to Color(0xFF0284C7)
+                                selected.contains(".jpg") || selected.contains(".jpeg") -> "JPEG" to Color(0xFFD97706)
+                                else -> "Original" to Color(0xFF475569)
+                            }
+                            Text(label, modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).background(color.copy(alpha = 0.78f), RoundedCornerShape(10.dp)).padding(horizontal = 8.dp, vertical = 4.dp), color = Color.White, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                         }
                         if (nsfwHidden) {
                             Box(
@@ -18283,6 +18315,7 @@ fun ProfileTab(
     feedPostPushEnabled: Boolean,
     showPublicPostNumbers: Boolean,
     preferSwipeForTwoImagePosts: Boolean,
+    showMediaFormatBadge: Boolean,
     showConnectionHealthIndicator: Boolean,
     customNotificationToneEnabled: Boolean,
     customNotificationToneUri: String,
@@ -18395,6 +18428,7 @@ fun ProfileTab(
     onApplyServerBaseUrlOverride: (String) -> Unit,
     onShowPublicPostNumbersChange: (Boolean) -> Unit,
     onPreferSwipeForTwoImagePostsChange: (Boolean) -> Unit,
+    onShowMediaFormatBadgeChange: (Boolean) -> Unit,
     onClearAllBookmarks: () -> Unit,
     onRollInviteCode: () -> Unit,
     onShareInviteCode: () -> Unit,
@@ -19562,6 +19596,12 @@ fun ProfileTab(
                       checked = preferSwipeForTwoImagePosts,
                       onCheckedChange = onPreferSwipeForTwoImagePostsChange,
                       supportingText = "Bei genau zwei Bildern bleibt sonst die alte geteilte Ansicht aktiv. Ab drei Bildern wird immer gewischt."
+                  )
+                  SettingsToggleRow(
+                      label = "Aktives Medienformat anzeigen",
+                      checked = showMediaFormatBadge,
+                      onCheckedChange = onShowMediaFormatBadgeChange,
+                      supportingText = "Zeigt am Bild eine dezente farbige Markierung für AVIF, WebP, JPEG oder Original. Standardmäßig aus; YOLO aktiviert diese Anzeige automatisch."
                   )
                   SettingsToggleRow(
                       label = "Verbindungsstatus im Kamera-Reiter anzeigen",
