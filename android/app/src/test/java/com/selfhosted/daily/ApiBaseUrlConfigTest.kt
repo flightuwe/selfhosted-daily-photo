@@ -7,6 +7,14 @@ import org.junit.Test
 
 class ApiBaseUrlConfigTest {
     @Test
+    fun `normal interactive calls have a bounded fallback timeout`() {
+        assertEquals(8L, DefaultHttpTimeoutProfile.connectTimeoutSeconds)
+        assertEquals(15L, DefaultHttpTimeoutProfile.readTimeoutSeconds)
+        assertEquals(20L, DefaultHttpTimeoutProfile.callTimeoutSeconds)
+        assertTrue(QueueUploadHttpTimeoutProfile.callTimeoutSeconds > DefaultHttpTimeoutProfile.callTimeoutSeconds)
+    }
+
+    @Test
     fun `normalize appends api suffix`() {
         assertEquals("https://daily.example.com/api/", normalizeApiBaseUrl("https://daily.example.com"))
         assertEquals("https://daily.example.com/api/", normalizeApiBaseUrl("daily.example.com"))

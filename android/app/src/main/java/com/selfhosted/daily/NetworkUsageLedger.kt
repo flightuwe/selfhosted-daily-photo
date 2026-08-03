@@ -9,6 +9,9 @@ import android.net.NetworkCapabilities
 import android.net.TrafficStats
 import android.os.Process
 import java.util.UUID
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.Response
@@ -54,6 +57,17 @@ data class NetworkUsageSummary(
 
 data class DailyDeviceUsage(val dayStartMs: Long, val wifiBytes: Long, val cellularBytes: Long, val unknownBytes: Long)
 
+data class NetworkUsageDiagnosticEntry(
+    val startedAt: String,
+    val finishedAt: String,
+    val endpoint: String,
+    val status: Int,
+    val durationMs: Long,
+    val network: String,
+    val requestId: String,
+    val failureClass: String
+)
+
 private data class NetworkUsageEntry(
     val atMs: Long,
     val endpoint: String,
@@ -72,7 +86,9 @@ private data class NetworkUsageEntry(
     val contentEncoding: String = "",
     val cacheSource: String = if (cacheHit) "http_disk" else "network",
     val sessionId: String = "",
-    val appVersion: String = ""
+    val appVersion: String = "",
+    val requestId: String = "",
+    val failureClass: String = ""
 )
 
 object NetworkUsageLedger {
@@ -165,6 +181,7 @@ object NetworkUsageLedger {
     fun interceptor(context: Context, requestContext: String = "app"): Interceptor = Interceptor { chain ->
         val startedAt = System.currentTimeMillis()
         val request = chain.request()
+        val requestId = request.header("X-Request-ID").orEmpty()
         // Capture the network at request start: completion may happen after a network handover.
         val requestNetwork = networkClass(context)
         val capturedContext = currentRequestContext(requestContext)
@@ -196,7 +213,8 @@ object NetworkUsageLedger {
                         durationMs = System.currentTimeMillis() - startedAt,
                         cacheHit = cacheHit,
                         retries = retries,
-                        source = "http"
+                        source = "http",
+                        requestId = requestId
                     )
                 )
                 response
@@ -221,7 +239,8 @@ object NetworkUsageLedger {
                                 compressedRxBytes = fixedRxBytes + (compressedLength ?: consumed),
                                 protocol = response.protocol.toString(),
                                 contentEncoding = contentEncoding,
-                                cacheSource = cacheSource
+                                cacheSource = cacheSource,
+                                requestId = requestId
                             )
                         )
                     }
@@ -241,7 +260,9 @@ object NetworkUsageLedger {
                     durationMs = System.currentTimeMillis() - startedAt,
                     cacheHit = false,
                     retries = 0,
-                    source = "http"
+                    source = "http",
+                    requestId = requestId,
+                    failureClass = networkFailureClass(throwable)
                 )
             )
             throw throwable
@@ -391,6 +412,30 @@ object NetworkUsageLedger {
         }
     }
 
+    /** A locally stored, connection-independent HTTP timeline for support exports. */
+    @Synchronized
+    fun diagnosticTimeline(context: Context, limit: Int = 80): List<NetworkUsageDiagnosticEntry> {
+        val formatter = DateTimeFormatter.ISO_OFFSET_DATE_TIME.withZone(ZoneId.systemDefault())
+        return read(context)
+            .asReversed()
+            .asSequence()
+            .filter { it.source == "http" && (it.durationMs >= 1_000L || it.status < 0 || it.status >= 400) }
+            .take(limit.coerceIn(1, 200))
+            .map { entry ->
+                NetworkUsageDiagnosticEntry(
+                    startedAt = formatter.format(Instant.ofEpochMilli(entry.atMs)),
+                    finishedAt = formatter.format(Instant.ofEpochMilli(entry.atMs + entry.durationMs)),
+                    endpoint = entry.endpoint,
+                    status = entry.status,
+                    durationMs = entry.durationMs,
+                    network = entry.network,
+                    requestId = entry.requestId,
+                    failureClass = entry.failureClass
+                )
+            }
+            .toList()
+    }
+
     @Synchronized
     private fun record(context: Context, entry: NetworkUsageEntry) {
         val db = database(context).writableDatabase
@@ -413,6 +458,8 @@ object NetworkUsageLedger {
             put("cache_source", entry.cacheSource)
             put("session_id", entry.sessionId.ifBlank { sessionId(context) })
             put("app_version", entry.appVersion.ifBlank { BuildConfig.VERSION_NAME })
+            put("request_id", entry.requestId)
+            put("failure_class", entry.failureClass)
         })
         val now = System.currentTimeMillis()
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -425,7 +472,7 @@ object NetworkUsageLedger {
     private fun read(context: Context): List<NetworkUsageEntry> {
         val cursor = database(context).readableDatabase.query(
             "usage_entries",
-            arrayOf("at_ms", "endpoint", "context_name", "network", "tx_bytes", "rx_bytes", "status", "duration_ms", "cache_hit", "retries", "source", "logical_rx_bytes", "compressed_rx_bytes", "protocol", "content_encoding", "cache_source"),
+            arrayOf("at_ms", "endpoint", "context_name", "network", "tx_bytes", "rx_bytes", "status", "duration_ms", "cache_hit", "retries", "source", "logical_rx_bytes", "compressed_rx_bytes", "protocol", "content_encoding", "cache_source", "request_id", "failure_class"),
             "at_ms >= ?",
             arrayOf((System.currentTimeMillis() - DETAIL_RETENTION_MS).toString()),
             null,
@@ -443,7 +490,8 @@ object NetworkUsageLedger {
                             retries = it.getInt(9), source = it.getString(10).orEmpty().ifBlank { "http" },
                             logicalRxBytes = it.getLong(11), compressedRxBytes = it.getLong(12),
                             protocol = it.getString(13).orEmpty(), contentEncoding = it.getString(14).orEmpty(),
-                            cacheSource = it.getString(15).orEmpty().ifBlank { if (it.getInt(8) != 0) "http_disk" else "network" }
+                            cacheSource = it.getString(15).orEmpty().ifBlank { if (it.getInt(8) != 0) "http_disk" else "network" },
+                            requestId = it.getString(16).orEmpty(), failureClass = it.getString(17).orEmpty()
                         )
                     )
                 }
@@ -505,6 +553,16 @@ object NetworkUsageLedger {
         else -> "other_api"
     }
 
+    private fun networkFailureClass(throwable: Throwable): String =
+        generateSequence(throwable) { it.cause }
+            .take(8)
+            .lastOrNull()
+            ?.javaClass
+            ?.simpleName
+            ?.ifBlank { "unknown" }
+            ?.take(80)
+            ?: "unknown"
+
     private fun networkClass(context: Context): String {
         val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return "unknown"
         val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return "offline"
@@ -525,7 +583,7 @@ object NetworkUsageLedger {
         response.headers.sumOf { it.first.length + it.second.length + 4 }.toLong() + 16L
 }
 
-private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context, "network_usage_ledger.db", null, 4) {
+private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context, "network_usage_ledger.db", null, 5) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -547,6 +605,7 @@ private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context,
         )
         addVersion3Columns(db)
         addVersion4Columns(db)
+        addVersion5Columns(db)
         db.execSQL("CREATE INDEX idx_usage_entries_at_ms ON usage_entries(at_ms)")
         createAggregateTable(db)
     }
@@ -555,6 +614,7 @@ private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context,
         if (oldVersion < 2) createAggregateTable(db)
         if (oldVersion < 3) addVersion3Columns(db)
         if (oldVersion < 4) addVersion4Columns(db)
+        if (oldVersion < 5) addVersion5Columns(db)
     }
 
     private fun createAggregateTable(db: SQLiteDatabase) {
@@ -587,6 +647,11 @@ private class NetworkUsageDbHelper(context: Context) : SQLiteOpenHelper(context,
     private fun addVersion4Columns(db: SQLiteDatabase) {
         db.execSQL("ALTER TABLE usage_entries ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
         db.execSQL("ALTER TABLE usage_entries ADD COLUMN app_version TEXT NOT NULL DEFAULT ''")
+    }
+
+    private fun addVersion5Columns(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE usage_entries ADD COLUMN request_id TEXT NOT NULL DEFAULT ''")
+        db.execSQL("ALTER TABLE usage_entries ADD COLUMN failure_class TEXT NOT NULL DEFAULT ''")
     }
 }
 

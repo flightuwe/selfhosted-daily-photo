@@ -1370,8 +1370,12 @@ private fun debugNetworkFailureKindShared(throwable: Throwable): String? {
 }
 
 private fun isBenignCancellationShared(throwable: Throwable): Boolean {
-    if (throwable is CancellationException) return true
-    return throwable::class.java.simpleName.contains("LeftCompositionCancellationException")
+    return generateSequence(throwable) { current -> current.cause }
+        .take(8)
+        .any { current ->
+            current is CancellationException ||
+                current::class.java.simpleName.contains("LeftCompositionCancellationException")
+        }
 }
 
 private fun debugMetaSanitizeShared(value: String, maxLen: Int = 160): String {
@@ -2583,6 +2587,16 @@ class AppRepo(
             appendLine("- TLS-Handshake: ${families["ssl_handshake"] ?: 0}x")
             appendLine("- Zertifikatspfad: ${families["cert_path_validator"] ?: 0}x")
             appendLine("- Datenverbrauch: ${NetworkUsageLedger.diagnosticSummary(context)}")
+            appendLine("")
+            val networkTimeline = NetworkUsageLedger.diagnosticTimeline(context)
+            appendLine("Lokale HTTP-Endpoint-Timeline (offline erfasst)")
+            if (networkTimeline.isEmpty()) {
+                appendLine("- Keine langsamen oder fehlgeschlagenen HTTP-Aufrufe im lokalen Aufbewahrungsfenster.")
+            } else {
+                networkTimeline.forEach { entry ->
+                    appendLine("[${entry.startedAt} -> ${entry.finishedAt}] endpoint=${entry.endpoint};status=${entry.status};durationMs=${entry.durationMs};network=${entry.network};requestId=${entry.requestId.ifBlank { "-" }};failureClass=${entry.failureClass.ifBlank { "-" }}")
+                }
+            }
             appendLine("")
             if (aggregateRows.isNotEmpty()) {
                 appendLine("Verdichtete Wiederholungen")
@@ -13242,7 +13256,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         val body = chatInput
                         if (body.isNotBlank() && !state.chatSending) {
                             scope.launch {
-                                val ok = vm.sendChat(body)
+                                val ok = vm.sendChat(cleanChatLinks(body))
                                 if (ok) chatInput = ""
                             }
                         }
@@ -18170,7 +18184,7 @@ fun ChatTab(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 } else {
-                                    Text(item.body)
+                                    LinkedChatMessageText(item.body)
                                 }
                             }
                         }

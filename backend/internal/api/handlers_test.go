@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1315,6 +1316,55 @@ func TestCalendarPublicIndexIsCompleteAndMediaFree(t *testing.T) {
 	encoded, _ := json.Marshal(payload)
 	if bytes.Contains(encoded, []byte("photosByDay")) || bytes.Contains(encoded, []byte("thumbnailUrl")) || bytes.Contains(encoded, []byte("/uploads/")) {
 		t.Fatalf("media-free index leaked card payload: %s", encoded)
+	}
+}
+
+func TestCalendarPublicIndexHandlesConcurrentFullIndexReads(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "calendar-load-viewer", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	for userOffset := 0; userOffset < 8; userOffset++ {
+		user := models.User{Username: fmt.Sprintf("calendar-load-%d", userOffset), PasswordHash: "x"}
+		if err := server.DB.Create(&user).Error; err != nil {
+			t.Fatal(err)
+		}
+		for dayOffset := 0; dayOffset < 120; dayOffset++ {
+			if err := server.DB.Create(&models.Photo{UserID: user.ID, Day: now.AddDate(0, 0, -dayOffset).Format("2006-01-02"), FilePath: fmt.Sprintf("photos/load-%d-%d.jpg", userOffset, dayOffset), CreatedAt: now}).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	const readers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, readers)
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			payload, err := server.calendarPublicIndexPayload(viewer.ID, now)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if got := len(payload["days"].([]string)); got != 120 {
+				errs <- fmt.Errorf("index days = %d, want 120", got)
+			}
+		}()
+	}
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent calendar index reads did not complete within 5 seconds")
+	}
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
 	}
 }
 

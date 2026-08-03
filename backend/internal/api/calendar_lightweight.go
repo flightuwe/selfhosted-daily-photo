@@ -32,12 +32,25 @@ func (s *Server) calendarPublicIndexPayload(viewerID uint, now time.Time) (gin.H
 		ParticipantCount int64  `gorm:"column:participant_count"`
 	}
 	var rows []indexRow
-	if err := s.DB.Model(&models.Photo{}).
-		Select("day, COUNT(*) AS post_count, COUNT(DISTINCT user_id) AS participant_count").
-		Where("user_id = ? OR capsule_visible_at IS NULL OR capsule_visible_at <= ?", viewerID, now).
-		Group("day").
-		Order("day desc").
-		Scan(&rows).Error; err != nil {
+	// Splitting the visibility predicate avoids the broad OR scan. It lets
+	// SQLite use the dedicated user/day and visibility/day indexes separately.
+	queryStartedAt := time.Now()
+	err := s.DB.Raw(`
+		WITH visible_photos AS (
+			SELECT day, user_id FROM photos WHERE user_id = ?
+			UNION ALL
+			SELECT day, user_id FROM photos
+			WHERE user_id <> ? AND (capsule_visible_at IS NULL OR capsule_visible_at <= ?)
+		)
+		SELECT day, COUNT(*) AS post_count, COUNT(DISTINCT user_id) AS participant_count
+		FROM visible_photos
+		GROUP BY day
+		ORDER BY day DESC
+	`, viewerID, viewerID, now).Scan(&rows).Error
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/calendar/public", "calendar_public_index_visible_days", time.Since(queryStartedAt))
+	}
+	if err != nil {
 		return nil, err
 	}
 	days := make([]string, 0, len(rows))

@@ -37,10 +37,12 @@ data class HttpTimeoutProfile(
 )
 
 val DefaultHttpTimeoutProfile = HttpTimeoutProfile(
-    connectTimeoutSeconds = 10,
-    readTimeoutSeconds = 20,
+    // Bootstrap, feed and chat must fail back to the warm cache before a
+    // stalled server can make the application look permanently offline.
+    connectTimeoutSeconds = 8,
+    readTimeoutSeconds = 15,
     writeTimeoutSeconds = 20,
-    callTimeoutSeconds = 25
+    callTimeoutSeconds = 20
 )
 
 val QueueUploadHttpTimeoutProfile = HttpTimeoutProfile(

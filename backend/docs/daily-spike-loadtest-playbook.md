@@ -6,6 +6,9 @@ Reproduzierbarer Lasttest fuer das Daily-Moment-Fenster mit vergleichbaren Vorhe
 ## Szenario
 1. Daily-Moment triggern.
 2. Parallel fuer 10-15 Minuten:
+   - `GET /api/dashboard/bootstrap`
+   - `GET /api/hub/bootstrap`
+   - `GET /api/calendar/public`
    - `GET /api/feed?day=today`
    - `POST /api/uploads` (prompt/extra gemischt)
    - `POST /api/photos/{id}/comments`
@@ -46,3 +49,6 @@ Nutze folgende Endpoints fuer denselben Zeitraum:
 - 5xx-Rate bleibt unter SLO-Grenze.
 - Upload-Error-Rate bleibt unter SLO-Grenze.
 - Keine unerklaerten neuen DB-Hotspots.
+- Bootstrap-, Hub- und Kalenderindex-Aufrufe bleiben parallel bedienbar; ein
+  einzelner Analyse- oder Metrik-Write darf sie nicht hinter einer SQLite-Queue
+  blockieren.
