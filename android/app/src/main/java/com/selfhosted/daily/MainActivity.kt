@@ -1329,7 +1329,8 @@ data class DebugLogEntry(
     val firstSeenAt: String = createdAt,
     val lastSeenAt: String = createdAt,
     val sessionId: String = "",
-    val appVersion: String = ""
+    val appVersion: String = "",
+    val uploadedAt: String = ""
 )
 
 data class UploadTelemetryProbe(
@@ -2378,7 +2379,8 @@ class AppRepo(
                         firstSeenAt = obj.optString("firstSeenAt", obj.optString("createdAt", "")),
                         lastSeenAt = obj.optString("lastSeenAt", obj.optString("createdAt", "")),
                         sessionId = obj.optString("sessionId", ""),
-                        appVersion = obj.optString("appVersion", "")
+                        appVersion = obj.optString("appVersion", ""),
+                        uploadedAt = obj.optString("uploadedAt", "")
                     )
                 )
             }
@@ -2400,6 +2402,7 @@ class AppRepo(
             obj.put("lastSeenAt", item.lastSeenAt.ifBlank { item.createdAt })
             obj.put("sessionId", item.sessionId)
             obj.put("appVersion", item.appVersion)
+            obj.put("uploadedAt", item.uploadedAt)
             arr.put(obj)
         }
         prefs.edit().putString(debugLogsPrefKey, arr.toString()).apply()
@@ -2460,7 +2463,8 @@ class AppRepo(
                     message = cleanMessage,
                     meta = cleanMeta,
                     aggregateCount = existing.aggregateCount + 1,
-                    lastSeenAt = createdAt
+                    lastSeenAt = createdAt,
+                    uploadedAt = ""
                 )
                 writeDebugLogsInternal(current)
                 return
@@ -2596,9 +2600,13 @@ class AppRepo(
         val now = System.currentTimeMillis()
         val last = prefs.getLong(debugLastUploadAtKey, 0L)
         if (!force && now-last < debugUploadMinIntervalMs) return 0
-        val rows = recentDebugLogs(80).filter { it.sessionId == diagnosticsSessionId() }
+        val rows = recentDebugLogs(80).filter {
+            it.sessionId == diagnosticsSessionId() &&
+                (it.uploadedAt.isBlank() || parseIsoInstantMs(it.lastSeenAt.ifBlank { it.createdAt }) > parseIsoInstantMs(it.uploadedAt))
+        }
         if (rows.isEmpty()) return 0
         var sent = 0
+		val sentIds = mutableSetOf<String>()
         val sessionId = diagnosticsSessionId()
         rows.forEach { row ->
             runCatching {
@@ -2618,9 +2626,19 @@ class AppRepo(
                         )
                     )
                 }
-            }.onSuccess { sent += 1 }
+			}.onSuccess {
+				sent += 1
+				sentIds += row.id
+			}
         }
         if (sent > 0) {
+			// Keep local diagnostics visible, but exclude acknowledged rows from
+			// subsequent retry batches. New occurrences reset uploadedAt above.
+			val uploadedAt = OffsetDateTime.now().toString()
+			val current = readDebugLogsInternal().map { entry ->
+				if (entry.id in sentIds) entry.copy(uploadedAt = uploadedAt) else entry
+			}
+			writeDebugLogsInternal(current)
             prefs.edit().putLong(debugLastUploadAtKey, now).apply()
         }
         return sent

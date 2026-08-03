@@ -198,6 +198,57 @@ func TestDebugFailureFamilyRecognizesCertAndDns(t *testing.T) {
 	}
 }
 
+func TestDebugSignalCategorySeparatesOperationalFailuresFromMobileNoise(t *testing.T) {
+	tests := []struct {
+		name string
+		row  models.ClientDebugLog
+		want string
+	}{
+		{name: "offline refresh", row: models.ClientDebugLog{Type: "feed_refresh_failed", Meta: "failureClass=no_active_network"}, want: "connectivity"},
+		{name: "compose cancellation", row: models.ClientDebugLog{Type: "dashboard_load_failed", Meta: "failureClass=JobCancellationException"}, want: "cancelled"},
+		{name: "gateway failure", row: models.ClientDebugLog{Type: "dashboard_load_failed", Meta: "failureClass=http_502"}, want: "server"},
+		{name: "unhandled crash", row: models.ClientDebugLog{Type: "crash_unhandled", Meta: "failureClass=none"}, want: "crash"},
+		{name: "successful trace", row: models.ClientDebugLog{Type: "feed_refresh_result", Meta: "failureClass=none"}, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := debugSignalCategory(tc.row); got != tc.want {
+				t.Fatalf("debugSignalCategory() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClientDebugLogRequestIDUpdatesRetryAggregate(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "debug-retry", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	upload := func(meta string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodPost, "/api/debug/client-log", strings.NewReader(fmt.Sprintf(`{"type":"feed_refresh_failed","message":"offline","meta":%q,"appVersion":"test","deviceName":"test","requestId":"dbg_retry"}`, meta)))
+		context.Request.Header.Set("Content-Type", "application/json")
+		context.Set("user", user)
+		server.handleClientDebugLog(context)
+		return recorder
+	}
+	if response := upload("failureClass=no_active_network;aggregateCount=1"); response.Code != http.StatusOK {
+		t.Fatalf("first upload status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := upload("failureClass=no_active_network;aggregateCount=4"); response.Code != http.StatusOK {
+		t.Fatalf("retry upload status=%d body=%s", response.Code, response.Body.String())
+	}
+	var rows []models.ClientDebugLog
+	if err := server.DB.Where("user_id = ? AND request_id = ?", user.ID, "dbg_retry").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || !strings.Contains(rows[0].Meta, "aggregateCount=4") {
+		t.Fatalf("retry rows=%#v, want one row with latest aggregate", rows)
+	}
+}
+
 func TestInvalidPromptOnlyPhotoIDs(t *testing.T) {
 	triggeredAt := time.Date(2026, 3, 12, 13, 0, 0, 0, time.UTC)
 	uploadUntil := triggeredAt.Add(10 * time.Minute)
@@ -1207,6 +1258,36 @@ func TestCompactCalendarOmitsInteractionPayloadAndIsMateriallySmaller(t *testing
 	}
 	if len(compactJSON)*5 > len(legacyJSON) {
 		t.Fatalf("compact response is not at least 80%% smaller: compact=%d legacy=%d", len(compactJSON), len(legacyJSON))
+	}
+}
+
+func TestCompactCalendarPreviewBoundsRecentDays(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "calendar-preview", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for index := 0; index < 70; index++ {
+		photo := models.Photo{
+			UserID: user.ID, Day: now.AddDate(0, 0, -index).Format("2006-01-02"),
+			FilePath: fmt.Sprintf("photos/preview-%d.jpg", index), CreatedAt: now.Add(-time.Duration(index) * time.Hour),
+		}
+		if err := server.DB.Create(&photo).Error; err != nil {
+			t.Fatalf("create photo %d: %v", index, err)
+		}
+	}
+	payload, err := server.calendarPublicCompactPayloadForDays(user.ID, now, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	days, _ := payload["days"].([]string)
+	stats, _ := payload["dayStats"].([]gin.H)
+	if len(days) != 60 || len(stats) != 60 {
+		t.Fatalf("preview lengths = %d days, %d stats; want 60", len(days), len(stats))
+	}
+	if days[0] != now.Format("2006-01-02") || days[len(days)-1] != now.AddDate(0, 0, -59).Format("2006-01-02") {
+		t.Fatalf("unexpected preview range: first=%q last=%q", days[0], days[len(days)-1])
 	}
 }
 
