@@ -110,6 +110,8 @@ type AppSettings struct {
 	// MediaAVIFDisabled is an operator kill switch. The environment flag remains
 	// the capability boundary; this durable flag makes enablement auditable.
 	MediaAVIFDisabled           bool       `gorm:"default:false" json:"mediaAvifDisabled"`
+	MediaAVIFAutoPaused         bool       `gorm:"default:false" json:"mediaAvifAutoPaused"`
+	MediaAVIFAutoPauseReason    string     `gorm:"size:255" json:"mediaAvifAutoPauseReason"`
 	SchedulerAutoPaused         bool       `gorm:"default:false" json:"schedulerAutoPaused"`
 	SchedulerAutoPauseReason    string     `gorm:"size:120" json:"schedulerAutoPauseReason"`
 	SchedulerAutoPausedAt       *time.Time `json:"schedulerAutoPausedAt"`

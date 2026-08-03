@@ -7517,7 +7517,10 @@ export function App() {
                   <CardStat title="AVIF Auslieferung" value={mediaRenditions.avifEnabled ? "aktiv" : "pausiert"} />
                   <CardStat title="Bereit" value={Number(mediaRenditions.renditions?.ready || 0)} />
                   <CardStat title="Wartend / Fehler" value={`${Number(mediaRenditions.renditions?.queued || 0)} / ${Number(mediaRenditions.renditions?.failed || 0)}`} />
+                  <CardStat title="AVIF-Fehler (1 h)" value={Number(mediaRenditions.renditions?.avifFailuresLastHour || 0)} />
                 </div>
+                {mediaRenditions.autoPaused && <p className="error"><strong>Automatisch pausiert:</strong> {mediaRenditions.autoPauseReason || "AVIF-Encoderfehler"}</p>}
+                <p>Rendition-Größen: AVIF {formatBytes(Number(mediaRenditions.renditions?.formats?.avif?.bytes || 0))} · WebP {formatBytes(Number(mediaRenditions.renditions?.formats?.webp?.bytes || 0))} · JPEG {formatBytes(Number(mediaRenditions.renditions?.formats?.jpeg?.bytes || 0))}.</p>
                 <p>AVIF ist eine regenerierbare Ansicht. WebP, JPEG und die Originale bleiben immer als Fallback erhalten.</p>
                 <button disabled={!mediaRenditions.runtimeAvailable} onClick={async () => {
                   try { await updateAdminMediaRenditions(token, !mediaRenditions.avifEnabled); setMediaRenditions(await getAdminMediaRenditions(token)); setMessage("AVIF-Konfiguration gespeichert; Backfill wurde eingeplant."); }
@@ -7531,8 +7534,8 @@ export function App() {
             </article>
             <article className="settings-current">
               <h2>Letzte Konvertierungen</h2>
-              <div className="table-wrap"><table><thead><tr><th>Zeit</th><th>Variante</th><th>Status</th><th>Größe</th><th>Quelle</th></tr></thead><tbody>
-                {mediaRenditions?.recentConversions.map((item) => <tr key={item.id}><td>{new Date(item.updatedAt).toLocaleString()}</td><td>{item.variant}</td><td>{item.status}{item.lastError ? ` · ${item.lastError}` : ""}</td><td>{formatBytes(Number(item.byteSize || 0))}</td><td><code>{item.sourcePath}</code></td></tr>)}
+              <div className="table-wrap"><table><thead><tr><th>Zeit</th><th>Beitrag</th><th>Ersteller</th><th>Variante</th><th>Status</th><th>Größe</th><th>zuletzt ausgeliefert</th></tr></thead><tbody>
+                {mediaRenditions?.recentConversions.map((item) => <tr key={item.id}><td>{new Date(item.updatedAt).toLocaleString()}</td><td>{item.postFound ? `#${item.photoId} · ${item.day || ""}` : "nicht mehr zuordenbar"}</td><td>{item.username ? `@${item.username}` : "–"}</td><td>{item.variant}</td><td>{item.status}{item.lastError ? ` · ${item.lastError}` : ""}</td><td>{formatBytes(Number(item.byteSize || 0))}</td><td>{item.lastRequestedAt ? new Date(item.lastRequestedAt).toLocaleString() : "noch nicht"}</td></tr>)}
               </tbody></table></div>
             </article>
           </div>

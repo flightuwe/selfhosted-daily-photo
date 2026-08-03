@@ -15191,6 +15191,7 @@ private fun PostCanvasCard(
     val displayCandidates = remember(mediaItems, mediaDataMode, mediaFormatPreference, metered, avifDisabled) {
         mediaItems.map { selectFeedMediaCandidates(it, mediaDataMode, metered, Build.VERSION.SDK_INT, avifDisabled, mediaFormatPreference) }
     }
+    var renderedMediaFormat by remember(item.photo.id, mediaDataMode, mediaFormatPreference) { mutableStateOf("") }
     val reactions = remember(item.reactions) { item.reactions.orEmpty() }
     val photoMojis = remember(item.photoMojis) {
         item.photoMojis.orEmpty().sortedWith(compareBy<PhotoMojiItem>({ parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN }, { it.id }))
@@ -15358,7 +15359,8 @@ private fun PostCanvasCard(
                                         .then(
                                             if (onOpenViewer != null) Modifier.clickable { onOpenViewer(urls, item.photo.id) } else Modifier
                                         ),
-                                    contentScale = ContentScale.Crop
+                                    contentScale = ContentScale.Crop,
+                                    onFormatResolved = { format -> renderedMediaFormat = format }
                                 )
                             }
                         } else {
@@ -15380,7 +15382,8 @@ private fun PostCanvasCard(
                                             .then(
                                                 if (onOpenViewer != null) Modifier.clickable { onOpenViewer(urls, item.photo.id) } else Modifier
                                             ),
-                                        contentScale = ContentScale.Crop
+                                        contentScale = ContentScale.Crop,
+                                        onFormatResolved = { format -> if (renderedMediaFormat.isBlank()) renderedMediaFormat = format }
                                     )
                                 }
                             }
@@ -15401,11 +15404,11 @@ private fun PostCanvasCard(
                             }
                         }
                         if (context.getSharedPreferences("app", Context.MODE_PRIVATE).getBoolean("show_media_format_badge", false)) {
-                            val selected = displayCandidates.getOrNull(pagerState?.currentPage ?: 0)?.firstOrNull().orEmpty().lowercase()
-                            val (label, color) = when {
-                                selected.contains(".avif") -> "AVIF" to Color(0xFF7C3AED)
-                                selected.contains(".webp") -> "WebP" to Color(0xFF0284C7)
-                                selected.contains(".jpg") || selected.contains(".jpeg") -> "JPEG" to Color(0xFFD97706)
+                            val (label, color) = when (renderedMediaFormat.lowercase()) {
+                                "avif" -> "AVIF" to Color(0xFF7C3AED)
+                                "webp" -> "WebP" to Color(0xFF0284C7)
+                                "jpeg", "jpg" -> "JPEG" to Color(0xFFD97706)
+                                "" -> "Lädt" to Color(0xFF64748B)
                                 else -> "Original" to Color(0xFF475569)
                             }
                             Text(label, modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).background(color.copy(alpha = 0.78f), RoundedCornerShape(10.dp)).padding(horizontal = 8.dp, vertical = 4.dp), color = Color.White, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
@@ -16212,7 +16215,8 @@ private fun FeedRenditionImage(
     candidates: List<String>,
     contentDescription: String?,
     modifier: Modifier,
-    contentScale: ContentScale
+    contentScale: ContentScale,
+    onFormatResolved: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     var candidateIndex by remember(candidates) { mutableStateOf(0) }
@@ -16223,10 +16227,12 @@ private fun FeedRenditionImage(
         modifier = modifier,
         contentScale = contentScale,
         onSuccess = { state ->
+            val actualFormat = candidate?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()
+            onFormatResolved(actualFormat)
             NetworkUsageLedger.recordMediaCacheResult(
                 context,
                 state.result.dataSource.toString(),
-                candidate?.substringBefore('?')?.substringAfterLast('.', "unknown") ?: "unknown"
+                actualFormat.ifBlank { "unknown" }
             )
         },
         onError = { state ->

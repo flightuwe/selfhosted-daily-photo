@@ -56,8 +56,10 @@ export type AdminMediaRenditions = {
   runtimeAvailable: boolean;
   avifEnabled: boolean;
   operatorDisabled: boolean;
+  autoPaused?: boolean;
+  autoPauseReason?: string;
   renditions: Record<string, any>;
-  recentConversions: Array<{ id: number; sourcePath: string; variant: string; purpose: string; format: string; width: number; status: string; byteSize: number; attempts: number; lastError?: string; createdAt: string; updatedAt: string; completedAt?: string | null }>;
+  recentConversions: Array<{ id: number; sourcePath: string; variant: string; purpose: string; format: string; width: number; status: string; byteSize: number; attempts: number; lastError?: string; createdAt: string; updatedAt: string; completedAt?: string | null; lastRequestedAt?: string | null; photoId?: number; day?: string; postCreatedAt?: string; userId?: number; username?: string; postFound?: boolean }>;
   viewerPreferences: Array<{ preference: string; users: number }>;
   serverNow: string;
 };

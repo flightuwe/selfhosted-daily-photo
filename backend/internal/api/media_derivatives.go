@@ -245,8 +245,12 @@ func (s *Server) processOneMediaDerivative(parent context.Context) error {
 		message = message[:500]
 	}
 	if row.Attempts >= 4 {
-		return s.DB.Model(&models.MediaDerivative{}).Where("id = ?", row.ID).
+		err := s.DB.Model(&models.MediaDerivative{}).Where("id = ?", row.ID).
 			Updates(map[string]any{"status": mediaDerivativeFailed, "last_error": message, "next_attempt_at": nil}).Error
+		if err == nil && row.Format == "avif" {
+			_ = s.autoPauseAVIFOnFailures()
+		}
+		return err
 	}
 	retryAt := completed.Add(time.Duration(1<<minInt(row.Attempts, 6)) * time.Minute)
 	return s.DB.Model(&models.MediaDerivative{}).Where("id = ?", row.ID).
@@ -503,9 +507,23 @@ func (s *Server) mediaDerivativeStats() gin.H {
 			stats["bytes"] = row.Bytes
 		}
 	}
+	var formats []struct {
+		Format string
+		Count  int64
+		Bytes  int64
+	}
+	_ = s.DB.Model(&models.MediaDerivative{}).Select("format, COUNT(*) AS count, COALESCE(SUM(byte_size),0) AS bytes").Where("status = ?", mediaDerivativeReady).Group("format").Scan(&formats).Error
+	byFormat := gin.H{}
+	for _, row := range formats {
+		byFormat[row.Format] = gin.H{"ready": row.Count, "bytes": row.Bytes}
+	}
+	var avifFailuresHour int64
+	_ = s.DB.Model(&models.MediaDerivative{}).Where("format = ? AND status = ? AND updated_at >= ?", "avif", mediaDerivativeFailed, time.Now().UTC().Add(-time.Hour)).Count(&avifFailuresHour).Error
 	stats["enabled"] = s.Config.MediaRenditionsEnabled
 	stats["avifEnabled"] = s.mediaAVIFEnabled()
 	stats["maxBytes"] = s.Config.MediaDerivativeMaxBytes
 	stats["deliveriesSevenDays"] = s.mediaDeliveryStats()
+	stats["formats"] = byFormat
+	stats["avifFailuresLastHour"] = avifFailuresHour
 	return stats
 }
