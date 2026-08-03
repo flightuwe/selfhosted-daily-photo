@@ -1,0 +1,9 @@
+{
+  "version": "v0.8.4",
+  "title": "Zuverlaessigere Warteschlangen-Uploads",
+  "items": [
+    "Unterbrochene Warteschlangen-Uploads werden auch ohne App-Neustart automatisch wieder aufgenommen.",
+    "Unsichere Serverbestaetigungen werden mit derselben Upload-ID sicher erneut versucht.",
+    "Die Upload-Timeline ordnet gesendete Daten und ausstehende Bestaetigungen eindeutiger ein."
+  ]
+}
