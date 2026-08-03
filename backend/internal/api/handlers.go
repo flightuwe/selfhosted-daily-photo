@@ -1208,6 +1208,17 @@ func (s *Server) handleClientDebugLog(c *gin.Context) {
 	if entry.RequestID != "" {
 		var existing models.ClientDebugLog
 		if err := s.DB.Where("user_id = ? AND request_id = ?", user.ID, entry.RequestID).First(&existing).Error; err == nil {
+			if existing.Type == entry.Type &&
+				existing.Message == entry.Message &&
+				existing.Meta == entry.Meta &&
+				existing.AppVersion == entry.AppVersion &&
+				existing.DeviceName == entry.DeviceName &&
+				existing.SessionID == entry.SessionID {
+				// Older clients may send an already acknowledged batch again. The
+				// read above is enough to prove idempotence; avoid a needless write.
+				c.JSON(http.StatusOK, gin.H{"ok": true, "deduplicated": true})
+				return
+			}
 			if err := s.DB.Model(&existing).Updates(map[string]any{
 				"type":        entry.Type,
 				"message":     entry.Message,
