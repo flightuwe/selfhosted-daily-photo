@@ -4267,7 +4267,7 @@ class AppRepo(
         return response.photo
     }
 
-    suspend fun activateCommunityPost(photoId: Long): PromptPhoto =
+    suspend fun activateCommunityPost(photoId: Long): PromptPhoto? =
         authorizedCall("/api/photos/:id/community-post") { token -> api.activateCommunityPost(token, photoId) }.photo
 
     suspend fun enqueueDualUpload(
