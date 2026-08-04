@@ -27,19 +27,17 @@ func (s *Server) handleAdminTriggerRuntime(c *gin.Context) {
 	var blocked int64
 	var failed int64
 	var dbLocked int64
-	var dailyTodayAttempts int64
-	var duplicateToday int64
+	var trueDuplicateTriggers int64
+	var leaseUnavailable int64
 	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ?", from).Where(dailyFilter, specialSources).Count(&attempts).Error
 	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND result = ?", from, "blocked").Where(dailyFilter, specialSources).Count(&blocked).Error
 	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND result = ?", from, "failed").Where(dailyFilter, specialSources).Count(&failed).Error
 	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND reason = ?", from, "db_locked").Where(dailyFilter, specialSources).Count(&dbLocked).Error
-	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).
-		Where("day = ?", now.Format("2006-01-02")).
-		Where(dailyFilter, specialSources).
-		Count(&dailyTodayAttempts).Error
-	if dailyTodayAttempts > 1 {
-		duplicateToday = dailyTodayAttempts - 1
+	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("day = ? AND result = ?", now.Format("2006-01-02"), "triggered").Where(dailyFilter, specialSources).Count(&trueDuplicateTriggers).Error
+	if trueDuplicateTriggers > 0 {
+		trueDuplicateTriggers--
 	}
+	_ = s.DB.Model(&models.DailyTriggerAuditEvent{}).Where("occurred_at >= ? AND reason IN ?", from, []string{"lease_owned", "lease_expired"}).Where(dailyFilter, specialSources).Count(&leaseUnavailable).Error
 
 	reasonCounts := map[string]int64{}
 	type reasonRow struct {
@@ -77,14 +75,17 @@ func (s *Server) handleAdminTriggerRuntime(c *gin.Context) {
 		sloDBLockThreshold         = int64(1)
 	)
 	violations := make([]gin.H, 0, 4)
-	if duplicateToday >= sloDuplicateTodayThreshold {
+	if trueDuplicateTriggers >= sloDuplicateTodayThreshold {
 		violations = append(violations, gin.H{
 			"id":        "duplicate_trigger_attempts_per_day",
 			"severity":  "high",
 			"threshold": sloDuplicateTodayThreshold,
-			"observed":  duplicateToday,
+			"observed":  trueDuplicateTriggers,
 			"unit":      "count",
 		})
+	}
+	if leaseUnavailable > 0 {
+		violations = append(violations, gin.H{"id": "lease_unavailable_for_due_prompt", "severity": "high", "threshold": int64(1), "observed": leaseUnavailable, "unit": "count"})
 	}
 	if blockRate >= sloBlockRateThreshold && attempts >= 3 {
 		violations = append(violations, gin.H{
@@ -113,31 +114,32 @@ func (s *Server) handleAdminTriggerRuntime(c *gin.Context) {
 	lastDispatchState := gin.H{}
 	if err := s.DB.Order("created_at desc").Limit(1).First(&lastDispatch).Error; err == nil {
 		lastDispatchState = gin.H{
-			"day":           lastDispatch.Day,
-			"kind":          lastDispatch.Kind,
-			"source":        lastDispatch.Source,
-			"status":        lastDispatch.Status,
-			"sentCount":     lastDispatch.SentCount,
-			"failedCount":   lastDispatch.FailedCount,
-			"errorMessage":  lastDispatch.ErrorMessage,
+			"day":            lastDispatch.Day,
+			"kind":           lastDispatch.Kind,
+			"source":         lastDispatch.Source,
+			"status":         lastDispatch.Status,
+			"sentCount":      lastDispatch.SentCount,
+			"failedCount":    lastDispatch.FailedCount,
+			"errorMessage":   lastDispatch.ErrorMessage,
 			"serverInstance": lastDispatch.ServerInstance,
-			"updatedAt":     lastDispatch.UpdatedAt,
+			"updatedAt":      lastDispatch.UpdatedAt,
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"serverNow": now,
+		"serverNow":     now,
 		"windowMinutes": windowMinutes,
-		"runtime": state,
+		"runtime":       state,
 		"recent": gin.H{
-			"attempts":       attempts,
-			"blocked":        blocked,
-			"failed":         failed,
-			"dbLocked":       dbLocked,
-			"duplicateToday": duplicateToday,
-			"blockRate":      blockRate,
-			"byReason":       reasonCounts,
-			"byReasonRate":   reasonRates,
+			"attempts":         attempts,
+			"blocked":          blocked,
+			"failed":           failed,
+			"dbLocked":         dbLocked,
+			"duplicateToday":   trueDuplicateTriggers,
+			"leaseUnavailable": leaseUnavailable,
+			"blockRate":        blockRate,
+			"byReason":         reasonCounts,
+			"byReasonRate":     reasonRates,
 		},
 		"slo": gin.H{
 			"evaluatedAt":   now,

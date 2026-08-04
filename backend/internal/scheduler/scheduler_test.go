@@ -106,6 +106,34 @@ func TestTriggerNowWithSourceAndMeta_BlocksSecondDailyAfterSpecialOverwrite(t *t
 	}
 }
 
+func TestTickAfterDailyTriggerIsLeaseFreeNoop(t *testing.T) {
+	svc := newTestPromptService(t)
+	day := time.Now().In(svc.Location).Format("2006-01-02")
+	if err := svc.DB.Create(&models.DailyTriggerAuditEvent{Day: day, OccurredAt: time.Now(), Source: "scheduler", AttemptType: "scheduler", Result: "triggered", Reason: "ok"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc.tick(nil)
+	var leases int64
+	if err := svc.DB.Model(&models.SchedulerLease{}).Count(&leases).Error; err != nil {
+		t.Fatal(err)
+	}
+	if leases != 0 {
+		t.Fatalf("routine noop acquired a lease: %d rows", leases)
+	}
+	if got := svc.RuntimeState(time.Now())["lastTickResult"]; got != "noop:already_triggered" {
+		t.Fatalf("last tick = %#v", got)
+	}
+}
+
+func TestClassifyLeaseError(t *testing.T) {
+	if got := classifyLeaseError(errors.New("database is locked")); got != "sqlite_locked" {
+		t.Fatalf("locked error class = %q", got)
+	}
+	if got := classifyLeaseError(errors.New("unable to open database file")); got != "db_unavailable" {
+		t.Fatalf("unavailable error class = %q", got)
+	}
+}
+
 func newTestPromptService(t *testing.T) *DailyPromptService {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "app.db")

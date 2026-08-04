@@ -42,6 +42,7 @@ const (
 	schedulerAutoPauseAttemptLimit = 4
 	dispatchKindDailyPromptPush    = "daily_prompt_push"
 	dispatchKindSpecialMomentPush  = "special_moment_push"
+	schedulerStartupDelay          = 5 * time.Second
 )
 
 var specialTriggerSources = []string{"special_request", "chat_command"}
@@ -58,6 +59,11 @@ func (s *DailyPromptService) Start(enabled bool, onTrigger func(models.DailyProm
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
+		// Let migrations and the rendition backlog parking settle before the
+		// first scheduler write after a container restart.
+		timer := time.NewTimer(schedulerStartupDelay)
+		defer timer.Stop()
+		<-timer.C
 		s.tick(onTrigger)
 		for range ticker.C {
 			s.tick(onTrigger)
@@ -77,20 +83,33 @@ func (s *DailyPromptService) tick(onTrigger func(models.DailyPrompt, models.AppS
 	day := now.Format("2006-01-02")
 
 	if s.isAutoPaused() {
-		_ = s.writeSchedulerSkipAudit(day, now, "scheduler_auto_paused")
+		_ = s.writeSchedulerSkipAudit(day, now, "scheduler_auto_paused", "")
 		s.recordTick("blocked:scheduler_auto_paused")
+		return
+	}
+	// A completed daily prompt is the common steady-state. Check it before the
+	// lease write so routine ticks are truly read-only no-ops.
+	dailyTriggeredToday, triggerCheckErr := s.hasTriggeredKindForDay(day, "daily")
+	if triggerCheckErr != nil {
+		log.Printf("scheduler trigger-check failed: %v", triggerCheckErr)
+		s.recordTick("failed:day_check")
+		return
+	}
+	if dailyTriggeredToday {
+		s.recordTick("noop:already_triggered")
 		return
 	}
 	leaseOwner, leaseGranted, leaseErr := s.acquireOrRenewSchedulerLease(now)
 	if leaseErr != nil {
 		log.Printf("scheduler lease failed: %v", leaseErr)
-		_ = s.writeSchedulerSkipAudit(day, now, "lease_error")
-		s.recordTick("failed:lease_error")
+		reason := classifyLeaseError(leaseErr)
+		_ = s.writeSchedulerSkipAudit(day, now, reason, leaseErr.Error())
+		s.recordTick("failed:" + reason)
 		return
 	}
 	if !leaseGranted {
-		_ = s.writeSchedulerSkipAudit(day, now, "not_lease_owner")
-		s.recordTick("blocked:not_lease_owner")
+		_ = s.writeSchedulerSkipAudit(day, now, "lease_owned", "lease owned by another active scheduler")
+		s.recordTick("blocked:lease_owned")
 		return
 	}
 	if leaseOwner == "" {
@@ -103,17 +122,6 @@ func (s *DailyPromptService) tick(onTrigger func(models.DailyPrompt, models.AppS
 		s.recordTick("failed:day_check")
 		return
 	}
-	dailyTriggeredToday, triggerCheckErr := s.hasTriggeredKindForDay(day, "daily")
-	if triggerCheckErr != nil {
-		log.Printf("scheduler trigger-check failed: %v", triggerCheckErr)
-		s.recordTick("failed:day_check")
-		return
-	}
-	if dailyTriggeredToday {
-		s.recordTick("noop:already_triggered")
-		return
-	}
-
 	plan, err := s.EnsurePlanForDay(day)
 	if err != nil {
 		log.Printf("ensure plan failed: %v", err)
@@ -520,6 +528,17 @@ func (s *DailyPromptService) recordTick(result string) {
 func (s *DailyPromptService) acquireOrRenewSchedulerLease(now time.Time) (owner string, granted bool, err error) {
 	ownerID := s.resolvedServerInstance()
 	expiresAt := now.Add(s.resolvedLeaseTimeout())
+	for attempt := 0; attempt < 3; attempt++ {
+		owner, granted, err = s.acquireOrRenewSchedulerLeaseOnce(now, ownerID, expiresAt)
+		if err == nil || !isSQLiteBusy(err) {
+			return owner, granted, err
+		}
+		time.Sleep(time.Duration(25*(1<<attempt)) * time.Millisecond)
+	}
+	return owner, granted, err
+}
+
+func (s *DailyPromptService) acquireOrRenewSchedulerLeaseOnce(now time.Time, ownerID string, expiresAt time.Time) (owner string, granted bool, err error) {
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
 		var lease models.SchedulerLease
 		findErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -561,7 +580,25 @@ func (s *DailyPromptService) acquireOrRenewSchedulerLease(now time.Time) (owner 
 	return owner, granted, err
 }
 
-func (s *DailyPromptService) writeSchedulerSkipAudit(day string, at time.Time, reason string) error {
+func isSQLiteBusy(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") || strings.Contains(message, "database is busy")
+}
+
+func classifyLeaseError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if isSQLiteBusy(err) {
+		return "sqlite_locked"
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "no such table") || strings.Contains(strings.ToLower(err.Error()), "unable to open") {
+		return "db_unavailable"
+	}
+	return "db_unavailable"
+}
+
+func (s *DailyPromptService) writeSchedulerSkipAudit(day string, at time.Time, reason string, errorMessage string) error {
 	serverInstance := s.resolvedServerInstance()
 	row := models.DailyTriggerAuditEvent{
 		Day:            day,
@@ -570,6 +607,7 @@ func (s *DailyPromptService) writeSchedulerSkipAudit(day string, at time.Time, r
 		AttemptType:    "scheduler",
 		Result:         "blocked",
 		Reason:         strings.TrimSpace(reason),
+		ErrorMessage:   strings.TrimSpace(errorMessage),
 		ServerInstance: serverInstance,
 	}
 	return s.DB.Create(&row).Error
