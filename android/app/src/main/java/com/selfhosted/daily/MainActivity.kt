@@ -14129,10 +14129,12 @@ fun CameraTab(
             Text("Zeitfenster heute: ${promptRules.promptWindowStartHour}:00-${promptRules.promptWindowEndHour}:00")
         }
         if (locationFeatureEnabled) {
+            val locationCardTextColor = Color(0xFF1B1B1F)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (!locationPermissionGranted) Color(0xFFFFE1E1) else if (locationShareEnabled) Color(0xFFFFD7D7) else Color(0xFFDFF5E3)
+                    containerColor = if (!locationPermissionGranted) Color(0xFFFFE1E1) else if (locationShareEnabled) Color(0xFFFFD7D7) else Color(0xFFDFF5E3),
+                    contentColor = locationCardTextColor
                 )
             ) {
                 Column(
@@ -14145,7 +14147,7 @@ fun CameraTab(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("Standort fuer neuen Post", fontWeight = FontWeight.Bold)
+                            Text("Standort fuer neuen Post", fontWeight = FontWeight.Bold, color = locationCardTextColor)
                             Text(
                                 if (!locationPermissionGranted) {
                                     "Die App hat noch keine Standortberechtigung. Dieser Post wird trotz Feature-Schalter ohne Standort gesendet."
@@ -14153,7 +14155,8 @@ fun CameraTab(
                                     "Rot: Standort wird mit neuem Post geteilt."
                                 } else {
                                     "Gruen: Kein Standort wird geteilt."
-                                }
+                                },
+                                color = locationCardTextColor
                             )
                         }
                         Switch(

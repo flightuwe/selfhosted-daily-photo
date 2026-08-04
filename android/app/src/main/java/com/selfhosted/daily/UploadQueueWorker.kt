@@ -433,8 +433,16 @@ object UploadQueueManager {
     fun remove(context: Context, id: String): Boolean {
         val all = read(context)
         val item = all.firstOrNull { it.id == id } ?: return false
-        deleteFilesForItem(item)
-        write(context, prune(all.filterNot { it.id == id }))
+        // A draft is one user-facing unit. Removing any of its entries must not
+        // leave orphaned attachments that can never resolve their parent post.
+        val removed = if (item.localExtraDraftId.isNotBlank()) {
+            all.filter { it.localExtraDraftId == item.localExtraDraftId }
+        } else {
+            listOf(item)
+        }
+        removed.forEach(::deleteFilesForItem)
+        val removedIDs = removed.mapTo(mutableSetOf()) { it.id }
+        write(context, prune(all.filterNot { it.id in removedIDs }))
         return true
     }
 

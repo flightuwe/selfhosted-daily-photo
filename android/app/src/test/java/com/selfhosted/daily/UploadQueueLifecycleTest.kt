@@ -115,6 +115,21 @@ class UploadQueueLifecycleTest {
         assertNull("the draft closes when all images are confirmed", UploadQueueManager.latestOpenExtraDraft(context))
     }
 
+    @Test
+    fun removingAnyOfflineDraftEntryDeletesTheWholeDraft() {
+        val parent = enqueueExtra("delete-draft")
+        val attachment = UploadQueueManager.enqueueDraftAttachmentFromFile(
+            context, queueFile("delete-draft-attachment.jpg").absolutePath, "delete-draft-attachment", parent
+        )
+        val parentFiles = listOf(File(parent.backPath), File(parent.frontPath))
+        val attachmentFile = File(attachment.backPath)
+
+        assertTrue(UploadQueueManager.remove(context, attachment.id))
+        assertNull(UploadQueueManager.findById(context, parent.id))
+        assertNull(UploadQueueManager.findById(context, attachment.id))
+        assertTrue((parentFiles + attachmentFile).none(File::exists))
+    }
+
     private fun enqueueExtra(name: String, capturedAtMs: Long = 1_785_700_000_000L): QueuedUploadItem =
         UploadQueueManager.enqueueFromFiles(
             context = context,
