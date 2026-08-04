@@ -1,0 +1,9 @@
+{
+  "version": "v0.8.11",
+  "title": "Stabile Kalender- und Feed-Navigation",
+  "items": [
+    "Kalender-Sprünge bleiben auf dem ausgewählten Tag, statt durch Nachladen wegzulaufen.",
+    "Feed-Paging verhindert Anfrage- und Flacker-Schleifen an unveränderten Listenrändern.",
+    "Der Feed-Anfang erreicht den global ältesten sichtbaren Beitrag direkt und sicher."
+  ]
+}

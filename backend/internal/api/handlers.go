@@ -5931,7 +5931,51 @@ func (s *Server) handleFeedDays(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": days, "hasOlder": hasOlder, "hasNewer": hasNewer})
+	response := gin.H{
+		"items":    days,
+		"hasOlder": hasOlder,
+		"hasNewer": hasNewer,
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Query("include_bounds")), "true") {
+		oldestVisibleDay, newestVisibleDay, err := s.feedDayBoundsForUser(user.ID, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+		response["oldestVisibleDay"] = oldestVisibleDay
+		response["newestVisibleDay"] = newestVisibleDay
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+// feedDayBoundsForUser returns global feed boundaries under exactly the same
+// visibility and today's-feed-lock rules as feedDaysForUser. The mobile client
+// uses this to jump to the real beginning without repeatedly paging through a
+// partial local day index.
+func (s *Server) feedDayBoundsForUser(userID uint, now time.Time) (string, string, error) {
+	today := now.Format("2006-01-02")
+	hasPostedToday, err := s.userHasVisiblePhotoForDay(userID, today, now)
+	if err != nil {
+		return "", "", err
+	}
+	type bounds struct {
+		OldestVisibleDay string
+		NewestVisibleDay string
+	}
+	var result bounds
+	query := s.DB.Model(&models.Photo{}).
+		Where("user_id = ? OR (capsule_visible_at IS NULL OR capsule_visible_at <= ?)", userID, now)
+	if !hasPostedToday {
+		query = query.Where("day <> ?", today)
+	}
+	queryStart := time.Now()
+	if err := query.Select("MIN(day) AS oldest_visible_day, MAX(day) AS newest_visible_day").Scan(&result).Error; err != nil {
+		return "", "", err
+	}
+	if s.Monitor != nil {
+		s.Monitor.RecordDBQuery("/api/feed/days", "feed_day_bounds_query", time.Since(queryStart))
+	}
+	return result.OldestVisibleDay, result.NewestVisibleDay, nil
 }
 
 func (s *Server) handleFeedDayStats(c *gin.Context) {

@@ -952,8 +952,58 @@ private data class QueuedRefreshRequest(
 data class DayListResponse(
     val items: List<String>,
     val hasOlder: Boolean = false,
-    val hasNewer: Boolean = false
+    val hasNewer: Boolean = false,
+    val oldestVisibleDay: String? = null,
+    val newestVisibleDay: String? = null
 )
+
+/**
+ * Decides whether the viewport may start an automatic edge load. A targeted
+ * navigation owns the viewport until its final row has been positioned, so a
+ * temporary loading row must never be interpreted as a user reaching an edge.
+ */
+internal enum class FeedAutoPageDirection { NONE, NEWER, OLDER }
+
+internal fun feedViewportEdgeDirection(
+    rowsSize: Int,
+    firstVisibleIndex: Int,
+    lastVisibleIndex: Int,
+    hasNewer: Boolean,
+    hasOlder: Boolean
+): FeedAutoPageDirection = when {
+    rowsSize == 0 -> FeedAutoPageDirection.NONE
+    firstVisibleIndex in 0..2 && hasNewer -> FeedAutoPageDirection.NEWER
+    lastVisibleIndex >= rowsSize - 4 && hasOlder -> FeedAutoPageDirection.OLDER
+    else -> FeedAutoPageDirection.NONE
+}
+
+internal fun feedAutoPageDirection(
+    rowsSize: Int,
+    firstVisibleIndex: Int,
+    lastVisibleIndex: Int,
+    paging: Boolean,
+    refreshInFlight: Boolean,
+    feedWindowReloadInFlight: Boolean,
+    navigationInFlight: Boolean,
+    pullInProgress: Boolean,
+    hasNewer: Boolean,
+    hasOlder: Boolean
+): FeedAutoPageDirection = when {
+    paging || refreshInFlight || feedWindowReloadInFlight || navigationInFlight || pullInProgress -> FeedAutoPageDirection.NONE
+    else -> feedViewportEdgeDirection(rowsSize, firstVisibleIndex, lastVisibleIndex, hasNewer, hasOlder)
+}
+
+/** Keeps an edge latched across loading/no-op responses until the user leaves it. */
+internal fun nextFeedAutoPagingLatch(
+    previous: FeedAutoPageDirection,
+    viewportEdge: FeedAutoPageDirection,
+    permittedDirection: FeedAutoPageDirection
+): FeedAutoPageDirection = when {
+    viewportEdge == FeedAutoPageDirection.NONE -> FeedAutoPageDirection.NONE
+    permittedDirection == FeedAutoPageDirection.NONE -> previous
+    permittedDirection == previous -> previous
+    else -> permittedDirection
+}
 data class CalendarFeaturedPhoto(
     val photoId: Long,
     val url: String,
@@ -1603,7 +1653,8 @@ interface Api {
         @Query("before_day") beforeDay: String? = null,
         @Query("after_day") afterDay: String? = null,
         @Query("anchor_day") anchorDay: String? = null,
-        @Query("limit") limit: Int? = null
+        @Query("limit") limit: Int? = null,
+        @Query("include_bounds") includeBounds: Boolean = false
     ): DayListResponse
 
     @GET("feed/day-stats")
@@ -3504,10 +3555,11 @@ class AppRepo(
         beforeDay: String? = null,
         afterDay: String? = null,
         anchorDay: String? = null,
-        limit: Int? = null
+        limit: Int? = null,
+        includeBounds: Boolean = false
     ): DayListResponse =
         authorizedCall("/api/feed/days") { token ->
-            api.feedDays(token, from, to, beforeDay, afterDay, anchorDay, limit)
+            api.feedDays(token, from, to, beforeDay, afterDay, anchorDay, limit, includeBounds)
         }
     suspend fun feedDayStats(from: String? = null, to: String? = null): List<DayStatItem> =
         authorizedCall("/api/feed/day-stats") { token -> api.feedDayStats(token, from, to).items }
@@ -4738,6 +4790,7 @@ data class UiState(
     val feedViewportRestoreRequestId: Long = 0L,
     val feedNavigationTraceId: Long = 0L,
     val feedNavigationSource: String = "",
+    val feedNavigationInFlight: Boolean = false,
     val feedPaging: Boolean = false,
     val feedRefreshing: Boolean = false,
     val feedManualRefreshing: Boolean = false,
@@ -4877,7 +4930,7 @@ data class DashboardData(
     val special: SpecialMomentStatus,
     val photos: List<PromptPhoto>,
     val chat: List<ChatItem>,
-    val feedDays: List<String>,
+    val feedDayIndex: DayListResponse,
     val communityStats: CommunityStatsResponse?
 )
 
@@ -5230,7 +5283,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         message: String,
         meta: String
     ) {
-        repo.logFeedDebug(type, message, "$meta;orderMode=${state.feedOrderMode.name.lowercase()};feedDays=${state.feedDays.joinToString(",").ifBlank { "-" }};calendarDaysPrefix=${state.calendarDays.take(8).joinToString(",").ifBlank { "-" }};focusDay=${state.feedFocusDay ?: "-"};focusPhotoId=${state.feedFocusPhotoId ?: -1L};feedWindowReloadInFlight=${state.feedWindowReloadInFlight};paging=${state.feedPaging};networkSnapshot=${state.networkSnapshot}")
+        repo.logFeedDebug(type, message, "$meta;orderMode=${state.feedOrderMode.name.lowercase()};feedDays=${state.feedDays.joinToString(",").ifBlank { "-" }};calendarDaysPrefix=${state.calendarDays.take(8).joinToString(",").ifBlank { "-" }};focusDay=${state.feedFocusDay ?: "-"};focusPhotoId=${state.feedFocusPhotoId ?: -1L};navigationInFlight=${state.feedNavigationInFlight};feedWindowReloadInFlight=${state.feedWindowReloadInFlight};paging=${state.feedPaging};hasOlder=${state.feedIndexHasOlder};hasNewer=${state.feedIndexHasNewer};networkSnapshot=${state.networkSnapshot}")
     }
 
     fun updateFeedViewportAnchor(anchor: FeedViewportAnchor) {
@@ -5378,7 +5431,26 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedFocusDay = null,
             feedFocusPhotoId = null,
             feedFocusBoundary = null,
-            feedScrollRequestId = 0L
+            feedScrollRequestId = 0L,
+            feedNavigationInFlight = false
+        )
+    }
+
+    fun failFeedScrollRequest(reason: String) {
+        if (!hasPendingFeedNavigation()) return
+        val targetDay = state.feedFocusDay.orEmpty()
+        logFeedDecision(
+            type = "feed_navigation_failed",
+            message = "feed navigation target missing after load",
+            meta = "${feedNavigationMeta()};targetDay=${targetDay.ifBlank { "-" }};reason=$reason"
+        )
+        state = state.copy(
+            feedFocusDay = null,
+            feedFocusPhotoId = null,
+            feedFocusBoundary = null,
+            feedScrollRequestId = 0L,
+            feedNavigationInFlight = false,
+            message = "Das angeforderte Feed-Ziel ist nicht mehr sichtbar."
         )
     }
 
@@ -7914,6 +7986,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val scrollRequestId = issueFeedScrollRequestId()
         state = withFeedNavigationTrace(requestId = scrollRequestId, source = source).copy(
             activeTab = AppTab.FEED,
+            feedNavigationInFlight = true,
             feedFocusDay = day,
             feedFocusPhotoId = null,
             feedFocusCommentId = null,
@@ -7929,7 +8002,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         )
         runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
             .onFailure {
-                state = state.copy(message = apiError(it, "Feed-Sprung fehlgeschlagen"))
+                state = state.copy(feedNavigationInFlight = false, message = apiError(it, "Feed-Sprung fehlgeschlagen"))
             }
     }
 
@@ -7949,6 +8022,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val scrollRequestId = issueFeedScrollRequestId()
         state = withFeedNavigationTrace(requestId = scrollRequestId, source = source).copy(
             activeTab = AppTab.FEED,
+            feedNavigationInFlight = true,
             feedFocusDay = day,
             feedFocusPhotoId = photoId,
             feedFocusCommentId = commentId?.takeIf { it > 0L },
@@ -7974,7 +8048,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             )
         }
             .onFailure {
-                state = state.copy(message = apiError(it, "Beitrag laden fehlgeschlagen"))
+                state = state.copy(feedNavigationInFlight = false, message = apiError(it, "Beitrag laden fehlgeschlagen"))
             }
     }
 
@@ -8104,6 +8178,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val scrollRequestId = issueFeedScrollRequestId()
         state = withFeedNavigationTrace(requestId = scrollRequestId, source = source).copy(
             activeTab = AppTab.FEED,
+            feedNavigationInFlight = true,
             feedFocusDay = day,
             feedFocusPhotoId = null,
             feedFocusCommentId = null,
@@ -8119,7 +8194,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         )
         runCatching { loadFeedWindow(day, around = 2, forceReload = false) }
             .onFailure {
-                state = state.copy(message = apiError(it, "Feed-Sprung fehlgeschlagen"))
+                state = state.copy(feedNavigationInFlight = false, message = apiError(it, "Feed-Sprung fehlgeschlagen"))
             }
     }
 
@@ -8478,7 +8553,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     special = bootstrap.specialMomentStatus,
                     photos = bootstrap.photos,
                     chat = bootstrap.chat,
-                    feedDays = bootstrap.feedDays,
+                    feedDayIndex = DayListResponse(
+                        items = bootstrap.feedDays,
+                        hasOlder = bootstrap.feedDays.size >= 60
+                    ),
                     communityStats = bootstrap.communityStats
                 )
             }.getOrElse {
@@ -8579,7 +8657,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     special = fetchedSpecial,
                     photos = fetchedPhotos,
                     chat = fetchedChat,
-                    feedDays = feedDays.items,
+                    feedDayIndex = feedDays,
                     communityStats = communityStats
                 )
             }
@@ -8614,8 +8692,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             val special = payload.special
             val photos = payload.photos
             val chat = payload.chat
-            val calendarDays = payload.feedDays
-            val feedIndexHasOlder = calendarDays.size >= 60
+            val calendarDays = payload.feedDayIndex.items
+            val feedIndexHasOlder = payload.feedDayIndex.hasOlder
             val previousCalendarDays = state.calendarDays
             val calendarChanged = previousCalendarDays != calendarDays
             if (calendarChanged) {
@@ -8684,7 +8762,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 chatHasUnreadMessages = hasUnreadChat,
                 calendarDays = calendarDays,
                 feedIndexHasOlder = feedIndexHasOlder,
-                feedIndexHasNewer = false,
+                feedIndexHasNewer = payload.feedDayIndex.hasNewer,
                 calendarDayStats = calendarDayStats,
                 communityStats = payload.communityStats,
                 communityStatsLoading = false,
@@ -9151,6 +9229,36 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
+    /**
+     * Resolves the global lower feed boundary from the server instead of
+     * trusting a possibly paged local calendar index.
+     */
+    suspend fun jumpToFeedBottom() {
+        if (state.feedOrderMode != FeedOrderMode.CHRONO) {
+            return
+        }
+        runCatching { repo.feedDays(limit = 1, includeBounds = true) }
+            .onSuccess { index ->
+                val targetDay = index.oldestVisibleDay
+                    ?: index.items.lastOrNull().takeIf { !index.hasOlder }
+                if (targetDay.isNullOrBlank()) {
+                    state = state.copy(message = "Der erste sichtbare Feed-Tag konnte nicht ermittelt werden.")
+                    return@onSuccess
+                }
+                state = state.copy(
+                    calendarDays = mergeDayIndex(state.calendarDays, index.items),
+                    feedIndexHasOlder = index.hasOlder,
+                    feedIndexHasNewer = state.feedIndexHasNewer || index.hasNewer
+                )
+                // Feed rows are newest-first. END therefore means the oldest
+                // visible post of the globally oldest visible day.
+                jumpToDayBoundary(targetDay, FeedJumpBoundary.END, source = "quick_action_bottom")
+            }
+            .onFailure {
+                state = state.copy(message = apiError(it, "Feed-Anfang konnte nicht ermittelt werden"))
+            }
+    }
+
     suspend fun loadMoreCalendarStats(batch: Int = 30) {
         ensureCalendarStatsPrefix(calendarStatsLoadedPrefix + batch)
     }
@@ -9190,7 +9298,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun loadOlderFeedDays(count: Int = 3) {
-        if (state.feedPaging) return
+        if (state.feedPaging || state.feedNavigationInFlight) return
         if (state.feedOrderMode != FeedOrderMode.CHRONO) {
             if (!state.feedIndexHasOlder) return
             loadDiscoverFeed(offset = state.feedDiscoverNextOffset, limitDays = count, appendOlder = true)
@@ -9216,7 +9324,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun loadNewerFeedDays(count: Int = 3) {
-        if (state.feedPaging) return
+        if (state.feedPaging || state.feedNavigationInFlight) return
         if (state.feedOrderMode != FeedOrderMode.CHRONO) {
             if (!state.feedIndexHasNewer) return
             val offset = (state.feedDiscoverOffset - count).coerceAtLeast(0)
@@ -9286,7 +9394,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 beforeDays = around,
                 afterDays = around,
                 focusPhotoId = state.feedFocusPhotoId,
-                knownRevisions = state.feedDayRevisions
+                knownRevisions = cachedFeedDayRevisions()
             ).normalized(source = "feed_window_center:$target")
             applyFeedWindow(
                 window,
@@ -9322,7 +9430,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     anchorDay = anchorDay,
                     beforeDays = beforeDays,
                     afterDays = afterDays,
-                    knownRevisions = state.feedDayRevisions
+                    knownRevisions = cachedFeedDayRevisions()
                 ).normalized(source = "feed_window_edge:$anchorDay")
             }
                 .onSuccess { window ->
@@ -9596,7 +9704,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             feedWindowReloadInFlight = false,
             feedFocusDay = null,
             feedFocusPhotoId = null,
-            feedFocusBoundary = null
+            feedFocusBoundary = null,
+            feedNavigationInFlight = false
         )
     }
 
@@ -9627,6 +9736,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val prunedRecap = monthRecapByDay.filterKeys(keepSet::contains)
         return FeedCacheBundle(prunedFeed, prunedPrompt, prunedRecap)
     }
+
+    /** Only advertise revisions for payloads retained locally; otherwise a 304
+     * could leave a just-navigated day with no rows to scroll to. */
+    private fun cachedFeedDayRevisions(): Map<String, Long> =
+        state.feedDayRevisions.filterKeys { day ->
+            state.feedByDay.containsKey(day) && state.promptMetaByDay.containsKey(day)
+        }
 
     private fun mergeDayIndex(existing: List<String>, incoming: List<String>): List<String> =
         (existing + incoming)
@@ -13251,6 +13367,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     hiddenNewerAnchorDay = state.feedHiddenNewerAnchorDay,
                     paging = state.feedPaging,
                     feedWindowReloadInFlight = state.feedWindowReloadInFlight,
+                    navigationInFlight = state.feedNavigationInFlight,
+                    hasOlderAvailable = state.feedIndexHasOlder,
+                    hasNewerAvailable = state.feedIndexHasNewer,
                     feedOrderMode = state.feedOrderMode,
                     showPublicPostNumbers = state.showPublicPostNumbers,
                     preferSwipeForTwoImagePosts = state.preferSwipeForTwoImagePosts,
@@ -13264,12 +13383,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onLoadNewer = { scope.launch { vm.loadNewerFeedDays() } },
                     onViewportAnchorChanged = vm::updateFeedViewportAnchor,
                     onJumpToTop = { scope.launch { vm.jumpToFeedTop() } },
+                    onJumpToBottom = { scope.launch { vm.jumpToFeedBottom() } },
                     onJumpToDay = { day -> scope.launch { vm.jumpToDay(day) } },
-                    onJumpToBoundary = { day, boundary -> scope.launch { vm.jumpToDayBoundary(day, boundary) } },
                     onJumpToCapsule = { day, photoId -> scope.launch { vm.jumpToPhoto(day, photoId) } },
                     onShowHiddenNewerContent = { day -> scope.launch { vm.jumpToDay(day) } },
                     onInteractionFocusConsumed = vm::clearFeedInteractionFocus,
                     onScrollRequestConsumed = vm::consumeFeedScrollRequest,
+                    onScrollRequestFailed = vm::failFeedScrollRequest,
                     onScrollToTopConsumed = vm::consumeFeedScrollToTopRequest,
                     onViewportRestoreConsumed = vm::consumeFeedViewportRestore,
                     onViewportRestoreResult = vm::reportFeedViewportRestoreResult,
@@ -14454,6 +14574,9 @@ fun FeedTab(
     hiddenNewerAnchorDay: String?,
     paging: Boolean,
     feedWindowReloadInFlight: Boolean,
+    navigationInFlight: Boolean,
+    hasOlderAvailable: Boolean,
+    hasNewerAvailable: Boolean,
     feedOrderMode: FeedOrderMode,
     showPublicPostNumbers: Boolean,
     preferSwipeForTwoImagePosts: Boolean,
@@ -14467,12 +14590,13 @@ fun FeedTab(
     onLoadNewer: () -> Unit,
     onViewportAnchorChanged: (FeedViewportAnchor) -> Unit,
     onJumpToTop: () -> Unit,
+    onJumpToBottom: () -> Unit,
     onJumpToDay: (String) -> Unit,
-    onJumpToBoundary: (String, FeedJumpBoundary) -> Unit,
     onJumpToCapsule: (day: String, photoId: Long) -> Unit,
     onShowHiddenNewerContent: (String) -> Unit,
     onInteractionFocusConsumed: () -> Unit,
     onScrollRequestConsumed: () -> Unit,
+    onScrollRequestFailed: (String) -> Unit,
     onScrollToTopConsumed: () -> Unit,
     onViewportRestoreConsumed: () -> Unit,
     onViewportRestoreResult: (FeedViewportAnchor, FeedViewportAnchor?, String) -> Unit,
@@ -14658,7 +14782,7 @@ fun FeedTab(
             }
         }
     }
-    val showScrollBottom by remember(feedOrderMode, oldestKnownDay, loadedOldestDay) {
+    val showScrollBottom by remember(feedOrderMode, oldestKnownDay, loadedOldestDay, hasOlderAvailable) {
         derivedStateOf {
             if (rows.isEmpty()) {
                 false
@@ -14666,6 +14790,7 @@ fun FeedTab(
                 lastVisibleIndex in 0 until rows.lastIndex
             } else {
                 lastVisibleIndex in 0 until rows.lastIndex - 1 ||
+                    hasOlderAvailable ||
                     (!oldestKnownDay.isNullOrBlank() && oldestKnownDay != loadedOldestDay)
             }
         }
@@ -14682,15 +14807,22 @@ fun FeedTab(
     }
 
     var handledScrollRequestId by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(scrollRequestId, rows.size) {
+    LaunchedEffect(scrollRequestId, rows.size, jumpLoadingDay) {
         if (scrollRequestId <= 0L || scrollRequestId == handledScrollRequestId) return@LaunchedEffect
+        // loadFeedWindow deliberately renders a temporary target row. Waiting
+        // for the real window keeps the navigation request alive until the
+        // requested day/photo can actually be positioned.
+        if (jumpLoadingDay != null) return@LaunchedEffect
         val idx = if (focusPhotoId != null) {
             rows.indexOfFirst { it is FeedRow.PhotoItem && it.item.photo.id == focusPhotoId }
         } else {
             val target = focusDay ?: return@LaunchedEffect
             boundaryRowIndex(target, focusBoundary ?: FeedJumpBoundary.START)
         }
-        if (idx < 0) return@LaunchedEffect
+        if (idx < 0) {
+            onScrollRequestFailed(if (focusPhotoId != null) "target_photo_not_found" else "target_day_not_found")
+            return@LaunchedEffect
+        }
         val distance = if (firstVisibleIndex >= 0) kotlin.math.abs(idx - firstVisibleIndex) else Int.MAX_VALUE
         if (distance <= 6) {
             listState.animateScrollToItem(idx)
@@ -14802,16 +14934,51 @@ fun FeedTab(
         currentViewportAnchor?.let(onViewportAnchorChanged)
     }
 
-    LaunchedEffect(listState, rows.size, paging, refreshInFlight, feedWindowReloadInFlight) {
+    // One edge entry may schedule one page. It is re-armed only after the
+    // viewport leaves that edge, preventing a 304/no-op response from turning
+    // into a tight request loop while the list has not moved.
+    var lastAutomaticPagingDirection by remember { mutableStateOf(FeedAutoPageDirection.NONE) }
+    LaunchedEffect(listState, rows.size, paging, refreshInFlight, feedWindowReloadInFlight, navigationInFlight, hasOlderAvailable, hasNewerAvailable) {
         snapshotFlow {
             val info = listState.layoutInfo
             val first = info.visibleItemsInfo.firstOrNull()?.index ?: -1
             val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
             Triple(first, last, pullRefreshState.progress)
         }.collect { (first, last, pullProgress) ->
-            if (rows.isEmpty() || paging || refreshInFlight || feedWindowReloadInFlight || pullProgress > 0f) return@collect
-            if (first in 0..2) onLoadNewer()
-            if (last >= rows.lastIndex - 4) onLoadOlder()
+            val viewportEdge = feedViewportEdgeDirection(
+                rowsSize = rows.size,
+                firstVisibleIndex = first,
+                lastVisibleIndex = last,
+                hasNewer = hasNewerAvailable,
+                hasOlder = hasOlderAvailable
+            )
+            val direction = feedAutoPageDirection(
+                rowsSize = rows.size,
+                firstVisibleIndex = first,
+                lastVisibleIndex = last,
+                paging = paging,
+                refreshInFlight = refreshInFlight,
+                feedWindowReloadInFlight = feedWindowReloadInFlight,
+                navigationInFlight = navigationInFlight,
+                pullInProgress = pullProgress > 0f,
+                hasNewer = hasNewerAvailable,
+                hasOlder = hasOlderAvailable
+            )
+            val nextPagingLatch = nextFeedAutoPagingLatch(
+                previous = lastAutomaticPagingDirection,
+                viewportEdge = viewportEdge,
+                permittedDirection = direction
+            )
+            if (nextPagingLatch != lastAutomaticPagingDirection && nextPagingLatch != FeedAutoPageDirection.NONE) {
+                lastAutomaticPagingDirection = nextPagingLatch
+                when (nextPagingLatch) {
+                    FeedAutoPageDirection.NEWER -> onLoadNewer()
+                    FeedAutoPageDirection.OLDER -> onLoadOlder()
+                    FeedAutoPageDirection.NONE -> Unit
+                }
+            } else {
+                lastAutomaticPagingDirection = nextPagingLatch
+            }
         }
     }
 
@@ -15044,18 +15211,10 @@ fun FeedTab(
                 onJumpToTop()
             },
             onBottomClick = {
-                scope.launch {
-                    val targetDay = oldestKnownDay
-                    if (isChronoMode && !targetDay.isNullOrBlank() && targetDay != loadedOldestDay) {
-                        onJumpToBoundary(targetDay, FeedJumpBoundary.END)
-                    } else if (rows.isNotEmpty()) {
-                        val boundaryIndex = if (isChronoMode) {
-                            targetDay?.let { boundaryRowIndex(it, FeedJumpBoundary.END) } ?: rows.lastIndex
-                        } else {
-                            rows.lastIndex
-                        }
-                        listState.animateScrollToItem(boundaryIndex.coerceAtLeast(0))
-                    }
+                if (isChronoMode) {
+                    onJumpToBottom()
+                } else if (rows.isNotEmpty()) {
+                    scope.launch { listState.animateScrollToItem(rows.lastIndex) }
                 }
             },
             onAnchorClick = {

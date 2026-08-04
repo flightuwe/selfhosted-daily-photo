@@ -123,7 +123,7 @@ class SyncCacheLogicTest {
         cacheFile.writeText(Gson().toJson(AppWarmCacheEnvelope(schemaVersion = "app_warm_cache_v1", userId = userId)))
         val repo = AppRepo(context, OkHttpClient())
 
-        assertEquals("app_warm_cache_v2", repo.loadLastWarmCache()?.schemaVersion)
+        assertEquals("app_warm_cache_v3", repo.loadLastWarmCache()?.schemaVersion)
 
         cacheFile.writeText(Gson().toJson(AppWarmCacheEnvelope(schemaVersion = "broken", userId = userId)))
         assertNull(repo.loadLastWarmCache())

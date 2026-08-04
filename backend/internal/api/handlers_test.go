@@ -1115,6 +1115,51 @@ func TestFeedWindowReturnsRevisionsDeltaAndNotModified(t *testing.T) {
 	}
 }
 
+func TestFeedDaysReturnsGlobalVisibleBounds(t *testing.T) {
+	server := newSearchTestServer(t)
+	viewer := models.User{Username: "feed-bounds-viewer", PasswordHash: "x"}
+	if err := server.DB.Create(&viewer).Error; err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	now := time.Now().In(server.Location)
+	oldest := now.AddDate(0, 0, -9).Format("2006-01-02")
+	newest := now.AddDate(0, 0, -2).Format("2006-01-02")
+	for _, day := range []string{oldest, newest} {
+		photo := models.Photo{
+			UserID:    viewer.ID,
+			Day:       day,
+			FilePath:  day + "/bounds.jpg",
+			CreatedAt: now,
+		}
+		if err := server.DB.Create(&photo).Error; err != nil {
+			t.Fatalf("create photo for %s: %v", day, err)
+		}
+	}
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/feed/days?limit=1&include_bounds=true", nil)
+	context.Set("user", viewer)
+	server.handleFeedDays(context)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("feed days status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Items            []string `json:"items"`
+		OldestVisibleDay string   `json:"oldestVisibleDay"`
+		NewestVisibleDay string   `json:"newestVisibleDay"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode feed days: %v", err)
+	}
+	if payload.OldestVisibleDay != oldest || payload.NewestVisibleDay != newest {
+		t.Fatalf("feed bounds = oldest=%q newest=%q, want oldest=%q newest=%q", payload.OldestVisibleDay, payload.NewestVisibleDay, oldest, newest)
+	}
+	if len(payload.Items) != 1 || payload.Items[0] != newest {
+		t.Fatalf("limited feed index = %v, want newest %q only", payload.Items, newest)
+	}
+}
+
 func TestAttachmentUploadIsIdempotentForSelectableOlderOwnPost(t *testing.T) {
 	server := newSearchTestServer(t)
 	user := models.User{Username: "attachment-owner", PasswordHash: "x"}
