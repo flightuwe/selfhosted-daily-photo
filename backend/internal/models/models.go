@@ -272,6 +272,7 @@ type MediaDerivative struct {
 	LastError       string     `gorm:"size:500" json:"lastError"`
 	NextAttemptAt   *time.Time `gorm:"index" json:"nextAttemptAt"`
 	LastRequestedAt *time.Time `gorm:"index" json:"lastRequestedAt"`
+	StartedAt       *time.Time `gorm:"index" json:"startedAt"`
 	CompletedAt     *time.Time `json:"completedAt"`
 	CreatedAt       time.Time  `gorm:"index" json:"createdAt"`
 	UpdatedAt       time.Time  `json:"updatedAt"`

@@ -86,6 +86,15 @@ func (m *Monitor) TryStartDaytimeBackgroundDerivative(now time.Time) bool {
 	return true
 }
 
+func (m *Monitor) CanStartDaytimeBackgroundDerivative(now time.Time) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastBackgroundDerivativeAt.IsZero() || now.Sub(m.lastBackgroundDerivativeAt) >= 5*time.Minute
+}
+
 type RequestMetric struct {
 	At        time.Time `json:"at"`
 	Method    string    `json:"method"`

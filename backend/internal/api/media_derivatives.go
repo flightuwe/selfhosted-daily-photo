@@ -178,7 +178,7 @@ func (s *Server) RunMediaDerivativeLoop(ctx context.Context, interval time.Durat
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.processOneMediaDerivative(ctx, s.backgroundDerivativeAllowed(time.Now())); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := s.processOneMediaDerivative(ctx, s.backgroundDerivativeAllowed(time.Now(), true)); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 				log.Printf("media derivative worker: %v", err)
 			}
 		case <-cleanupTicker.C:
@@ -205,7 +205,7 @@ func (s *Server) parkBackgroundDerivativeQueue() error {
 // are no longer deleted or evicted during an upgrade.
 func (s *Server) discardBackgroundDerivativeQueue() error { return s.parkBackgroundDerivativeQueue() }
 
-func (s *Server) backgroundDerivativeAllowed(now time.Time) bool {
+func (s *Server) backgroundDerivativeAllowed(now time.Time, consumeDaytimeSlot bool) bool {
 	var settings models.AppSettings
 	if s.DB.First(&settings).Error != nil || settings.MediaDerivativeBackgroundPaused {
 		return false
@@ -225,7 +225,13 @@ func (s *Server) backgroundDerivativeAllowed(now time.Time) bool {
 	if local.Hour() >= 1 && local.Hour() < 6 {
 		return true
 	}
-	return s.Monitor != nil && s.Monitor.TryStartDaytimeBackgroundDerivative(now)
+	if s.Monitor == nil {
+		return false
+	}
+	if consumeDaytimeSlot {
+		return s.Monitor.TryStartDaytimeBackgroundDerivative(now)
+	}
+	return s.Monitor.CanStartDaytimeBackgroundDerivative(now)
 }
 
 func (s *Server) enqueueRecentMediaDerivativeBackfill() error {
@@ -295,7 +301,7 @@ func (s *Server) processOneMediaDerivative(parent context.Context, allowBackgrou
 		return err
 	}
 	claimed := s.DB.Model(&models.MediaDerivative{}).Where("id = ? AND status = ?", row.ID, row.Status).
-		Updates(map[string]any{"status": mediaDerivativeRunning, "attempts": gorm.Expr("attempts + 1"), "last_error": ""})
+		Updates(map[string]any{"status": mediaDerivativeRunning, "attempts": gorm.Expr("attempts + 1"), "last_error": "", "started_at": now})
 	if claimed.Error != nil {
 		return claimed.Error
 	}
@@ -633,5 +639,5 @@ func (s *Server) backgroundDerivativePolicy(now time.Time) gin.H {
 	}
 	var settings models.AppSettings
 	_ = s.DB.First(&settings).Error
-	return gin.H{"paused": settings.MediaDerivativeBackgroundPaused, "idle": last.IsZero() || now.Sub(last) >= 2*time.Minute, "lastUserRequestAt": last, "nightWindow": "01:00-06:00", "daytimeIntervalSeconds": 300, "nextEligibleAt": next, "allowed": s.backgroundDerivativeAllowed(now)}
+	return gin.H{"paused": settings.MediaDerivativeBackgroundPaused, "idle": last.IsZero() || now.Sub(last) >= 2*time.Minute, "lastUserRequestAt": last, "nightWindow": "01:00-06:00", "daytimeIntervalSeconds": 300, "nextEligibleAt": next, "allowed": s.backgroundDerivativeAllowed(now, false)}
 }

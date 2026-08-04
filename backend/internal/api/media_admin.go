@@ -67,6 +67,7 @@ func (s *Server) handleAdminMediaRenditions(c *gin.Context) {
 	for _, row := range preferences {
 		prefs = append(prefs, gin.H{"preference": row.Preference, "users": row.Users})
 	}
+	queueTelemetry := s.mediaDerivativeQueueTelemetry(time.Now())
 	c.JSON(http.StatusOK, gin.H{
 		"runtimeAvailable": s.Config.MediaAVIFEnabled,
 		"avifEnabled":      s.mediaAVIFEnabled(),
@@ -75,10 +76,50 @@ func (s *Server) handleAdminMediaRenditions(c *gin.Context) {
 		"backgroundPolicy": s.backgroundDerivativePolicy(time.Now()),
 		"autoPaused":       settings.MediaAVIFAutoPaused, "autoPauseReason": settings.MediaAVIFAutoPauseReason,
 		"renditions":        s.mediaDerivativeStats(),
+		"queueTelemetry":    queueTelemetry,
 		"recentConversions": items,
 		"viewerPreferences": prefs,
 		"serverNow":         time.Now().UTC(),
 	})
+}
+
+func (s *Server) mediaDerivativeQueueTelemetry(now time.Time) gin.H {
+	telemetry := gin.H{"pending": int64(0), "paused": int64(0), "running": gin.H{}, "lastCompleted": gin.H{}, "throughput": gin.H{}, "eta": gin.H{}}
+	var pending, paused int64
+	_ = s.DB.Model(&models.MediaDerivative{}).Where("status = ?", mediaDerivativeQueued).Count(&pending).Error
+	_ = s.DB.Model(&models.MediaDerivative{}).Where("status = ?", mediaDerivativePaused).Count(&paused).Error
+	telemetry["pending"] = pending
+	telemetry["paused"] = paused
+	var running models.MediaDerivative
+	if err := s.DB.Where("status = ?", mediaDerivativeRunning).Order("started_at asc, id asc").First(&running).Error; err == nil {
+		runningJSON := gin.H{"id": running.ID, "sourcePath": running.SourcePath, "variant": running.Variant, "format": running.Format, "startedAt": running.StartedAt}
+		if running.StartedAt != nil {
+			runningJSON["ageSeconds"] = int64(now.Sub(*running.StartedAt).Seconds())
+		}
+		telemetry["running"] = runningJSON
+	}
+	var last models.MediaDerivative
+	if err := s.DB.Where("status = ? AND completed_at IS NOT NULL", mediaDerivativeReady).Order("completed_at desc").First(&last).Error; err == nil {
+		lastJSON := gin.H{"id": last.ID, "sourcePath": last.SourcePath, "variant": last.Variant, "format": last.Format, "completedAt": last.CompletedAt, "byteSize": last.ByteSize}
+		if last.StartedAt != nil && last.CompletedAt != nil {
+			lastJSON["durationMs"] = last.CompletedAt.Sub(*last.StartedAt).Milliseconds()
+		}
+		telemetry["lastCompleted"] = lastJSON
+	}
+	var completedHour, completedDay int64
+	_ = s.DB.Model(&models.MediaDerivative{}).Where("status = ? AND completed_at >= ?", mediaDerivativeReady, now.Add(-time.Hour)).Count(&completedHour).Error
+	_ = s.DB.Model(&models.MediaDerivative{}).Where("status = ? AND completed_at >= ?", mediaDerivativeReady, now.Add(-24*time.Hour)).Count(&completedDay).Error
+	telemetry["throughput"] = gin.H{"completedLastHour": completedHour, "completedLast24Hours": completedDay}
+	// One worker ticks every five seconds. At the configured five-hour night
+	// window this is 3,600 background jobs/night; daytime idle slots add up to
+	// 216 more jobs/day, but are deliberately excluded from the conservative ETA.
+	nightlyCapacity := int64(5 * 60 * 60 / 5)
+	nights := int64(0)
+	if paused > 0 {
+		nights = (paused + nightlyCapacity - 1) / nightlyCapacity
+	}
+	telemetry["eta"] = gin.H{"policyCapacityPerNight": nightlyCapacity, "conservativeNights": nights, "daytimeCapacityMax": int64(18 * 60 / 5), "basis": "night window only; daytime idle work shortens this estimate"}
+	return telemetry
 }
 
 func (s *Server) handleAdminMediaRenditionsUpdate(c *gin.Context) {

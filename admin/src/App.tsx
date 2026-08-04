@@ -7597,6 +7597,17 @@ export function App() {
                   catch (error) { setMessage(error instanceof Error ? error.message : "AVIF-Konfiguration fehlgeschlagen"); }
                 }}>{mediaRenditions.avifEnabled ? "AVIF-Auslieferung pausieren" : "AVIF-Auslieferung aktivieren"}</button>
                 <p>Historischer Backfill: {mediaRenditions.backgroundPaused ? "global pausiert" : mediaRenditions.backgroundPolicy?.allowed ? "darf jetzt laufen" : "wartet auf Nachtfenster/Leerlauf"}. Nächste Möglichkeit: {mediaRenditions.backgroundPolicy?.nextEligibleAt ? new Date(mediaRenditions.backgroundPolicy.nextEligibleAt).toLocaleString() : "–"}.</p>
+                <div className="settings-grid">
+                  <CardStat title="Gesamt wartend" value={Number(mediaRenditions.queueTelemetry?.pending || 0)} />
+                  <CardStat title="Historisch pausiert" value={Number(mediaRenditions.queueTelemetry?.paused || 0)} />
+                  <CardStat title="Läuft gerade" value={mediaRenditions.queueTelemetry?.running?.variant || "–"} />
+                  <CardStat title="Letzte Laufzeit" value={mediaRenditions.queueTelemetry?.lastCompleted?.durationMs != null ? `${Math.round(mediaRenditions.queueTelemetry.lastCompleted.durationMs / 1000)} s` : "ab nächstem Job"} />
+                  <CardStat title="Durchsatz 1 h / 24 h" value={`${Number(mediaRenditions.queueTelemetry?.throughput?.completedLastHour || 0)} / ${Number(mediaRenditions.queueTelemetry?.throughput?.completedLast24Hours || 0)}`} />
+                  <CardStat title="Konservative ETA" value={mediaRenditions.queueTelemetry?.eta?.conservativeNights ? `${mediaRenditions.queueTelemetry.eta.conservativeNights} Nacht/Nächte` : "fertig"} />
+                </div>
+                {mediaRenditions.queueTelemetry?.running?.sourcePath && <p>Aktiver Job: #{mediaRenditions.queueTelemetry.running.id} · {mediaRenditions.queueTelemetry.running.sourcePath} · {mediaRenditions.queueTelemetry.running.variant} · seit {mediaRenditions.queueTelemetry.running.ageSeconds ?? 0} s.</p>}
+                {mediaRenditions.queueTelemetry?.lastCompleted?.sourcePath && <p>Letzter Abschluss: {mediaRenditions.queueTelemetry.lastCompleted.sourcePath} · {mediaRenditions.queueTelemetry.lastCompleted.variant} · {mediaRenditions.queueTelemetry.lastCompleted.completedAt ? new Date(mediaRenditions.queueTelemetry.lastCompleted.completedAt).toLocaleString() : "–"}.</p>}
+                <p>ETA-Basis: {mediaRenditions.queueTelemetry?.eta?.policyCapacityPerNight || 3600} Jobs/Nacht; Tages-Leerlauf kann zusätzlich bis zu {mediaRenditions.queueTelemetry?.eta?.daytimeCapacityMax || 216} Jobs beitragen.</p>
                 <button onClick={async () => {
                   try { await updateAdminMediaRenditions(token, { backgroundPaused: !mediaRenditions.backgroundPaused }); setMediaRenditions(await getAdminMediaRenditions(token)); setMessage(mediaRenditions.backgroundPaused ? "Historischer Backfill freigegeben." : "Historischer Backfill pausiert."); }
                   catch (error) { setMessage(error instanceof Error ? error.message : "Backfill-Konfiguration fehlgeschlagen"); }

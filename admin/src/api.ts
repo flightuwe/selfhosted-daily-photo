@@ -58,6 +58,13 @@ export type AdminMediaRenditions = {
   operatorDisabled: boolean;
 	backgroundPaused?: boolean;
 	backgroundPolicy?: { paused?: boolean; idle?: boolean; allowed?: boolean; nextEligibleAt?: string; nightWindow?: string; daytimeIntervalSeconds?: number };
+	queueTelemetry?: {
+		pending?: number; paused?: number;
+		running?: { id?: number; sourcePath?: string; variant?: string; format?: string; startedAt?: string; ageSeconds?: number };
+		lastCompleted?: { id?: number; sourcePath?: string; variant?: string; format?: string; completedAt?: string; byteSize?: number; durationMs?: number };
+		throughput?: { completedLastHour?: number; completedLast24Hours?: number };
+		eta?: { policyCapacityPerNight?: number; conservativeNights?: number; daytimeCapacityMax?: number; basis?: string };
+	};
   autoPaused?: boolean;
   autoPauseReason?: string;
   renditions: Record<string, any>;
