@@ -189,68 +189,16 @@ jobs:
           CURRENT_TAG="${GITHUB_REF_NAME}"
           [[ "$CURRENT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || (echo "::error::Expected semantic tag like v0.3.41" && exit 1)
 
-          MANUAL_MD=".github/release-notes/${CURRENT_TAG}.md"
           MANUAL_JSON=".github/release-notes/${CURRENT_TAG}.json"
-          if [[ -f "$MANUAL_MD" ]]; then
-            cp "$MANUAL_MD" release-notes.md
-            if [[ -f "$MANUAL_JSON" ]]; then
-              cp "$MANUAL_JSON" dist/changelog.json
-              exit 0
-            fi
+          if [[ -f "$MANUAL_JSON" ]]; then
+            python3 scripts/validate_release_notes.py "$CURRENT_TAG" "$MANUAL_JSON"
+            python3 scripts/render_release_notes.py "$MANUAL_JSON" > release-notes.md
+            cp "$MANUAL_JSON" dist/changelog.json
+            exit 0
           fi
 
-          git fetch --tags --force >/dev/null 2>&1 || true
-          PREV_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -vx "$CURRENT_TAG" | head -n 1 || true)"
-
-          if [[ -n "$PREV_TAG" ]]; then
-            RANGE="${PREV_TAG}..HEAD"
-          else
-            RANGE="HEAD~40..HEAD"
-          fi
-
-          mapfile -t RAW_COMMITS < <(git log --no-merges --pretty=format:'%s' $RANGE 2>/dev/null || true)
-          if [[ ${#RAW_COMMITS[@]} -eq 0 ]]; then
-            mapfile -t RAW_COMMITS < <(git log --no-merges --pretty=format:'%s' -n 20 2>/dev/null || true)
-          fi
-
-          declare -A seen
-          HIGHLIGHTS=()
-          for msg in "${RAW_COMMITS[@]}"; do
-            clean="$(echo "$msg" | sed -E 's/[[:space:]]+/ /g; s/^ +//; s/ +$//')"
-            [[ -z "$clean" ]] && continue
-            key="$(echo "$clean" | tr '[:upper:]' '[:lower:]')"
-            if [[ -z "${seen[$key]+x}" ]]; then
-              seen[$key]=1
-              HIGHLIGHTS+=("$clean")
-            fi
-            [[ ${#HIGHLIGHTS[@]} -ge 20 ]] && break
-          done
-
-          if [[ ${#HIGHLIGHTS[@]} -eq 0 ]]; then
-            HIGHLIGHTS=("Interne Verbesserungen und Stabilitaetsupdates.")
-          fi
-
-          {
-            echo "## Daily ${CURRENT_TAG}"
-            echo
-            echo "### Highlights"
-            for h in "${HIGHLIGHTS[@]}"; do
-              echo "- $h"
-            done
-            echo
-            echo "### Assets"
-            echo "- Android APK: \`app-release.apk\`"
-            echo "- Changelog JSON: \`changelog.json\`"
-          } > release-notes.md
-
-          highlights_json="$(printf '%s\n' "${HIGHLIGHTS[@]}" | jq -R . | jq -s .)"
-          jq -n \
-            --arg version "${CURRENT_TAG#v}" \
-            --arg releasedAt "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-            --argjson highlights "$highlights_json" \
-            '{version:$version,releasedAt:$releasedAt,highlights:$highlights,details:[]}' > changelog.json
-
-          cp changelog.json dist/changelog.json
+          echo "::error::Missing canonical release-note JSON: $MANUAL_JSON"
+          exit 1
       - name: Validate release artifacts
         shell: bash
         run: |

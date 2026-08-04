@@ -1981,6 +1981,7 @@ class AppRepo(
     }
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     private val gson = Gson()
+    private val releaseHistory by lazy { ReleaseHistoryRepository(context) }
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(context) }
     @Volatile
     private var api: Api = buildApiService(resolveApiBaseUrl(context), httpClient)
@@ -4376,6 +4377,9 @@ class AppRepo(
     suspend fun changelogLines(currentVersion: String): List<String> =
         UpdateReleaseChecker.changelogLinesForVersion(currentVersion)
 
+    suspend fun changelogHistory(forceRefresh: Boolean = false): List<ChangelogEntry> =
+        releaseHistory.history(forceRefresh)
+
     fun downloadLatestApk(update: UpdateInfo): Long {
         val fallbackUrl = "https://github.com/flightuwe/selfhosted-daily-photo/releases/latest/download/app-release.apk"
         val apkUrl = update.apkUrl?.trim().takeUnless { it.isNullOrBlank() } ?: fallbackUrl
@@ -4919,6 +4923,11 @@ data class UiState(
     val profileSetupJumpTarget: String = "",
     val showChangelogDialog: Boolean = false,
     val changelogLines: List<String> = emptyList(),
+    val changelogEntries: List<ChangelogEntry> = emptyList(),
+    val changelogHistoryEntries: List<ChangelogEntry> = emptyList(),
+    val showChangelogHistoryDialog: Boolean = false,
+    val changelogHistoryLoading: Boolean = false,
+    val changelogHistoryError: String? = null,
     val showHelpDialog: Boolean = false,
     val promptRules: PromptRulesResponse? = null,
     val specialMomentStatus: SpecialMomentStatus? = null,
@@ -6667,6 +6676,19 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         return lines.filterNot { it.equals("Keine Action-Historie verfuegbar.", ignoreCase = true) }
     }
 
+    private suspend fun fetchChangelogEntriesSinceLastSeen(): List<ChangelogEntry> {
+        val current = BuildConfig.VERSION_NAME.trim().removePrefix("v")
+        val lastSeen = repo.lastSeenChangelogVersion().trim().removePrefix("v")
+        if (!ReleaseHistoryParser.isStableVersion(current)) return emptyList()
+        val history = runCatching { repo.changelogHistory() }.getOrDefault(emptyList())
+        if (history.isEmpty()) return emptyList()
+        // A fresh installation gets a focused welcome; upgrades explain every skipped release.
+        return history.filter { entry ->
+            ReleaseHistoryParser.compareVersions(entry.version, current) <= 0 &&
+                (lastSeen.isBlank() || ReleaseHistoryParser.compareVersions(entry.version, lastSeen) > 0)
+        }
+    }
+
     suspend fun bootstrap() {
         if (state.startupDone) return
         val perfStartedAt = System.currentTimeMillis()
@@ -6705,7 +6727,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             delay(900 - elapsed)
         }
         val showChangelog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME)
-        val changelogLines = if (showChangelog) fetchChangelogLinesFresh() else emptyList()
+        val changelogEntries = if (showChangelog) fetchChangelogEntriesSinceLastSeen() else emptyList()
+        val changelogLines = if (showChangelog && changelogEntries.isEmpty()) fetchChangelogLinesFresh() else emptyList()
         val healthOk = health?.ok == true
         val startupQuote = if (healthOk) {
             if (repo.token().isNotBlank()) {
@@ -6742,6 +6765,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             commentDeleteSupported = health?.features?.commentDelete == true,
             showChangelogDialog = showChangelog,
             changelogLines = changelogLines,
+            changelogEntries = changelogEntries,
             uploadQueue = repo.uploadQueue(),
             fotomojiUploadQuality = repo.fotomojiUploadQuality(),
             autoUpdateEnabled = repo.autoUpdateEnabled(),
@@ -10922,16 +10946,37 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun showChangelogDialog() {
-        val lines = fetchChangelogLinesFresh()
+        val entries = runCatching { repo.changelogHistory() }
+            .getOrDefault(emptyList())
+            .filter { it.version == BuildConfig.VERSION_NAME.trim().removePrefix("v") }
+        val lines = if (entries.isEmpty()) fetchChangelogLinesFresh() else emptyList()
         state = state.copy(
             showChangelogDialog = true,
-            changelogLines = if (lines.isNotEmpty()) lines else state.changelogLines
+            changelogLines = if (lines.isNotEmpty()) lines else state.changelogLines,
+            changelogEntries = entries
         )
     }
 
     fun dismissChangelogDialog() {
         repo.markChangelogSeen(BuildConfig.VERSION_NAME)
-        state = state.copy(showChangelogDialog = false)
+        state = state.copy(showChangelogDialog = false, showChangelogHistoryDialog = false)
+    }
+
+    suspend fun showChangelogHistory() {
+        state = state.copy(showChangelogHistoryDialog = true, changelogHistoryLoading = true, changelogHistoryError = null)
+        val history = runCatching { repo.changelogHistory() }
+        state = history.fold(
+            onSuccess = { entries ->
+                state.copy(changelogHistoryEntries = entries, changelogHistoryLoading = false)
+            },
+            onFailure = {
+                state.copy(changelogHistoryLoading = false, changelogHistoryError = "Changelog-Verlauf konnte nicht geladen werden.")
+            }
+        )
+    }
+
+    fun closeChangelogHistory() {
+        state = state.copy(showChangelogHistoryDialog = false)
     }
 
     fun showHelpDialog() {
@@ -12902,22 +12947,18 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
 
     if (state.showChangelogDialog) {
         val lines = if (state.changelogLines.isNotEmpty()) state.changelogLines else fallbackChangelogLines()
+        val entries = state.changelogEntries
         AlertDialog(
             onDismissRequest = { vm.dismissChangelogDialog() },
             confirmButton = {
                 TextButton(onClick = { vm.dismissChangelogDialog() }) { Text("Schliessen") }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    context.startActivity(
-                        Intent(
-                            Intent.ACTION_VIEW,
-                            Uri.parse("https://github.com/flightuwe/selfhosted-daily-photo")
-                        )
-                    )
-                }) { Text("GitHub") }
+                TextButton(onClick = { scope.launch { vm.showChangelogHistory() } }) {
+                    Text("Gesamten Changelog anzeigen")
+                }
             },
-            title = { Text("Changelog ${BuildConfig.VERSION_NAME}") },
+            title = { Text(if (entries.size > 1) "Neu seit deinem letzten Update" else "Changelog ${BuildConfig.VERSION_NAME}") },
             text = {
                 Column(
                     modifier = Modifier
@@ -12926,7 +12967,47 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    lines.forEach { line -> Text("- $line") }
+                    if (entries.isNotEmpty()) {
+                        entries.forEach { entry -> ChangelogEntryContent(entry) }
+                    } else {
+                        lines.forEach { line -> Text("- $line") }
+                    }
+                }
+            }
+        )
+    }
+
+    if (state.showChangelogHistoryDialog) {
+        AlertDialog(
+            onDismissRequest = { vm.closeChangelogHistory() },
+            confirmButton = {
+                TextButton(onClick = { vm.closeChangelogHistory() }) { Text("Zurueck") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/flightuwe/selfhosted-daily-photo/releases")))
+                }) { Text("GitHub") }
+            },
+            title = { Text("Gesamter Changelog") },
+            text = {
+                when {
+                    state.changelogHistoryLoading -> Column(
+                        modifier = Modifier.fillMaxWidth().height(160.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text("Release-Verlauf wird geladen …")
+                    }
+                    state.changelogHistoryEntries.isEmpty() -> Text(state.changelogHistoryError ?: "Noch keine Release-Infos verfuegbar.")
+                    else -> LazyColumn(
+                        modifier = Modifier.fillMaxWidth().height(420.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(state.changelogHistoryEntries, key = { it.version }) { entry ->
+                            ChangelogEntryContent(entry)
+                        }
+                    }
                 }
             }
         )
@@ -21623,6 +21704,26 @@ private fun fallbackChangelogLines(): List<String> {
     )
 }
 
+@Composable
+private fun ChangelogEntryContent(entry: ChangelogEntry) {
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text("v${entry.version}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        if (entry.title.isNotBlank() && !entry.title.equals("Daily ${entry.version}", ignoreCase = true)) {
+            Text(entry.title, style = MaterialTheme.typography.titleSmall)
+        }
+        formatChangelogReleaseDate(entry.releasedAt).takeIf { it.isNotBlank() }?.let { date ->
+            Text(date, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        entry.highlights.forEach { line -> Text("- $line") }
+        entry.details.forEach { line -> Text("- $line", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+    }
+}
+
+private fun formatChangelogReleaseDate(value: String): String = runCatching {
+    Instant.parse(value.trim()).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("dd.MM.yyyy", Locale.GERMAN))
+}.getOrDefault("")
+
 private fun helpLines(): List<String> = listOf(
     "Willkommen bei Daily. Ziel ist ein kurzer, gemeinsamer Moment pro Tag.",
     "",
@@ -21676,7 +21777,8 @@ private fun helpLines(): List<String> = listOf(
     "Updates und Changelog",
     "- Update pruefen sucht nach neuen Releases auf GitHub.",
     "- Das Symbol ! oeffnet den Changelog-Dialog.",
-    "- Bei neuer App-Version wird der Changelog beim ersten Start automatisch angezeigt.",
+    "- Bei neuer App-Version wird der Changelog beim ersten Start automatisch angezeigt; bei mehreren Updates auch fuer die uebersprungenen Versionen.",
+    "- Im Changelog kannst du den gesamten Release-Verlauf von GitHub oeffnen; er bleibt fuer Offline-Nutzung zwischengespeichert.",
     "",
     "Hinweis",
     "- Einige Funktionen (z. B. Push-Zustellung) haengen von korrekter Server/FCM-Konfiguration ab."

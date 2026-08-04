@@ -31,9 +31,7 @@ Precondition for workstations with the local Android toolchain:
 - run the local debug build from `docs/android-local-toolchain.md` before tagging if the release includes Android changes
 
 1. Set `versionName` and increment `versionCode` in `android/app/build.gradle.kts`.
-2. Prepare release notes pair:
-   - `.github/release-notes/vX.Y.Z.md`
-   - `.github/release-notes/vX.Y.Z.json`
+2. Prepare and validate the canonical release notes: `.github/release-notes/vX.Y.Z.json`.
 3. Push tag `vX.Y.Z`.
 4. Workflow validates CI gate, version matching and secret availability.
 5. Release publishes APK and `changelog.json` assets.

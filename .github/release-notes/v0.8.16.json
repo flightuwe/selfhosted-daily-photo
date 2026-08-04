@@ -1,0 +1,13 @@
+{
+  "version": "0.8.16",
+  "title": "Vollstaendiger Changelog-Verlauf",
+  "highlights": [
+    "Der gesamte Changelog aller veroeffentlichten Daily-Versionen ist direkt in der App erreichbar.",
+    "Nach mehreren verpassten Updates zeigt Daily die Neuerungen aller uebersprungenen Versionen gruppiert an.",
+    "Der Release-Verlauf wird von GitHub geladen und lokal fuer die Offline-Nutzung zwischengespeichert."
+  ],
+  "details": [
+    "Der Profil-Button ! zeigt weiterhin den aktuellen Changelog; der neue Button Gesamten Changelog anzeigen oeffnet den vollstaendigen Verlauf.",
+    "Release-Notes werden ab jetzt aus einem validierten, gemeinsamen JSON-Dokument fuer GitHub und die App erzeugt."
+  ]
+}

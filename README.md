@@ -140,16 +140,13 @@ Diese 5 Secrets muessen gesetzt sein:
    - `git tag vX.Y.Z`
    - `git push origin vX.Y.Z`
 4. APK liegt danach im GitHub Release als `app-release.apk`
-5. Changelog wird automatisch erzeugt:
-   - Release-Body aus `.github/release-notes/vX.Y.Z.md`
+5. Changelog wird aus der kanonischen `.github/release-notes/vX.Y.Z.json` validiert und erzeugt:
+   - GitHub-Release-Body
    - Asset `changelog.json` fuer die App
-6. Wenn keine manuellen Release-Notes vorliegen, faellt der Workflow auf deduplizierte Commit-Highlights zurueck
 
 Hinweis:
 - Der Android-Release-Workflow ist absichtlich **tag-only** und akzeptiert nur semantische Tags `vX.Y.Z`.
-- Manuelle Release-Notes bestehen immer aus einem Paar:
-  - `.github/release-notes/vX.Y.Z.md`
-  - `.github/release-notes/vX.Y.Z.json`
+- Neue Release-Notes bestehen aus `.github/release-notes/vX.Y.Z.json`; alte Markdown-Dateien bleiben historische Dokumentation.
 - Details zur Policy stehen in `.github/release-notes/README.md`
 
 ## E2E Testen vor Release
