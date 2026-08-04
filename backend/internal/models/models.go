@@ -394,7 +394,7 @@ type Photo struct {
 type PhotoAttachment struct {
 	ID             uint       `gorm:"primaryKey" json:"id"`
 	PhotoID        uint       `gorm:"not null;index;index:idx_photo_attachment_photo_sort,priority:1" json:"photoId"`
-	UserID         uint       `gorm:"not null;index" json:"userId"`
+	UserID         uint       `gorm:"not null;default:0;index" json:"userId"`
 	UploadClientID string     `gorm:"size:64;uniqueIndex:idx_attachment_photo_upload_client" json:"uploadClientId"`
 	FilePath       string     `gorm:"size:255;not null" json:"filePath"`
 	PreviewPath    string     `gorm:"size:255" json:"previewPath"`
