@@ -1776,7 +1776,7 @@ interface Api {
         @Part("location_shared") locationShared: RequestBody? = null,
         @Part("location_latitude") locationLatitude: RequestBody? = null,
         @Part("location_longitude") locationLongitude: RequestBody? = null
-    )
+    ): PhotoMutationResponse
 
     @Multipart
     @POST("photos/{id}/attachments")
@@ -2334,8 +2334,8 @@ class AppRepo(
         locationSharedPart: RequestBody? = null,
         locationLatitudePart: RequestBody? = null,
         locationLongitudePart: RequestBody? = null
-    ) {
-        authorizedCall("/api/uploads/dual") { token ->
+    ): PromptPhoto? {
+        return authorizedCall("/api/uploads/dual") { token ->
             api.uploadDual(
                 token,
                 backPart,
@@ -2349,7 +2349,7 @@ class AppRepo(
                 locationSharedPart,
                 locationLatitudePart,
                 locationLongitudePart
-            )
+            ).photo
         }
     }
 
@@ -2805,6 +2805,8 @@ class AppRepo(
     }
 
     fun uploadQueue(): List<QueuedUploadItem> = UploadQueueManager.list(context)
+
+    fun hasOpenExtraDraft(): Boolean = UploadQueueManager.latestOpenExtraDraft(context) != null
 
     fun syncUploadQueueScheduler() {
         UploadQueueScheduler.sync(context)
@@ -4312,6 +4314,29 @@ class AppRepo(
             filePath = queuedFile.absolutePath,
             uploadClientId = uploadClientId,
             appendTargetPhotoId = photoId,
+            locationShared = locationPayload != null,
+            locationLatitude = locationPayload?.latitude,
+            locationLongitude = locationPayload?.longitude,
+            capturedAtMs = capturedAt?.toInstant()?.toEpochMilli() ?: 0L
+        )
+    }
+
+    suspend fun enqueuePhotoToOpenExtraDraft(
+        uri: Uri,
+        shareLocation: Boolean = false
+    ): QueuedUploadItem {
+        val draft = UploadQueueManager.latestOpenExtraDraft(context)
+            ?: throw IllegalStateException("no_open_extra_draft")
+        val capturedAt = readCapturedAtFromUri(uri)
+        val file = copyUriToTemp(uri)
+        val queuedDir = File(context.filesDir, "upload-queue").apply { mkdirs() }
+        val queuedFile = moveToQueueFile(file, queuedDir, "draft-attachment")
+        val locationPayload = if (shareLocation) lastAvailableLocationPayload() else null
+        return UploadQueueManager.enqueueDraftAttachmentFromFile(
+            context = context,
+            filePath = queuedFile.absolutePath,
+            uploadClientId = UUID.randomUUID().toString(),
+            draft = draft,
             locationShared = locationPayload != null,
             locationLatitude = locationPayload?.latitude,
             locationLongitude = locationPayload?.longitude,
@@ -9943,6 +9968,24 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }.isSuccess
     }
 
+    fun hasOpenExtraDraft(): Boolean = repo.hasOpenExtraDraft()
+
+    suspend fun appendPhotoToOpenExtraDraft(uri: Uri, shareLocation: Boolean): Boolean {
+        state = state.copy(loading = true)
+        return runCatching {
+            repo.enqueuePhotoToOpenExtraDraft(uri, shareLocation)
+        }.onSuccess {
+            repo.syncUploadQueueScheduler()
+            state = state.copy(
+                loading = false,
+                uploadQueue = repo.uploadQueue(),
+                message = "Bild zum offenen Extra-Entwurf hinzugefuegt."
+            )
+        }.onFailure {
+            state = state.copy(loading = false, message = apiError(it, "Extra-Entwurf nicht mehr verfuegbar"))
+        }.isSuccess
+    }
+
     fun retryQueuedUpload(id: String) {
         val ok = repo.retryUploadQueueItem(id)
         if (ok) {
@@ -12294,6 +12337,14 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         }
                     }
                 }
+                "append_pending_extra" -> {
+                    if (shotUri != null) {
+                        val shareLocation = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true) && locationPermissionGranted
+                        scope.launch {
+                            vm.appendPhotoToOpenExtraDraft(shotUri, shareLocation)
+                        }
+                    }
+                }
                 "fotomoji" -> {
                     val pending = pendingFotomojiCapture
                     if (pending != null && shotUri != null) {
@@ -12355,6 +12406,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         cameraUploadError = ""
         cameraUploadDone = false
         openCameraFor("append")
+    }
+
+    fun startPendingExtraAppendCapture() {
+        cameraUploadPercent = 0
+        cameraUploadError = ""
+        cameraUploadDone = false
+        openCameraFor("append_pending_extra")
     }
 
     fun requestLocationPermission() {
@@ -13288,6 +13346,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onCaptureExtra = { capsule -> startDualCapture(false, capsule) },
                     onRequestSpecialMoment = { showSpecialMomentConfirm = true },
                     onAppendToLatestPost = { photoId -> startAppendCapture(photoId) },
+                    hasOpenExtraDraft = vm.hasOpenExtraDraft(),
+                    onAppendToOpenExtraDraft = ::startPendingExtraAppendCapture,
                     onReset = {
                         backPreviewUri = null
                         frontPreviewUri = null
@@ -13929,6 +13989,8 @@ fun CameraTab(
     onCaptureExtra: (CapsuleUploadOptions) -> Unit,
     onRequestSpecialMoment: () -> Unit,
     onAppendToLatestPost: (Long) -> Unit,
+    hasOpenExtraDraft: Boolean,
+    onAppendToOpenExtraDraft: () -> Unit,
     onReset: () -> Unit,
     onRetryUpload: () -> Unit,
     uploading: Boolean,
@@ -14115,6 +14177,21 @@ fun CameraTab(
             }
         }
 
+        if (hasOpenExtraDraft) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Offener Extra-Entwurf", fontWeight = FontWeight.Bold)
+                    Text("Weitere Bilder werden automatisch diesem Extra hinzugefuegt, sobald wieder eine Verbindung besteht.")
+                    OutlinedButton(onClick = onAppendToOpenExtraDraft, modifier = Modifier.fillMaxWidth()) {
+                        Text("Bild zum Extra-Entwurf hinzufuegen")
+                    }
+                }
+            }
+        }
+
         if (hasVisiblePosted) {
             if (canUpload) {
                 Text(activeMomentLabel, fontWeight = FontWeight.Bold)
@@ -14293,6 +14370,40 @@ fun CameraTab(
         val queueItems = visibleQueueItems(uploadQueue)
         if (queueItems.isNotEmpty()) {
             Text("Upload-Queue", style = MaterialTheme.typography.titleMedium)
+            queueItems
+                .filter { it.localExtraDraftId.isNotBlank() }
+                .groupBy { it.localExtraDraftId }
+                .values
+                .forEach { draftItems ->
+                    val pending = draftItems.count { it.status != UploadQueueStatus.SUCCESS }
+                    val progress = draftItems.map { it.transferProgressPercent }.average().toFloat().div(100f).coerceIn(0f, 1f)
+                    val previewFiles = draftItems.flatMap { item ->
+                        listOfNotNull(
+                            item.backPath.takeIf { it.isNotBlank() },
+                            item.frontPath.takeIf { it.isNotBlank() }
+                        )
+                    }
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Extra-Entwurf: ${draftItems.size + 1} Bilder", fontWeight = FontWeight.SemiBold)
+                            Text(if (pending == 0) "Alle Bilder bestaetigt" else "$pending Bild(er) werden noch hochgeladen")
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                previewFiles.take(4).forEach { path ->
+                                    AsyncImage(
+                                        model = File(path),
+                                        contentDescription = "Lokale Entwurfsaufnahme",
+                                        modifier = Modifier.weight(1f).height(72.dp),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            }
+                            if (pending > 0) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                }
             queueItems.forEach { item ->
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {

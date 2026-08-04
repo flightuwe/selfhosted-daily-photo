@@ -47,6 +47,10 @@ data class QueuedUploadItem(
     val uploadClientId: String,
     val uploadMode: String,
     val appendTargetPhotoId: Long?,
+    val localExtraDraftId: String = "",
+    val parentUploadClientId: String = "",
+    val resolvedParentPhotoId: Long? = null,
+    val mediaSequence: Long = 0L,
     val isPrompt: Boolean,
     val capsuleMode: String,
     val capsulePrivate: Boolean,
@@ -107,6 +111,8 @@ private data class QueuedUploadFailureInfo(
     val actionRequired: Boolean = false
 )
 
+private data class QueueUploadResult(val photoId: Long? = null)
+
 private const val queueRetryRetentionMs = 7L * 24L * 60L * 60L * 1000L
 private const val queueLeaseMs = 10L * 60L * 1000L
 private const val queueMaxBackoffSec = 6L * 60L * 60L
@@ -149,6 +155,10 @@ object UploadQueueManager {
             uploadClientId = uploadClientId,
             uploadMode = UploadQueueMode.DUAL,
             appendTargetPhotoId = null,
+            localExtraDraftId = if (isPrompt) "" else UUID.randomUUID().toString(),
+            parentUploadClientId = "",
+            resolvedParentPhotoId = null,
+            mediaSequence = 0L,
             isPrompt = isPrompt,
             capsuleMode = capsuleMode.trim(),
             capsulePrivate = capsulePrivate,
@@ -198,6 +208,10 @@ object UploadQueueManager {
             uploadClientId = uploadClientId,
             uploadMode = UploadQueueMode.ATTACHMENT,
             appendTargetPhotoId = appendTargetPhotoId,
+            localExtraDraftId = "",
+            parentUploadClientId = "",
+            resolvedParentPhotoId = appendTargetPhotoId,
+            mediaSequence = 0L,
             isPrompt = false,
             capsuleMode = "",
             capsulePrivate = false,
@@ -226,6 +240,66 @@ object UploadQueueManager {
         check(write(context, prune(all))) { "upload queue persistence failed" }
         UploadQueueScheduler.enqueueNow(context)
         return item
+    }
+
+    /** The newest extra stays open until its post and every queued attachment are confirmed. */
+    @Synchronized
+    fun latestOpenExtraDraft(context: Context): QueuedUploadItem? {
+        val all = read(context)
+        return all.asSequence()
+            .filter { it.uploadMode == UploadQueueMode.DUAL && !it.isPrompt && it.localExtraDraftId.isNotBlank() }
+            .filter { parent -> all.any { it.localExtraDraftId == parent.localExtraDraftId && it.status != UploadQueueStatus.SUCCESS } }
+            .maxByOrNull { it.createdAtMs }
+    }
+
+    @Synchronized
+    fun enqueueDraftAttachmentFromFile(
+        context: Context,
+        filePath: String,
+        uploadClientId: String,
+        draft: QueuedUploadItem,
+        locationShared: Boolean = false,
+        locationLatitude: Double? = null,
+        locationLongitude: Double? = null,
+        capturedAtMs: Long = 0L
+    ): QueuedUploadItem {
+        require(draft.localExtraDraftId.isNotBlank()) { "draft id missing" }
+        val now = System.currentTimeMillis()
+        val all = read(context).toMutableList()
+        val sequence = (all.filter { it.localExtraDraftId == draft.localExtraDraftId }.maxOfOrNull { it.mediaSequence } ?: 0L) + 1L
+        val item = QueuedUploadItem(
+            id = UUID.randomUUID().toString(), backPath = filePath, frontPath = "", uploadClientId = uploadClientId,
+            uploadMode = UploadQueueMode.ATTACHMENT, appendTargetPhotoId = draft.resolvedParentPhotoId,
+            localExtraDraftId = draft.localExtraDraftId, parentUploadClientId = draft.uploadClientId,
+            resolvedParentPhotoId = draft.resolvedParentPhotoId, mediaSequence = sequence,
+            isPrompt = false, capsuleMode = "", capsulePrivate = false, capsuleGroupRemind = false,
+            locationShared = locationShared && locationLatitude != null && locationLongitude != null,
+            locationLatitude = locationLatitude, locationLongitude = locationLongitude,
+            status = UploadQueueStatus.WAITING, attempts = 0, lastError = "", transferProgressPercent = 0,
+            serverAckState = UploadQueueServerAckState.NONE, nextRetryAtMs = 0L, capturedAtMs = capturedAtMs,
+            createdAtMs = now, updatedAtMs = now, lastAttemptStartedAtMs = 0L, lastAttemptFinishedAtMs = 0L,
+            lastFailureClass = "", lastHttpCode = null, retentionUntilMs = now + queueRetryRetentionMs, leaseExpiresAtMs = 0L
+        )
+        all.add(item)
+        check(write(context, prune(all))) { "upload queue persistence failed" }
+        UploadQueueScheduler.enqueueNow(context)
+        return item
+    }
+
+    @Synchronized
+    fun resolveDraftParent(context: Context, draftId: String, parentUploadClientId: String, photoId: Long) {
+        if (draftId.isBlank() || parentUploadClientId.isBlank() || photoId <= 0L) return
+        val now = System.currentTimeMillis()
+        val next = read(context).map { item ->
+            if (item.localExtraDraftId == draftId &&
+                (item.uploadClientId == parentUploadClientId || item.parentUploadClientId == parentUploadClientId)
+            ) item.copy(
+                appendTargetPhotoId = if (item.uploadMode == UploadQueueMode.ATTACHMENT) photoId else item.appendTargetPhotoId,
+                resolvedParentPhotoId = photoId,
+                updatedAtMs = now
+            ) else item
+        }
+        write(context, prune(next))
     }
 
     @Synchronized
@@ -332,6 +406,10 @@ object UploadQueueManager {
                     uploadClientId = if (fileIndex == 0) original.uploadClientId else UUID.randomUUID().toString(),
                     uploadMode = UploadQueueMode.ATTACHMENT,
                     appendTargetPhotoId = targetPhotoId,
+                    localExtraDraftId = "",
+                    parentUploadClientId = "",
+                    resolvedParentPhotoId = targetPhotoId,
+                    mediaSequence = 0L,
                     status = UploadQueueStatus.WAITING,
                     attempts = 0,
                     lastError = "",
@@ -408,21 +486,14 @@ object UploadQueueManager {
 
     @Synchronized
     fun nextRunnable(context: Context, nowMs: Long = System.currentTimeMillis()): QueuedUploadItem? {
-        return read(context).firstOrNull {
-            isAutoRetryState(it.status) &&
-                (it.nextRetryAtMs <= 0L || it.nextRetryAtMs <= nowMs) &&
-                (it.retentionUntilMs <= 0L || it.retentionUntilMs > nowMs)
-        }
+        val all = read(context)
+        return all.firstOrNull { item -> isRunnable(item, all, nowMs) }
     }
 
     @Synchronized
     fun claimNextRunnable(context: Context, nowMs: Long = System.currentTimeMillis()): QueuedUploadItem? {
         val all = read(context).toMutableList()
-        val index = all.indexOfFirst {
-            isAutoRetryState(it.status) &&
-                (it.nextRetryAtMs <= 0L || it.nextRetryAtMs <= nowMs) &&
-                (it.retentionUntilMs <= 0L || it.retentionUntilMs > nowMs)
-        }
+        val index = all.indexOfFirst { item -> isRunnable(item, all, nowMs) }
         if (index < 0) return null
         val claimed = all[index].copy(
             status = UploadQueueStatus.RUNNING,
@@ -657,12 +728,30 @@ object UploadQueueManager {
     fun findById(context: Context, id: String): QueuedUploadItem? =
         read(context).firstOrNull { it.id == id }
 
+    private fun isRunnable(item: QueuedUploadItem, all: List<QueuedUploadItem>, nowMs: Long): Boolean {
+        if (!isAutoRetryState(item.status) || (item.nextRetryAtMs > 0L && item.nextRetryAtMs > nowMs) ||
+            (item.retentionUntilMs > 0L && item.retentionUntilMs <= nowMs)) return false
+        return isQueueEligible(item, all)
+    }
+
+    private fun isQueueEligible(item: QueuedUploadItem, all: List<QueuedUploadItem>): Boolean {
+        if (item.uploadMode != UploadQueueMode.ATTACHMENT || item.parentUploadClientId.isBlank()) return true
+        if ((item.resolvedParentPhotoId ?: 0L) <= 0L) return false
+        // Do not let a later attachment overtake a retrying earlier image in this draft.
+        return all.none { other ->
+            other.localExtraDraftId == item.localExtraDraftId && other.uploadMode == UploadQueueMode.ATTACHMENT &&
+                other.mediaSequence < item.mediaSequence && other.status != UploadQueueStatus.SUCCESS
+        }
+    }
+
     @Synchronized
     fun nextDelaySeconds(context: Context): Long? {
         val now = System.currentTimeMillis()
-        val items = read(context).filter {
+        val all = read(context)
+        val items = all.filter {
             (isAutoRetryState(it.status) || it.status == UploadQueueStatus.RUNNING || it.status == UploadQueueStatus.AWAITING_SERVER_ACK) &&
-                (it.retentionUntilMs <= 0L || it.retentionUntilMs > now)
+                (it.retentionUntilMs <= 0L || it.retentionUntilMs > now) &&
+                isQueueEligible(it, all)
         }
         if (items.isEmpty()) return null
         val immediate = items.any {
@@ -724,6 +813,10 @@ object UploadQueueManager {
                     uploadClientId = o.optString("uploadClientId"),
                     uploadMode = o.optString("uploadMode", UploadQueueMode.DUAL).ifBlank { UploadQueueMode.DUAL },
                     appendTargetPhotoId = if (o.has("appendTargetPhotoId") && !o.isNull("appendTargetPhotoId")) o.optLong("appendTargetPhotoId") else null,
+                    localExtraDraftId = o.optString("localExtraDraftId"),
+                    parentUploadClientId = o.optString("parentUploadClientId"),
+                    resolvedParentPhotoId = if (o.has("resolvedParentPhotoId") && !o.isNull("resolvedParentPhotoId")) o.optLong("resolvedParentPhotoId") else null,
+                    mediaSequence = o.optLong("mediaSequence", 0L),
                     isPrompt = o.optBoolean("isPrompt", true),
                     capsuleMode = o.optString("capsuleMode"),
                     capsulePrivate = o.optBoolean("capsulePrivate", false),
@@ -763,6 +856,10 @@ object UploadQueueManager {
                     put("uploadClientId", item.uploadClientId)
                     put("uploadMode", item.uploadMode)
                     put("appendTargetPhotoId", item.appendTargetPhotoId)
+                    put("localExtraDraftId", item.localExtraDraftId)
+                    put("parentUploadClientId", item.parentUploadClientId)
+                    put("resolvedParentPhotoId", item.resolvedParentPhotoId)
+                    put("mediaSequence", item.mediaSequence)
                     put("isPrompt", item.isPrompt)
                     put("capsuleMode", item.capsuleMode)
                     put("capsulePrivate", item.capsulePrivate)
@@ -797,17 +894,27 @@ object UploadQueueManager {
     private fun prune(items: List<QueuedUploadItem>): List<QueuedUploadItem> {
         val now = System.currentTimeMillis()
         val keep = items.filterNot {
-            it.status == UploadQueueStatus.SUCCESS && (now - it.updatedAtMs) > 24L * 60L * 60L * 1000L
+            it.status == UploadQueueStatus.SUCCESS &&
+                (now - it.updatedAtMs) > 24L * 60L * 60L * 1000L &&
+                (it.localExtraDraftId.isBlank() || items.none { sibling ->
+                    sibling.localExtraDraftId == it.localExtraDraftId && sibling.status != UploadQueueStatus.SUCCESS
+                })
         }
         val actionItems = keep.filter {
             it.status == UploadQueueStatus.ACTION_REQUIRED ||
                 it.status == UploadQueueStatus.FAILED_PERMANENT ||
                 it.status == UploadQueueStatus.PAUSED
         }
-        val boundedAutomaticItems = keep.filterNot { it in actionItems }
+        // A confirmed parent is still required to reopen its draft and to add more
+        // photos while children are pending, even when the normal queue cap is full.
+        val protectedDraftParents = keep.filter { item ->
+            item.uploadMode == UploadQueueMode.DUAL && item.localExtraDraftId.isNotBlank() &&
+                keep.any { sibling -> sibling.localExtraDraftId == item.localExtraDraftId && sibling.status != UploadQueueStatus.SUCCESS }
+        }
+        val boundedAutomaticItems = keep.filterNot { it in actionItems || it in protectedDraftParents }
             .sortedByDescending { it.createdAtMs }
             .take(60)
-        return (actionItems + boundedAutomaticItems).distinctBy { it.id }.sortedByDescending { it.createdAtMs }
+        return (actionItems + protectedDraftParents + boundedAutomaticItems).distinctBy { it.id }.sortedByDescending { it.createdAtMs }
     }
 
     private fun deleteFilesForItem(item: QueuedUploadItem) {
@@ -877,11 +984,23 @@ class UploadQueueWorker(
                 append(";").append(probe.networkSnapshot)
             }
         )
-        val result = runCatching { upload(item, repo, probe) }
+        val result = runCatching { upload(item, repo, probe) }.mapCatching { uploadResult ->
+            if (item.uploadMode == UploadQueueMode.DUAL && item.localExtraDraftId.isNotBlank() && uploadResult.photoId == null) {
+                throw IOException("draft_parent_photo_id_missing")
+            }
+            uploadResult
+        }
         if (result.isSuccess) {
+            val uploadResult = result.getOrThrow()
+            if (item.uploadMode == UploadQueueMode.DUAL && item.localExtraDraftId.isNotBlank()) {
+                val photoId = uploadResult.photoId ?: error("validated above")
+                // Persist the server id before success deletes the parent files. A process death
+                // after this point is safe: every child can resume without another parent lookup.
+                UploadQueueManager.resolveDraftParent(applicationContext, item.localExtraDraftId, item.uploadClientId, photoId)
+            }
             UploadQueueManager.markSuccess(applicationContext, item.id)
             if (item.uploadMode == UploadQueueMode.ATTACHMENT) {
-                val targetPhotoId = item.appendTargetPhotoId?.takeIf { it > 0L }
+                val targetPhotoId = (item.resolvedParentPhotoId ?: item.appendTargetPhotoId)?.takeIf { it > 0L }
                 appendFeedTraceLog(
                     context = applicationContext,
                     type = "attachment_upload_confirmed",
@@ -1063,13 +1182,14 @@ class UploadQueueWorker(
         return Result.success()
     }
 
-    private suspend fun upload(item: QueuedUploadItem, repo: AppRepo, probe: UploadTelemetryProbe) {
+    private suspend fun upload(item: QueuedUploadItem, repo: AppRepo, probe: UploadTelemetryProbe): QueueUploadResult {
         if (item.uploadMode == UploadQueueMode.ATTACHMENT) {
             val file = File(item.backPath)
             if (!file.exists()) throw IOException("attachment file missing")
             val totalBytes = file.length().coerceAtLeast(1L)
             repo.appendPhotoToPost(
-                photoId = item.appendTargetPhotoId ?: throw IllegalStateException("append_target_missing"),
+                photoId = (item.resolvedParentPhotoId ?: item.appendTargetPhotoId)
+                    ?: throw IllegalStateException("append_target_missing"),
                 uri = file.toUri(),
                 shareLocation = item.locationShared,
                 capturedAtOverride = item.capturedAtMs.takeIf { it > 0L }?.let {
@@ -1080,7 +1200,7 @@ class UploadQueueWorker(
                 val percent = ((sent.coerceAtMost(totalBytes) * 100L) / totalBytes).toInt().coerceIn(0, 100)
                 UploadQueueManager.markProgress(applicationContext, item.id, percent)
             }
-            return
+            return QueueUploadResult((item.resolvedParentPhotoId ?: item.appendTargetPhotoId))
         }
         val backFile = File(item.backPath)
         val frontFile = File(item.frontPath)
@@ -1164,7 +1284,7 @@ class UploadQueueWorker(
 
         UploadQueueManager.markProgress(applicationContext, item.id, 1)
         try {
-            repo.uploadDualAuthorized(
+            val photo = repo.uploadDualAuthorized(
                 backPart = backPart,
                 frontPart = frontPart,
                 kind = kind,
@@ -1177,6 +1297,7 @@ class UploadQueueWorker(
                 locationLatitudePart = locationLatitudePart,
                 locationLongitudePart = locationLongitudePart
             )
+            return QueueUploadResult(photo?.id)
         } catch (t: Throwable) {
             if (awaitingAckLogged && queuedUploadNetworkFailureKind(t) == "timeout") {
                 throw QueueServerAckTimeoutException(t)

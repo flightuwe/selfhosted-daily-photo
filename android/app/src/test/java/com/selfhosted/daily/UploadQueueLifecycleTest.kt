@@ -85,6 +85,36 @@ class UploadQueueLifecycleTest {
         assertTrue(paths.none(File::exists))
     }
 
+    @Test
+    fun offlineExtraDraftReleasesAttachmentsOnlyAfterParentAndInCaptureOrder() {
+        val parent = enqueueExtra("draft-parent")
+        val first = UploadQueueManager.enqueueDraftAttachmentFromFile(
+            context, queueFile("draft-first.jpg").absolutePath, "draft-first", parent, capturedAtMs = 101L
+        )
+        val second = UploadQueueManager.enqueueDraftAttachmentFromFile(
+            context, queueFile("draft-second.jpg").absolutePath, "draft-second", parent, capturedAtMs = 102L
+        )
+
+        assertEquals(parent.id, UploadQueueManager.latestOpenExtraDraft(context)?.id)
+        val claimedParent = UploadQueueManager.claimNextRunnable(context, 1L)
+        assertEquals(parent.id, claimedParent?.id)
+        assertNull("children must not upload before the parent id is durable", UploadQueueManager.claimNextRunnable(context, 2L))
+
+        UploadQueueManager.resolveDraftParent(context, parent.localExtraDraftId, parent.uploadClientId, 77L)
+        UploadQueueManager.markSuccess(context, parent.id)
+        val claimedFirst = UploadQueueManager.claimNextRunnable(context, 3L)
+        assertEquals(first.id, claimedFirst?.id)
+        assertEquals(77L, claimedFirst?.resolvedParentPhotoId)
+        UploadQueueManager.markFailedTransient(context, first.id, "offline", "connect", null, networkWaiting = true, overrideDelayMs = 60_000L)
+        assertNull("a retrying first image must keep the second image behind it", UploadQueueManager.claimNextRunnable(context, 4L))
+
+        UploadQueueManager.markSuccess(context, first.id)
+        val claimedSecond = UploadQueueManager.claimNextRunnable(context, 5L)
+        assertEquals(second.id, claimedSecond?.id)
+        UploadQueueManager.markSuccess(context, second.id)
+        assertNull("the draft closes when all images are confirmed", UploadQueueManager.latestOpenExtraDraft(context))
+    }
+
     private fun enqueueExtra(name: String, capturedAtMs: Long = 1_785_700_000_000L): QueuedUploadItem =
         UploadQueueManager.enqueueFromFiles(
             context = context,
