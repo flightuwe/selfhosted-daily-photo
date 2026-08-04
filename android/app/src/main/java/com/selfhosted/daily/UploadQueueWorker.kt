@@ -72,7 +72,8 @@ data class QueuedUploadItem(
     val lastFailureClass: String,
     val lastHttpCode: Int?,
     val retentionUntilMs: Long,
-    val leaseExpiresAtMs: Long
+    val leaseExpiresAtMs: Long,
+    val communityPost: Boolean = false
 )
 
 object UploadQueueMode {
@@ -145,7 +146,8 @@ object UploadQueueManager {
         locationShared: Boolean = false,
         locationLatitude: Double? = null,
         locationLongitude: Double? = null,
-        capturedAtMs: Long = 0L
+        capturedAtMs: Long = 0L,
+        communityPost: Boolean = false
     ): QueuedUploadItem {
         val now = System.currentTimeMillis()
         val item = QueuedUploadItem(
@@ -180,7 +182,8 @@ object UploadQueueManager {
             lastFailureClass = "",
             lastHttpCode = null,
             retentionUntilMs = now + queueRetryRetentionMs,
-            leaseExpiresAtMs = 0L
+            leaseExpiresAtMs = 0L,
+            communityPost = communityPost
         )
         val all = read(context).toMutableList()
         all.add(item)
@@ -1289,6 +1292,7 @@ class UploadQueueWorker(
         } else null
         val locationLatitudePart = item.locationLatitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
         val locationLongitudePart = item.locationLongitude?.toString()?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val communityPostPart = item.communityPost.takeIf { it }?.let { "true".toRequestBody("text/plain".toMediaTypeOrNull()) }
 
         UploadQueueManager.markProgress(applicationContext, item.id, 1)
         try {
@@ -1303,7 +1307,8 @@ class UploadQueueWorker(
                 capsuleGroupRemindPart = capsuleGroupRemindPart,
                 locationSharedPart = locationSharedPart,
                 locationLatitudePart = locationLatitudePart,
-                locationLongitudePart = locationLongitudePart
+                locationLongitudePart = locationLongitudePart,
+                communityPostPart = communityPostPart
             )
             return QueueUploadResult(photo?.id)
         } catch (t: Throwable) {

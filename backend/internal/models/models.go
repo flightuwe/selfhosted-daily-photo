@@ -29,6 +29,8 @@ type User struct {
 	CreativePostMode                    string     `gorm:"size:16;default:'none'" json:"creativePostMode"`
 	LocationFeatureEnabled              bool       `gorm:"default:false" json:"locationFeatureEnabled"`
 	LocationShareDefaultEnabled         bool       `gorm:"default:false" json:"locationShareDefaultEnabled"`
+	AllowCommunityPostPromotion         bool       `gorm:"default:false" json:"allowCommunityPostPromotion"`
+	CommunityContributionPushEnabled    bool       `gorm:"default:false" json:"communityContributionPushEnabled"`
 	AvatarPath                          string     `gorm:"size:255" json:"avatarUrl"`
 	Bio                                 string     `gorm:"size:280" json:"bio"`
 	StatusText                          string     `gorm:"size:120" json:"statusText"`
@@ -379,6 +381,8 @@ type Photo struct {
 	LocationShared           bool       `gorm:"default:false;index" json:"locationShared"`
 	LocationLatitude         *float64   `json:"locationLatitude"`
 	LocationLongitude        *float64   `json:"locationLongitude"`
+	CommunityPost            bool       `gorm:"default:false;index" json:"communityPost"`
+	CommunityActivatedAt     *time.Time `gorm:"index" json:"communityActivatedAt"`
 	Nsfw                     bool       `gorm:"default:false;index" json:"nsfw"`
 	NsfwMarkedByUserID       *uint      `gorm:"index" json:"nsfwMarkedByUserId"`
 	NsfwMarkedAt             *time.Time `json:"nsfwMarkedAt"`
@@ -390,6 +394,7 @@ type Photo struct {
 type PhotoAttachment struct {
 	ID             uint       `gorm:"primaryKey" json:"id"`
 	PhotoID        uint       `gorm:"not null;index;index:idx_photo_attachment_photo_sort,priority:1" json:"photoId"`
+	UserID         uint       `gorm:"not null;index" json:"userId"`
 	UploadClientID string     `gorm:"size:64;uniqueIndex:idx_attachment_photo_upload_client" json:"uploadClientId"`
 	FilePath       string     `gorm:"size:255;not null" json:"filePath"`
 	PreviewPath    string     `gorm:"size:255" json:"previewPath"`

@@ -471,6 +471,8 @@ data class User(
     val creativePostMode: String = "none",
     val locationFeatureEnabled: Boolean = false,
     val locationShareDefaultEnabled: Boolean = false,
+    val allowCommunityPostPromotion: Boolean = false,
+    val communityContributionPushEnabled: Boolean = false,
     val avatarUrl: String = "",
     val bio: String = "",
     val statusText: String = "",
@@ -528,6 +530,8 @@ data class PreferencesUpdateRequest(
     val creativePostMode: String? = null,
     val locationFeatureEnabled: Boolean? = null,
     val locationShareDefaultEnabled: Boolean? = null,
+    val allowCommunityPostPromotion: Boolean? = null,
+    val communityContributionPushEnabled: Boolean? = null,
     val diagnosticsConsentGranted: Boolean? = null,
     val diagnosticsConsentSource: String? = null,
     val mediaDataMode: String? = null,
@@ -667,9 +671,13 @@ data class PromptPhoto(
     val paintedByMe: Boolean = false,
     val media: List<PostMediaItem> = emptyList(),
     val mediaCount: Int = 0,
+    val communityPost: Boolean = false,
+    val communityActive: Boolean = false,
+    val communityContributors: List<CommunityContributor> = emptyList(),
     val marks: List<PhotoMarkOverlay> = emptyList(),
     val paints: List<PhotoPaintOverlay> = emptyList()
 )
+data class CommunityContributor(val id: Long, val username: String, val color: String = "#1F5FBF")
 data class PhotoMarkOverlay(
     val id: Long,
     val userId: Long,
@@ -723,6 +731,7 @@ data class PromptResponse(
     val appendTargetPhotoId: Long? = null,
     val appendRemainingMediaSlots: Int? = null,
     val appendMediaUnlimited: Boolean = false,
+    val activeCommunityPost: PromptPhoto? = null,
     val triggerSource: String? = null,
     val requestedByUser: String? = null,
     val momentKind: String? = null
@@ -1775,7 +1784,8 @@ interface Api {
         @Part("capsule_group_remind") capsuleGroupRemind: RequestBody? = null,
         @Part("location_shared") locationShared: RequestBody? = null,
         @Part("location_latitude") locationLatitude: RequestBody? = null,
-        @Part("location_longitude") locationLongitude: RequestBody? = null
+        @Part("location_longitude") locationLongitude: RequestBody? = null,
+        @Part("community_post") communityPost: RequestBody? = null
     ): PhotoMutationResponse
 
     @Multipart
@@ -1790,6 +1800,9 @@ interface Api {
         @Part("location_latitude") locationLatitude: RequestBody? = null,
         @Part("location_longitude") locationLongitude: RequestBody? = null
     ): PhotoMutationResponse
+
+    @POST("photos/{id}/community-post")
+    suspend fun activateCommunityPost(@Header("Authorization") token: String, @Path("id") id: Long): PhotoMutationResponse
 
     @Multipart
     @POST("me/avatar")
@@ -2333,7 +2346,8 @@ class AppRepo(
         capsuleGroupRemindPart: RequestBody? = null,
         locationSharedPart: RequestBody? = null,
         locationLatitudePart: RequestBody? = null,
-        locationLongitudePart: RequestBody? = null
+        locationLongitudePart: RequestBody? = null,
+        communityPostPart: RequestBody? = null
     ): PromptPhoto? {
         return authorizedCall("/api/uploads/dual") { token ->
             api.uploadDual(
@@ -2348,7 +2362,8 @@ class AppRepo(
                 capsuleGroupRemindPart,
                 locationSharedPart,
                 locationLatitudePart,
-                locationLongitudePart
+                locationLongitudePart,
+                communityPostPart
             ).photo
         }
     }
@@ -4251,7 +4266,8 @@ class AppRepo(
         frontUri: Uri,
         isPrompt: Boolean,
         shareLocation: Boolean = false,
-        capsule: CapsuleUploadOptions = CapsuleUploadOptions()
+        capsule: CapsuleUploadOptions = CapsuleUploadOptions(),
+        communityPost: Boolean = false
     ): QueuedUploadItem {
         val backCapturedAt = readCapturedAtFromUri(backUri)
         val frontCapturedAt = readCapturedAtFromUri(frontUri)
@@ -4278,7 +4294,8 @@ class AppRepo(
             locationShared = locationPayload != null,
             locationLatitude = locationPayload?.latitude,
             locationLongitude = locationPayload?.longitude,
-            capturedAtMs = capturedAt?.toInstant()?.toEpochMilli() ?: 0L
+            capturedAtMs = capturedAt?.toInstant()?.toEpochMilli() ?: 0L,
+            communityPost = communityPost
         )
         logDebug(
             type = "upload_queue_enqueued",
@@ -9905,11 +9922,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         front: Uri,
         asPrompt: Boolean,
         shareLocation: Boolean,
-        capsule: CapsuleUploadOptions = CapsuleUploadOptions()
+        capsule: CapsuleUploadOptions = CapsuleUploadOptions(),
+        communityPost: Boolean = false
     ): Boolean {
         state = state.copy(loading = true)
         return runCatching {
-            repo.enqueueDualUpload(back, front, asPrompt, shareLocation, capsule)
+            repo.enqueueDualUpload(back, front, asPrompt, shareLocation, capsule, communityPost)
         }.onSuccess {
             repo.syncUploadQueueScheduler()
             state = state.copy(
@@ -12243,6 +12261,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     var pendingFotomojiCapture by remember { mutableStateOf<PendingFotomojiCapture?>(null) }
     var pendingProfileFotomojiTemplateEmoji by remember { mutableStateOf<String?>(null) }
     var captureAsPrompt by remember { mutableStateOf(true) }
+    var captureAsCommunity by remember { mutableStateOf(false) }
     var captureCapsule by remember { mutableStateOf(CapsuleUploadOptions()) }
     var backPreviewUri by remember { mutableStateOf<Uri?>(null) }
     var frontPreviewUri by remember { mutableStateOf<Uri?>(null) }
@@ -12305,7 +12324,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                                 front,
                                 asPrompt,
                                 shareLocation,
-                                if (asPrompt) CapsuleUploadOptions() else captureCapsule
+                                if (asPrompt) CapsuleUploadOptions() else captureCapsule,
+                                captureAsCommunity
                             )
                             cameraUploading = false
                             if (ok) {
@@ -12428,8 +12448,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         appPermissionSettingsLauncher.launch(appPermissionSettingsIntent(context))
     }
 
-    fun startDualCapture(asPrompt: Boolean, capsule: CapsuleUploadOptions = CapsuleUploadOptions()) {
+    fun startDualCapture(asPrompt: Boolean, capsule: CapsuleUploadOptions = CapsuleUploadOptions(), communityPost: Boolean = false) {
         captureAsPrompt = asPrompt
+        captureAsCommunity = communityPost
         captureCapsule = if (asPrompt) CapsuleUploadOptions() else capsule
         cameraUploadPercent = 0
         cameraUploadError = ""
@@ -13344,6 +13365,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onOpenLocationPermissionSettings = ::openLocationPermissionSettings,
                     onCapturePrompt = { startDualCapture(true) },
                     onCaptureExtra = { capsule -> startDualCapture(false, capsule) },
+                    onCaptureCommunity = { startDualCapture(false, CapsuleUploadOptions(), true) },
                     onRequestSpecialMoment = { showSpecialMomentConfirm = true },
                     onAppendToLatestPost = { photoId -> startAppendCapture(photoId) },
                     hasOpenExtraDraft = vm.hasOpenExtraDraft(),
@@ -13987,6 +14009,7 @@ fun CameraTab(
     onOpenLocationPermissionSettings: () -> Unit,
     onCapturePrompt: () -> Unit,
     onCaptureExtra: (CapsuleUploadOptions) -> Unit,
+    onCaptureCommunity: () -> Unit,
     onRequestSpecialMoment: () -> Unit,
     onAppendToLatestPost: (Long) -> Unit,
     hasOpenExtraDraft: Boolean,
@@ -14195,6 +14218,21 @@ fun CameraTab(
             }
         }
 
+        prompt?.activeCommunityPost?.takeIf { it.communityActive }?.let { community ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFE0B2))
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Aktiver Community-Post", fontWeight = FontWeight.Bold)
+                    Text("${community.communityContributors.size} Beteiligte · ${community.mediaCount} Bilder")
+                    Button(onClick = { onAppendToLatestPost(community.id) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Community-Post Bild hinzufuegen")
+                    }
+                }
+            }
+        }
+
         if (hasVisiblePosted) {
             if (canUpload) {
                 Text(activeMomentLabel, fontWeight = FontWeight.Bold)
@@ -14247,6 +14285,7 @@ fun CameraTab(
                     onClick = { onCaptureExtra(CapsuleUploadOptions()) },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Weiteres Extra posten") }
+                Button(onClick = onCaptureCommunity, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
             }
             if (!canUpload) {
                 TextButton(
@@ -14315,6 +14354,7 @@ fun CameraTab(
                         onClick = { onCaptureExtra(CapsuleUploadOptions()) },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Extra posten") }
+                    Button(onClick = onCaptureCommunity, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
                 }
                 if (!canUpload) {
                     if (showSpecialMomentButton) {
@@ -15552,6 +15592,14 @@ private fun FeedPostCard(
         onRevealNsfw = onRevealNsfw,
         headerTrailing = {
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                if (item.photo.communityPost) {
+                    Text("COMMUNITY", color = Color(0xFF8A4B00), fontWeight = FontWeight.Bold)
+                    Text(
+                        "Gemeinsam von " + item.photo.communityContributors.joinToString(", ") { it.username },
+                        color = Color(0xFF8A4B00),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
                 if (showPublicPostNumbers && !item.photo.publicNumber.isNullOrBlank()) {
                     Text(
                         "#${item.photo.publicNumber}",

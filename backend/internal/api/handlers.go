@@ -355,6 +355,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.POST("/photos/:id/comments", s.handlePhotoComment)
 			protected.DELETE("/photos/:id/comments/:commentId", s.handleDeletePhotoComment)
 			protected.POST("/photos/:id/attachments", s.handlePhotoAttachmentCreate)
+			protected.POST("/photos/:id/community-post", s.handleCommunityPostActivate)
 		}
 
 		admin := api.Group("/admin")
@@ -934,6 +935,8 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 		CreativePostMode                    *string `json:"creativePostMode"`
 		LocationFeatureEnabled              *bool   `json:"locationFeatureEnabled"`
 		LocationShareDefaultEnabled         *bool   `json:"locationShareDefaultEnabled"`
+		AllowCommunityPostPromotion         *bool   `json:"allowCommunityPostPromotion"`
+		CommunityContributionPushEnabled    *bool   `json:"communityContributionPushEnabled"`
 		DiagnosticsConsentGranted           *bool   `json:"diagnosticsConsentGranted"`
 		DiagnosticsConsentSource            string  `json:"diagnosticsConsentSource"`
 	}
@@ -1024,6 +1027,12 @@ func (s *Server) handleUpdatePreferences(c *gin.Context) {
 			}
 		}
 		updates["location_share_default_enabled"] = shareDefault
+	}
+	if req.AllowCommunityPostPromotion != nil {
+		updates["allow_community_post_promotion"] = *req.AllowCommunityPostPromotion
+	}
+	if req.CommunityContributionPushEnabled != nil {
+		updates["community_contribution_push_enabled"] = *req.CommunityContributionPushEnabled
 	}
 	if req.DiagnosticsConsentGranted != nil {
 		updates["diagnostics_consent_granted"] = *req.DiagnosticsConsentGranted
@@ -1565,6 +1574,7 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 	_ = s.DB.First(&settings).Error
 	settings = normalizeSettings(settings)
 	var ownPhoto gin.H
+	var activeCommunityPost gin.H
 	canAppendToOwnLatestPost := false
 	var appendTargetPhotoID any = nil
 	var appendRemainingMediaSlots any = nil
@@ -1585,6 +1595,9 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		if !unlimited {
 			appendRemainingMediaSlots = remaining
 		}
+	}
+	if community, ok := s.activeCommunityPostForDay(day); ok {
+		activeCommunityPost = s.photoJSON(community)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1609,7 +1622,16 @@ func (s *Server) handleCurrentPrompt(c *gin.Context) {
 		"appendTargetPhotoId":         appendTargetPhotoID,
 		"appendRemainingMediaSlots":   appendRemainingMediaSlots,
 		"appendMediaUnlimited":        settings.PostMediaUnlimited,
+		"activeCommunityPost":         activeCommunityPost,
 	})
+}
+
+func (s *Server) activeCommunityPostForDay(day string) (models.Photo, bool) {
+	var photo models.Photo
+	if err := s.DB.Where("day = ? AND community_post = ?", day, true).Order("community_activated_at desc, id desc").First(&photo).Error; err != nil {
+		return models.Photo{}, false
+	}
+	return photo, true
 }
 
 func (s *Server) handleDashboardBootstrap(c *gin.Context) {
@@ -1651,6 +1673,7 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/dashboard/bootstrap")
 
 	var ownPhoto gin.H
+	var activeCommunityPost gin.H
 	canAppendToOwnLatestPost := false
 	var appendTargetPhotoID any = nil
 	var appendRemainingMediaSlots any = nil
@@ -1670,6 +1693,9 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 		if !unlimited {
 			appendRemainingMediaSlots = remaining
 		}
+	}
+	if community, ok := s.activeCommunityPostForDay(day); ok {
+		activeCommunityPost = s.photoJSON(community)
 	}
 
 	specialStatus, _ := s.specialMomentStatus(user.ID)
@@ -1728,6 +1754,7 @@ func (s *Server) handleDashboardBootstrap(c *gin.Context) {
 			"appendTargetPhotoId":         appendTargetPhotoID,
 			"appendRemainingMediaSlots":   appendRemainingMediaSlots,
 			"appendMediaUnlimited":        settings.PostMediaUnlimited,
+			"activeCommunityPost":         activeCommunityPost,
 		},
 		"promptRules": gin.H{
 			"promptWindowStartHour": settings.PromptWindowStartHour,
@@ -1950,7 +1977,6 @@ func (s *Server) handleUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be prompt or extra"})
 		return
 	}
-
 	capturedAt, err := s.parseCapturedAtValue(c.PostForm("captured_at"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid captured_at"})
@@ -8898,6 +8924,11 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be prompt or extra"})
 		return
 	}
+	communityPost := parseQueryBool(c.PostForm("community_post"), false)
+	if communityPost && kind != "extra" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "community posts must be extras"})
+		return
+	}
 
 	capturedAt, err := s.parseCapturedAtValue(c.PostForm("captured_at"))
 	if err != nil {
@@ -9021,6 +9052,11 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		LocationShared:           locationShared,
 		LocationLatitude:         latitude,
 		LocationLongitude:        longitude,
+		CommunityPost:            communityPost,
+	}
+	if communityPost {
+		activated := now.UTC()
+		photo.CommunityActivatedAt = &activated
 	}
 	photo.PrimaryDigest, err = s.fileDigest(backPath)
 	if err != nil {
@@ -9104,12 +9140,16 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 
 	now := time.Now().In(s.Location)
 	var photo models.Photo
-	if err := s.DB.Where("id = ? AND user_id = ?", photoID, user.ID).First(&photo).Error; err != nil {
+	if err := s.DB.Where("id = ?", photoID).First(&photo).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if photo.UserID != user.ID && !s.isActiveCommunityPost(photo) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "append only allowed for active community post"})
 		return
 	}
 	if !photoVisibleToViewer(user.ID, photo, now) {
@@ -9143,13 +9183,15 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 		return
 	}
 	settings = normalizeSettings(settings)
-	if remaining, unlimited := s.remainingPostMediaSlots(photo, settings); !unlimited && remaining <= 0 {
-		c.JSON(http.StatusConflict, gin.H{
-			"error":    "attachment limit reached",
-			"code":     "post_media_limit_reached",
-			"maxCount": settings.PostMediaMaxCount,
-		})
-		return
+	if !photo.CommunityPost {
+		if remaining, unlimited := s.remainingPostMediaSlots(photo, settings); !unlimited && remaining <= 0 {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":    "attachment limit reached",
+				"code":     "post_media_limit_reached",
+				"maxCount": settings.PostMediaMaxCount,
+			})
+			return
+		}
 	}
 
 	locationShared, latitude, longitude, locationErr := parseLocationForm(c)
@@ -9215,6 +9257,7 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 	}
 	attachment := models.PhotoAttachment{
 		PhotoID:        photo.ID,
+		UserID:         user.ID,
 		UploadClientID: uploadClientID,
 		FilePath:       savedPath,
 		PreviewPath:    previewPath,
@@ -9238,6 +9281,9 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 	}
 	s.invalidateFeedDayCache(photo.Day)
 	s.enqueueMediaDerivatives(filepath.ToSlash(filepath.Clean(savedPath)), 8_000, false)
+	if photo.CommunityPost && photo.UserID != user.ID {
+		s.notifyCommunityContribution(user, photo)
+	}
 	s.notifyPhotoAttachmentAppended(user, photo)
 	decorations, err := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
 	if err != nil {
@@ -9249,6 +9295,63 @@ func (s *Server) handlePhotoAttachmentCreate(c *gin.Context) {
 		"ok":    true,
 		"photo": s.photoJSONForViewerWithAttachments(user.ID, photo, decorations, attachmentByPhoto[photo.ID]),
 	})
+}
+
+func (s *Server) notifyCommunityContribution(actor models.User, photo models.Photo) {
+	var tokens []string
+	_ = s.DB.Table("device_tokens").Select("device_tokens.token").Joins("JOIN users ON users.id = device_tokens.user_id").
+		Where("users.id = ? AND users.community_contribution_push_enabled = ?", photo.UserID, true).Pluck("device_tokens.token", &tokens).Error
+	if len(tokens) == 0 {
+		return
+	}
+	result, err := s.Notifier.Send(tokens, notify.Message{Title: "Community-Post", Body: fmt.Sprintf("%s hat ein Bild hinzugefuegt", actor.Username), Type: "community_post", Action: "open_feed", Day: photo.Day, PhotoID: int64(photo.ID)})
+	s.recordPushResult(result, err)
+	s.removeInvalidTokens(result.InvalidTokens)
+}
+
+func (s *Server) isActiveCommunityPost(photo models.Photo) bool {
+	if !photo.CommunityPost || photo.CommunityActivatedAt == nil {
+		return false
+	}
+	var newer int64
+	if s.DB.Model(&models.Photo{}).Where("day = ? AND community_post = ? AND community_activated_at > ?", photo.Day, true, photo.CommunityActivatedAt).Count(&newer).Error != nil {
+		return false
+	}
+	return newer == 0
+}
+
+func (s *Server) handleCommunityPostActivate(c *gin.Context) {
+	user, _ := userFromContext(c)
+	photoID, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid photo id"})
+		return
+	}
+	var photo models.Photo
+	if err := s.DB.Preload("User").First(&photo, photoID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
+		return
+	}
+	if photo.PromptOnly || photo.CapsuleVisibleAt != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only visible extras can become community posts"})
+		return
+	}
+	if photo.UserID != user.ID && !photo.User.AllowCommunityPostPromotion {
+		c.JSON(http.StatusForbidden, gin.H{"error": "owner has not allowed community promotion"})
+		return
+	}
+	if !photo.CommunityPost {
+		now := time.Now().In(s.Location)
+		if err := s.DB.Model(&photo).Updates(map[string]any{"community_post": true, "community_activated_at": now}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "community activation failed"})
+			return
+		}
+		photo.CommunityPost, photo.CommunityActivatedAt = true, &now
+		s.invalidateFeedDayCache(photo.Day)
+	}
+	attachments := s.photoAttachmentsByPhotoIDs([]uint{photo.ID})
+	decorations, _ := s.photoDecorationsForViewer(user.ID, []uint{photo.ID})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "photo": s.photoJSONForViewerWithAttachments(user.ID, photo, decorations, attachments[photo.ID])})
 }
 
 func (s *Server) handleHealth(c *gin.Context) {
@@ -11621,43 +11724,47 @@ func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.P
 		creativeMode = normalizeCreativePostMode(p.User.CreativePostMode)
 	}
 	out := gin.H{
-		"id":                 p.ID,
-		"day":                p.Day,
-		"promptOnly":         p.PromptOnly,
-		"momentKind":         normalizePhotoMomentKind(p.MomentKind),
-		"caption":            p.Caption,
-		"createdAt":          effectiveAt,
-		"capturedAt":         p.CapturedAt,
-		"uploadedAt":         p.CreatedAt,
-		"timeShifted":        photoTimeShifted(p),
-		"capsuleMode":        p.CapsuleMode,
-		"capsuleVisibleAt":   p.CapsuleVisibleAt,
-		"capsulePrivate":     false,
-		"capsuleGroupRemind": p.CapsuleGroupRemind,
-		"url":                fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
-		"capsuleLocked":      false,
-		"capsulePreviewUrl":  "",
-		"locationShared":     false,
-		"locationDisplay":    "",
-		"locationMapsUrl":    "",
-		"deduplicated":       false,
-		"bookmarkedByMe":     false,
-		"bookmarkCount":      0,
-		"media":              []gin.H{},
-		"mediaCount":         0,
-		"nsfw":               p.Nsfw,
-		"nsfwMarkedByUserId": p.NsfwMarkedByUserID,
-		"nsfwMarkedAt":       p.NsfwMarkedAt,
-		"nsfwMarkAllowed":    false,
-		"nsfwUnmarkAllowed":  false,
-		"publicNumber":       publicNumber,
-		"creativePostMode":   creativeMode,
-		"canMark":            false,
-		"canPaint":           false,
-		"markedByMe":         false,
-		"paintedByMe":        false,
-		"marks":              []gin.H{},
-		"paints":             []gin.H{},
+		"id":                    p.ID,
+		"day":                   p.Day,
+		"promptOnly":            p.PromptOnly,
+		"momentKind":            normalizePhotoMomentKind(p.MomentKind),
+		"caption":               p.Caption,
+		"createdAt":             effectiveAt,
+		"capturedAt":            p.CapturedAt,
+		"uploadedAt":            p.CreatedAt,
+		"timeShifted":           photoTimeShifted(p),
+		"capsuleMode":           p.CapsuleMode,
+		"capsuleVisibleAt":      p.CapsuleVisibleAt,
+		"capsulePrivate":        false,
+		"capsuleGroupRemind":    p.CapsuleGroupRemind,
+		"url":                   fmt.Sprintf("%s/uploads/%s", s.Config.PublicBaseURL, p.FilePath),
+		"capsuleLocked":         false,
+		"capsulePreviewUrl":     "",
+		"locationShared":        false,
+		"locationDisplay":       "",
+		"locationMapsUrl":       "",
+		"deduplicated":          false,
+		"bookmarkedByMe":        false,
+		"bookmarkCount":         0,
+		"media":                 []gin.H{},
+		"mediaCount":            0,
+		"nsfw":                  p.Nsfw,
+		"nsfwMarkedByUserId":    p.NsfwMarkedByUserID,
+		"nsfwMarkedAt":          p.NsfwMarkedAt,
+		"nsfwMarkAllowed":       false,
+		"nsfwUnmarkAllowed":     false,
+		"publicNumber":          publicNumber,
+		"creativePostMode":      creativeMode,
+		"canMark":               false,
+		"canPaint":              false,
+		"markedByMe":            false,
+		"paintedByMe":           false,
+		"marks":                 []gin.H{},
+		"paints":                []gin.H{},
+		"communityPost":         p.CommunityPost,
+		"communityActive":       s.isActiveCommunityPost(p),
+		"communityActivatedAt":  p.CommunityActivatedAt,
+		"communityContributors": s.communityContributors(p, attachments),
 	}
 	if thumbnailURL := s.photoThumbnailURL(p.FilePath); thumbnailURL != "" {
 		out["thumbnailUrl"] = thumbnailURL
@@ -11678,6 +11785,34 @@ func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.P
 		out["locationShared"] = true
 		out["locationDisplay"] = formatLocationDisplay(*p.LocationLatitude, *p.LocationLongitude)
 		out["locationMapsUrl"] = googleMapsLocationURL(*p.LocationLatitude, *p.LocationLongitude)
+	}
+	return out
+}
+
+func (s *Server) communityContributors(p models.Photo, attachments []models.PhotoAttachment) []gin.H {
+	if !p.CommunityPost {
+		return []gin.H{}
+	}
+	ids := []uint{p.UserID}
+	seen := map[uint]bool{p.UserID: true}
+	for _, a := range attachments {
+		if a.UserID != 0 && !seen[a.UserID] {
+			ids, seen[a.UserID] = append(ids, a.UserID), true
+		}
+	}
+	var users []models.User
+	if len(ids) > 0 {
+		_ = s.DB.Where("id IN ?", ids).Find(&users).Error
+	}
+	byID := map[uint]models.User{}
+	for _, u := range users {
+		byID[u.ID] = u
+	}
+	out := make([]gin.H, 0, len(ids))
+	for _, id := range ids {
+		if u, ok := byID[id]; ok {
+			out = append(out, gin.H{"id": u.ID, "username": u.Username, "color": defaultColor(u.FavoriteColor)})
+		}
 	}
 	return out
 }
@@ -11900,6 +12035,8 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"creativePostMode":                    normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":              u.LocationFeatureEnabled,
 		"locationShareDefaultEnabled":         u.LocationShareDefaultEnabled,
+		"allowCommunityPostPromotion":         u.AllowCommunityPostPromotion,
+		"communityContributionPushEnabled":    u.CommunityContributionPushEnabled,
 		"avatarUrl":                           avatarURL,
 		"bio":                                 strings.TrimSpace(u.Bio),
 		"statusText":                          strings.TrimSpace(u.StatusText),
@@ -11947,6 +12084,8 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"creativePostMode":                    normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":              false,
 		"locationShareDefaultEnabled":         false,
+		"allowCommunityPostPromotion":         false,
+		"communityContributionPushEnabled":    false,
 		"avatarUrl":                           "",
 		"bio":                                 "",
 		"statusText":                          "",

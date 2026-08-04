@@ -98,8 +98,19 @@ func Connect(path string) (*gorm.DB, error) {
 	if err := ensurePhotoPublicNumbers(database); err != nil {
 		return nil, err
 	}
+	if err := ensurePhotoAttachmentAuthors(database); err != nil {
+		return nil, err
+	}
 
 	return database, nil
+}
+
+// Attachments predating community posts could only be created by the post
+// owner. Preserve that fact while adding explicit attribution.
+func ensurePhotoAttachmentAuthors(database *gorm.DB) error {
+	return database.Exec(`UPDATE photo_attachments
+		SET user_id = (SELECT user_id FROM photos WHERE photos.id = photo_attachments.photo_id)
+		WHERE user_id = 0`).Error
 }
 
 func configureSQLite(database *gorm.DB) error {
