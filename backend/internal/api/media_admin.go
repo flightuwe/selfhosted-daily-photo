@@ -91,7 +91,7 @@ func (s *Server) mediaDerivativeQueueTelemetry(now time.Time) gin.H {
 	telemetry["pending"] = pending
 	telemetry["paused"] = paused
 	var running models.MediaDerivative
-	if err := s.DB.Where("status = ?", mediaDerivativeRunning).Order("started_at asc, id asc").First(&running).Error; err == nil {
+	if err := s.DB.Where("status = ?", mediaDerivativeRunning).Order("started_at asc, id asc").Limit(1).Find(&running).Error; err == nil && running.ID != 0 {
 		runningJSON := gin.H{"id": running.ID, "sourcePath": running.SourcePath, "variant": running.Variant, "format": running.Format, "startedAt": running.StartedAt}
 		if running.StartedAt != nil {
 			runningJSON["ageSeconds"] = int64(now.Sub(*running.StartedAt).Seconds())
@@ -99,7 +99,7 @@ func (s *Server) mediaDerivativeQueueTelemetry(now time.Time) gin.H {
 		telemetry["running"] = runningJSON
 	}
 	var last models.MediaDerivative
-	if err := s.DB.Where("status = ? AND completed_at IS NOT NULL", mediaDerivativeReady).Order("completed_at desc").First(&last).Error; err == nil {
+	if err := s.DB.Where("status = ? AND completed_at IS NOT NULL", mediaDerivativeReady).Order("completed_at desc").Limit(1).Find(&last).Error; err == nil && last.ID != 0 {
 		lastJSON := gin.H{"id": last.ID, "sourcePath": last.SourcePath, "variant": last.Variant, "format": last.Format, "completedAt": last.CompletedAt, "byteSize": last.ByteSize}
 		if last.StartedAt != nil && last.CompletedAt != nil {
 			lastJSON["durationMs"] = last.CompletedAt.Sub(*last.StartedAt).Milliseconds()
