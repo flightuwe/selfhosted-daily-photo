@@ -109,33 +109,36 @@ type AppSettings struct {
 	PerformanceTrackingOneShot       bool   `gorm:"default:false" json:"performanceTrackingOneShot"`
 	// MediaAVIFDisabled is an operator kill switch. The environment flag remains
 	// the capability boundary; this durable flag makes enablement auditable.
-	MediaAVIFDisabled           bool       `gorm:"default:false" json:"mediaAvifDisabled"`
-	MediaAVIFAutoPaused         bool       `gorm:"default:false" json:"mediaAvifAutoPaused"`
-	MediaAVIFAutoPauseReason    string     `gorm:"size:255" json:"mediaAvifAutoPauseReason"`
-	SchedulerAutoPaused         bool       `gorm:"default:false" json:"schedulerAutoPaused"`
-	SchedulerAutoPauseReason    string     `gorm:"size:120" json:"schedulerAutoPauseReason"`
-	SchedulerAutoPausedAt       *time.Time `json:"schedulerAutoPausedAt"`
-	UserPromptRulesJSON         string     `gorm:"type:text" json:"userPromptRulesJson"`
-	MigrationEnabled            bool       `gorm:"default:false" json:"migrationEnabled"`
-	MigrationStartedAt          *time.Time `json:"migrationStartedAt"`
-	MigrationUntil              *time.Time `json:"migrationUntil"`
-	MigrationAutoOffEnabled     bool       `gorm:"default:true" json:"migrationAutoOffEnabled"`
-	MigrationTargetBaseURL      string     `gorm:"size:500" json:"migrationTargetBaseUrl"`
-	MigrationDownloadURL        string     `gorm:"size:500" json:"migrationDownloadUrl"`
-	MigrationPushTitle          string     `gorm:"size:255" json:"migrationPushTitle"`
-	MigrationPushBody           string     `gorm:"size:500" json:"migrationPushBody"`
-	MigrationScreenTitle        string     `gorm:"size:255" json:"migrationScreenTitle"`
-	MigrationScreenBody         string     `gorm:"size:2000" json:"migrationScreenBody"`
-	MigrationRequirePromptFirst bool       `gorm:"default:true" json:"migrationRequirePromptFirst"`
-	MigrationCallbackSecret     string     `gorm:"size:255" json:"migrationCallbackSecret"`
-	MigrationExpectedSource     string     `gorm:"size:120" json:"migrationExpectedSource"`
-	MigrationReportEnabled      bool       `gorm:"default:false" json:"migrationReportEnabled"`
-	MigrationReportTarget       string     `gorm:"size:500" json:"migrationReportTarget"`
-	MigrationReportSecret       string     `gorm:"size:255" json:"migrationReportSecret"`
-	MigrationReportSource       string     `gorm:"size:500" json:"migrationReportSource"`
-	MigrationBaselineUserCount  int64      `gorm:"default:0" json:"migrationBaselineUserCount"`
-	CreatedAt                   time.Time  `json:"createdAt"`
-	UpdatedAt                   time.Time  `json:"updatedAt"`
+	MediaAVIFDisabled        bool   `gorm:"default:false" json:"mediaAvifDisabled"`
+	MediaAVIFAutoPaused      bool   `gorm:"default:false" json:"mediaAvifAutoPaused"`
+	MediaAVIFAutoPauseReason string `gorm:"size:255" json:"mediaAvifAutoPauseReason"`
+	// MediaDerivativeBackgroundPaused is a durable, global operator switch for
+	// the best-effort historical rendition backlog. Visible requests ignore it.
+	MediaDerivativeBackgroundPaused bool       `gorm:"default:false" json:"mediaDerivativeBackgroundPaused"`
+	SchedulerAutoPaused             bool       `gorm:"default:false" json:"schedulerAutoPaused"`
+	SchedulerAutoPauseReason        string     `gorm:"size:120" json:"schedulerAutoPauseReason"`
+	SchedulerAutoPausedAt           *time.Time `json:"schedulerAutoPausedAt"`
+	UserPromptRulesJSON             string     `gorm:"type:text" json:"userPromptRulesJson"`
+	MigrationEnabled                bool       `gorm:"default:false" json:"migrationEnabled"`
+	MigrationStartedAt              *time.Time `json:"migrationStartedAt"`
+	MigrationUntil                  *time.Time `json:"migrationUntil"`
+	MigrationAutoOffEnabled         bool       `gorm:"default:true" json:"migrationAutoOffEnabled"`
+	MigrationTargetBaseURL          string     `gorm:"size:500" json:"migrationTargetBaseUrl"`
+	MigrationDownloadURL            string     `gorm:"size:500" json:"migrationDownloadUrl"`
+	MigrationPushTitle              string     `gorm:"size:255" json:"migrationPushTitle"`
+	MigrationPushBody               string     `gorm:"size:500" json:"migrationPushBody"`
+	MigrationScreenTitle            string     `gorm:"size:255" json:"migrationScreenTitle"`
+	MigrationScreenBody             string     `gorm:"size:2000" json:"migrationScreenBody"`
+	MigrationRequirePromptFirst     bool       `gorm:"default:true" json:"migrationRequirePromptFirst"`
+	MigrationCallbackSecret         string     `gorm:"size:255" json:"migrationCallbackSecret"`
+	MigrationExpectedSource         string     `gorm:"size:120" json:"migrationExpectedSource"`
+	MigrationReportEnabled          bool       `gorm:"default:false" json:"migrationReportEnabled"`
+	MigrationReportTarget           string     `gorm:"size:500" json:"migrationReportTarget"`
+	MigrationReportSecret           string     `gorm:"size:255" json:"migrationReportSecret"`
+	MigrationReportSource           string     `gorm:"size:500" json:"migrationReportSource"`
+	MigrationBaselineUserCount      int64      `gorm:"default:0" json:"migrationBaselineUserCount"`
+	CreatedAt                       time.Time  `json:"createdAt"`
+	UpdatedAt                       time.Time  `json:"updatedAt"`
 }
 
 type MigrationUserStatus struct {

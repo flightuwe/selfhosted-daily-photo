@@ -24,11 +24,13 @@ import (
 )
 
 const (
-	mediaDerivativeQueued  = "queued"
-	mediaDerivativeRunning = "running"
-	mediaDerivativeReady   = "ready"
-	mediaDerivativeFailed  = "failed"
-	mediaDerivativeEvicted = "evicted"
+	mediaDerivativeQueued     = "queued"
+	mediaDerivativeRunning    = "running"
+	mediaDerivativeReady      = "ready"
+	mediaDerivativeFailed     = "failed"
+	mediaDerivativeEvicted    = "evicted"
+	mediaDerivativePaused     = "paused"
+	visibleDerivativePriority = 1_000
 )
 
 type mediaVariantSpec struct {
@@ -85,9 +87,6 @@ func (s *Server) mediaRenditionsJSONWithQueue(sourcePath string, queueMissing bo
 		// demand. It must never sit behind the best-effort historic backfill.
 		s.enqueueMediaDerivatives(clean, 0, true)
 		_ = s.DB.Where("source_path = ?", clean).Order("width asc, format asc").Find(&rows).Error
-	} else {
-		now := time.Now().UTC()
-		_ = s.DB.Model(&models.MediaDerivative{}).Where("source_path = ?", clean).Update("last_requested_at", now).Error
 	}
 	out := make([]gin.H, 0, len(rows))
 	for _, row := range rows {
@@ -130,7 +129,12 @@ func (s *Server) enqueueMediaDerivatives(clean string, priorityAdjustment int, r
 		row := models.MediaDerivative{
 			SourcePath: clean, Variant: spec.Name, Purpose: spec.Purpose, Format: spec.Format,
 			Width: spec.Width, Quality: spec.Quality, OutputPath: output,
-			Status: mediaDerivativeQueued, Priority: priority,
+			Status: func() string {
+				if requested {
+					return mediaDerivativeQueued
+				}
+				return mediaDerivativePaused
+			}(), Priority: priority,
 		}
 		if requested {
 			row.LastRequestedAt = &now
@@ -138,7 +142,7 @@ func (s *Server) enqueueMediaDerivatives(clean string, priorityAdjustment int, r
 		_ = s.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error
 		updates := map[string]any{
 			"priority": gorm.Expr("CASE WHEN priority < ? THEN ? ELSE priority END", priority, priority),
-			"status":   gorm.Expr("CASE WHEN status = ? THEN ? ELSE status END", mediaDerivativeEvicted, mediaDerivativeQueued),
+			"status":   gorm.Expr("CASE WHEN status IN (?, ?) THEN ? ELSE status END", mediaDerivativeEvicted, mediaDerivativePaused, mediaDerivativeQueued),
 		}
 		if requested {
 			updates["last_requested_at"] = now
@@ -161,11 +165,9 @@ func (s *Server) RunMediaDerivativeLoop(ctx context.Context, interval time.Durat
 		interval = 5 * time.Second
 	}
 	_ = s.recoverInterruptedMediaDerivatives()
-	// Previous versions enqueued every medium from the last 30 days at once.
-	// That created tens of thousands of rows and starved AVIF. Derivatives are
-	// disposable, so discard only untouched background rows on upgrade and let
-	// visible requests repopulate them at high priority.
-	_ = s.discardBackgroundDerivativeQueue()
+	// Preserve upgrade backlog in a paused state. A visible request promotes its
+	// own variants back to the foreground queue immediately.
+	_ = s.parkBackgroundDerivativeQueue()
 	_ = s.enqueueOlderMediaDerivativeBatch(1)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -176,7 +178,7 @@ func (s *Server) RunMediaDerivativeLoop(ctx context.Context, interval time.Durat
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.processOneMediaDerivative(ctx); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := s.processOneMediaDerivative(ctx, s.backgroundDerivativeAllowed(time.Now())); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 				log.Printf("media derivative worker: %v", err)
 			}
 		case <-cleanupTicker.C:
@@ -190,13 +192,40 @@ func (s *Server) RunMediaDerivativeLoop(ctx context.Context, interval time.Durat
 	}
 }
 
-func (s *Server) discardBackgroundDerivativeQueue() error {
+func (s *Server) parkBackgroundDerivativeQueue() error {
 	return s.DB.Model(&models.MediaDerivative{}).
-		Where("status = ? AND priority < ? AND last_requested_at IS NULL", mediaDerivativeQueued, 1_000).
+		Where("status = ? AND priority < ?", mediaDerivativeQueued, visibleDerivativePriority).
 		Updates(map[string]any{
-			"status": mediaDerivativeEvicted, "next_attempt_at": nil,
-			"last_error": "superseded background backfill",
+			"status": mediaDerivativePaused, "next_attempt_at": nil,
+			"last_error": "paused historical backfill",
 		}).Error
+}
+
+// discardBackgroundDerivativeQueue is retained for older tests/callers; jobs
+// are no longer deleted or evicted during an upgrade.
+func (s *Server) discardBackgroundDerivativeQueue() error { return s.parkBackgroundDerivativeQueue() }
+
+func (s *Server) backgroundDerivativeAllowed(now time.Time) bool {
+	var settings models.AppSettings
+	if s.DB.First(&settings).Error != nil || settings.MediaDerivativeBackgroundPaused {
+		return false
+	}
+	if s.Monitor != nil {
+		last := s.Monitor.LastUserFacingRequestAt()
+		if !last.IsZero() && now.Sub(last) < 2*time.Minute {
+			return false
+		}
+	}
+	local := now
+	if s.Monitor != nil && s.Monitor.Location != nil {
+		local = now.In(s.Monitor.Location)
+	}
+	// Nighttime may make steady progress. Daytime work is intentionally sparse:
+	// the worker ticker permits one paused job only every five minutes.
+	if local.Hour() >= 1 && local.Hour() < 6 {
+		return true
+	}
+	return s.Monitor != nil && s.Monitor.TryStartDaytimeBackgroundDerivative(now)
 }
 
 func (s *Server) enqueueRecentMediaDerivativeBackfill() error {
@@ -253,15 +282,19 @@ func (s *Server) recoverInterruptedMediaDerivatives() error {
 		Updates(map[string]any{"status": mediaDerivativeQueued, "next_attempt_at": nil}).Error
 }
 
-func (s *Server) processOneMediaDerivative(parent context.Context) error {
+func (s *Server) processOneMediaDerivative(parent context.Context, allowBackground bool) error {
 	now := time.Now().UTC()
 	var row models.MediaDerivative
-	err := s.DB.Where("status = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)", mediaDerivativeQueued, now).
+	query := s.DB.Where("status = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)", mediaDerivativeQueued, now)
+	if allowBackground {
+		query = s.DB.Where("(status = ? OR status = ?) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)", mediaDerivativeQueued, mediaDerivativePaused, now)
+	}
+	err := query.
 		Order("priority desc, created_at asc, id asc").First(&row).Error
 	if err != nil {
 		return err
 	}
-	claimed := s.DB.Model(&models.MediaDerivative{}).Where("id = ? AND status = ?", row.ID, mediaDerivativeQueued).
+	claimed := s.DB.Model(&models.MediaDerivative{}).Where("id = ? AND status = ?", row.ID, row.Status).
 		Updates(map[string]any{"status": mediaDerivativeRunning, "attempts": gorm.Expr("attempts + 1"), "last_error": ""})
 	if claimed.Error != nil {
 		return claimed.Error
@@ -299,8 +332,12 @@ func (s *Server) processOneMediaDerivative(parent context.Context) error {
 		return err
 	}
 	retryAt := completed.Add(time.Duration(1<<minInt(row.Attempts, 6)) * time.Minute)
+	status := mediaDerivativeQueued
+	if row.Priority < visibleDerivativePriority {
+		status = mediaDerivativePaused
+	}
 	return s.DB.Model(&models.MediaDerivative{}).Where("id = ?", row.ID).
-		Updates(map[string]any{"status": mediaDerivativeQueued, "last_error": message, "next_attempt_at": retryAt}).Error
+		Updates(map[string]any{"status": status, "last_error": message, "next_attempt_at": retryAt}).Error
 }
 
 func (s *Server) invalidateDerivativeSource(sourcePath string) {
@@ -540,7 +577,7 @@ func (s *Server) cleanupMediaDerivatives() error {
 }
 
 func (s *Server) mediaDerivativeStats() gin.H {
-	stats := gin.H{"queued": int64(0), "running": int64(0), "ready": int64(0), "failed": int64(0), "bytes": int64(0)}
+	stats := gin.H{"queued": int64(0), "paused": int64(0), "running": int64(0), "ready": int64(0), "failed": int64(0), "bytes": int64(0)}
 	var rows []struct {
 		Status string
 		Count  int64
@@ -571,5 +608,30 @@ func (s *Server) mediaDerivativeStats() gin.H {
 	stats["deliveriesSevenDays"] = s.mediaDeliveryStats()
 	stats["formats"] = byFormat
 	stats["avifFailuresLastHour"] = avifFailuresHour
+	var visibleQueued int64
+	_ = s.DB.Model(&models.MediaDerivative{}).Where("status = ? AND priority >= ?", mediaDerivativeQueued, visibleDerivativePriority).Count(&visibleQueued).Error
+	stats["visibleQueued"] = visibleQueued
+	stats["background"] = s.backgroundDerivativePolicy(time.Now())
 	return stats
+}
+
+func (s *Server) backgroundDerivativePolicy(now time.Time) gin.H {
+	last := time.Time{}
+	if s.Monitor != nil {
+		last = s.Monitor.LastUserFacingRequestAt()
+	}
+	local := now
+	if s.Monitor != nil && s.Monitor.Location != nil {
+		local = now.In(s.Monitor.Location)
+	}
+	next := local.Truncate(5 * time.Minute).Add(5 * time.Minute)
+	if local.Hour() < 1 {
+		next = time.Date(local.Year(), local.Month(), local.Day(), 1, 0, 0, 0, local.Location())
+	}
+	if local.Hour() >= 6 {
+		next = time.Date(local.Year(), local.Month(), local.Day()+1, 1, 0, 0, 0, local.Location())
+	}
+	var settings models.AppSettings
+	_ = s.DB.First(&settings).Error
+	return gin.H{"paused": settings.MediaDerivativeBackgroundPaused, "idle": last.IsZero() || now.Sub(last) >= 2*time.Minute, "lastUserRequestAt": last, "nightWindow": "01:00-06:00", "daytimeIntervalSeconds": 300, "nextEligibleAt": next, "allowed": s.backgroundDerivativeAllowed(now)}
 }

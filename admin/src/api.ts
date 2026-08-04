@@ -56,6 +56,8 @@ export type AdminMediaRenditions = {
   runtimeAvailable: boolean;
   avifEnabled: boolean;
   operatorDisabled: boolean;
+	backgroundPaused?: boolean;
+	backgroundPolicy?: { paused?: boolean; idle?: boolean; allowed?: boolean; nextEligibleAt?: string; nightWindow?: string; daytimeIntervalSeconds?: number };
   autoPaused?: boolean;
   autoPauseReason?: string;
   renditions: Record<string, any>;
@@ -1391,8 +1393,8 @@ export async function getAdminMediaRenditions(token: string): Promise<AdminMedia
   return parse<AdminMediaRenditions>(res);
 }
 
-export async function updateAdminMediaRenditions(token: string, avifEnabled: boolean): Promise<Pick<AdminMediaRenditions, "runtimeAvailable" | "avifEnabled" | "operatorDisabled">> {
-  const res = await fetch(`${apiBase}/admin/media/renditions`, { method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ avifEnabled }) });
+export async function updateAdminMediaRenditions(token: string, update: { avifEnabled?: boolean; backgroundPaused?: boolean }): Promise<Pick<AdminMediaRenditions, "runtimeAvailable" | "avifEnabled" | "operatorDisabled">> {
+  const res = await fetch(`${apiBase}/admin/media/renditions`, { method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(update) });
   return parse(res);
 }
 

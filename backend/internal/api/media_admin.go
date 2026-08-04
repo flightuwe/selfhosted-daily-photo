@@ -71,6 +71,8 @@ func (s *Server) handleAdminMediaRenditions(c *gin.Context) {
 		"runtimeAvailable": s.Config.MediaAVIFEnabled,
 		"avifEnabled":      s.mediaAVIFEnabled(),
 		"operatorDisabled": settings.MediaAVIFDisabled,
+		"backgroundPaused": settings.MediaDerivativeBackgroundPaused,
+		"backgroundPolicy": s.backgroundDerivativePolicy(time.Now()),
 		"autoPaused":       settings.MediaAVIFAutoPaused, "autoPauseReason": settings.MediaAVIFAutoPauseReason,
 		"renditions":        s.mediaDerivativeStats(),
 		"recentConversions": items,
@@ -81,13 +83,14 @@ func (s *Server) handleAdminMediaRenditions(c *gin.Context) {
 
 func (s *Server) handleAdminMediaRenditionsUpdate(c *gin.Context) {
 	var req struct {
-		AVIFEnabled *bool `json:"avifEnabled"`
+		AVIFEnabled      *bool `json:"avifEnabled"`
+		BackgroundPaused *bool `json:"backgroundPaused"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.AVIFEnabled == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "avifEnabled is required"})
+	if err := c.ShouldBindJSON(&req); err != nil || (req.AVIFEnabled == nil && req.BackgroundPaused == nil) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "avifEnabled or backgroundPaused is required"})
 		return
 	}
-	if *req.AVIFEnabled && !s.Config.MediaAVIFEnabled {
+	if req.AVIFEnabled != nil && *req.AVIFEnabled && !s.Config.MediaAVIFEnabled {
 		c.JSON(http.StatusConflict, gin.H{"error": "AVIF runtime capability is disabled; set MEDIA_AVIF_ENABLED=true and restart first"})
 		return
 	}
@@ -96,19 +99,24 @@ func (s *Server) handleAdminMediaRenditionsUpdate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "settings missing"})
 		return
 	}
-	settings.MediaAVIFDisabled = !*req.AVIFEnabled
-	if *req.AVIFEnabled {
+	if req.AVIFEnabled != nil {
+		settings.MediaAVIFDisabled = !*req.AVIFEnabled
+	}
+	if req.AVIFEnabled != nil && *req.AVIFEnabled {
 		settings.MediaAVIFAutoPaused = false
 		settings.MediaAVIFAutoPauseReason = ""
+	}
+	if req.BackgroundPaused != nil {
+		settings.MediaDerivativeBackgroundPaused = *req.BackgroundPaused
 	}
 	if err := s.DB.Save(&settings).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
 		return
 	}
-	if *req.AVIFEnabled {
+	if req.AVIFEnabled != nil && *req.AVIFEnabled {
 		_ = s.enqueueRecentMediaDerivativeBackfill()
 	}
-	c.JSON(http.StatusOK, gin.H{"runtimeAvailable": s.Config.MediaAVIFEnabled, "avifEnabled": s.mediaAVIFEnabled(), "operatorDisabled": settings.MediaAVIFDisabled, "autoPaused": settings.MediaAVIFAutoPaused, "autoPauseReason": settings.MediaAVIFAutoPauseReason})
+	c.JSON(http.StatusOK, gin.H{"runtimeAvailable": s.Config.MediaAVIFEnabled, "avifEnabled": s.mediaAVIFEnabled(), "operatorDisabled": settings.MediaAVIFDisabled, "backgroundPaused": settings.MediaDerivativeBackgroundPaused, "backgroundPolicy": s.backgroundDerivativePolicy(time.Now()), "autoPaused": settings.MediaAVIFAutoPaused, "autoPauseReason": settings.MediaAVIFAutoPauseReason})
 }
 
 func (s *Server) photoForDerivativeSource(source string) (models.Photo, bool) {

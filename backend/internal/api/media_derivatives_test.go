@@ -49,7 +49,7 @@ func TestVisibleMediaDerivativeRequestPrioritizesAVIF(t *testing.T) {
 	}
 }
 
-func TestDiscardBackgroundDerivativeQueueKeepsVisibleWork(t *testing.T) {
+func TestParkBackgroundDerivativeQueueKeepsVisibleWork(t *testing.T) {
 	server := newSearchTestServer(t)
 	background := models.MediaDerivative{SourcePath: "photos/background.jpg", Variant: "feed-webp-720", Purpose: "feed", Format: "webp", Width: 720, Quality: 75, OutputPath: "renditions/a/background.webp", Status: mediaDerivativeQueued, Priority: 70}
 	visible := models.MediaDerivative{SourcePath: "photos/visible.jpg", Variant: "feed-avif-720", Purpose: "feed", Format: "avif", Width: 720, Quality: 55, OutputPath: "renditions/a/visible.avif", Status: mediaDerivativeQueued, Priority: 10030}
@@ -65,7 +65,7 @@ func TestDiscardBackgroundDerivativeQueueKeepsVisibleWork(t *testing.T) {
 	var gotBackground, gotVisible models.MediaDerivative
 	_ = server.DB.First(&gotBackground, background.ID).Error
 	_ = server.DB.First(&gotVisible, visible.ID).Error
-	if gotBackground.Status != mediaDerivativeEvicted || gotVisible.Status != mediaDerivativeQueued {
+	if gotBackground.Status != mediaDerivativePaused || gotVisible.Status != mediaDerivativeQueued {
 		t.Fatalf("unexpected queue states background=%s visible=%s", gotBackground.Status, gotVisible.Status)
 	}
 }

@@ -40,14 +40,50 @@ type Monitor struct {
 	ThrottleTotal     int64
 	ThrottleByReason  map[string]int64
 
-	minuteBuckets      map[minuteBucketKey]*minuteBucket
-	dbQueryBuckets     map[dbQueryBucketKey]*dbQueryBucket
-	syncBuckets        map[syncCapabilityBucketKey]*syncCapabilityBucket
-	persistenceQueue   chan func()
-	persistenceDropped int64
-	activeSpike        *spikeWindow
-	lastMaintenanceAt  time.Time
-	lastSystemMinute   time.Time
+	minuteBuckets              map[minuteBucketKey]*minuteBucket
+	dbQueryBuckets             map[dbQueryBucketKey]*dbQueryBucket
+	syncBuckets                map[syncCapabilityBucketKey]*syncCapabilityBucket
+	persistenceQueue           chan func()
+	persistenceDropped         int64
+	activeSpike                *spikeWindow
+	lastMaintenanceAt          time.Time
+	lastSystemMinute           time.Time
+	lastUserRequestAt          time.Time
+	lastBackgroundDerivativeAt time.Time
+}
+
+func (m *Monitor) RecordUserFacingRequest(at time.Time) {
+	if m == nil {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	m.mu.Lock()
+	m.lastUserRequestAt = at.UTC()
+	m.mu.Unlock()
+}
+
+func (m *Monitor) LastUserFacingRequestAt() time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastUserRequestAt
+}
+
+func (m *Monitor) TryStartDaytimeBackgroundDerivative(now time.Time) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.lastBackgroundDerivativeAt.IsZero() && now.Sub(m.lastBackgroundDerivativeAt) < 5*time.Minute {
+		return false
+	}
+	m.lastBackgroundDerivativeAt = now.UTC()
+	return true
 }
 
 type RequestMetric struct {
@@ -713,8 +749,19 @@ func (s *Server) metricsMiddleware() gin.HandlerFunc {
 			BytesOut:  int64(c.Writer.Size()),
 		}
 		s.Monitor.RecordRequest(metric)
+		if isUserFacingProductRequest(c, path) {
+			s.Monitor.RecordUserFacingRequest(metric.At)
+		}
 		s.recordSyncCapabilityMetric(c, metric)
 	}
+}
+
+func isUserFacingProductRequest(c *gin.Context, path string) bool {
+	if !strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/api/admin") || strings.HasPrefix(path, "/api/health") || strings.HasPrefix(path, "/api/debug") {
+		return false
+	}
+	_, authenticated := c.Get("user")
+	return authenticated
 }
 
 func (s *Server) recordSyncCapabilityMetric(c *gin.Context, metric RequestMetric) {

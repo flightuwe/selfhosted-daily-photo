@@ -7586,16 +7586,21 @@ export function App() {
                   <CardStat title="AVIF Laufzeit" value={mediaRenditions.runtimeAvailable ? "verfügbar" : "Image/Env fehlt"} />
                   <CardStat title="AVIF Auslieferung" value={mediaRenditions.avifEnabled ? "aktiv" : "pausiert"} />
                   <CardStat title="Bereit" value={Number(mediaRenditions.renditions?.ready || 0)} />
-                  <CardStat title="Wartend / Fehler" value={`${Number(mediaRenditions.renditions?.queued || 0)} / ${Number(mediaRenditions.renditions?.failed || 0)}`} />
+                  <CardStat title="Sichtbar / pausiert" value={`${Number(mediaRenditions.renditions?.visibleQueued || 0)} / ${Number(mediaRenditions.renditions?.paused || 0)}`} />
                   <CardStat title="AVIF-Fehler (1 h)" value={Number(mediaRenditions.renditions?.avifFailuresLastHour || 0)} />
                 </div>
                 {mediaRenditions.autoPaused && <p className="error"><strong>Automatisch pausiert:</strong> {mediaRenditions.autoPauseReason || "AVIF-Encoderfehler"}</p>}
                 <p>Rendition-Größen: AVIF {formatBytes(Number(mediaRenditions.renditions?.formats?.avif?.bytes || 0))} · WebP {formatBytes(Number(mediaRenditions.renditions?.formats?.webp?.bytes || 0))} · JPEG {formatBytes(Number(mediaRenditions.renditions?.formats?.jpeg?.bytes || 0))}.</p>
                 <p>AVIF ist eine regenerierbare Ansicht. WebP, JPEG und die Originale bleiben immer als Fallback erhalten.</p>
                 <button disabled={!mediaRenditions.runtimeAvailable} onClick={async () => {
-                  try { await updateAdminMediaRenditions(token, !mediaRenditions.avifEnabled); setMediaRenditions(await getAdminMediaRenditions(token)); setMessage("AVIF-Konfiguration gespeichert; Backfill wurde eingeplant."); }
+                  try { await updateAdminMediaRenditions(token, { avifEnabled: !mediaRenditions.avifEnabled }); setMediaRenditions(await getAdminMediaRenditions(token)); setMessage("AVIF-Konfiguration gespeichert; Backfill wurde eingeplant."); }
                   catch (error) { setMessage(error instanceof Error ? error.message : "AVIF-Konfiguration fehlgeschlagen"); }
                 }}>{mediaRenditions.avifEnabled ? "AVIF-Auslieferung pausieren" : "AVIF-Auslieferung aktivieren"}</button>
+                <p>Historischer Backfill: {mediaRenditions.backgroundPaused ? "global pausiert" : mediaRenditions.backgroundPolicy?.allowed ? "darf jetzt laufen" : "wartet auf Nachtfenster/Leerlauf"}. Nächste Möglichkeit: {mediaRenditions.backgroundPolicy?.nextEligibleAt ? new Date(mediaRenditions.backgroundPolicy.nextEligibleAt).toLocaleString() : "–"}.</p>
+                <button onClick={async () => {
+                  try { await updateAdminMediaRenditions(token, { backgroundPaused: !mediaRenditions.backgroundPaused }); setMediaRenditions(await getAdminMediaRenditions(token)); setMessage(mediaRenditions.backgroundPaused ? "Historischer Backfill freigegeben." : "Historischer Backfill pausiert."); }
+                  catch (error) { setMessage(error instanceof Error ? error.message : "Backfill-Konfiguration fehlgeschlagen"); }
+                }}>{mediaRenditions.backgroundPaused ? "Historischen Backfill fortsetzen" : "Historischen Backfill pausieren"}</button>
               </>}
             </article>
             <article className="settings-current">

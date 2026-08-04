@@ -1,0 +1,9 @@
+{
+  "version": "v0.8.8",
+  "title": "Schneller Start und ruhige Medien-Queue",
+  "items": [
+    "Schneller sichtbarer App-Start durch Kern-Cache und schlanken Refresh.",
+    "Historische Medienkonvertierung arbeitet nur noch im kontrollierten Leerlauf.",
+    "Admin-Steuerung für den Rendition-Backlog."
+  ]
+}

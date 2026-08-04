@@ -1905,7 +1905,7 @@ class AppRepo(
     private val processDiagnosticsSessionId = "sess_${UUID.randomUUID()}"
     private val promptSeenVersionPrefix = "user_prompt_seen_version_"
     private val warmCacheLastUserIdKey = "warm_cache_last_user_id_v1"
-    private val warmCacheSchemaVersion = "app_warm_cache_v2"
+    private val warmCacheSchemaVersion = "app_warm_cache_v3"
     private val debugMaxEntries = 400
     private val debugUploadMinIntervalMs = 5 * 60 * 1000L
     private val debugAggregateWindowMs = 15 * 60 * 1000L
@@ -1985,6 +1985,10 @@ class AppRepo(
                 )
             )
         }
+    }
+
+    fun saveCoreWarmCache(userId: Long, me: MeResponse, inviteCode: String, prompt: PromptResponse, rules: PromptRulesResponse, special: SpecialMomentStatus) {
+        writeWarmCacheEnvelope(userId) { current -> current.copy(core = CoreWarmCacheSnapshot(me, inviteCode, prompt, rules, special)) }
     }
 
     fun saveTimelineWarmCache(userId: Long, response: HubTimelineResponse) {
@@ -4595,19 +4599,28 @@ data class CalendarPublicSnapshotLite(
 )
 
 data class AppWarmCacheEnvelope(
-    val schemaVersion: String = "app_warm_cache_v2",
+    val schemaVersion: String = "app_warm_cache_v3",
     val userId: Long = 0L,
     val savedAtEpochMs: Long = 0L,
     val hubBootstrap: HubBootstrapSnapshot? = null,
     val timelineLite: HubTimelineSnapshotLite? = null,
     val calendarPublicLite: CalendarPublicSnapshotLite? = null,
-    val feed: FeedWarmCacheSnapshot? = null
+    val feed: FeedWarmCacheSnapshot? = null,
+    val core: CoreWarmCacheSnapshot? = null
+)
+
+data class CoreWarmCacheSnapshot(
+    val me: MeResponse,
+    val inviteCode: String = "",
+    val prompt: PromptResponse,
+    val rules: PromptRulesResponse,
+    val special: SpecialMomentStatus
 )
 
 internal fun migrateWarmCacheEnvelope(envelope: AppWarmCacheEnvelope?, expectedUserId: Long): AppWarmCacheEnvelope? {
     if (envelope == null || envelope.userId != expectedUserId) return null
-    if (envelope.schemaVersion !in setOf("app_warm_cache_v1", "app_warm_cache_v2")) return null
-    return envelope.copy(schemaVersion = "app_warm_cache_v2")
+    if (envelope.schemaVersion !in setOf("app_warm_cache_v1", "app_warm_cache_v2", "app_warm_cache_v3")) return null
+    return envelope.copy(schemaVersion = "app_warm_cache_v3")
 }
 
 internal fun shouldApplyTimelinePreview(timelineComplete: Boolean, timelineItemsEmpty: Boolean): Boolean =
@@ -4711,6 +4724,8 @@ data class UiState(
     val message: String = "",
     val activeTab: AppTab = AppTab.CAMERA,
     val startupDone: Boolean = false,
+    val startupCoreReady: Boolean = false,
+    val startupDeferredHydrationComplete: Boolean = false,
     val startupQuote: String = "",
     val migrationInfo: MigrationInfo? = null,
     val migrationCanUseSessionShortcut: Boolean = false,
@@ -5536,6 +5551,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun applyWarmCacheSnapshot(snapshot: AppWarmCacheEnvelope) {
+        val core = snapshot.core
         val bootstrap = snapshot.hubBootstrap?.toResponse()
         val timelineItems = snapshot.timelineLite?.items
             ?.takeIf { it.isNotEmpty() }
@@ -5551,6 +5567,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val feedSnapshot = snapshot.feed
         val hasFeed = feedSnapshot?.days?.isNotEmpty() == true
         state = state.copy(
+            user = core?.me?.user ?: state.user,
+            myInviteCode = core?.inviteCode ?: state.myInviteCode,
+            prompt = core?.prompt ?: state.prompt,
+            promptRules = core?.rules ?: state.promptRules,
+            specialMomentStatus = core?.special ?: state.specialMomentStatus,
+            streakDays = core?.me?.streakDays ?: state.streakDays,
+            dailyMomentCount = core?.me?.dailyMomentCount ?: state.dailyMomentCount,
+            bookmarksGivenCount = core?.me?.bookmarksGivenCount ?: state.bookmarksGivenCount,
+            bookmarksReceivedCount = core?.me?.bookmarksReceivedCount ?: state.bookmarksReceivedCount,
             hubBootstrap = bootstrap ?: state.hubBootstrap,
             hubBootstrapLoadState = if (hasBootstrap) {
                 SurfaceLoadState(SurfaceLoadPhase.WARM_CACHED, snapshot.savedAtEpochMs, "cache")
@@ -5597,7 +5622,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.logDebug(
             type = "warm_cache_applied",
             message = "warm cache applied",
-            meta = "userId=${snapshot.userId};hub=$hasBootstrap;timeline=$hasTimeline;timelineComplete=${snapshot.timelineLite?.isComplete == true};capsules=$hasCapsules;calendar=$hasCalendar;feed=$hasFeed"
+            meta = "userId=${snapshot.userId};core=${core != null};hub=$hasBootstrap;timeline=$hasTimeline;timelineComplete=${snapshot.timelineLite?.isComplete == true};capsules=$hasCapsules;calendar=$hasCalendar;feed=$hasFeed"
         )
     }
 
@@ -6475,8 +6500,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val healthOk = health?.ok == true
         val startupQuote = if (healthOk) {
             if (repo.token().isNotBlank()) {
-                val chatLine = runCatching { repo.randomStartupChatLine(repo.listChat()) }.getOrDefault("")
-                if (chatLine.isNotBlank()) chatLine else repo.randomStartupQuote()
+            repo.randomStartupQuote()
             } else {
                 repo.randomStartupQuote()
             }
@@ -6540,18 +6564,43 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         repo.pendingUpdateInstallWarning(BuildConfig.VERSION_NAME)?.let { warning ->
             state = state.copy(message = warning)
         }
-        runCatching { checkForUpdate(silent = true) }
-        if (healthOk && repo.token().isNotBlank()) {
-            viewModelScope.launch {
-                refreshHubBootstrap(force = true)
-            }
-        }
         logPerfEvent(
             event = "app_start",
             durationMs = System.currentTimeMillis() - perfStartedAt,
             success = healthOk,
             extra = "serverConnected=$healthOk"
         )
+    }
+
+    suspend fun refreshStartupCore(): Boolean {
+        if (repo.token().isBlank()) return false
+        val started = System.currentTimeMillis()
+        return runCatching {
+            val bootstrap = repo.dashboardBootstrap(includeChat = false, includePhotos = false, includeCommunity = false)
+            val marker = "${bootstrap.prompt.day}:${bootstrap.prompt.triggered ?: ""}"
+            val shouldPopup = bootstrap.prompt.canUpload && !bootstrap.prompt.triggered.isNullOrBlank() && !bootstrap.prompt.hasPromptPostedToday && marker != repo.seenPromptMarker()
+            if (shouldPopup) repo.setSeenPromptMarker(marker)
+            state = state.copy(
+                user = bootstrap.me.user, myInviteCode = bootstrap.inviteCode, prompt = bootstrap.prompt,
+                promptRules = bootstrap.promptRules, specialMomentStatus = bootstrap.specialMomentStatus,
+                streakDays = bootstrap.me.streakDays, dailyMomentCount = bootstrap.me.dailyMomentCount,
+                bookmarksGivenCount = bootstrap.me.bookmarksGivenCount, bookmarksReceivedCount = bootstrap.me.bookmarksReceivedCount,
+                showPromptDialog = state.showPromptDialog || shouldPopup, startupCoreReady = true
+            )
+            repo.saveCoreWarmCache(bootstrap.me.user.id, bootstrap.me, bootstrap.inviteCode, bootstrap.prompt, bootstrap.promptRules, bootstrap.specialMomentStatus)
+            repo.logDebug("startup_core_applied", "slim startup bootstrap applied", "durationMs=${System.currentTimeMillis() - started}")
+            true
+        }.onFailure {
+            repo.logDebug("startup_core_failed", debugFailureMessage(it), "durationMs=${System.currentTimeMillis() - started}")
+        }.getOrDefault(false)
+    }
+
+    suspend fun runDeferredStartupHydration() {
+        delay(1_500)
+        refreshAll(reason = "startup_deferred", refreshFeedWindow = false, bypassCooldown = true, showLoading = false)
+        runCatching { checkForUpdate(silent = true) }
+        state = state.copy(startupDeferredHydrationComplete = true)
+        repo.logDebug("startup_deferred_hydration_completed", "deferred startup hydration completed", "")
     }
 
     suspend fun login(username: String, password: String) {
@@ -8613,6 +8662,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 showPromptDialog = state.showPromptDialog || shouldPopup,
                 message = ""
             ))
+            repo.saveCoreWarmCache(
+                me.id,
+                MeResponse(me, dailyMomentCount, streakDays, bookmarksGivenCount, bookmarksReceivedCount),
+                inviteCode,
+                prompt,
+                rules,
+                special
+            )
             if (me.yoloModeEnabled) {
                 runCatching { applyYoloFeatures(forceAll = false, reason = "refresh_all") }
                     .onFailure { state = state.copy(message = apiError(it, "YOLO-Feature-Sync fehlgeschlagen")) }
@@ -12209,6 +12266,15 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
 
     LaunchedEffect(state.token, state.startupDone) {
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
+        vm.refreshStartupCore()
+        vm.runDeferredStartupHydration()
+    }
+
+    LaunchedEffect(state.token, state.startupDone) {
+        if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
+        // The slim core refresh owns startup. Keep the periodic full refresh
+        // from racing it or starting a second full bootstrap on first frame.
+        delay(20_000)
         while (true) {
             if (NetworkUsageLedger.isAppInForeground()) {
                 vm.refreshAll(refreshFeedWindow = vm.state.activeTab != AppTab.FEED)
@@ -12250,8 +12316,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         vm.refreshFotomojiTemplates()
     }
 
-    LaunchedEffect(state.token, state.startupDone, state.diagnosticsUploadEnabled) {
-        if (state.token.isBlank() || !state.startupDone || !state.diagnosticsUploadEnabled) return@LaunchedEffect
+    LaunchedEffect(state.token, state.startupDeferredHydrationComplete, state.diagnosticsUploadEnabled) {
+        if (state.token.isBlank() || !state.startupDeferredHydrationComplete || !state.diagnosticsUploadEnabled) return@LaunchedEffect
         vm.autoUploadDebugLogsIfEnabled()
     }
 
