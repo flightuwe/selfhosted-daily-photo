@@ -3364,6 +3364,8 @@ class AppRepo(
         specialMomentPushEnabled: Boolean? = null,
         locationFeatureEnabled: Boolean? = null,
         locationShareDefaultEnabled: Boolean? = null,
+        allowCommunityPostPromotion: Boolean? = null,
+        communityContributionPushEnabled: Boolean? = null,
         diagnosticsConsentGranted: Boolean? = null,
         diagnosticsConsentSource: String? = null,
         mediaDataMode: String? = null,
@@ -3390,6 +3392,8 @@ class AppRepo(
                 specialMomentPushEnabled = specialMomentPushEnabled,
                 locationFeatureEnabled = locationFeatureEnabled,
                 locationShareDefaultEnabled = locationShareDefaultEnabled,
+                allowCommunityPostPromotion = allowCommunityPostPromotion,
+                communityContributionPushEnabled = communityContributionPushEnabled,
                 diagnosticsConsentGranted = diagnosticsConsentGranted,
                 diagnosticsConsentSource = diagnosticsConsentSource,
                 mediaDataMode = mediaDataMode,
@@ -3415,6 +3419,8 @@ class AppRepo(
             check("photoCommentPushEnabled", photoCommentPushEnabled, user.photoCommentPushEnabled)
             check("allowPhotoDownload", allowPhotoDownload, user.allowPhotoDownload)
             check("allowCommunityNsfwMarking", allowCommunityNsfwMarking, user.allowCommunityNsfwMarking)
+            check("allowCommunityPostPromotion", allowCommunityPostPromotion, user.allowCommunityPostPromotion)
+            check("communityContributionPushEnabled", communityContributionPushEnabled, user.communityContributionPushEnabled)
             check("showNsfwByDefault", showNsfwByDefault, user.showNsfwByDefault)
             checkText("creativePostMode", creativePostMode, user.creativePostMode)
             check("bookmarkedPhotoPushEnabled", bookmarkedPhotoPushEnabled, user.bookmarkedPhotoPushEnabled)
@@ -4261,6 +4267,9 @@ class AppRepo(
         return response.photo
     }
 
+    suspend fun activateCommunityPost(photoId: Long): PromptPhoto =
+        authorizedCall("/api/photos/:id/community-post") { token -> api.activateCommunityPost(token, photoId) }.photo
+
     suspend fun enqueueDualUpload(
         backUri: Uri,
         frontUri: Uri,
@@ -5026,6 +5035,8 @@ private data class YoloPreferenceState(
     var yoloModeEnabled: Boolean,
     var allowPhotoDownload: Boolean,
     var allowCommunityNsfwMarking: Boolean,
+    var allowCommunityPostPromotion: Boolean,
+    var communityContributionPushEnabled: Boolean,
     var showNsfwByDefault: Boolean,
     var creativePostMode: String,
     var locationFeatureEnabled: Boolean,
@@ -5158,6 +5169,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         YoloFeatureDefinition("post_number_in_push_enabled_v1", "0.6.0", "Postnummern bei gemerkten Beitrags-Pushes", "notifications") { it.postNumberInPushEnabled = true },
         YoloFeatureDefinition("allow_photo_download_v1", "0.6.0", "Download-Freigabe", "sharing") { it.allowPhotoDownload = true },
         YoloFeatureDefinition("allow_community_nsfw_marking_v1", "0.6.0", "NSFW-Markierung durch andere erlauben", "posting") { it.allowCommunityNsfwMarking = true },
+        YoloFeatureDefinition("community_contribution_push_v1", "0.8.14", "Push bei Community-Bildern", "notifications") { it.communityContributionPushEnabled = true },
         YoloFeatureDefinition("show_nsfw_by_default_v1", "0.6.0", "NSFW standardmaessig anzeigen", "display") { it.showNsfwByDefault = true },
         YoloFeatureDefinition("creative_post_mode_both_v1", "0.6.0", "Kreativmodus", "posting") { it.creativePostMode = "both" },
         YoloFeatureDefinition("location_feature_enabled_v1", "0.6.0", "Standort-Feature", "location") { it.locationFeatureEnabled = true },
@@ -9986,6 +9998,30 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }.isSuccess
     }
 
+    suspend fun activateCommunityPost(photoId: Long): Boolean {
+        state = state.copy(loading = true)
+        return runCatching { repo.activateCommunityPost(photoId) }
+            .onSuccess { refreshAll(refreshFeedWindow = true); state = state.copy(loading = false, message = "Post als Community-Post freigegeben") }
+            .onFailure { state = state.copy(loading = false, message = apiError(it, "Community-Post freigeben fehlgeschlagen")) }
+            .isSuccess
+    }
+
+    suspend fun setAllowCommunityPostPromotionEnabled(enabled: Boolean) = setCommunityPreference(
+        enabled, "Freigabe für Community-Posts", allowPromotion = true
+    )
+
+    suspend fun setCommunityContributionPushEnabled(enabled: Boolean) = setCommunityPreference(
+        enabled, "Push für Community-Bilder", allowPromotion = false
+    )
+
+    private suspend fun setCommunityPreference(enabled: Boolean, label: String, allowPromotion: Boolean) {
+        val current = state.user ?: return
+        state = state.copy(loading = true)
+        runCatching { repo.updatePreferences(current.chatPushEnabled, current.pollPushEnabled, current.inviteRegistrationPushEnabled, current.photoReactionPushEnabled, current.photoCommentPushEnabled, current.allowPhotoDownload, allowCommunityPostPromotion = if (allowPromotion) enabled else null, communityContributionPushEnabled = if (allowPromotion) null else enabled) }
+            .onSuccess { state = state.copy(user = it, loading = false, message = "$label ${if (enabled) "aktiviert" else "deaktiviert"}") }
+            .onFailure { state = state.copy(loading = false, message = apiError(it, "$label speichern fehlgeschlagen")) }
+    }
+
     fun hasOpenExtraDraft(): Boolean = repo.hasOpenExtraDraft()
 
     suspend fun appendPhotoToOpenExtraDraft(uri: Uri, shareLocation: Boolean): Boolean {
@@ -11152,6 +11188,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             yoloModeEnabled = current?.yoloModeEnabled ?: repo.yoloModeLocalEnabled(),
             allowPhotoDownload = current?.allowPhotoDownload ?: false,
             allowCommunityNsfwMarking = current?.allowCommunityNsfwMarking ?: false,
+            allowCommunityPostPromotion = current?.allowCommunityPostPromotion ?: false,
+            communityContributionPushEnabled = current?.communityContributionPushEnabled ?: false,
             showNsfwByDefault = current?.showNsfwByDefault ?: false,
             creativePostMode = current?.creativePostMode ?: "none",
             locationFeatureEnabled = current?.locationFeatureEnabled ?: false,
@@ -11204,6 +11242,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 photoCommentPushEnabled = preferences.photoCommentPushEnabled,
                 allowPhotoDownload = preferences.allowPhotoDownload,
                 allowCommunityNsfwMarking = preferences.allowCommunityNsfwMarking,
+                allowCommunityPostPromotion = preferences.allowCommunityPostPromotion,
+                communityContributionPushEnabled = preferences.communityContributionPushEnabled,
                 showNsfwByDefault = preferences.showNsfwByDefault,
                 creativePostMode = preferences.creativePostMode,
                 bookmarkedPhotoPushEnabled = preferences.bookmarkedPhotoPushEnabled,
@@ -11234,6 +11274,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             yoloModeEnabled = updatedUser?.yoloModeEnabled ?: preferences.yoloModeEnabled,
             allowPhotoDownload = updatedUser?.allowPhotoDownload ?: preferences.allowPhotoDownload,
             allowCommunityNsfwMarking = updatedUser?.allowCommunityNsfwMarking ?: preferences.allowCommunityNsfwMarking,
+            allowCommunityPostPromotion = updatedUser?.allowCommunityPostPromotion ?: preferences.allowCommunityPostPromotion,
+            communityContributionPushEnabled = updatedUser?.communityContributionPushEnabled ?: preferences.communityContributionPushEnabled,
             showNsfwByDefault = updatedUser?.showNsfwByDefault ?: preferences.showNsfwByDefault,
             creativePostMode = updatedUser?.creativePostMode ?: preferences.creativePostMode,
             locationFeatureEnabled = updatedUser?.locationFeatureEnabled ?: preferences.locationFeatureEnabled,
@@ -13500,6 +13542,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onSavePaint = { photoId, paths, strokeWidth -> scope.launch { vm.savePhotoPaint(photoId, paths, strokeWidth) } },
                     onDeletePaint = { photoId, targetUserId -> scope.launch { vm.deletePhotoPaint(photoId, targetUserId) } },
                     onReportPhoto = { photoId -> scope.launch { vm.reportPhoto(photoId) } },
+                    onActivateCommunityPost = { photoId -> scope.launch { vm.activateCommunityPost(photoId) } },
                     onToggleNsfw = { photoId, nsfw -> scope.launch { vm.togglePhotoNsfw(photoId, nsfw) } },
                     onOpenHashtagSearch = { vm.openCalendarSearch(it) },
                     onOpenViewer = { urls, photoId ->
@@ -13658,6 +13701,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     mediaFormatPreference = state.mediaFormatPreference,
                     allowPhotoDownload = state.user?.allowPhotoDownload ?: false,
                     allowCommunityNsfwMarking = state.user?.allowCommunityNsfwMarking ?: false,
+                    allowCommunityPostPromotion = state.user?.allowCommunityPostPromotion ?: false,
+                    communityContributionPushEnabled = state.user?.communityContributionPushEnabled ?: false,
                     showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
                     creativePostMode = state.user?.creativePostMode ?: "none",
                     locationFeatureEnabled = state.user?.locationFeatureEnabled ?: false,
@@ -13721,6 +13766,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onMediaFormatPreferenceChange = { scope.launch { vm.setMediaFormatPreference(it) } },
                     onAllowPhotoDownloadChange = { scope.launch { vm.setAllowPhotoDownloadEnabled(it) } },
                     onAllowCommunityNsfwMarkingChange = { scope.launch { vm.setAllowCommunityNsfwMarkingEnabled(it) } },
+                    onAllowCommunityPostPromotionChange = { scope.launch { vm.setAllowCommunityPostPromotionEnabled(it) } },
+                    onCommunityContributionPushEnabledChange = { scope.launch { vm.setCommunityContributionPushEnabled(it) } },
                     onShowNsfwByDefaultChange = { scope.launch { vm.setShowNsfwByDefaultEnabled(it) } },
                     onCreativePostModeChange = { scope.launch { vm.setCreativePostMode(it) } },
                     onLocationFeatureEnabledChange = { scope.launch { vm.setLocationFeatureEnabled(it) } },
@@ -14048,6 +14095,7 @@ fun CameraTab(
     }
     val ownMedia = prompt?.ownPhoto?.mediaItems().orEmpty()
     var showCapsuleDialog by remember { mutableStateOf(false) }
+    var showCommunityPostDialog by remember { mutableStateOf(false) }
     var pendingCapsule by remember { mutableStateOf<CapsuleUploadOptions?>(null) }
     var showConnectionHealthDialog by remember { mutableStateOf(false) }
     val dayLabel = formatDayLabel(prompt?.day ?: LocalDate.now().toString())
@@ -14285,7 +14333,7 @@ fun CameraTab(
                     onClick = { onCaptureExtra(CapsuleUploadOptions()) },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Weiteres Extra posten") }
-                Button(onClick = onCaptureCommunity, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
+                Button(onClick = { showCommunityPostDialog = true }, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
             }
             if (!canUpload) {
                 TextButton(
@@ -14354,7 +14402,7 @@ fun CameraTab(
                         onClick = { onCaptureExtra(CapsuleUploadOptions()) },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Extra posten") }
-                    Button(onClick = onCaptureCommunity, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
+                    Button(onClick = { showCommunityPostDialog = true }, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
                 }
                 if (!canUpload) {
                     if (showSpecialMomentButton) {
@@ -14564,6 +14612,16 @@ fun CameraTab(
                     ) { Text("in einem Jahr zeigen 💀") }
                 }
             }
+        )
+    }
+
+    if (showCommunityPostDialog) {
+        AlertDialog(
+            onDismissRequest = { showCommunityPostDialog = false },
+            title = { Text("Community-Post erstellen?") },
+            text = { Text("Ein Community-Post ist ein gemeinsamer Beitrag. Andere Mitglieder können diesem Post später jeweils ein eigenes Bild hinzufügen. Der Post bleibt dauerhaft bestehen und kann nach der Freigabe nicht wieder geschlossen werden.") },
+            confirmButton = { Button(onClick = { showCommunityPostDialog = false; onCaptureCommunity() }) { Text("OK") } },
+            dismissButton = { TextButton(onClick = { showCommunityPostDialog = false }) { Text("Abbrechen") } }
         )
     }
     pendingCapsule?.let { selected ->
@@ -14777,6 +14835,7 @@ fun FeedTab(
     onSavePaint: (photoId: Long, paths: List<PhotoPaintPath>, strokeWidth: Float) -> Unit,
     onDeletePaint: (photoId: Long, targetUserId: Long?) -> Unit,
     onReportPhoto: (photoId: Long) -> Unit,
+    onActivateCommunityPost: (photoId: Long) -> Unit,
     onToggleNsfw: (photoId: Long, nsfw: Boolean) -> Unit,
     onOpenHashtagSearch: (String) -> Unit,
     onOpenViewer: (List<String>, Long?) -> Unit
@@ -15320,6 +15379,7 @@ fun FeedTab(
                         onToggleMark = onToggleMark,
                         onDeletePaint = onDeletePaint,
                         onReportPhoto = onReportPhoto,
+                        onActivateCommunityPost = onActivateCommunityPost,
                         onToggleNsfw = onToggleNsfw,
                         onRevealNsfw = { revealedNsfwPhotoIds = revealedNsfwPhotoIds + item.photo.id },
                         onOpenPaintEditor = {
@@ -15562,12 +15622,14 @@ private fun FeedPostCard(
     onToggleMark: (Long, Boolean) -> Unit,
     onDeletePaint: (Long, Long?) -> Unit,
     onReportPhoto: (Long) -> Unit,
+    onActivateCommunityPost: (Long) -> Unit,
     onToggleNsfw: (Long, Boolean) -> Unit,
     onRevealNsfw: () -> Unit,
     onOpenPaintEditor: () -> Unit,
     onOpenPaintModeration: () -> Unit,
     onOpenMarkModeration: () -> Unit
 ) {
+    var showCommunityPostDisclaimer by remember(item.photo.id) { mutableStateOf(false) }
     PostCanvasCard(
         item = item,
         secondaryTextColor = secondaryTextColor,
@@ -15686,6 +15748,15 @@ private fun FeedPostCard(
                                 }
                             )
                         }
+                        if (!item.photo.communityPost && !item.photo.promptOnly && (viewerId == item.user.id || item.user.allowCommunityPostPromotion)) {
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text("Als Community-Post freigeben") },
+                                onClick = {
+                                    onMenuExpandedChange(false)
+                                    showCommunityPostDisclaimer = true
+                                }
+                            )
+                        }
                         androidx.compose.material3.DropdownMenuItem(
                             text = { Text("Melden") },
                             onClick = {
@@ -15702,6 +15773,15 @@ private fun FeedPostCard(
             PhotoPaintLayer(item.photo, frameRect, Modifier.fillMaxSize())
         }
     )
+    if (showCommunityPostDisclaimer) {
+        AlertDialog(
+            onDismissRequest = { showCommunityPostDisclaimer = false },
+            title = { Text("Als Community-Post freigeben?") },
+            text = { Text("Ein Community-Post ist ein gemeinsamer Beitrag. Andere Mitglieder können diesem Post später jeweils ein eigenes Bild hinzufügen. Der Post bleibt dauerhaft bestehen und kann nach der Freigabe nicht wieder geschlossen werden.") },
+            confirmButton = { Button(onClick = { showCommunityPostDisclaimer = false; onActivateCommunityPost(item.photo.id) }) { Text("OK") } },
+            dismissButton = { TextButton(onClick = { showCommunityPostDisclaimer = false }) { Text("Abbrechen") } }
+        )
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -18888,6 +18968,8 @@ fun ProfileTab(
     mediaFormatPreference: String,
     allowPhotoDownload: Boolean,
     allowCommunityNsfwMarking: Boolean,
+    allowCommunityPostPromotion: Boolean,
+    communityContributionPushEnabled: Boolean,
     showNsfwByDefault: Boolean,
     creativePostMode: String,
     locationFeatureEnabled: Boolean,
@@ -18951,6 +19033,8 @@ fun ProfileTab(
     onMediaFormatPreferenceChange: (String) -> Unit,
     onAllowPhotoDownloadChange: (Boolean) -> Unit,
     onAllowCommunityNsfwMarkingChange: (Boolean) -> Unit,
+    onAllowCommunityPostPromotionChange: (Boolean) -> Unit,
+    onCommunityContributionPushEnabledChange: (Boolean) -> Unit,
     onShowNsfwByDefaultChange: (Boolean) -> Unit,
     onCreativePostModeChange: (String) -> Unit,
     onLocationFeatureEnabledChange: (Boolean) -> Unit,
@@ -19430,6 +19514,12 @@ fun ProfileTab(
                                 checked = allowCommunityNsfwMarking,
                                 onCheckedChange = onAllowCommunityNsfwMarkingChange,
                                 supportingText = "Wenn aktiv, erscheint bei deinen Posts fuer andere im Menue die NSFW-Markierung."
+                            )
+                            SettingsToggleRow(
+                                label = "Andere duerfen meine Extras zu Community-Posts machen",
+                                checked = allowCommunityPostPromotion,
+                                onCheckedChange = onAllowCommunityPostPromotionChange,
+                                supportingText = "Wenn aktiv, darf jedes Mitglied einen sichtbaren Extra-Post von dir dauerhaft für gemeinsame Bilder freigeben."
                             )
                             SettingsToggleRow(
                                 label = "NSFW standardmaessig anzeigen",
@@ -19940,6 +20030,12 @@ fun ProfileTab(
                         label = "Push bei Kommentaren auf meine Beitraege",
                         checked = photoCommentPushEnabled,
                         onCheckedChange = onPhotoCommentPushEnabledChange
+                    )
+                    SettingsToggleRow(
+                        label = "Push bei neuen Bildern in meinen Community-Posts",
+                        checked = communityContributionPushEnabled,
+                        onCheckedChange = onCommunityContributionPushEnabledChange,
+                        supportingText = "Informiert dich, wenn ein anderes Mitglied ein Bild zu deinem Community-Post hinzufügt."
                     )
                 }
                 SettingsSubsection("Gemerkt", "Zusaetzliche Hinweise zu fremden Posts, die du gemerkt hast") {

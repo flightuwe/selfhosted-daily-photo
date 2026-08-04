@@ -12084,7 +12084,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 		"creativePostMode":                    normalizeCreativePostMode(u.CreativePostMode),
 		"locationFeatureEnabled":              false,
 		"locationShareDefaultEnabled":         false,
-		"allowCommunityPostPromotion":         false,
+		"allowCommunityPostPromotion":         u.AllowCommunityPostPromotion,
 		"communityContributionPushEnabled":    false,
 		"avatarUrl":                           "",
 		"bio":                                 "",

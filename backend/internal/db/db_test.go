@@ -87,6 +87,37 @@ func TestEnsureFotomojiTemplateVersionBackfill(t *testing.T) {
 	}
 }
 
+func TestEnsurePhotoAttachmentAuthorsBackfill(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "requires cgo") {
+			t.Skip(err)
+		}
+		t.Fatal(err)
+	}
+	if err := database.AutoMigrate(&models.Photo{}, &models.PhotoAttachment{}); err != nil {
+		t.Fatal(err)
+	}
+	photo := models.Photo{UserID: 42, Day: "2026-08-04", FilePath: "owner.jpg"}
+	if err := database.Create(&photo).Error; err != nil {
+		t.Fatal(err)
+	}
+	attachment := models.PhotoAttachment{PhotoID: photo.ID, FilePath: "legacy.jpg", SortOrder: 2}
+	if err := database.Create(&attachment).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePhotoAttachmentAuthors(database); err != nil {
+		t.Fatal(err)
+	}
+	var got models.PhotoAttachment
+	if err := database.First(&got, attachment.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.UserID != photo.UserID {
+		t.Fatalf("attachment user=%d, want %d", got.UserID, photo.UserID)
+	}
+}
+
 func TestEnsurePhotoPublicNumbersBackfill(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "app.db")
 	database, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
