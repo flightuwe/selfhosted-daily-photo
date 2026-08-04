@@ -1,0 +1,10 @@
+{
+  "version": "v0.8.13",
+  "title": "Offline-Extras als Bildergruppe",
+  "items": [
+    "Offline-Extras koennen weitere Bilder in einem gemeinsamen Entwurf sammeln.",
+    "Der Upload stellt den Post und seine Zusatzbilder automatisch in Aufnahme-Reihenfolge wieder her.",
+    "Offene Entwuerfe werden beim Entfernen vollstaendig mit ihren lokalen Bildern geloescht.",
+    "Der Standort-Hinweis ist im Dark Mode besser lesbar."
+  ]
+}
