@@ -964,6 +964,35 @@ data class DayListResponse(
  */
 internal enum class FeedAutoPageDirection { NONE, NEWER, OLDER }
 
+/**
+ * The calendar index is deliberately only a display cache: it can be partial
+ * after startup or a targeted jump. Chronological paging must therefore seek
+ * from the rendered edge, which is guaranteed to be an actual feed day.
+ */
+internal data class FeedEdgeWindowRequest(
+    val anchorDay: String,
+    val beforeDays: Int,
+    val afterDays: Int,
+    val appendOlder: Boolean
+)
+
+internal fun chronologicalFeedEdgeWindowRequest(
+    visibleDays: List<String>,
+    direction: FeedAutoPageDirection,
+    count: Int
+): FeedEdgeWindowRequest? {
+    val pageSize = count.coerceAtLeast(1)
+    return when (direction) {
+        FeedAutoPageDirection.NEWER -> visibleDays.firstOrNull()?.let { edge ->
+            FeedEdgeWindowRequest(anchorDay = edge, beforeDays = pageSize, afterDays = 0, appendOlder = false)
+        }
+        FeedAutoPageDirection.OLDER -> visibleDays.lastOrNull()?.let { edge ->
+            FeedEdgeWindowRequest(anchorDay = edge, beforeDays = 0, afterDays = pageSize, appendOlder = true)
+        }
+        FeedAutoPageDirection.NONE -> null
+    }
+}
+
 internal fun feedViewportEdgeDirection(
     rowsSize: Int,
     firstVisibleIndex: Int,
@@ -9304,23 +9333,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             loadDiscoverFeed(offset = state.feedDiscoverNextOffset, limitDays = count, appendOlder = true)
             return
         }
-        val base = state.feedDays.lastOrNull() ?: return
-        var all = state.calendarDays
-        var idx = all.indexOf(base)
-        if ((idx < 0 || idx >= all.lastIndex) && state.feedIndexHasOlder) {
-            val page = runCatching { repo.feedDays(beforeDay = all.lastOrNull(), limit = count) }.getOrNull() ?: return
-            all = mergeDayIndex(all, page.items)
-            idx = all.indexOf(base)
-            state = state.copy(
-                calendarDays = all,
-                feedIndexHasOlder = page.hasOlder,
-                feedIndexHasNewer = state.feedIndexHasNewer || page.hasNewer
-            )
-        }
-        if (idx < 0) return
-        val newDays = all.drop(idx + 1).take(count)
-        if (newDays.isEmpty()) return
-        loadFeedEdgeWindow(anchorDay = newDays.first(), beforeDays = 0, afterDays = newDays.size - 1, appendOlder = true)
+        val request = chronologicalFeedEdgeWindowRequest(state.feedDays, FeedAutoPageDirection.OLDER, count) ?: return
+        loadFeedEdgeWindow(
+            anchorDay = request.anchorDay,
+            beforeDays = request.beforeDays,
+            afterDays = request.afterDays,
+            appendOlder = request.appendOlder
+        )
     }
 
     suspend fun loadNewerFeedDays(count: Int = 3) {
@@ -9331,26 +9350,16 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             loadDiscoverFeed(offset = offset, limitDays = count, appendOlder = false)
             return
         }
-        val base = state.feedDays.firstOrNull() ?: return
         val today = state.prompt?.day ?: LocalDate.now().toString()
-        if (state.feedTodayLocked && base != today && state.calendarDays.firstOrNull() == today) return
-        var all = state.calendarDays
-        var idx = all.indexOf(base)
-        if (idx <= 0 && state.feedIndexHasNewer) {
-            val page = runCatching { repo.feedDays(afterDay = all.firstOrNull(), limit = count) }.getOrNull() ?: return
-            all = mergeDayIndex(all, page.items)
-            idx = all.indexOf(base)
-            state = state.copy(
-                calendarDays = all,
-                feedIndexHasOlder = state.feedIndexHasOlder || page.hasOlder,
-                feedIndexHasNewer = page.hasNewer
-            )
-        }
-        if (idx <= 0) return
-        val start = maxOf(0, idx - count)
-        val prependDays = all.subList(start, idx)
-        if (prependDays.isEmpty()) return
-        loadFeedEdgeWindow(anchorDay = prependDays.last(), beforeDays = prependDays.size - 1, afterDays = 0, appendOlder = false)
+        val edge = state.feedDays.firstOrNull() ?: return
+        if (state.feedTodayLocked && edge != today && state.calendarDays.firstOrNull() == today) return
+        val request = chronologicalFeedEdgeWindowRequest(state.feedDays, FeedAutoPageDirection.NEWER, count) ?: return
+        loadFeedEdgeWindow(
+            anchorDay = request.anchorDay,
+            beforeDays = request.beforeDays,
+            afterDays = request.afterDays,
+            appendOlder = request.appendOlder
+        )
     }
 
     private suspend fun loadFeedWindow(
@@ -9622,8 +9631,14 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             (finalVisibleDays.contains(state.feedHiddenNewerAnchorDay) || finalVisibleDays.firstOrNull() == state.feedHiddenNewerAnchorDay)
         state = state.copy(
             calendarDays = mergedKnownDays,
-            feedIndexHasOlder = state.feedIndexHasOlder || window.hasOlder,
-            feedIndexHasNewer = window.hasNewer,
+            feedIndexHasOlder = when (mergeDirection) {
+                FeedWindowMergeDirection.OLDER, FeedWindowMergeDirection.CENTER -> window.hasOlder
+                FeedWindowMergeDirection.NEWER -> state.feedIndexHasOlder
+            },
+            feedIndexHasNewer = when (mergeDirection) {
+                FeedWindowMergeDirection.NEWER, FeedWindowMergeDirection.CENTER -> window.hasNewer
+                FeedWindowMergeDirection.OLDER -> state.feedIndexHasNewer
+            },
             feedDays = finalVisibleDays,
             feedByDay = finalFeedByDay,
             feedDayRevisions = state.feedDayRevisions + effectiveWindow.dayRevisions +

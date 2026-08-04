@@ -1,0 +1,9 @@
+{
+  "version": "v0.8.12",
+  "title": "Lückenloses chronologisches Feed-Paging",
+  "items": [
+    "Feed-Paging lädt relativ zum sichtbaren Rand statt aus einem teilweise geladenen Kalendercache.",
+    "Nach Sprüngen in ältere Monate werden vorhandene Tage dazwischen nicht mehr übersprungen.",
+    "Die Feed-Enderkennung bleibt nach neuen Paging-Fenstern zuverlässig."
+  ]
+}
