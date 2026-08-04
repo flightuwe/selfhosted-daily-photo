@@ -1541,6 +1541,9 @@ interface Api {
         @Query("includeCommunity") includeCommunity: Boolean = true
     ): DashboardBootstrapResponse
 
+    @GET("dashboard/core")
+    suspend fun dashboardCore(@Header("Authorization") token: String): DashboardBootstrapResponse
+
     @GET("hub/bootstrap")
     suspend fun hubBootstrap(@Header("Authorization") token: String): HubBootstrapResponse
 
@@ -1918,6 +1921,26 @@ class AppRepo(
     private fun warmCacheDir(): File = File(context.filesDir, "warm-cache").apply { mkdirs() }
 
     private fun warmCacheFile(userId: Long): File = File(warmCacheDir(), "user_${userId}_hub.json")
+    private fun warmCoreCacheFile(userId: Long): File = File(warmCacheDir(), "user_${userId}_core.json")
+
+    private fun readWarmCoreCache(userId: Long): CoreWarmCacheEnvelope? {
+        if (userId <= 0L) return null
+        val file = warmCoreCacheFile(userId)
+        if (!file.exists()) return null
+        return runCatching { gson.fromJson(file.readText(), CoreWarmCacheEnvelope::class.java) }
+            .getOrNull()
+            ?.takeIf { it.userId == userId && it.core != null }
+    }
+
+    private fun writeWarmCoreCache(userId: Long, core: CoreWarmCacheSnapshot) {
+        if (userId <= 0L) return
+        runCatching {
+            val target = warmCoreCacheFile(userId)
+            val temporary = File(target.parentFile, target.name + ".tmp")
+            temporary.writeText(gson.toJson(CoreWarmCacheEnvelope(userId = userId, savedAtEpochMs = System.currentTimeMillis(), core = core)))
+            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
 
     private fun readWarmCacheEnvelope(userId: Long): AppWarmCacheEnvelope? {
         if (userId <= 0L) return null
@@ -1987,8 +2010,15 @@ class AppRepo(
         }
     }
 
+    fun loadLastWarmCoreCache(): CoreWarmCacheEnvelope? {
+        val userId = prefs.getLong(warmCacheLastUserIdKey, 0L)
+        return readWarmCoreCache(userId)
+    }
+
     fun saveCoreWarmCache(userId: Long, me: MeResponse, inviteCode: String, prompt: PromptResponse, rules: PromptRulesResponse, special: SpecialMomentStatus) {
-        writeWarmCacheEnvelope(userId) { current -> current.copy(core = CoreWarmCacheSnapshot(me, inviteCode, prompt, rules, special)) }
+        val core = CoreWarmCacheSnapshot(me, inviteCode, prompt, rules, special)
+        writeWarmCoreCache(userId, core)
+        writeWarmCacheEnvelope(userId) { current -> current.copy(core = core) }
     }
 
     fun saveTimelineWarmCache(userId: Long, response: HubTimelineResponse) {
@@ -3328,6 +3358,8 @@ class AppRepo(
             includeCommunity = includeCommunity
         )
     }
+    suspend fun dashboardCore(): DashboardBootstrapResponse =
+        authorizedCall("/api/dashboard/core") { token -> api.dashboardCore(token) }
     suspend fun hubBootstrap(): HubBootstrapResponse =
         authorizedCall("/api/hub/bootstrap") { token -> api.hubBootstrap(token) }
     suspend fun hubTimeline(
@@ -4617,6 +4649,13 @@ data class CoreWarmCacheSnapshot(
     val special: SpecialMomentStatus
 )
 
+data class CoreWarmCacheEnvelope(
+    val schemaVersion: String = "app_core_cache_v1",
+    val userId: Long = 0L,
+    val savedAtEpochMs: Long = 0L,
+    val core: CoreWarmCacheSnapshot? = null
+)
+
 internal fun migrateWarmCacheEnvelope(envelope: AppWarmCacheEnvelope?, expectedUserId: Long): AppWarmCacheEnvelope? {
     if (envelope == null || envelope.userId != expectedUserId) return null
     if (envelope.schemaVersion !in setOf("app_warm_cache_v1", "app_warm_cache_v2", "app_warm_cache_v3")) return null
@@ -5625,6 +5664,21 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             meta = "userId=${snapshot.userId};core=${core != null};hub=$hasBootstrap;timeline=$hasTimeline;timelineComplete=${snapshot.timelineLite?.isComplete == true};capsules=$hasCapsules;calendar=$hasCalendar;feed=$hasFeed"
         )
     }
+    private fun applyWarmCoreCacheSnapshot(snapshot: CoreWarmCacheEnvelope) {
+        val core = snapshot.core ?: return
+        state = state.copy(
+            user = core.me.user,
+            myInviteCode = core.inviteCode,
+            prompt = core.prompt,
+            promptRules = core.rules,
+            specialMomentStatus = core.special,
+            streakDays = core.me.streakDays,
+            dailyMomentCount = core.me.dailyMomentCount,
+            bookmarksGivenCount = core.me.bookmarksGivenCount,
+            bookmarksReceivedCount = core.me.bookmarksReceivedCount
+        )
+        repo.logDebug("startup_core_cache_applied", "separate core cache applied", "userId=${snapshot.userId};savedAt=${snapshot.savedAtEpochMs}")
+    }
 
     private fun applyCalendarDataset(dataset: CalendarDataset) {
         val selectedDay = state.calendarSelectedDay?.takeIf { dataset.days.contains(it) }
@@ -6482,9 +6536,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         repo.syncAutoUpdateScheduler()
         repo.syncUploadQueueScheduler()
-        val warmCache = if (repo.token().isNotBlank()) repo.loadLastWarmCache() else null
-        if (warmCache != null) {
-            applyWarmCacheSnapshot(warmCache)
+        val warmCore = if (repo.token().isNotBlank()) repo.loadLastWarmCoreCache() else null
+        if (warmCore != null) {
+            applyWarmCoreCacheSnapshot(warmCore)
             // Make the persisted feed/timeline available while the health and
             // delta checks continue in this coroutine.
             state = refreshConnectionHealthState(state.copy(startupDone = true))
@@ -6492,7 +6546,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val started = System.currentTimeMillis()
         val health = runCatching { repo.health() }.getOrNull()
         val elapsed = System.currentTimeMillis() - started
-        if (warmCache == null && elapsed < 900) {
+        if (warmCore == null && elapsed < 900) {
             delay(900 - elapsed)
         }
         val showChangelog = repo.shouldShowChangelog(BuildConfig.VERSION_NAME)
@@ -6558,8 +6612,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             debugLogs = repo.recentDebugLogs(),
             message = if (health?.ok == true) "" else "Server nicht erreichbar"
         ))
-        if (warmCache == null && repo.token().isNotBlank()) {
-            repo.loadLastWarmCache()?.let(::applyWarmCacheSnapshot)
+        if (repo.token().isNotBlank()) {
+            viewModelScope.launch {
+                delay(100)
+                repo.loadLastWarmCache()?.let(::applyWarmCacheSnapshot)
+            }
         }
         repo.pendingUpdateInstallWarning(BuildConfig.VERSION_NAME)?.let { warning ->
             state = state.copy(message = warning)
@@ -6576,7 +6633,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (repo.token().isBlank()) return false
         val started = System.currentTimeMillis()
         return runCatching {
-            val bootstrap = repo.dashboardBootstrap(includeChat = false, includePhotos = false, includeCommunity = false)
+            val bootstrap = repo.dashboardCore()
             val marker = "${bootstrap.prompt.day}:${bootstrap.prompt.triggered ?: ""}"
             val shouldPopup = bootstrap.prompt.canUpload && !bootstrap.prompt.triggered.isNullOrBlank() && !bootstrap.prompt.hasPromptPostedToday && marker != repo.seenPromptMarker()
             if (shouldPopup) repo.setSeenPromptMarker(marker)

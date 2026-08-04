@@ -311,6 +311,7 @@ func (s *Server) Router() *gin.Engine {
 			protected.GET("/prompt/current", s.handleCurrentPrompt)
 			protected.GET("/prompt/rules", s.handlePromptRules)
 			protected.GET("/dashboard/bootstrap", s.handleDashboardBootstrap)
+			protected.GET("/dashboard/core", s.handleDashboardCore)
 			protected.GET("/hub/bootstrap", s.handleHubBootstrap)
 			protected.GET("/hub/timeline", s.handleHubTimeline)
 			protected.POST("/hub/timeline/viewed", s.handleHubTimelineViewed)
@@ -429,6 +430,34 @@ func (s *Server) Router() *gin.Engine {
 	}
 
 	return r
+}
+
+// handleDashboardCore is deliberately small enough for the first visible app
+// frame. Feed indexes, invite creation, append targets and social payloads are
+// deferred to the normal bootstrap.
+func (s *Server) handleDashboardCore(c *gin.Context) {
+	user, _ := userFromContext(c)
+	now := time.Now().In(s.Location)
+	day := now.Format("2006-01-02")
+	dailyMomentCount, streakDays, _ := s.computeUserMomentStats(user.ID)
+	bookmarksGivenCount, bookmarksReceivedCount, _ := s.computeUserBookmarkStats(user.ID)
+	var prompt models.DailyPrompt
+	_ = s.DB.Where("day = ?", day).Limit(1).Find(&prompt).Error
+	var settings models.AppSettings
+	_ = s.DB.Limit(1).Find(&settings).Error
+	settings = normalizeSettings(settings)
+	hasPromptPosted, _ := s.userHasPostedForMomentDay(user.ID, day, momentKindFromTriggerSource(prompt.TriggerSource), prompt)
+	triggerStatus, _ := s.currentDayTriggerStatus(day, "/api/dashboard/core")
+	specialStatus, _ := s.specialMomentStatus(user.ID)
+	c.JSON(http.StatusOK, gin.H{
+		"schemaVersion": "dashboard_bootstrap_v1", "serverNow": now,
+		"me":                  gin.H{"user": s.userOwnJSON(user), "dailyMomentCount": dailyMomentCount, "streakDays": streakDays, "bookmarksGivenCount": bookmarksGivenCount, "bookmarksReceivedCount": bookmarksReceivedCount},
+		"inviteCode":          "",
+		"prompt":              gin.H{"day": day, "triggered": prompt.TriggeredAt, "uploadUntil": prompt.UploadUntil, "canUpload": isPromptWindowActive(prompt, now), "hasPosted": hasPromptPosted, "hasPromptPostedToday": hasPromptPosted, "triggerSource": prompt.TriggerSource, "requestedByUser": prompt.RequestedBy, "momentKind": momentKindFromTriggerSource(prompt.TriggerSource), "dailyTriggeredAt": triggerStatus.DailyTriggeredAt, "dailyPending": triggerStatus.DailyPending, "specialTriggeredAt": triggerStatus.SpecialTriggeredAt, "specialRequestedByUser": triggerStatus.SpecialRequestedByUser, "specialRequestedByUserColor": triggerStatus.SpecialRequestedByUserColor},
+		"promptRules":         gin.H{"promptWindowStartHour": settings.PromptWindowStartHour, "promptWindowEndHour": settings.PromptWindowEndHour, "uploadWindowMinutes": settings.UploadWindowMinutes, "maxUploadBytes": settings.MaxUploadBytes, "chatMessageMaxLength": settings.ChatMessageMaxLength, "chatMessageUnlimited": settings.ChatMessageUnlimited, "timezone": s.Config.Timezone},
+		"specialMomentStatus": specialStatus,
+		"photos":              []gin.H{}, "chat": []gin.H{}, "feedDays": []string{}, "communityStats": nil,
+	})
 }
 
 type authRequest struct {
@@ -4690,6 +4719,18 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 			offset = n
 		}
 	}
+	debugLimit := 1000
+	if raw := strings.TrimSpace(c.Query("debugLimit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			debugLimit = n
+		}
+	}
+	if debugLimit < 100 {
+		debugLimit = 100
+	}
+	if debugLimit > 5000 {
+		debugLimit = 5000
+	}
 
 	now := time.Now().In(s.Location)
 	startDayDate := now.AddDate(0, 0, -offset)
@@ -4805,8 +4846,10 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 	_ = s.DB.Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Find(&reactions).Error
 	var chats []models.ChatMessage
 	_ = s.DB.Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Find(&chats).Error
+	var debugLogTotal int64
+	_ = s.DB.Model(&models.ClientDebugLog{}).Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Count(&debugLogTotal).Error
 	var debugLogs []models.ClientDebugLog
-	_ = s.DB.Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Find(&debugLogs).Error
+	_ = s.DB.Select("user_id", "type", "meta", "created_at").Where("created_at >= ? AND created_at <= ?", dayStart, dayEnd).Order("created_at DESC").Limit(debugLimit).Find(&debugLogs).Error
 
 	var activities []models.DailyUserActivity
 	if err := s.DB.Preload("User").Where("day >= ? AND day <= ?", oldest, newest).Order("day desc, first_seen_at asc").Find(&activities).Error; err != nil {
@@ -5386,6 +5429,7 @@ func (s *Server) handleAdminHistory(c *gin.Context) {
 		"days":                days,
 		"offset":              offset,
 		"excludeEmpty":        excludeEmpty,
+		"debugLogSample":      gin.H{"loaded": len(debugLogs), "total": debugLogTotal, "limit": debugLimit, "truncated": debugLogTotal > int64(len(debugLogs))},
 		"onlineTrackingSince": trackingAvailableFrom,
 		"leaderboard": gin.H{
 			"reliableTop":   reliableTop,

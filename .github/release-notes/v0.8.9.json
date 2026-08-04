@@ -1,0 +1,9 @@
+{
+  "version": "v0.8.9",
+  "title": "Sofortiger Kernstart und schlankere Historie",
+  "items": [
+    "Kernwerte werden aus einem separaten kleinen Cache sofort angezeigt.",
+    "Der Start-Refresh lÃ¤dt nur den aktuellen Kernstatus; umfangreiche Inhalte folgen im Hintergrund.",
+    "Admin-Historie mit einstellbarer Diagnose-Rohloggrenze und transparenter Stichprobe."
+  ]
+}

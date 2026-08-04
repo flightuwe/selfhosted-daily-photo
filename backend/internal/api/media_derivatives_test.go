@@ -49,6 +49,13 @@ func TestVisibleMediaDerivativeRequestPrioritizesAVIF(t *testing.T) {
 	}
 }
 
+func TestEmptyMediaDerivativePollIsANoop(t *testing.T) {
+	server := newSearchTestServer(t)
+	if err := server.processOneMediaDerivative(context.Background(), false); err != nil {
+		t.Fatalf("empty derivative poll returned an error: %v", err)
+	}
+}
+
 func TestParkBackgroundDerivativeQueueKeepsVisibleWork(t *testing.T) {
 	server := newSearchTestServer(t)
 	background := models.MediaDerivative{SourcePath: "photos/background.jpg", Variant: "feed-webp-720", Purpose: "feed", Format: "webp", Width: 720, Quality: 75, OutputPath: "renditions/a/background.webp", Status: mediaDerivativeQueued, Priority: 70}

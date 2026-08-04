@@ -295,10 +295,12 @@ func (s *Server) processOneMediaDerivative(parent context.Context, allowBackgrou
 	if allowBackground {
 		query = s.DB.Where("(status = ? OR status = ?) AND (next_attempt_at IS NULL OR next_attempt_at <= ?)", mediaDerivativeQueued, mediaDerivativePaused, now)
 	}
-	err := query.
-		Order("priority desc, created_at asc, id asc").First(&row).Error
+	err := query.Order("priority desc, created_at asc, id asc").Limit(1).Find(&row).Error
 	if err != nil {
 		return err
+	}
+	if row.ID == 0 {
+		return nil
 	}
 	claimed := s.DB.Model(&models.MediaDerivative{}).Where("id = ? AND status = ?", row.ID, row.Status).
 		Updates(map[string]any{"status": mediaDerivativeRunning, "attempts": gorm.Expr("attempts + 1"), "last_error": "", "started_at": now})

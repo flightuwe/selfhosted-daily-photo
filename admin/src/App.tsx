@@ -598,6 +598,13 @@ export function App() {
   const [historyItems, setHistoryItems] = useState<AdminHistoryDay[]>([]);
   const [historyDays, setHistoryDays] = useState<number>(30);
   const [historyOffset, setHistoryOffset] = useState<number>(0);
+  const [historyDebugLimit, setHistoryDebugLimit] = useState<number>(1000);
+  const [historyDebugSample, setHistoryDebugSample] = useState({
+    loaded: 0,
+    total: 0,
+    limit: 1000,
+    truncated: false,
+  });
   const [historyTrackingSince, setHistoryTrackingSince] = useState("");
   const [expandedHistoryDays, setExpandedHistoryDays] = useState<
     Record<string, boolean>
@@ -1838,10 +1845,23 @@ export function App() {
     }
   }
 
-  async function loadHistory(authToken: string, days = 30, offset = 0) {
+  async function loadHistory(
+    authToken: string,
+    days = 30,
+    offset = 0,
+    debugLimit = historyDebugLimit,
+  ) {
     try {
-      const data = await getAdminHistory(authToken, days, offset);
+      const data = await getAdminHistory(authToken, days, offset, true, debugLimit);
       setHistoryItems(data.items || []);
+      setHistoryDebugSample(
+        data.debugLogSample || {
+          loaded: 0,
+          total: 0,
+          limit: debugLimit,
+          truncated: false,
+        },
+      );
       setHistoryTrackingSince(data.onlineTrackingSince || "");
       setHistoryReliableTop(data.leaderboard?.reliableTop || []);
       setHistoryExtraHeavyTop(data.leaderboard?.extraHeavyTop || []);
@@ -4330,8 +4350,22 @@ export function App() {
                     style={{ width: 90 }}
                   />
                 </label>
+                <label>
+                  Diagnose-Rohlogs
+                  <select
+                    value={historyDebugLimit}
+                    onChange={(e) => setHistoryDebugLimit(Number(e.target.value))}
+                  >
+                    <option value={250}>250</option>
+                    <option value={1000}>1.000</option>
+                    <option value={2500}>2.500</option>
+                    <option value={5000}>5.000</option>
+                  </select>
+                </label>
                 <button
-                  onClick={() => loadHistory(token, historyDays, historyOffset)}
+                  onClick={() =>
+                    loadHistory(token, historyDays, historyOffset, historyDebugLimit)
+                  }
                 >
                   Aktualisieren
                 </button>
@@ -4373,6 +4407,14 @@ export function App() {
                         ) / historyItems.length
                       ).toFixed(1)
                     : "-"
+                }
+              />
+              <CardStat
+                title="Diagnose-Rohlogs"
+                value={
+                  historyDebugSample.truncated
+                    ? `${historyDebugSample.loaded}/${historyDebugSample.total}`
+                    : historyDebugSample.total
                 }
               />
             </div>

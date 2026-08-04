@@ -736,6 +736,7 @@ export type AdminHistoryResponse = {
   days: number;
   offset: number;
   excludeEmpty?: boolean;
+  debugLogSample?: { loaded: number; total: number; limit: number; truncated: boolean };
   onlineTrackingSince?: string;
   leaderboard?: {
     reliableTop?: AdminHistoryLeaderboardEntry[];
@@ -1717,11 +1718,13 @@ export async function getAdminHistory(
   days = 30,
   offset = 0,
   excludeEmpty = true,
+  debugLimit = 1000,
 ): Promise<AdminHistoryResponse> {
   const qs = new URLSearchParams();
   qs.set("days", String(days));
   qs.set("offset", String(offset));
   qs.set("excludeEmpty", String(excludeEmpty));
+  qs.set("debugLimit", String(debugLimit));
   const res = await fetch(`${apiBase}/admin/history?${qs.toString()}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
