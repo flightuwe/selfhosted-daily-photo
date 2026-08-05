@@ -1031,6 +1031,16 @@ internal fun feedAutoPageDirection(
     else -> feedViewportEdgeDirection(rowsSize, firstVisibleIndex, lastVisibleIndex, hasNewer, hasOlder)
 }
 
+/**
+ * A targeted jump replaces the rendered rows with a temporary target row.
+ * It must therefore receive a complete window: a 304 would otherwise leave
+ * that temporary one-day list in place without its adjacent paging bounds.
+ */
+internal fun feedWindowKnownRevisions(
+    cachedRevisions: Map<String, Long>,
+    isTargetedNavigation: Boolean
+): Map<String, Long> = if (isTargetedNavigation) emptyMap() else cachedRevisions
+
 /** Keeps an edge latched across loading/no-op responses until the user leaves it. */
 internal fun nextFeedAutoPagingLatch(
     previous: FeedAutoPageDirection,
@@ -9481,7 +9491,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 beforeDays = around,
                 afterDays = around,
                 focusPhotoId = state.feedFocusPhotoId,
-                knownRevisions = cachedFeedDayRevisions()
+                knownRevisions = feedWindowKnownRevisions(
+                    cachedRevisions = cachedFeedDayRevisions(),
+                    isTargetedNavigation = showJumpLoading
+                )
             ).normalized(source = "feed_window_center:$target")
             applyFeedWindow(
                 window,

@@ -95,6 +95,23 @@ class FeedPagingPolicyTest {
     }
 
     @Test
+    fun targetedNavigationAlwaysRequestsACompleteFeedWindow() {
+        val cachedRevisions = mapOf(
+            "2026-08-05" to 7L,
+            "2026-08-04" to 6L
+        )
+
+        assertEquals(
+            emptyMap<String, Long>(),
+            feedWindowKnownRevisions(cachedRevisions, isTargetedNavigation = true)
+        )
+        assertEquals(
+            cachedRevisions,
+            feedWindowKnownRevisions(cachedRevisions, isTargetedNavigation = false)
+        )
+    }
+
+    @Test
     fun unchangedEdgeRemainsLatchedAcrossACompletedNoOpRequest() {
         val entered = nextFeedAutoPagingLatch(
             previous = FeedAutoPageDirection.NONE,

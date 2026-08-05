@@ -1,0 +1,9 @@
+{
+  "version": "0.8.17",
+  "title": "Zuverlaessiger Feed-Sprung",
+  "highlights": [
+    "Der Feed bleibt beim Sprung zurueck auf Heute vollstaendig und laedt weitere Tage wieder normal nach.",
+    "Gezielte Spruenge laden nun immer ein vollstaendiges Feed-Fenster statt nur einen unveraenderten Cache-Zustand zu uebernehmen.",
+    "Ein Regressionstest schuetzt den Feed gegen dieses Abschneiden nach Timeline- und Schnellnavigation."
+  ]
+}
