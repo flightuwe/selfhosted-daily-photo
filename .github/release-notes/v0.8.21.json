@@ -1,0 +1,8 @@
+{
+  "version": "0.8.21",
+  "title": "Offline-Rueckweg und Ruhemodus korrigiert",
+  "highlights": [
+    "OFFLINE laesst sich im Kamera-Reiter wieder nach links zu Daily wischen.",
+    "Der Offline-Modus pausiert nun auch Netzwechsel-Recovery und deren lokale Health-Probes vollstaendig."
+  ]
+}

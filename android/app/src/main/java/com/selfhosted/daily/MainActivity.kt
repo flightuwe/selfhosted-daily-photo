@@ -6516,6 +6516,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         source: String,
         scheduleProbe: Boolean
     ) {
+        if (state.offlineMode || OfflineModeManager.isEnabled(repo.contextForOfflineMode())) {
+            return
+        }
         networkRecoveryReason = reason
         networkRecoveryActive = true
         lastNetworkTransitionAtMs = System.currentTimeMillis()
@@ -6541,11 +6544,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     private fun scheduleNetworkRecoveryProbe(reason: String, source: String) {
+        if (state.offlineMode || OfflineModeManager.isEnabled(repo.contextForOfflineMode())) {
+            finishNetworkRecovery("offline_mode_enabled", currentNetworkSnapshot())
+            return
+        }
         networkRecoveryJob?.cancel()
         networkRecoveryJob = viewModelScope.launch {
             delay(networkRecoveryProbeDebounceMs)
             var attempt = 1
-            while (networkRecoveryActive && attempt <= networkRecoveryProbeMaxAttempts) {
+            while (!state.offlineMode && !OfflineModeManager.isEnabled(repo.contextForOfflineMode()) &&
+                networkRecoveryActive && attempt <= networkRecoveryProbeMaxAttempts
+            ) {
                 val snapshot = currentNetworkSnapshot()
                 state = refreshConnectionHealthState(state.copy(networkSnapshot = snapshot))
                 if (!isValidatedNetworkSnapshot(snapshot)) {
@@ -6613,6 +6622,15 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     fun onConnectivitySnapshotChanged(snapshot: String, source: String = "observer") {
         val normalized = snapshot.trim().ifBlank { currentNetworkSnapshot() }
+        if (state.offlineMode || OfflineModeManager.isEnabled(repo.contextForOfflineMode())) {
+            lastObservedNetworkSnapshot = normalized
+            if (networkRecoveryActive) {
+                finishNetworkRecovery("offline_mode_enabled", normalized)
+            } else if (state.networkSnapshot != normalized) {
+                state = refreshConnectionHealthState(state.copy(networkSnapshot = normalized))
+            }
+            return
+        }
         val previous = lastObservedNetworkSnapshot
         if (normalized == previous) {
             if (state.networkSnapshot != normalized) {
@@ -7491,6 +7509,9 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (state.offlineMode == enabled) return
         OfflineModeManager.setEnabled(repo.contextForOfflineMode(), enabled)
         FirebaseMessaging.getInstance().isAutoInitEnabled = !enabled
+        if (enabled) {
+            finishNetworkRecovery("offline_mode_enabled", currentNetworkSnapshot())
+        }
         state = state.copy(
             offlineMode = enabled,
             serverConnected = if (enabled) false else state.serverConnected,
@@ -12741,7 +12762,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         }
     }
 
-    LaunchedEffect(launchIntentTick, state.token, state.startupDone) {
+    LaunchedEffect(launchIntentTick, state.token, state.startupDone, state.offlineMode) {
+        if (state.offlineMode) return@LaunchedEffect
         if (launchIntentTick <= 0) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         if (!vm.shouldRunLaunchIntentRefresh()) return@LaunchedEffect
@@ -13566,7 +13588,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     prompt = state.prompt,
                     offlineMode = state.offlineMode,
                     currentUsername = state.user?.username,
-                    networkUnstable = vm.shouldPauseFeedAutoRefresh(),
+                    networkUnstable = !state.offlineMode && vm.shouldPauseFeedAutoRefresh(),
                     promptRules = state.promptRules,
                     locationFeatureEnabled = state.user?.locationFeatureEnabled == true,
                     locationPermissionGranted = locationPermissionGranted,
@@ -16016,8 +16038,9 @@ private fun OfflineModeHeader(
                     onDrag = { change, amount ->
                         if (!dragActive) return@detectDragGestures
                         change.consume()
-                        val direction = if (offline) -1f else 1f
-                        dragProgress = (dragProgress + direction * amount.x / dragDistancePx).coerceIn(0f, 1f)
+                        // Progress follows the physical x position: right increases, left decreases.
+                        // This is identical in both states; inverting it offline pins the pill at 1.0.
+                        dragProgress = (dragProgress + amount.x / dragDistancePx).coerceIn(0f, 1f)
                         scope.launch { progress.snapTo(dragProgress) }
                     },
                     onDragEnd = {
