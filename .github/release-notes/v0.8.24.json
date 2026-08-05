@@ -1,0 +1,9 @@
+{
+  "version": "0.8.24",
+  "title": "Changelog-Verlauf wird zuverlässig aktualisiert",
+  "highlights": [
+    "Der gesamte Changelog wird beim bewussten Oeffnen jetzt direkt mit GitHub abgeglichen und zeigt neue Releases sofort an.",
+    "Ein frischer lokaler Verlauf wird beim App-Start erneuert, wenn er die installierte Daily-Version noch nicht enthaelt.",
+    "Offline bleiben gespeicherte Release-Infos lesbar; bei einer fehlgeschlagenen Aktualisierung kennzeichnet Daily den angezeigten Cache-Stand klar."
+  ]
+}

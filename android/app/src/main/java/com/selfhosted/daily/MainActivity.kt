@@ -4393,8 +4393,14 @@ class AppRepo(
     suspend fun changelogLines(currentVersion: String): List<String> =
         UpdateReleaseChecker.changelogLinesForVersion(currentVersion, allowNetwork = !OfflineModeManager.isEnabled(context))
 
-    suspend fun changelogHistory(forceRefresh: Boolean = false): List<ChangelogEntry> =
-        releaseHistory.history(allowNetwork = !OfflineModeManager.isEnabled(context), forceRefresh = forceRefresh)
+    suspend fun changelogHistory(
+        forceRefresh: Boolean = false,
+        requiredVersion: String? = null
+    ): ChangelogHistoryResult = releaseHistory.history(
+        allowNetwork = !OfflineModeManager.isEnabled(context),
+        forceRefresh = forceRefresh,
+        requiredVersion = requiredVersion
+    )
 
     fun downloadLatestApk(update: UpdateInfo): Long {
         OfflineModeManager.requireOnline(context)
@@ -4968,6 +4974,7 @@ data class UiState(
     val showChangelogHistoryDialog: Boolean = false,
     val changelogHistoryLoading: Boolean = false,
     val changelogHistoryError: String? = null,
+    val changelogHistoryStatus: String? = null,
     val showHelpDialog: Boolean = false,
     val promptRules: PromptRulesResponse? = null,
     val specialMomentStatus: SpecialMomentStatus? = null,
@@ -6740,10 +6747,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val current = BuildConfig.VERSION_NAME.trim().removePrefix("v")
         val lastSeen = repo.lastSeenChangelogVersion().trim().removePrefix("v")
         if (!ReleaseHistoryParser.isStableVersion(current)) return emptyList()
-        val history = runCatching { repo.changelogHistory() }.getOrDefault(emptyList())
-        if (history.isEmpty()) return emptyList()
+        val history = runCatching { repo.changelogHistory(requiredVersion = current) }.getOrNull()
+            ?: return emptyList()
+        if (history.entries.isEmpty()) return emptyList()
         // A fresh installation gets a focused welcome; upgrades explain every skipped release.
-        return history.filter { entry ->
+        return history.entries.filter { entry ->
             ReleaseHistoryParser.compareVersions(entry.version, current) <= 0 &&
                 (lastSeen.isBlank() || ReleaseHistoryParser.compareVersions(entry.version, lastSeen) > 0)
         }
@@ -11104,8 +11112,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun showChangelogDialog() {
-        val entries = runCatching { repo.changelogHistory() }
-            .getOrDefault(emptyList())
+        val entries = runCatching { repo.changelogHistory(requiredVersion = BuildConfig.VERSION_NAME) }
+            .getOrNull()
+            ?.entries
+            .orEmpty()
             .filter { it.version == BuildConfig.VERSION_NAME.trim().removePrefix("v") }
         val lines = if (entries.isEmpty() && !state.offlineMode) fetchChangelogLinesFresh() else emptyList()
         state = state.copy(
@@ -11121,14 +11131,36 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun showChangelogHistory() {
-        state = state.copy(showChangelogHistoryDialog = true, changelogHistoryLoading = true, changelogHistoryError = null)
-        val history = runCatching { repo.changelogHistory() }
+        state = state.copy(
+            showChangelogHistoryDialog = true,
+            changelogHistoryLoading = true,
+            changelogHistoryError = null,
+            changelogHistoryStatus = null
+        )
+        val history = runCatching { repo.changelogHistory(forceRefresh = true) }
         state = history.fold(
-            onSuccess = { entries ->
-                state.copy(changelogHistoryEntries = entries, changelogHistoryLoading = false)
+            onSuccess = { result ->
+                val status = when (result.source) {
+                    ChangelogHistorySource.OFFLINE_CACHE -> "Offline-Modus – gespeicherter Release-Verlauf wird angezeigt."
+                    ChangelogHistorySource.STALE_CACHE -> "Aktualisierung fehlgeschlagen – gespeicherter Release-Verlauf wird angezeigt."
+                    else -> null
+                }
+                val error = if (result.entries.isEmpty()) {
+                    if (state.offlineMode) "Im Offline-Modus sind nur bereits gespeicherte Release-Infos verfuegbar."
+                    else "Changelog-Verlauf konnte nicht geladen werden."
+                } else null
+                state.copy(
+                    changelogHistoryEntries = result.entries,
+                    changelogHistoryLoading = false,
+                    changelogHistoryError = error,
+                    changelogHistoryStatus = status
+                )
             },
             onFailure = {
-                state.copy(changelogHistoryLoading = false, changelogHistoryError = if (state.offlineMode) "Im Offline-Modus sind nur bereits gespeicherte Release-Infos verfuegbar." else "Changelog-Verlauf konnte nicht geladen werden.")
+                state.copy(
+                    changelogHistoryLoading = false,
+                    changelogHistoryError = if (state.offlineMode) "Im Offline-Modus sind nur bereits gespeicherte Release-Infos verfuegbar." else "Changelog-Verlauf konnte nicht geladen werden."
+                )
             }
         )
     }
@@ -13164,12 +13196,22 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         Text("Release-Verlauf wird geladen …")
                     }
                     state.changelogHistoryEntries.isEmpty() -> Text(state.changelogHistoryError ?: "Noch keine Release-Infos verfuegbar.")
-                    else -> LazyColumn(
-                        modifier = Modifier.fillMaxWidth().height(420.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(state.changelogHistoryEntries, key = { it.version }) { entry ->
-                            ChangelogEntryContent(entry)
+                    else -> Column(modifier = Modifier.fillMaxWidth()) {
+                        state.changelogHistoryStatus?.let { status ->
+                            Text(
+                                status,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            )
+                        }
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().height(420.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            items(state.changelogHistoryEntries, key = { it.version }) { entry ->
+                                ChangelogEntryContent(entry)
+                            }
                         }
                     }
                 }

@@ -18,8 +18,26 @@ data class ChangelogEntry(
     val releaseUrl: String = ""
 )
 
+enum class ChangelogHistorySource {
+    NETWORK,
+    FRESH_CACHE,
+    OFFLINE_CACHE,
+    STALE_CACHE,
+    UNAVAILABLE
+}
+
+data class ChangelogHistoryResult(
+    val entries: List<ChangelogEntry>,
+    val source: ChangelogHistorySource,
+    val cachedAt: Long = 0L
+)
+
 /** GitHub remains the canonical source; the cache only makes it reliable offline. */
-class ReleaseHistoryRepository(context: Context) {
+class ReleaseHistoryRepository(
+    context: Context,
+    private val releaseFetcher: (() -> List<ChangelogEntry>)? = null,
+    private val nowMillis: () -> Long = System::currentTimeMillis
+) {
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     private val http = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -27,19 +45,34 @@ class ReleaseHistoryRepository(context: Context) {
         .callTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    suspend fun history(allowNetwork: Boolean, forceRefresh: Boolean = false): List<ChangelogEntry> = withContext(Dispatchers.IO) {
+    suspend fun history(
+        allowNetwork: Boolean,
+        forceRefresh: Boolean = false,
+        requiredVersion: String? = null
+    ): ChangelogHistoryResult = withContext(Dispatchers.IO) {
         val cached = cachedHistory()
         if (!allowNetwork) return@withContext cached
-        val cachedAt = prefs.getLong(CACHE_AT_KEY, 0L)
-        val cacheFresh = cached.isNotEmpty() && System.currentTimeMillis() - cachedAt < CACHE_TTL_MS
-        if (!forceRefresh && cacheFresh) return@withContext cached
+            .takeIf { it.isNotEmpty() }
+            ?.let { ChangelogHistoryResult(it, ChangelogHistorySource.OFFLINE_CACHE, cachedAt()) }
+            ?: ChangelogHistoryResult(emptyList(), ChangelogHistorySource.UNAVAILABLE)
 
-        val fresh = fetchAllReleases()
+        val cachedAt = prefs.getLong(CACHE_AT_KEY, 0L)
+        val cacheFresh = cached.isNotEmpty() && nowMillis() - cachedAt < CACHE_TTL_MS
+        val normalizedRequiredVersion = requiredVersion?.trim()?.removePrefix("v").orEmpty()
+        val cacheContainsRequiredVersion = normalizedRequiredVersion.isBlank() ||
+            cached.any { it.version == normalizedRequiredVersion }
+        if (!forceRefresh && cacheFresh && cacheContainsRequiredVersion) {
+            return@withContext ChangelogHistoryResult(cached, ChangelogHistorySource.FRESH_CACHE, cachedAt)
+        }
+
+        val fresh = releaseFetcher?.invoke() ?: fetchAllReleases()
         if (fresh.isNotEmpty()) {
             saveHistory(fresh)
-            fresh
+            ChangelogHistoryResult(fresh, ChangelogHistorySource.NETWORK, nowMillis())
         } else {
-            cached
+            cached.takeIf { it.isNotEmpty() }
+                ?.let { ChangelogHistoryResult(it, ChangelogHistorySource.STALE_CACHE, cachedAt) }
+                ?: ChangelogHistoryResult(emptyList(), ChangelogHistorySource.UNAVAILABLE)
         }
     }
 
@@ -119,8 +152,10 @@ class ReleaseHistoryRepository(context: Context) {
                 put("releaseUrl", entry.releaseUrl)
             })
         }
-        prefs.edit().putString(CACHE_KEY, array.toString()).putLong(CACHE_AT_KEY, System.currentTimeMillis()).apply()
+        prefs.edit().putString(CACHE_KEY, array.toString()).putLong(CACHE_AT_KEY, nowMillis()).apply()
     }
+
+    private fun cachedAt(): Long = prefs.getLong(CACHE_AT_KEY, 0L)
 
     private fun JSONArray?.stringList(): List<String> {
         if (this == null) return emptyList()

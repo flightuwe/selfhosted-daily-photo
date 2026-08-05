@@ -49,8 +49,9 @@ class OfflineModeTest {
             )
             .apply()
 
-        val entries = ReleaseHistoryRepository(context).history(allowNetwork = false, forceRefresh = true)
+        val result = ReleaseHistoryRepository(context).history(allowNetwork = false, forceRefresh = true)
 
-        assertEquals(listOf("0.8.21"), entries.map { it.version })
+        assertEquals(ChangelogHistorySource.OFFLINE_CACHE, result.source)
+        assertEquals(listOf("0.8.21"), result.entries.map { it.version })
     }
 }
