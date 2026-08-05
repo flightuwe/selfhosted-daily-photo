@@ -210,6 +210,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.imageLoader
+import coil.request.CachePolicy
 import coil.request.ImageRequest
 import com.google.gson.Gson
 import com.google.android.gms.location.CurrentLocationRequest
@@ -10383,6 +10384,17 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         surfaceError: Boolean = true
     ): PhotoInteractionsResponse? {
         if (photoId <= 0) return null
+        if (state.offlineMode || OfflineModeManager.isEnabled(repo.contextForOfflineMode())) {
+            val cached = photoInteractionsStore[photoId]
+                ?: state.photoInteractions?.takeIf { it.photoId == photoId }
+            state = state.copy(interactionsLoading = false, photoInteractions = cached)
+            logFeedDecision(
+                type = "interactions_reload_skipped",
+                message = "photo interactions reload skipped in offline mode",
+                meta = "photoId=$photoId;reason=offline_mode;trigger=$reason;cached=${cached != null}"
+            )
+            return cached
+        }
         if (activePhotoInteractionsLoadPhotoId == photoId) {
             logFeedDecision(
                 type = "interactions_reload_skipped",
@@ -13237,6 +13249,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             urls = viewerUrls,
             initialIndex = viewerIndex,
             photoId = viewerPhotoId,
+            offlineMode = state.offlineMode,
             locationMapsUrl = viewerLocationMapsUrl,
             meId = state.user?.id,
             comment = viewerComment,
@@ -17268,23 +17281,9 @@ private fun FeedRenditionImage(
     contentScale: ContentScale,
     onFormatResolved: (String) -> Unit = {}
 ) {
-    if (offlineMode) {
-        Box(
-            modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                "Bild nicht lokal gespeichert",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(12.dp)
-            )
-        }
-        return
-    }
     val context = LocalContext.current
-    var candidateIndex by remember(candidates) { mutableStateOf(0) }
+    var candidateIndex by remember(candidates, offlineMode) { mutableStateOf(0) }
+    var offlineCacheMiss by remember(candidates, offlineMode) { mutableStateOf(false) }
     val candidate = candidates.getOrNull(candidateIndex)
     val candidateFormats = remember(candidates) {
         candidates.map { url ->
@@ -17302,45 +17301,81 @@ private fun FeedRenditionImage(
             "formats=${candidateFormats.joinToString(",")};count=${candidates.size}"
         )
     }
-    AsyncImage(
-        model = candidate,
-        contentDescription = contentDescription,
-        modifier = modifier,
-        contentScale = contentScale,
-        onSuccess = { state ->
-            val actualFormat = candidate?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()
-            onFormatResolved(actualFormat)
-            appendFeedTraceLog(
-                context,
-                "media_selection_resolved",
-                "media rendition rendered",
-                "format=${actualFormat.ifBlank { "unknown" }};candidateIndex=$candidateIndex;chain=${candidateFormats.joinToString(",")};source=${state.result.dataSource}"
-            )
-            NetworkUsageLedger.recordMediaCacheResult(
-                context,
-                state.result.dataSource.toString(),
-                actualFormat.ifBlank { "unknown" }
-            )
-        },
-        onError = { state ->
-            val isAvif = candidate?.substringBefore('?')?.endsWith(".avif", ignoreCase = true) == true
-            val throwableName = state.result.throwable.toString().lowercase(Locale.ROOT)
-            val decodeFailure = "decode" in throwableName || "bitmap" in throwableName || "image decoder" in throwableName
-            if (isAvif && decodeFailure) {
-                context.getSharedPreferences("app", Context.MODE_PRIVATE)
-                    .edit().putInt("avif_decode_disabled_version", BuildConfig.VERSION_CODE).apply()
+    Box(modifier = modifier) {
+        AsyncImage(
+            model = remember(candidate, offlineMode) { offlineCacheOnlyImageRequest(context, candidate, offlineMode) },
+            contentDescription = contentDescription,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = contentScale,
+            onSuccess = { state ->
+                offlineCacheMiss = false
+                val actualFormat = candidate?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()
+                onFormatResolved(actualFormat)
+                appendFeedTraceLog(
+                    context,
+                    if (offlineMode) "offline_media_cache_hit" else "media_selection_resolved",
+                    if (offlineMode) "offline cached media rendered" else "media rendition rendered",
+                    "surface=feed;format=${actualFormat.ifBlank { "unknown" }};candidateIndex=$candidateIndex;chain=${candidateFormats.joinToString(",")};source=${state.result.dataSource}"
+                )
+                NetworkUsageLedger.recordMediaCacheResult(
+                    context,
+                    state.result.dataSource.toString(),
+                    actualFormat.ifBlank { "unknown" }
+                )
+            },
+            onError = { state ->
+                val isAvif = candidate?.substringBefore('?')?.endsWith(".avif", ignoreCase = true) == true
+                val throwableName = state.result.throwable.toString().lowercase(Locale.ROOT)
+                val decodeFailure = "decode" in throwableName || "bitmap" in throwableName || "image decoder" in throwableName
+                if (isAvif && decodeFailure) {
+                    context.getSharedPreferences("app", Context.MODE_PRIVATE)
+                        .edit().putInt("avif_decode_disabled_version", BuildConfig.VERSION_CODE).apply()
+                }
+                val nextFormat = candidates.getOrNull(candidateIndex + 1)
+                    ?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()
+                appendFeedTraceLog(
+                    context,
+                    if (offlineMode) "offline_media_cache_miss" else "media_selection_fallback",
+                    if (offlineMode) "offline media missing from cache" else "media rendition failed; trying fallback",
+                    "surface=feed;format=${candidate?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()};candidateIndex=$candidateIndex;next=${nextFormat.ifBlank { "none" }};final=${candidateIndex >= candidates.lastIndex};decodeFailure=$decodeFailure"
+                )
+                if (candidateIndex < candidates.lastIndex) {
+                    candidateIndex++
+                } else if (offlineMode) {
+                    offlineCacheMiss = true
+                }
             }
-            val nextFormat = candidates.getOrNull(candidateIndex + 1)
-                ?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()
-            appendFeedTraceLog(
-                context,
-                "media_selection_fallback",
-                "media rendition failed; trying fallback",
-                "format=${candidate?.substringBefore('?')?.substringAfterLast('.', "original")?.lowercase(Locale.ROOT).orEmpty()};next=${nextFormat.ifBlank { "none" }};decodeFailure=$decodeFailure;status=render_error"
-            )
-            if (candidateIndex < candidates.lastIndex) candidateIndex++
+        )
+        if (offlineCacheMiss) OfflineMediaPlaceholder(Modifier.fillMaxSize())
+    }
+}
+
+private fun offlineCacheOnlyImageRequest(context: Context, url: String?, offlineMode: Boolean): ImageRequest =
+    ImageRequest.Builder(context)
+        .data(url)
+        .apply {
+            if (offlineMode) {
+                memoryCachePolicy(CachePolicy.ENABLED)
+                diskCachePolicy(CachePolicy.ENABLED)
+                networkCachePolicy(CachePolicy.DISABLED)
+            }
         }
-    )
+        .build()
+
+@Composable
+private fun OfflineMediaPlaceholder(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            "Bild nicht lokal gespeichert",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(12.dp)
+        )
+    }
 }
 
 @Composable
@@ -22173,6 +22208,7 @@ private fun FullscreenPhotoViewer(
     urls: List<String>,
     initialIndex: Int,
     photoId: Long?,
+    offlineMode: Boolean,
     locationMapsUrl: String?,
     meId: Long?,
     comment: String,
@@ -22305,6 +22341,7 @@ private fun FullscreenPhotoViewer(
                     ) { page ->
                         ZoomableViewerImage(
                             url = urls[page],
+                            offlineMode = offlineMode,
                             active = page == pagerState.currentPage,
                             onScaleChanged = { scale -> scales[page] = scale },
                             onDoubleTap = onDoubleTapReact
@@ -22555,12 +22592,15 @@ private fun ViewerInteractionSheet(
 @Composable
 private fun ZoomableViewerImage(
     url: String,
+    offlineMode: Boolean,
     active: Boolean,
     onScaleChanged: (Float) -> Unit,
     onDoubleTap: (() -> Unit)? = null
 ) {
+    val context = LocalContext.current
     var scale by remember(url) { mutableStateOf(1f) }
     var offset by remember(url) { mutableStateOf(Offset.Zero) }
+    var offlineCacheMiss by remember(url, offlineMode) { mutableStateOf(false) }
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         val nextScale = (scale * zoomChange).coerceIn(1f, 5f)
         if (nextScale == 1f) {
@@ -22582,30 +22622,55 @@ private fun ZoomableViewerImage(
         onScaleChanged(scale)
     }
 
-    AsyncImage(
-        model = url,
-        contentDescription = "Vollbild",
-        modifier = Modifier
-            .fillMaxSize()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
+    Box(modifier = Modifier.fillMaxSize()) {
+        AsyncImage(
+            model = remember(url, offlineMode) { offlineCacheOnlyImageRequest(context, url, offlineMode) },
+            contentDescription = "Vollbild",
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                }
+                .pointerInput(url) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            onDoubleTap?.invoke()
+                        }
+                    )
+                }
+                // Important: keep single-finger horizontal swipes for pager navigation.
+                // Pan gestures are only consumed while zoomed in.
+                .transformable(
+                    state = transformState,
+                    canPan = { scale > 1f }
+                ),
+            contentScale = ContentScale.Fit,
+            onSuccess = { state ->
+                offlineCacheMiss = false
+                if (offlineMode) {
+                    appendFeedTraceLog(
+                        context,
+                        "offline_media_cache_hit",
+                        "offline cached media rendered",
+                        "surface=viewer;format=${url.substringBefore('?').substringAfterLast('.', "original").lowercase(Locale.ROOT)};source=${state.result.dataSource}"
+                    )
+                }
+            },
+            onError = {
+                if (offlineMode) {
+                    offlineCacheMiss = true
+                    appendFeedTraceLog(
+                        context,
+                        "offline_media_cache_miss",
+                        "offline media missing from cache",
+                        "surface=viewer;format=${url.substringBefore('?').substringAfterLast('.', "original").lowercase(Locale.ROOT)};final=true"
+                    )
+                }
             }
-            .pointerInput(url) {
-                detectTapGestures(
-                    onDoubleTap = {
-                        onDoubleTap?.invoke()
-                    }
-                )
-            }
-            // Important: keep single-finger horizontal swipes for pager navigation.
-            // Pan gestures are only consumed while zoomed in.
-            .transformable(
-                state = transformState,
-                canPan = { scale > 1f }
-            ),
-        contentScale = ContentScale.Fit
-    )
+        )
+        if (offlineCacheMiss) OfflineMediaPlaceholder(Modifier.fillMaxSize())
+    }
 }

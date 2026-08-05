@@ -1,0 +1,10 @@
+{
+  "version": "0.8.23",
+  "title": "Offline-Medien zeigen den echten lokalen Cache",
+  "highlights": [
+    "Feed und Vollansicht nutzen offline jetzt Memory- und Disk-Cache ohne jeden Netzwerkzugriff.",
+    "Der Hinweis erscheint nur noch bei einem echten lokalen Cache-Miss.",
+    "Diagnoseprotokolle erfassen datensparsam Cache-Treffer und -Misses ohne Bild-URLs.",
+    "Beim Oeffnen einer Vollansicht werden offline keine Interaktionsdaten mehr angefragt."
+  ]
+}
