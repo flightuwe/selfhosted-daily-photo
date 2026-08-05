@@ -1,0 +1,10 @@
+{
+  "version": "0.8.22",
+  "title": "Offline-Grenzen und Timecapsules abgesichert",
+  "highlights": [
+    "Der Offline-Modus blockiert jetzt auch Update-Pruefungen und GitHub-Changelogs; gespeicherte Release-Infos bleiben lesbar.",
+    "Feed-Bilder werden offline nicht mehr nachgeladen; fehlende lokale Medien zeigen einen ruhigen Platzhalter.",
+    "Timecapsules lassen sich weder in der App noch ueber die API als Community-Post freigeben.",
+    "Die Reaktivierung des Online-Modus synchronisiert kontrolliert nur einmal und vermeidet doppelte Startup-Refreshes."
+  ]
+}

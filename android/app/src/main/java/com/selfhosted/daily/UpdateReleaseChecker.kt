@@ -19,7 +19,8 @@ object UpdateReleaseChecker {
     private const val RELEASES_TAG_URL_PREFIX = "https://api.github.com/repos/flightuwe/selfhosted-daily-photo/releases/tags/"
     private const val RELEASES_DOWNLOAD_URL_PREFIX = "https://github.com/flightuwe/selfhosted-daily-photo/releases/download/"
 
-    suspend fun checkForUpdate(currentVersion: String): UpdateInfo? = withContext(Dispatchers.IO) {
+    suspend fun checkForUpdate(currentVersion: String, allowNetwork: Boolean): UpdateInfo? = withContext(Dispatchers.IO) {
+        if (!allowNetwork) return@withContext null
         val release = fetchRelease(RELEASES_LATEST_URL) ?: return@withContext null
         if (isVersionNewer(release.version, currentVersion)) {
             UpdateInfo(release.version, release.releaseUrl, release.apkUrl)
@@ -28,7 +29,8 @@ object UpdateReleaseChecker {
         }
     }
 
-    suspend fun changelogLinesForVersion(version: String): List<String> = withContext(Dispatchers.IO) {
+    suspend fun changelogLinesForVersion(version: String, allowNetwork: Boolean): List<String> = withContext(Dispatchers.IO) {
+        if (!allowNetwork) return@withContext emptyList()
         val normalized = version.trim().removePrefix("v")
         if (normalized.isBlank()) return@withContext emptyList()
         val tag = "v$normalized"

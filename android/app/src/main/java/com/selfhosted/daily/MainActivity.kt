@@ -4293,6 +4293,7 @@ class AppRepo(
         capsule: CapsuleUploadOptions = CapsuleUploadOptions(),
         communityPost: Boolean = false
     ): QueuedUploadItem {
+        require(!(communityPost && capsule.enabled)) { "time_capsule_community_post_conflict" }
         val backCapturedAt = readCapturedAtFromUri(backUri)
         val frontCapturedAt = readCapturedAtFromUri(frontUri)
         val capturedAt = earliestCapturedAt(backCapturedAt, frontCapturedAt)
@@ -4386,13 +4387,13 @@ class AppRepo(
     }
 
     suspend fun checkForUpdate(currentVersion: String): UpdateInfo? =
-        UpdateReleaseChecker.checkForUpdate(currentVersion)
+        UpdateReleaseChecker.checkForUpdate(currentVersion, allowNetwork = !OfflineModeManager.isEnabled(context))
 
     suspend fun changelogLines(currentVersion: String): List<String> =
-        UpdateReleaseChecker.changelogLinesForVersion(currentVersion)
+        UpdateReleaseChecker.changelogLinesForVersion(currentVersion, allowNetwork = !OfflineModeManager.isEnabled(context))
 
     suspend fun changelogHistory(forceRefresh: Boolean = false): List<ChangelogEntry> =
-        releaseHistory.history(forceRefresh)
+        releaseHistory.history(allowNetwork = !OfflineModeManager.isEnabled(context), forceRefresh = forceRefresh)
 
     fun downloadLatestApk(update: UpdateInfo): Long {
         OfflineModeManager.requireOnline(context)
@@ -5159,6 +5160,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     private var lastApiFailureMessage = ""
     private var lastRefreshExecutionDisposition = RefreshExecutionDisposition.IDLE
     private var networkRecoveryJob: Job? = null
+    private var offlineReactivationJob: Job? = null
     private var networkRecoveryActive = false
     private var networkRecoveryReason = ""
     private var lastNetworkTransitionAtMs = 0L
@@ -6684,6 +6686,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
 
     override fun onCleared() {
         networkRecoveryJob?.cancel()
+        offlineReactivationJob?.cancel()
         deleteFeatureSyncJob?.cancel()
         super.onCleared()
     }
@@ -7510,18 +7513,29 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         OfflineModeManager.setEnabled(repo.contextForOfflineMode(), enabled)
         FirebaseMessaging.getInstance().isAutoInitEnabled = !enabled
         if (enabled) {
+            offlineReactivationJob?.cancel()
+            offlineReactivationJob = null
             finishNetworkRecovery("offline_mode_enabled", currentNetworkSnapshot())
         }
         state = state.copy(
             offlineMode = enabled,
             serverConnected = if (enabled) false else state.serverConnected,
             pushProvider = if (enabled) "deaktiviert" else state.pushProvider,
+            updateInfo = if (enabled) null else state.updateInfo,
+            latestUpdateInfo = if (enabled) null else state.latestUpdateInfo,
+            updateAvailable = if (enabled) false else state.updateAvailable,
+            updateCheckInFlight = if (enabled) false else state.updateCheckInFlight,
+            updateError = if (enabled) null else state.updateError,
             message = if (enabled) "Offline-Modus aktiv. Uploads warten lokal." else "Offline-Modus beendet. Synchronisierung startet."
         )
-        if (!enabled) viewModelScope.launch {
-            runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
-            refreshStartupCore()
-            refreshAll(reason = "offline_mode_disabled", bypassCooldown = true)
+        if (!enabled && offlineReactivationJob?.isActive != true) {
+            offlineReactivationJob = viewModelScope.launch {
+                runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
+                refreshStartupCore()
+                runDeferredStartupHydration()
+            }.also { job ->
+                job.invokeOnCompletion { if (offlineReactivationJob === job) offlineReactivationJob = null }
+            }
         }
     }
 
@@ -8192,6 +8206,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun jumpToDay(day: String, source: String = "direct_jump") {
+        if (state.offlineMode) return
         clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
         state = withFeedNavigationTrace(requestId = scrollRequestId, source = source).copy(
@@ -8228,6 +8243,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         reactionEmoji: String? = null,
         source: String = "direct_jump"
     ) {
+        if (state.offlineMode) return
         clearHiddenNewerContentIfReached(day)
         val scrollRequestId = issueFeedScrollRequestId()
         state = withFeedNavigationTrace(requestId = scrollRequestId, source = source).copy(
@@ -9418,6 +9434,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun jumpToFeedTop() {
+        if (state.offlineMode) return
         if (state.feedOrderMode == FeedOrderMode.CHRONO) {
             val targetDay = state.prompt?.day ?: state.calendarDays.firstOrNull() ?: state.feedDays.firstOrNull()
             if (!targetDay.isNullOrBlank()) {
@@ -9452,6 +9469,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
      * trusting a possibly paged local calendar index.
      */
     suspend fun jumpToFeedBottom() {
+        if (state.offlineMode) return
         if (state.feedOrderMode != FeedOrderMode.CHRONO) {
             return
         }
@@ -9516,6 +9534,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun loadOlderFeedDays(count: Int = 3) {
+        if (state.offlineMode) return
         if (state.feedPaging || state.feedNavigationInFlight) return
         if (state.feedOrderMode != FeedOrderMode.CHRONO) {
             if (!state.feedIndexHasOlder) return
@@ -9532,6 +9551,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun loadNewerFeedDays(count: Int = 3) {
+        if (state.offlineMode) return
         if (state.feedPaging || state.feedNavigationInFlight) return
         if (state.feedOrderMode != FeedOrderMode.CHRONO) {
             if (!state.feedIndexHasNewer) return
@@ -10733,6 +10753,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun checkForUpdate(silent: Boolean = false) {
+        if (state.offlineMode || OfflineModeManager.isEnabled(repo.contextForOfflineMode())) {
+            state = state.copy(
+                loading = if (silent) state.loading else false,
+                updateInfo = null,
+                latestUpdateInfo = null,
+                updateAvailable = false,
+                updateCheckInFlight = false,
+                updateError = null,
+                message = if (silent) state.message else "Update-Pruefung ist im Offline-Modus pausiert."
+            )
+            return
+        }
         state = state.copy(
             loading = if (silent) state.loading else true,
             updateCheckInFlight = true,
@@ -11063,7 +11095,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val entries = runCatching { repo.changelogHistory() }
             .getOrDefault(emptyList())
             .filter { it.version == BuildConfig.VERSION_NAME.trim().removePrefix("v") }
-        val lines = if (entries.isEmpty()) fetchChangelogLinesFresh() else emptyList()
+        val lines = if (entries.isEmpty() && !state.offlineMode) fetchChangelogLinesFresh() else emptyList()
         state = state.copy(
             showChangelogDialog = true,
             changelogLines = if (lines.isNotEmpty()) lines else state.changelogLines,
@@ -11084,7 +11116,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 state.copy(changelogHistoryEntries = entries, changelogHistoryLoading = false)
             },
             onFailure = {
-                state.copy(changelogHistoryLoading = false, changelogHistoryError = "Changelog-Verlauf konnte nicht geladen werden.")
+                state.copy(changelogHistoryLoading = false, changelogHistoryError = if (state.offlineMode) "Im Offline-Modus sind nur bereits gespeicherte Release-Infos verfuegbar." else "Changelog-Verlauf konnte nicht geladen werden.")
             }
         )
     }
@@ -12733,7 +12765,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         return
     }
 
-    LaunchedEffect(state.token, state.startupDone, state.offlineMode) {
+    LaunchedEffect(state.token, state.startupDone) {
         if (state.offlineMode) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         vm.refreshStartupCore()
@@ -13717,6 +13749,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     preferSwipeForTwoImagePosts = state.preferSwipeForTwoImagePosts,
                     showMediaFormatBadge = state.showMediaFormatBadge,
                     showNsfwByDefault = state.user?.showNsfwByDefault ?: false,
+                    offlineMode = state.offlineMode,
                     mediaDataMode = state.mediaDataMode,
                     mediaFormatPreference = state.mediaFormatPreference,
                     onTakePhoto = { vm.setTab(AppTab.CAMERA) },
@@ -13874,6 +13907,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     editableColor = profileColor,
                     appVersion = BuildConfig.VERSION_NAME,
                     updateAvailable = state.updateAvailable,
+                    offlineMode = state.offlineMode,
                     serverVersion = state.serverVersion,
                     pushProvider = state.pushProvider,
                     apiBaseUrl = state.activeApiBaseUrl,
@@ -15010,6 +15044,7 @@ fun FeedTab(
     preferSwipeForTwoImagePosts: Boolean,
     showMediaFormatBadge: Boolean,
     showNsfwByDefault: Boolean,
+    offlineMode: Boolean,
     mediaDataMode: String,
     mediaFormatPreference: String,
     onTakePhoto: () -> Unit,
@@ -15560,6 +15595,7 @@ fun FeedTab(
                         showPublicPostNumbers = showPublicPostNumbers,
                         preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
                         showNsfwByDefault = showNsfwByDefault,
+                        offlineMode = offlineMode,
                         mediaDataMode = mediaDataMode,
                         mediaFormatPreference = mediaFormatPreference,
                         nsfwRevealed = revealedNsfwPhotoIds.contains(item.photo.id),
@@ -15803,6 +15839,7 @@ private fun FeedPostCard(
     showPublicPostNumbers: Boolean,
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
+    offlineMode: Boolean,
     mediaDataMode: String,
     mediaFormatPreference: String,
     nsfwRevealed: Boolean,
@@ -15838,6 +15875,7 @@ private fun FeedPostCard(
         showPublicPostNumbers = showPublicPostNumbers,
         preferSwipeForTwoImagePosts = preferSwipeForTwoImagePosts,
         showNsfwByDefault = showNsfwByDefault,
+        offlineMode = offlineMode,
         mediaDataMode = mediaDataMode,
         mediaFormatPreference = mediaFormatPreference,
         nsfwRevealed = nsfwRevealed,
@@ -15949,7 +15987,8 @@ private fun FeedPostCard(
                                 }
                             )
                         }
-                        if (!item.photo.communityPost && !item.photo.promptOnly && (viewerId == item.user.id || item.user.allowCommunityPostPromotion)) {
+                        val isTimeCapsule = !item.photo.capsuleMode.isNullOrBlank() || !item.photo.capsuleVisibleAt.isNullOrBlank()
+                        if (!item.photo.communityPost && !item.photo.promptOnly && !isTimeCapsule && (viewerId == item.user.id || item.user.allowCommunityPostPromotion)) {
                             androidx.compose.material3.DropdownMenuItem(
                                 text = { Text("Als Community-Post freigeben") },
                                 onClick = {
@@ -16169,6 +16208,7 @@ private fun PostCanvasCard(
     showPublicPostNumbers: Boolean,
     preferSwipeForTwoImagePosts: Boolean,
     showNsfwByDefault: Boolean,
+    offlineMode: Boolean = false,
     mediaDataMode: String = "normal",
     mediaFormatPreference: String = "auto",
     nsfwRevealed: Boolean,
@@ -16358,6 +16398,7 @@ private fun PostCanvasCard(
                             ) {
                                 FeedRenditionImage(
                                     candidates = displayCandidates[it],
+                                    offlineMode = offlineMode,
                                     contentDescription = "${item.user.username} Foto",
                                     modifier = Modifier
                                         .fillMaxSize()
@@ -16380,6 +16421,7 @@ private fun PostCanvasCard(
                                 displayCandidates.forEach { candidates ->
                                     FeedRenditionImage(
                                         candidates = candidates,
+                                        offlineMode = offlineMode,
                                         contentDescription = "${item.user.username} Foto",
                                         modifier = Modifier
                                             .weight(1f)
@@ -17220,11 +17262,27 @@ private fun HashtagText(
 @Composable
 private fun FeedRenditionImage(
     candidates: List<String>,
+    offlineMode: Boolean,
     contentDescription: String?,
     modifier: Modifier,
     contentScale: ContentScale,
     onFormatResolved: (String) -> Unit = {}
 ) {
+    if (offlineMode) {
+        Box(
+            modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "Bild nicht lokal gespeichert",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(12.dp)
+            )
+        }
+        return
+    }
     val context = LocalContext.current
     var candidateIndex by remember(candidates) { mutableStateOf(0) }
     val candidate = candidates.getOrNull(candidateIndex)
@@ -19313,6 +19371,7 @@ fun ProfileTab(
     editableColor: String,
     appVersion: String,
     updateAvailable: Boolean,
+    offlineMode: Boolean,
     serverVersion: String,
     pushProvider: String,
     apiBaseUrl: String,
@@ -19629,13 +19688,14 @@ fun ProfileTab(
                                 updateChecked = true
                                 onCheckUpdate()
                             },
+                            enabled = !offlineMode,
                             modifier = Modifier
                                 .weight(1f)
                                 .graphicsLayer {
                                     scaleX = updateButtonScale.value
                                     scaleY = updateButtonScale.value
                                 }
-                        ) { Text(if (updateChecked) "Update geprueft" else "Update pruefen") }
+                        ) { Text(if (offlineMode) "Offline" else if (updateChecked) "Update geprueft" else "Update pruefen") }
                         Button(onClick = onShowChangelog, modifier = Modifier.widthIn(min = 56.dp)) { Text("!") }
                         Button(onClick = onShowHelp, modifier = Modifier.widthIn(min = 96.dp)) { Text("Hilfe") }
                     }

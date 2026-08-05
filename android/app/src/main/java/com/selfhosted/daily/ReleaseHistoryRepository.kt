@@ -27,8 +27,9 @@ class ReleaseHistoryRepository(context: Context) {
         .callTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    suspend fun history(forceRefresh: Boolean = false): List<ChangelogEntry> = withContext(Dispatchers.IO) {
+    suspend fun history(allowNetwork: Boolean, forceRefresh: Boolean = false): List<ChangelogEntry> = withContext(Dispatchers.IO) {
         val cached = cachedHistory()
+        if (!allowNetwork) return@withContext cached
         val cachedAt = prefs.getLong(CACHE_AT_KEY, 0L)
         val cacheFresh = cached.isNotEmpty() && System.currentTimeMillis() - cachedAt < CACHE_TTL_MS
         if (!forceRefresh && cacheFresh) return@withContext cached

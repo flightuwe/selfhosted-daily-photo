@@ -20,7 +20,7 @@ class UpdateCheckWorker(
         if (!enabled) return Result.success()
 
         runCatching {
-            val update = UpdateReleaseChecker.checkForUpdate(BuildConfig.VERSION_NAME)
+            val update = UpdateReleaseChecker.checkForUpdate(BuildConfig.VERSION_NAME, allowNetwork = true)
             if (update != null) {
                 val lastNotified = prefs.getString(PREF_LAST_NOTIFIED_VERSION, "") ?: ""
                 if (lastNotified != update.latestVersion) {

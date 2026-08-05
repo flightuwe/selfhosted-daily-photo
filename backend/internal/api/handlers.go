@@ -8995,6 +8995,10 @@ func (s *Server) handleDualUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": capsuleErr.Error()})
 		return
 	}
+	if communityPost && (capsuleMode != "" || capsuleVisibleAt != nil) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "time capsules cannot be community posts"})
+		return
+	}
 	locationShared, latitude, longitude, locationErr := parseLocationForm(c)
 	if locationErr != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": locationErr.Error()})
@@ -9332,7 +9336,7 @@ func (s *Server) handleCommunityPostActivate(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "photo not found"})
 		return
 	}
-	if photo.PromptOnly || photo.CapsuleVisibleAt != nil {
+	if photo.PromptOnly || photo.CapsuleMode != "" || photo.CapsuleVisibleAt != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only visible extras can become community posts"})
 		return
 	}

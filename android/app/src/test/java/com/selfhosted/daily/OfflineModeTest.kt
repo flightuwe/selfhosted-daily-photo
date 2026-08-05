@@ -9,6 +9,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 
 @RunWith(RobolectricTestRunner::class)
 class OfflineModeTest {
@@ -35,5 +37,20 @@ class OfflineModeTest {
 
         OfflineModeManager.setEnabled(context, false)
         assertFalse(OfflineModeManager.isEnabled(context))
+    }
+
+    @Test
+    fun changelogHistoryUsesOnlyItsLocalCacheWhenNetworkIsDisallowed() = runBlocking {
+        context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(
+                "github_release_history_v1",
+                "[{\"version\":\"0.8.21\",\"title\":\"Cached\",\"highlights\":[\"Local\"]}]"
+            )
+            .apply()
+
+        val entries = ReleaseHistoryRepository(context).history(allowNetwork = false, forceRefresh = true)
+
+        assertEquals(listOf("0.8.21"), entries.map { it.version })
     }
 }

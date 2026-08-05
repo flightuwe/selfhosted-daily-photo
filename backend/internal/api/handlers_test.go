@@ -770,6 +770,40 @@ func TestRouterBuildsWithoutPhotoCommentRouteConflict(t *testing.T) {
 	}
 }
 
+func TestHandleCommunityPostActivateRejectsTimeCapsulesByMode(t *testing.T) {
+	server := newSearchTestServer(t)
+	user := models.User{Username: "capsule-owner", PasswordHash: "x"}
+	if err := server.DB.Create(&user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	photo := models.Photo{
+		UserID:      user.ID,
+		Day:         "2026-08-05",
+		FilePath:    "capsule.jpg",
+		CapsuleMode: "date",
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create capsule: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(uint64(photo.ID), 10)}}
+	ctx.Set("user", user)
+
+	server.handleCommunityPostActivate(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	var stored models.Photo
+	if err := server.DB.First(&stored, photo.ID).Error; err != nil {
+		t.Fatalf("reload photo: %v", err)
+	}
+	if stored.CommunityPost {
+		t.Fatal("time capsule was incorrectly promoted to a community post")
+	}
+}
+
 func TestHandleAuthRefreshReturnsSessionRevokedErrorCodeForUnknownToken(t *testing.T) {
 	server := newSearchTestServer(t)
 	rec := httptest.NewRecorder()
