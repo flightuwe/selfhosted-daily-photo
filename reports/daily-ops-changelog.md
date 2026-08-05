@@ -217,3 +217,9 @@ This file is append-only operational history for Forge-side Daily continuity.
 - Published signed `app-release.apk` and `changelog.json` in the GitHub release.
 - Converted the historical rendition backlog to paused work on startup (7,128 rows); fresh logs show no new `database is locked` series. The remaining `record not found` worker entries mean no visible conversion is queued and are harmless.
 
+## 2026-08-05
+
+- Released the persistent Android offline mode in `v0.8.18` and completed its Timecapsule/morph-position correction in `v0.8.19` from `main` commit `c436116`.
+- Verified GitHub CI, Publish Server Images and Release Android APK for the final patch commit; the public release contains signed `app-release.apk` and `changelog.json`.
+- Rolled Broutschek CT `9204` atomically to matching `sha-c436116` backend/admin images. Internal operator verification and public `/api/health` plus `/api/health/live` were green on runtime `srv-364.1`; rollback anchor is `sha-c436116`.
+
