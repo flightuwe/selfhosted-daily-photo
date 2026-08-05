@@ -1976,9 +1976,11 @@ class AppRepo(
     private val context: Context,
     private val httpClient: OkHttpClient
 ) {
+    fun contextForOfflineMode(): Context = context
     fun isMeteredNetwork(): Boolean = NetworkUsageLedger.isMetered(context)
 
     fun preloadThumbnails(urls: Collection<String>) {
+        if (OfflineModeManager.isEnabled(context)) return
         if (!shouldPreloadThumbnails(isMeteredNetwork())) return
         urls.asSequence().map(String::trim).filter(String::isNotEmpty).distinct().take(24).forEach { url ->
             context.imageLoader.enqueue(
@@ -3829,6 +3831,7 @@ class AppRepo(
     }
 
     suspend fun syncDeviceTokenIfNeeded(force: Boolean = false) {
+        if (OfflineModeManager.isEnabled(context)) return
         if (token().isBlank()) {
             return
         }
@@ -4391,6 +4394,7 @@ class AppRepo(
         releaseHistory.history(forceRefresh)
 
     fun downloadLatestApk(update: UpdateInfo): Long {
+        OfflineModeManager.requireOnline(context)
         val fallbackUrl = "https://github.com/flightuwe/selfhosted-daily-photo/releases/latest/download/app-release.apk"
         val apkUrl = update.apkUrl?.trim().takeUnless { it.isNullOrBlank() } ?: fallbackUrl
         val safeVersion = update.latestVersion.trim().ifBlank { "latest" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
@@ -4409,6 +4413,7 @@ class AppRepo(
     }
 
     fun downloadPhotoToDownloads(photoUrl: String): Long {
+        OfflineModeManager.requireOnline(context)
         val safeUrl = photoUrl.trim()
         require(safeUrl.isNotBlank()) { "empty photo url" }
         val parsed = Uri.parse(safeUrl)
@@ -4434,6 +4439,13 @@ class AppRepo(
             return null
         }
         val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+        if (OfflineModeManager.isEnabled(context)) {
+            val gps = currentGpsLocation(manager)
+                ?: runCatching { manager.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull()
+            if (gps == null) return null
+            logSelectedLocation("offline_gps", gps)
+            return PendingLocationPayload(latitude = gps.latitude, longitude = gps.longitude)
+        }
         val candidates = buildList<Pair<String, android.location.Location>> {
             currentHighAccuracyLocation()?.let { add("fused_current" to it) }
             currentLocationFromManager(manager)?.let { add("manager_current" to it) }
@@ -4495,6 +4507,20 @@ class AppRepo(
                 val agePenalty = (ageMs / 1000f) * 1.5f
                 accuracyPenalty + agePenalty
             }
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun currentGpsLocation(manager: LocationManager): android.location.Location? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || !runCatching { manager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)) return null
+        return suspendCancellableCoroutine { cont ->
+            val signal = CancellationSignal()
+            cont.invokeOnCancellation { signal.cancel() }
+            runCatching {
+                manager.getCurrentLocation(LocationManager.GPS_PROVIDER, signal, context.mainExecutor) { location ->
+                    if (cont.isActive) cont.resume(location)
+                }
+            }.onFailure { if (cont.isActive) cont.resume(null) }
+        }
     }
 
     private fun logSelectedLocation(source: String, location: android.location.Location) {
@@ -4908,6 +4934,7 @@ data class UiState(
     val chatSending: Boolean = false,
     val loading: Boolean = false,
     val message: String = "",
+    val offlineMode: Boolean = false,
     val activeTab: AppTab = AppTab.CAMERA,
     val startupDone: Boolean = false,
     val startupCoreReady: Boolean = false,
@@ -6703,7 +6730,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (state.startupDone) return
         val perfStartedAt = System.currentTimeMillis()
         profileSetupPromptShownInSession = false
-        state = refreshConnectionHealthState(state.copy(startupDone = false, startupQuote = ""))
+        val offline = OfflineModeManager.isEnabled(repo.contextForOfflineMode())
+        state = refreshConnectionHealthState(state.copy(startupDone = false, startupQuote = "", offlineMode = offline))
+        if (offline) {
+            repo.loadLastWarmCoreCache()?.let(::applyWarmCoreCacheSnapshot)
+            repo.loadLastWarmCache()?.let(::applyWarmCacheSnapshot)
+            state = refreshConnectionHealthState(state.copy(
+                startupDone = true,
+                startupDeferredHydrationComplete = true,
+                serverConnected = false,
+                serverVersion = "Offline-Modus",
+                pushProvider = "deaktiviert",
+                uploadQueue = repo.uploadQueue(),
+                message = "Offline-Modus aktiv – lokale Inhalte und Aufnahmen bleiben verfügbar."
+            ))
+            return
+        }
         if (!repo.hasConfiguredApiBaseUrl()) {
             state = refreshConnectionHealthState(state.copy(
                 startupDone = true,
@@ -6819,6 +6861,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun refreshStartupCore(): Boolean {
+        if (state.offlineMode) return false
         if (repo.token().isBlank()) return false
         val started = System.currentTimeMillis()
         return runCatching {
@@ -6842,6 +6885,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun runDeferredStartupHydration() {
+        if (state.offlineMode) return
         delay(1_500)
         refreshAll(reason = "startup_deferred", refreshFeedWindow = false, bypassCooldown = true, showLoading = false)
         runCatching { checkForUpdate(silent = true) }
@@ -7430,6 +7474,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
         if (tab == AppTab.CALENDAR) {
             state = state.copy(activeTab = tab)
+            if (state.offlineMode) return
             viewModelScope.launch {
                 ensureCalendarModeLoaded(state.calendarMode, force = false)
                 if (!isFreshLoadState(state.hubBootstrapLoadState, hubBootstrapFreshMs)) {
@@ -7439,6 +7484,23 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             return
         }
         state = state.copy(activeTab = tab)
+    }
+
+    fun setOfflineMode(enabled: Boolean) {
+        if (state.offlineMode == enabled) return
+        OfflineModeManager.setEnabled(repo.contextForOfflineMode(), enabled)
+        FirebaseMessaging.getInstance().isAutoInitEnabled = !enabled
+        state = state.copy(
+            offlineMode = enabled,
+            serverConnected = if (enabled) false else state.serverConnected,
+            pushProvider = if (enabled) "deaktiviert" else state.pushProvider,
+            message = if (enabled) "Offline-Modus aktiv. Uploads warten lokal." else "Offline-Modus beendet. Synchronisierung startet."
+        )
+        if (!enabled) viewModelScope.launch {
+            runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
+            refreshStartupCore()
+            refreshAll(reason = "offline_mode_disabled", bypassCooldown = true)
+        }
     }
 
     fun setHubSection(section: HubSection) {
@@ -7532,6 +7594,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun refreshHubBootstrap(force: Boolean = true) {
+        if (state.offlineMode) return
         if (!force && isFreshLoadState(state.hubBootstrapLoadState, hubBootstrapFreshMs)) return
         state = state.copy(
             hubTimelineLoading = true,
@@ -7619,6 +7682,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun refreshHubTimeline(force: Boolean = true) {
+        if (state.offlineMode) return
         if (!force && state.hubTimelineComplete && isFreshLoadState(state.hubTimelineLoadState, hubTimelineFreshMs)) return
         state = state.copy(
             hubTimelineLoading = true,
@@ -7678,6 +7742,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun refreshHubTimeCapsules(force: Boolean = true) {
+        if (state.offlineMode) return
         if (!force && isFreshLoadState(state.hubTimeCapsulesLoadState, hubBootstrapFreshMs)) return
         state = state.copy(
             hubTimeCapsulesLoading = true,
@@ -7819,7 +7884,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                     ensureCalendarPublicWindowLoaded(state.calendarSelectedDay ?: state.calendarPublicData.days.firstOrNull())
                     return
                 }
-                CalendarMode.BOOKMARKS,
+                CalendarMode.BOOKMARKS -> if (
+                    state.calendarBookmarksData.days.isNotEmpty() &&
+                    isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)
+                ) {
+                    applyCalendarDataset(state.calendarBookmarksData)
+                    return
+                }
                 CalendarMode.SEARCH,
                 CalendarMode.TIME_CAPSULES -> if (isFreshLoadState(state.calendarModeLoadState, calendarPublicFreshMs)) return
             }
@@ -8551,6 +8622,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         showLoading: Boolean = true,
         respectCircuitBreaker: Boolean = true
     ): Boolean {
+        if (state.offlineMode) return false
         consumePersistedFeedInvalidations(reason)
         consumeResolvedPhotoInvalidationsIntoDays()
         if (repo.token().isBlank()) {
@@ -9110,6 +9182,12 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         meta = "reason=$reason;refreshed=$refreshedVisibleInteractions;remainingStale=${stalePhotoInteractionIds.joinToString(",").ifBlank { "-" }}"
                     )
                 }
+                // The feed can surface new posts before the user visits the Hub.
+                // Refresh its timeline delta in the same cycle so it never needs a
+                // separate manual pull-to-refresh to catch up with the feed.
+                if (refreshedFeedDays > 0) {
+                    refreshHubTimeline(force = true)
+                }
             } else {
                 val today = prompt.day
                 val hasVisibleTodayFeed = state.feedByDay[today].orEmpty().isNotEmpty()
@@ -9223,6 +9301,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     suspend fun refreshFeed(reason: String = "feed_pull") {
+        if (state.offlineMode) return
         if (state.feedRefreshing) {
             val isManual = reason == "feed_pull"
             if (isManual) {
@@ -12373,6 +12452,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     var profileUsername by remember { mutableStateOf("") }
     var profileColor by remember { mutableStateOf("#1F5FBF") }
     var chatInput by remember { mutableStateOf("") }
+    var offlineSurfaceNotice by remember { mutableStateOf<String?>(null) }
     var viewerUrls by remember { mutableStateOf<List<String>>(emptyList()) }
     var viewerIndex by remember { mutableStateOf(0) }
     var viewerPhotoId by remember { mutableStateOf<Long?>(null) }
@@ -12631,13 +12711,15 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         return
     }
 
-    LaunchedEffect(state.token, state.startupDone) {
+    LaunchedEffect(state.token, state.startupDone, state.offlineMode) {
+        if (state.offlineMode) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         vm.refreshStartupCore()
         vm.runDeferredStartupHydration()
     }
 
-    LaunchedEffect(state.token, state.startupDone) {
+    LaunchedEffect(state.token, state.startupDone, state.offlineMode) {
+        if (state.offlineMode) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         // The slim core refresh owns startup. Keep the periodic full refresh
         // from racing it or starting a second full bootstrap on first frame.
@@ -12665,7 +12747,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         vm.refreshAll(refreshFeedWindow = vm.state.activeTab != AppTab.FEED)
     }
 
-    LaunchedEffect(state.token, state.startupDone, state.activeTab) {
+    LaunchedEffect(state.token, state.startupDone, state.activeTab, state.offlineMode) {
+        if (state.offlineMode) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         if (state.activeTab != AppTab.FEED) return@LaunchedEffect
         while (true) {
@@ -12677,7 +12760,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         }
     }
 
-    LaunchedEffect(state.token, state.startupDone, state.activeTab) {
+    LaunchedEffect(state.token, state.startupDone, state.activeTab, state.offlineMode) {
+        if (state.offlineMode) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         if (state.activeTab != AppTab.PROFILE) return@LaunchedEffect
         vm.refreshFotomojiTemplates()
@@ -13441,18 +13525,18 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 FeedNavigationItem(
                     selected = state.activeTab == AppTab.FEED,
                     label = feedTabLabel,
-                    onClick = { vm.setTab(AppTab.FEED) },
+                    onClick = { vm.setTab(AppTab.FEED); if (state.offlineMode) offlineSurfaceNotice = "Feed" },
                     onLongClick = { feedModePickerVisible = true }
                 )
                 NavigationBarItem(
                     selected = state.activeTab == AppTab.CALENDAR,
-                    onClick = { vm.setTab(AppTab.CALENDAR) },
+                    onClick = { vm.setTab(AppTab.CALENDAR); if (state.offlineMode) offlineSurfaceNotice = "Hub" },
                     label = { Text("Hub") },
                     icon = { Icon(Icons.Filled.Home, contentDescription = "Hub") }
                 )
                 NavigationBarItem(
                     selected = state.activeTab == AppTab.CHAT,
-                    onClick = { vm.setTab(AppTab.CHAT) },
+                    onClick = { vm.setTab(AppTab.CHAT); if (state.offlineMode) offlineSurfaceNotice = "Chat" },
                     label = { Text("Chat") },
                     icon = {
                         ChatTabIcon(
@@ -13479,6 +13563,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             when (state.activeTab) {
                 AppTab.CAMERA -> CameraTab(
                     prompt = state.prompt,
+                    offlineMode = state.offlineMode,
                     currentUsername = state.user?.username,
                     networkUnstable = vm.shouldPauseFeedAutoRefresh(),
                     promptRules = state.promptRules,
@@ -13493,6 +13578,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     backPreviewUri = backPreviewUri,
                     frontPreviewUri = frontPreviewUri,
                     onDownloadUpdate = { vm.downloadLatestUpdateFromBadge() },
+                    onToggleOfflineMode = { vm.setOfflineMode(!state.offlineMode) },
                     onLocationShareEnabledChange = {
                         cameraLocationToggleTouched = true
                         cameraLocationShareEnabled = it
@@ -14015,6 +14101,15 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             }
         }
     }
+    offlineSurfaceNotice?.let { surface ->
+        AlertDialog(
+            onDismissRequest = { offlineSurfaceNotice = null },
+            title = { Text("$surface im Offline-Modus") },
+            text = { Text("Bereits gespeicherte Inhalte bleiben lesbar. Aktualisieren, Senden und andere Netzaktionen sind pausiert.") },
+            confirmButton = { Button(onClick = { offlineSurfaceNotice = null; vm.setOfflineMode(false) }) { Text("Offline-Modus beenden") } },
+            dismissButton = { TextButton(onClick = { offlineSurfaceNotice = null }) { Text("Weiter offline") } }
+        )
+    }
 }
 
 @Composable
@@ -14131,6 +14226,7 @@ fun StartupScreen(serverConnected: Boolean, appVersion: String, startupQuote: St
 @Composable
 fun CameraTab(
     prompt: PromptResponse?,
+    offlineMode: Boolean,
     currentUsername: String?,
     networkUnstable: Boolean,
     promptRules: PromptRulesResponse?,
@@ -14145,6 +14241,7 @@ fun CameraTab(
     backPreviewUri: Uri?,
     frontPreviewUri: Uri?,
     onDownloadUpdate: () -> Unit,
+    onToggleOfflineMode: () -> Unit,
     onLocationShareEnabledChange: (Boolean) -> Unit,
     onRequestLocationPermission: () -> Unit,
     onOpenLocationPermissionSettings: () -> Unit,
@@ -14172,7 +14269,7 @@ fun CameraTab(
 ) {
     val hasPromptPosted = prompt?.hasPromptPostedToday == true
     val hasVisiblePosted = prompt?.hasVisiblePostToday == true
-    val canUpload = prompt?.canUpload == true
+    val canUpload = prompt?.canUpload == true && !offlineMode
     val canSpecial = specialMomentStatus?.canRequest == true
     val activeMomentKind = normalizeMomentKind(prompt?.momentKind, prompt?.triggerSource)
     val activeSpecialRequester = prompt?.requestedByUser?.takeIf { !it.isNullOrBlank() } ?: prompt?.specialRequestedByUser
@@ -14238,14 +14335,18 @@ fun CameraTab(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                RainbowDailyTitle()
+                OfflineModeHeader(
+                    offline = offlineMode,
+                    dayLabel = dayLabel,
+                    onToggle = onToggleOfflineMode
+                )
                 if (showConnectionHealthIndicator) {
                     ConnectionHealthDot(
                         snapshot = connectionHealthSnapshot,
                         onClick = { showConnectionHealthDialog = true }
                     )
                 }
-                if (updateAvailable) {
+                if (updateAvailable && !offlineMode) {
                     Text(
                         text = "UPDATE VERFUEGBAR",
                         color = Color.White,
@@ -14264,7 +14365,7 @@ fun CameraTab(
                     Text("Update-Check ...", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            Text(dayLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!offlineMode) Text(dayLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         val specialTriggeredAt = prompt?.specialTriggeredAt
         if (!specialTriggeredAt.isNullOrBlank()) {
@@ -14360,7 +14461,7 @@ fun CameraTab(
             }
         }
 
-        prompt?.activeCommunityPost?.takeIf { it.communityActive }?.let { community ->
+        if (!offlineMode) prompt?.activeCommunityPost?.takeIf { it.communityActive }?.let { community ->
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFFFE0B2))
@@ -14427,7 +14528,7 @@ fun CameraTab(
                     onClick = { onCaptureExtra(CapsuleUploadOptions()) },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Weiteres Extra posten") }
-                Button(onClick = { showCommunityPostDialog = true }, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
+                if (!offlineMode) Button(onClick = { showCommunityPostDialog = true }, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
             }
             if (!canUpload) {
                 TextButton(
@@ -14436,7 +14537,7 @@ fun CameraTab(
                 ) {
                     Text("Timecapsule aufnehmen")
                 }
-                if (showSpecialMomentButton) {
+                if (!offlineMode && showSpecialMomentButton) {
                     SpecialMomentActionButton(
                         text = specialLabel,
                         onClick = onRequestSpecialMoment,
@@ -14496,10 +14597,10 @@ fun CameraTab(
                         onClick = { onCaptureExtra(CapsuleUploadOptions()) },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Extra posten") }
-                    Button(onClick = { showCommunityPostDialog = true }, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
+                    if (!offlineMode) Button(onClick = { showCommunityPostDialog = true }, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
                 }
                 if (!canUpload) {
-                    if (showSpecialMomentButton) {
+                    if (!offlineMode && showSpecialMomentButton) {
                         SpecialMomentActionButton(
                             text = specialLabel,
                             onClick = onRequestSpecialMoment,
@@ -14708,7 +14809,6 @@ fun CameraTab(
             }
         )
     }
-
     if (showCommunityPostDialog) {
         AlertDialog(
             onDismissRequest = { showCommunityPostDialog = false },
@@ -15874,6 +15974,66 @@ private fun FeedPostCard(
             text = { Text("Ein Community-Post ist ein gemeinsamer Beitrag. Andere Mitglieder können diesem Post später jeweils ein eigenes Bild hinzufügen. Der Post bleibt dauerhaft bestehen und kann nach der Freigabe nicht wieder geschlossen werden.") },
             confirmButton = { Button(onClick = { showCommunityPostDisclaimer = false; onActivateCommunityPost(item.photo.id) }) { Text("OK") } },
             dismissButton = { TextButton(onClick = { showCommunityPostDisclaimer = false }) { Text("Abbrechen") } }
+        )
+    }
+}
+
+/** Hidden, tactile entry point for the persisted offline mode. */
+@Composable
+private fun OfflineModeHeader(
+    offline: Boolean,
+    dayLabel: String,
+    onToggle: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val transition = rememberInfiniteTransition(label = "offline-prism")
+    val hue by transition.animateFloat(0f, 360f, infiniteRepeatable(tween(8_000, easing = LinearEasing)), label = "offline-hue")
+    val progress = remember { Animatable(if (offline) 1f else 0f) }
+    var dragStart by remember { mutableStateOf(0f) }
+    LaunchedEffect(offline) { progress.animateTo(if (offline) 1f else 0f, tween(360)) }
+    val outline = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) Color.White else Color.Black
+    Box(
+        modifier = Modifier
+            .width(172.dp)
+            .heightIn(min = 44.dp)
+            .pointerInput(offline) {
+                detectDragGestures(
+                    onDragStart = { dragStart = progress.value },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        val direction = if (offline) -1f else 1f
+                        scope.launch { progress.snapTo((dragStart + direction * amount.x / 140f).coerceIn(0f, 1f)) }
+                    },
+                    onDragEnd = {
+                        val target = if ((!offline && progress.value > .52f) || (offline && progress.value < .48f)) 1f - dragStart else dragStart
+                        if ((!offline && target > .5f) || (offline && target < .5f)) onToggle()
+                        scope.launch { progress.animateTo(if (offline) 1f else 0f, tween(260)) }
+                    },
+                    onDragCancel = { scope.launch { progress.animateTo(if (offline) 1f else 0f, tween(220)) } }
+                )
+            },
+        contentAlignment = Alignment.CenterStart
+    ) {
+        // A tiny spectrum trail makes the colour appear to peel away while dragging.
+        Canvas(modifier = Modifier.fillMaxSize().graphicsLayer(alpha = (1f - progress.value) * .8f)) {
+            repeat(6) { index ->
+                drawCircle(rainbowColor(hue + index * 52f), radius = 3.dp.toPx(), center = Offset(size.width * (.22f + index * .09f), size.height / 2f))
+            }
+        }
+        Text(
+            text = buildAnnotatedString { withStyle(SpanStyle(brush = Brush.linearGradient(listOf(rainbowColor(hue), rainbowColor(hue + 150f), rainbowColor(hue + 280f))))) { append("Daily") } },
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.graphicsLayer(alpha = 1f - progress.value, translationX = progress.value * 70f)
+        )
+        Text(
+            text = "OFFLINE",
+            color = outline,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .graphicsLayer(alpha = progress.value, translationX = (1f - progress.value) * -38f)
+                .border(1.dp, outline, RoundedCornerShape(18.dp))
+                .padding(horizontal = 9.dp, vertical = 5.dp)
         )
     }
 }

@@ -942,6 +942,7 @@ class UploadQueueWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
+        if (OfflineModeManager.isEnabled(applicationContext)) return Result.success()
         UploadQueueManager.recoverStaleEntries(applicationContext)
         val item = UploadQueueManager.claimNextRunnable(applicationContext) ?: return Result.success()
         val networkSnapshot = queueNetworkSnapshotMeta(applicationContext)
@@ -1574,6 +1575,10 @@ object UploadQueueScheduler {
         .build()
 
     fun sync(context: Context) {
+        if (OfflineModeManager.isEnabled(context)) {
+            cancelForOffline(context)
+            return
+        }
         UploadQueueManager.recoverStaleEntries(context)
         syncRecoveryCheck(context)
         val nextDelay = UploadQueueManager.nextDelaySeconds(context)
@@ -1588,18 +1593,22 @@ object UploadQueueScheduler {
     }
 
     fun enqueueNow(context: Context) {
+        if (OfflineModeManager.isEnabled(context)) return
         scheduleInternal(context, 0L)
     }
 
     fun scheduleSoon(context: Context, delaySeconds: Long = 20) {
+        if (OfflineModeManager.isEnabled(context)) return
         scheduleIn(context, delaySeconds)
     }
 
     fun scheduleIn(context: Context, delaySeconds: Long) {
+        if (OfflineModeManager.isEnabled(context)) return
         scheduleInternal(context, delaySeconds.coerceAtLeast(0L))
     }
 
     fun scheduleRecoveryCheck(context: Context, delayMs: Long) {
+        if (OfflineModeManager.isEnabled(context)) return
         val request = OneTimeWorkRequestBuilder<UploadQueueRecoveryWorker>()
             .setInitialDelay(delayMs.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
             .build()
@@ -1666,6 +1675,14 @@ object UploadQueueScheduler {
             .edit()
             .remove(PREF_KEY_NEXT_SCHEDULED_AT_MS)
             .apply()
+    }
+
+    fun cancelForOffline(context: Context) {
+        val workManager = WorkManager.getInstance(context)
+        workManager.cancelUniqueWork(WORK_NAME)
+        workManager.cancelUniqueWork(RECOVERY_WORK_NAME)
+        context.getSharedPreferences("app", Context.MODE_PRIVATE).edit()
+            .remove(PREF_KEY_NEXT_SCHEDULED_AT_MS).apply()
     }
 
     private const val WORK_NAME = "daily_upload_queue_worker"

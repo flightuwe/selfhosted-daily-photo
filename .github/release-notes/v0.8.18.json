@@ -1,0 +1,9 @@
+{
+  "version": "0.8.18",
+  "title": "Offline-Modus",
+  "highlights": [
+    "Daily kann jetzt dauerhaft offline geschaltet werden: App-Sync, Uploads, Updates und Push-Verarbeitung bleiben vollständig pausiert.",
+    "Extras, offene Extra-Entwürfe und Timecapsules lassen sich offline lokal aufnehmen und werden später inklusive GPS-Koordinaten hochgeladen.",
+    "Das Daily-Logo lässt sich im Kamera-Tab in eine prismatische OFFLINE-Kontur wischen; Feed, Hub und Chat bleiben aus dem lokalen Cache lesbar."
+  ]
+}

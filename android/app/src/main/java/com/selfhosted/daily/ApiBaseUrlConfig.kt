@@ -231,6 +231,10 @@ fun buildStandardHttpClient(
             chain.proceed(newReq)
         }
     if (context != null) builder.addInterceptor(NetworkUsageLedger.interceptor(context.applicationContext, usageContext))
+    if (context != null) builder.addInterceptor { chain ->
+        OfflineModeManager.requireOnline(context.applicationContext)
+        chain.proceed(chain.request())
+    }
     extraInterceptors.forEach(builder::addInterceptor)
     return builder.build()
 }

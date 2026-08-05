@@ -2,6 +2,27 @@
 
 This file is append-only operational history for Forge-side Daily continuity.
 
+## 2026-08-02
+
+- Completed the remaining roadmap gaps on `main` commit `7ec71ff31501e5a2f492b40aefc787e0d90cf77d` and published Android `v0.7.1` from the same commit.
+- Confirmed GitHub Actions success for `CI` run `30772807360`, `Publish Server Images` run `30772807362` and `Release Android APK` run `30772992036`; the release contains signed `app-release.apk` and `changelog.json`.
+- Re-verified the active WireGuard routes and all required TCP targets before the rollout, then manually recreated `daily-backend` and `daily-admin` in CT `9204` from the published images.
+- Confirmed clean backend startup, both containers `Up`, internal root `200`, internal and external health with both delete features enabled, and matching runtime `srv-338.1`; rollback was not required.
+
+- Released the Daily sync, upload, cache and data-usage overhaul from product commits `52428a621a5132a0de4e52e8aba68ade4e34f28e` and `6c49feb850d6426a2cc0f347e666f2676d7c81a0`, with Android tag `v0.7.0` pointing at the final commit.
+- Confirmed GitHub Actions success for final `CI` run `30771284820`, `Publish Server Images` run `30771284827` and `Release Android APK` run `30771461967`.
+- Confirmed GitHub release `v0.7.0` with signed `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.7.0`.
+- Rolled Broutschek CT `9204` manually to published runtime `srv-337.1`; pulled and recreated `daily-backend` and `daily-admin`, confirmed both containers `Up`, internal `/api/health` and `/api/health/live`, internal root `200`, and matching public health on `https://daily.broutschek.de`.
+- Rollback was not required.
+
+## 2026-07-22
+
+- Released Sondermoment/Daily decoupling from `main` commit `785e95cfd100e3db87dc8d814f9e27bf4d9dec12` and Android tag `v0.6.30`.
+- Confirmed GitHub Actions success for `CI` run `29933594303`, `Publish Server Images` run `29933593832` and `Release Android APK` run `29933997409`.
+- Confirmed GitHub release `v0.6.30` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.30`.
+- Rolled Broutschek CT `9204` manually to published runtime `srv-335.1`; pulled and recreated `daily-backend` and `daily-admin`, confirmed both containers `Up`, internal `/api/health` with `ok:true`, `features.chatDelete=true`, `features.commentDelete=true`, internal root `200`, and matching external `https://daily.broutschek.de/api/health/live`.
+- Rollback was not required.
+
 ## 2026-07-12
 
 - Prepared Android patch `v0.6.27` after analyzing `daily-diagnose-1783855910430.txt`, which showed heavy `feed_viewport_anchor_changed` churn instead of a fresh crash.
@@ -9,6 +30,18 @@ This file is append-only operational history for Forge-side Daily continuity.
 - Added dataset-specific `feed_item_meta_normalized` diagnostics so future exported logs show exactly which source payload produced missing `interactionSnapshot` or `interactionCounts` metadata.
 - Decoupled the visible pull-to-refresh spinner from background feed refreshes and reduced viewport-anchor state churn by ignoring minor visible-range changes, so the feed refresh indicator no longer spins during passive reloads and scroll jitter should reduce noticeably.
 - Re-verified locally with `gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain --max-workers=1` after clearing corrupted local Android build caches.
+
+## 2026-07-14
+
+- Released feed paging guard `v0.6.29` from `main` commit `879f1b6541b5317d3fa3b8cd5fc63de9882e846f` after fixing `/api/feed/window` explicit zero semantics and Android direction-guarded feed merges.
+- Confirmed GitHub Actions success for `CI` run `29324273346`, `Publish Server Images` run `29324273362` and `Release Android APK` run `29324580870`.
+- Confirmed GitHub release `v0.6.29` with assets `app-release.apk` and `changelog.json`: `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.6.29`.
+- Rolled Broutschek CT `9204` manually to published runtime `srv-334.1`; confirmed WireGuard routes, fresh `daily-backend` and `daily-admin` containers, internal `/api/health` with `ok:true`, `features.chatDelete=true`, `features.commentDelete=true`, and matching external `https://daily.broutschek.de/api/health/live`.
+
+- Rolled Broutschek CT `9204` manually to the already-published `main` commit `e4fff265ddeaffcecff372e81dffcfb47071de60` (`Add configurable post media limits`) after confirming successful GitHub runs `CI` `29320503737` and `Publish Server Images` `29320503974`.
+- Verified host reachability over the active WireGuard path (`10.20.10.30:13379`, `192.168.0.40:22`, `192.168.0.40:8006`) and confirmed that the working operator path on this workstation is password-based `Posh-SSH` login as `root` to Proxmox host `192.168.0.40`.
+- Executed `docker compose pull backend admin` and `docker compose up -d backend admin` via `pct exec 9204 -- sh -lc 'cd /opt/daily/stack && ...'`, then confirmed fresh `daily-backend` and `daily-admin` containers in state `Up`.
+- Verified internal `http://127.0.0.1:13379/api/health` with `ok:true`, `features.chatDelete=true`, `features.commentDelete=true`, plus internal and external `/api/health/live` on runtime `srv-333.1`.
 
 - Released combined server/android hardening `v0.6.25` from `main` commit `806b0d87a8428dd033f5d861e234f4c89963d6ac` after unifying Hub-to-Feed interaction resolution for comments, reactions and FotoMojis.
 - Added preview-vs-full interaction semantics across backend and Android feed models so timeline targets can force a precise post-interaction reload instead of relying on stale feed previews.
@@ -176,4 +209,11 @@ This file is append-only operational history for Forge-side Daily continuity.
 - Added internal script/runbook path (`ops-runbooks/scripts/daily-github-to-gitea-sync.ps1` and `ops-runbooks/runbooks/daily-github-gitea-mirror.md`).
 - Disabled GitHub-hosted push-to-private-Gitea as default path.
 - Added cluster handoff checklist for direct Gitea follow-up actions: `docs/gitea-direct-todo.md`.
+
+## 2026-08-04
+
+- Released performance fix `v0.8.8` from `main` commit `006eb5d`; CI, Publish Server Images and Release Android APK succeeded.
+- Deployed backend and admin manually to Broutschek CT `9204`; internal and external live health report `srv-349.1`.
+- Published signed `app-release.apk` and `changelog.json` in the GitHub release.
+- Converted the historical rendition backlog to paused work on startup (7,128 rows); fresh logs show no new `database is locked` series. The remaining `record not found` worker entries mean no visible conversion is queued and are harmless.
 

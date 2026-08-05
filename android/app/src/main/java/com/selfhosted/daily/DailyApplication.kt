@@ -5,12 +5,15 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import com.google.firebase.messaging.FirebaseMessaging
 
 class DailyApplication : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         // A process-scoped session keeps diagnostics from separate launches apart.
         NetworkUsageLedger.beginSession(this)
+        // Do this before any screen can request a token or schedule a sync.
+        FirebaseMessaging.getInstance().isAutoInitEnabled = !OfflineModeManager.isEnabled(this)
     }
 
     override fun newImageLoader(): ImageLoader {

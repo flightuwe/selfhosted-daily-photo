@@ -14,6 +14,7 @@ class UpdateCheckWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
+        if (OfflineModeManager.isEnabled(applicationContext)) return Result.success()
         val prefs = applicationContext.getSharedPreferences("app", Context.MODE_PRIVATE)
         val enabled = prefs.getBoolean(PREF_AUTO_UPDATE_ENABLED, false)
         if (!enabled) return Result.success()
@@ -52,6 +53,10 @@ object UpdateCheckScheduler {
     }
 
     fun syncFromPrefs(context: Context) {
+        if (OfflineModeManager.isEnabled(context)) {
+            cancelForOffline(context)
+            return
+        }
         val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
         val enabled = prefs.getBoolean(UpdateCheckWorker.PREF_AUTO_UPDATE_ENABLED, false)
         if (enabled) {
@@ -62,6 +67,7 @@ object UpdateCheckScheduler {
     }
 
     fun enqueueNow(context: Context) {
+        if (OfflineModeManager.isEnabled(context)) return
         val req = OneTimeWorkRequestBuilder<UpdateCheckWorker>().build()
         WorkManager.getInstance(context).enqueueUniqueWork(
             UpdateCheckWorker.WORK_NAME,
@@ -71,6 +77,7 @@ object UpdateCheckScheduler {
     }
 
     fun scheduleNext(context: Context, delayMinutes: Long, keepExisting: Boolean = false) {
+        if (OfflineModeManager.isEnabled(context)) return
         val req = OneTimeWorkRequestBuilder<UpdateCheckWorker>()
             .setInitialDelay(delayMinutes, TimeUnit.MINUTES)
             .build()
@@ -79,5 +86,9 @@ object UpdateCheckScheduler {
             if (keepExisting) ExistingWorkPolicy.KEEP else ExistingWorkPolicy.REPLACE,
             req
         )
+    }
+
+    fun cancelForOffline(context: Context) {
+        WorkManager.getInstance(context).cancelUniqueWork(UpdateCheckWorker.WORK_NAME)
     }
 }

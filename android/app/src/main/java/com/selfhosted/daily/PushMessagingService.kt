@@ -23,6 +23,7 @@ import java.time.LocalTime
 
 class PushMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
+        if (OfflineModeManager.isEnabled(this)) return
         getSharedPreferences("app", Context.MODE_PRIVATE)
             .edit()
             .putString("pending_fcm_token", token)
@@ -38,6 +39,7 @@ class PushMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        if (OfflineModeManager.isEnabled(this)) return
         val prefs = getSharedPreferences("app", Context.MODE_PRIVATE)
         val type = PushNotificationRules.normalizeType(message.data["type"])
         val action = message.data["action"]?.trim().orEmpty()
