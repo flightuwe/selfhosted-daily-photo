@@ -1,0 +1,8 @@
+{
+  "version": "0.8.20",
+  "title": "Offline-Wischgeste repariert",
+  "highlights": [
+    "Das Daily-Logo folgt dem Wisch nun ohne Zurueckspringen und rastet als OFFLINE exakt ueber dem Datum ein.",
+    "Der optionale Verbindungsstatuspunkt bleibt online direkt neben Daily und blendet im Offline-Modus sauber aus."
+  ]
+}

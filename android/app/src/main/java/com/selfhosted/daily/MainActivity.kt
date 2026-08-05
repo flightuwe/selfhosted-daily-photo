@@ -182,6 +182,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
@@ -14331,41 +14332,19 @@ fun CameraTab(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OfflineModeHeader(
-                    offline = offlineMode,
-                    dayLabel = dayLabel,
-                    onToggle = onToggleOfflineMode
-                )
-                if (showConnectionHealthIndicator) {
-                    ConnectionHealthDot(
-                        snapshot = connectionHealthSnapshot,
-                        onClick = { showConnectionHealthDialog = true }
-                    )
-                }
-                if (updateAvailable && !offlineMode) {
-                    Text(
-                        text = "UPDATE VERFUEGBAR",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .graphicsLayer {
-                                scaleX = updateScale
-                                scaleY = updateScale
-                                alpha = updateAlpha
-                            }
-                            .background(Color(0xFFD32F2F), shape = MaterialTheme.shapes.small)
-                            .clickable(onClick = onDownloadUpdate)
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    )
-                } else if (updateCheckInFlight) {
-                    Text("Update-Check ...", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            if (!offlineMode) Text(dayLabel, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OfflineModeHeader(
+                offline = offlineMode,
+                dayLabel = dayLabel,
+                showConnectionHealthIndicator = showConnectionHealthIndicator,
+                connectionHealthSnapshot = connectionHealthSnapshot,
+                onConnectionHealthClick = { showConnectionHealthDialog = true },
+                updateAvailable = updateAvailable,
+                updateCheckInFlight = updateCheckInFlight,
+                updateScale = updateScale,
+                updateAlpha = updateAlpha,
+                onDownloadUpdate = onDownloadUpdate,
+                onToggle = onToggleOfflineMode
+            )
         }
         val specialTriggeredAt = prompt?.specialTriggeredAt
         if (!specialTriggeredAt.isNullOrBlank()) {
@@ -15989,40 +15968,99 @@ private fun FeedPostCard(
 private fun OfflineModeHeader(
     offline: Boolean,
     dayLabel: String,
+    showConnectionHealthIndicator: Boolean,
+    connectionHealthSnapshot: ConnectionHealthSnapshot,
+    onConnectionHealthClick: () -> Unit,
+    updateAvailable: Boolean,
+    updateCheckInFlight: Boolean,
+    updateScale: Float,
+    updateAlpha: Float,
+    onDownloadUpdate: () -> Unit,
     onToggle: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
     val transition = rememberInfiniteTransition(label = "offline-prism")
     val hue by transition.animateFloat(0f, 360f, infiniteRepeatable(tween(8_000, easing = LinearEasing)), label = "offline-hue")
     val progress = remember { Animatable(if (offline) 1f else 0f) }
-    var dragStart by remember { mutableStateOf(0f) }
-    LaunchedEffect(offline) { progress.animateTo(if (offline) 1f else 0f, tween(360)) }
+    var dragActive by remember { mutableStateOf(false) }
+    var dragProgress by remember { mutableStateOf(progress.value) }
+    var dailyWidthPx by remember { mutableStateOf(0) }
+    var offlineWidthPx by remember { mutableStateOf(0) }
+    var headerStartPx by remember { mutableStateOf(0f) }
+    var dateRootStartPx by remember { mutableStateOf(0f) }
+    var dateWidthPx by remember { mutableStateOf(0) }
+    val logoToDateTravelPx = (dateRootStartPx - headerStartPx + (dateWidthPx - offlineWidthPx) / 2f).coerceAtLeast(0f)
+    val dragDistancePx = logoToDateTravelPx.coerceAtLeast(1f)
+    val logoHitSlopPx = with(density) { 18.dp.toPx() }
+    val logoGapPx = with(density) { 8.dp.toPx() }
+    val dotSizePx = with(density) { 8.dp.toPx() }
+    val onlineTrailingX = dailyWidthPx + if (showConnectionHealthIndicator) logoGapPx + dotSizePx + logoGapPx else logoGapPx
+    LaunchedEffect(offline) {
+        if (!dragActive) progress.animateTo(if (offline) 1f else 0f, tween(360))
+    }
     val outline = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) Color.White else Color.Black
     Box(
         modifier = Modifier
-            .width(172.dp)
             .heightIn(min = 44.dp)
-            .graphicsLayer { translationX = progress.value * 132f }
-            .pointerInput(offline) {
+            .fillMaxWidth()
+            .onGloballyPositioned { headerStartPx = it.positionInRoot().x }
+            .pointerInput(offline, logoToDateTravelPx, dailyWidthPx, offlineWidthPx) {
                 detectDragGestures(
-                    onDragStart = { dragStart = progress.value },
+                    onDragStart = { offset ->
+                        val activeWidth = if (offline) offlineWidthPx else dailyWidthPx
+                        val elementStart = progress.value * logoToDateTravelPx
+                        dragActive = activeWidth > 0 && offset.x in (elementStart - logoHitSlopPx)..(elementStart + activeWidth + logoHitSlopPx)
+                        dragProgress = progress.value
+                    },
                     onDrag = { change, amount ->
+                        if (!dragActive) return@detectDragGestures
                         change.consume()
                         val direction = if (offline) -1f else 1f
-                        scope.launch { progress.snapTo((dragStart + direction * amount.x / 140f).coerceIn(0f, 1f)) }
+                        dragProgress = (dragProgress + direction * amount.x / dragDistancePx).coerceIn(0f, 1f)
+                        scope.launch { progress.snapTo(dragProgress) }
                     },
                     onDragEnd = {
-                        val target = if ((!offline && progress.value > .52f) || (offline && progress.value < .48f)) 1f - dragStart else dragStart
-                        if ((!offline && target > .5f) || (offline && target < .5f)) onToggle()
-                        scope.launch { progress.animateTo(if (offline) 1f else 0f, tween(260)) }
+                        if (!dragActive) return@detectDragGestures
+                        dragActive = false
+                        val shouldToggle = (!offline && dragProgress >= .45f) || (offline && dragProgress <= .55f)
+                        if (shouldToggle) {
+                            // State owns the settle animation. Starting a second animation here would race it back.
+                            onToggle()
+                        } else {
+                            scope.launch { progress.animateTo(if (offline) 1f else 0f, tween(260)) }
+                        }
                     },
-                    onDragCancel = { scope.launch { progress.animateTo(if (offline) 1f else 0f, tween(220)) } }
+                    onDragCancel = {
+                        if (dragActive) {
+                            dragActive = false
+                            scope.launch { progress.animateTo(if (offline) 1f else 0f, tween(220)) }
+                        }
+                    }
                 )
             },
         contentAlignment = Alignment.CenterStart
     ) {
+        Text(
+            text = dayLabel,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .onGloballyPositioned {
+                    dateRootStartPx = it.positionInRoot().x
+                    dateWidthPx = it.size.width
+                }
+                .graphicsLayer { alpha = 1f - progress.value }
+        )
         // A tiny spectrum trail makes the colour appear to peel away while dragging.
-        Canvas(modifier = Modifier.fillMaxSize().graphicsLayer(alpha = (1f - progress.value) * .8f)) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    translationX = progress.value * logoToDateTravelPx
+                    alpha = (1f - progress.value) * .8f
+                }
+        ) {
             repeat(6) { index ->
                 drawCircle(rainbowColor(hue + index * 52f), radius = 3.dp.toPx(), center = Offset(size.width * (.22f + index * .09f), size.height / 2f))
             }
@@ -16031,14 +16069,67 @@ private fun OfflineModeHeader(
             text = buildAnnotatedString { withStyle(SpanStyle(brush = Brush.linearGradient(listOf(rainbowColor(hue), rainbowColor(hue + 150f), rainbowColor(hue + 280f))))) { append("Daily") } },
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.graphicsLayer(alpha = 1f - progress.value, translationX = progress.value * 70f)
+            modifier = Modifier
+                .onSizeChanged { dailyWidthPx = it.width }
+                .graphicsLayer {
+                    alpha = 1f - progress.value
+                    translationX = progress.value * logoToDateTravelPx
+                }
         )
+        if (showConnectionHealthIndicator) {
+            ConnectionHealthDot(
+                snapshot = connectionHealthSnapshot,
+                onClick = onConnectionHealthClick,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset { IntOffset(dailyWidthPx + logoGapPx.toInt(), 0) }
+                    .graphicsLayer {
+                        alpha = 1f - progress.value
+                        translationX = progress.value * logoToDateTravelPx
+                    }
+            )
+        }
+        if (updateAvailable && !offline) {
+            Text(
+                text = "UPDATE VERFUEGBAR",
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset { IntOffset(onlineTrailingX.toInt(), 0) }
+                    .graphicsLayer {
+                        scaleX = updateScale
+                        scaleY = updateScale
+                        alpha = updateAlpha * (1f - progress.value)
+                        translationX = progress.value * logoToDateTravelPx
+                    }
+                    .background(Color(0xFFD32F2F), shape = MaterialTheme.shapes.small)
+                    .clickable(onClick = onDownloadUpdate)
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            )
+        } else if (updateCheckInFlight && !offline) {
+            Text(
+                "Update-Check ...",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset { IntOffset(onlineTrailingX.toInt(), 0) }
+                    .graphicsLayer {
+                        alpha = 1f - progress.value
+                        translationX = progress.value * logoToDateTravelPx
+                    }
+            )
+        }
         Text(
             text = "OFFLINE",
             color = outline,
             fontWeight = FontWeight.Bold,
             modifier = Modifier
-                .graphicsLayer(alpha = progress.value, translationX = (1f - progress.value) * -38f)
+                .onSizeChanged { offlineWidthPx = it.width }
+                .graphicsLayer {
+                    alpha = progress.value
+                    translationX = progress.value * logoToDateTravelPx
+                }
                 .border(1.dp, outline, RoundedCornerShape(18.dp))
                 .padding(horizontal = 9.dp, vertical = 5.dp)
         )
