@@ -1,0 +1,8 @@
+{
+  "version": "0.8.19",
+  "title": "Offline-Modus komplettiert",
+  "highlights": [
+    "Timecapsules lassen sich nun auch dann offline aufnehmen, wenn noch kein sichtbarer Tagesbeitrag vorhanden ist.",
+    "Die OFFLINE-Morph-Animation rastet jetzt direkt an der ehemaligen Datumsposition ein."
+  ]
+}

@@ -14600,6 +14600,12 @@ fun CameraTab(
                     if (!offlineMode) Button(onClick = { showCommunityPostDialog = true }, modifier = Modifier.fillMaxWidth()) { Text("Community-Post erstellen") }
                 }
                 if (!canUpload) {
+                    if (offlineMode) {
+                        TextButton(
+                            onClick = { showCapsuleDialog = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Timecapsule aufnehmen") }
+                    }
                     if (!offlineMode && showSpecialMomentButton) {
                         SpecialMomentActionButton(
                             text = specialLabel,
@@ -15996,6 +16002,7 @@ private fun OfflineModeHeader(
         modifier = Modifier
             .width(172.dp)
             .heightIn(min = 44.dp)
+            .graphicsLayer { translationX = progress.value * 132f }
             .pointerInput(offline) {
                 detectDragGestures(
                     onDragStart = { dragStart = progress.value },
