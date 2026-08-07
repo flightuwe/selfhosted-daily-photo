@@ -222,3 +222,13 @@ This file is append-only operational history for Forge-side Daily continuity.
 - Released the persistent Android offline mode in `v0.8.18` and completed its Timecapsule/morph-position correction in `v0.8.19` from `main` commit `c436116`.
 - Verified GitHub CI, Publish Server Images and Release Android APK for the final patch commit; the public release contains signed `app-release.apk` and `changelog.json`.
 
+## 2026-08-07
+
+- Released Android patch `v0.8.25` from `main` commit `9803a6cbe84ba11a3c5fa0191f2b24a043503d1a` after diagnosis of session loss and the offline-header rendering defect.
+- The app now preserves a valid local session when refresh is only temporarily unavailable, immediately stops token-bound background work after a confirmed session rejection, and no longer records Compose disposal as a startup failure.
+- Corrected the OfflineModeHeader spectrum trail so it is rendered only while the user actively drags the offline toggle; the idle header again contains only the Daily logo and optional connection-health dot.
+- Diagnostics now report current-session events separately from the rolling HTTP timeline, preventing misleading DNS-zero summaries when older HTTP failures are still retained.
+- Local verification: `gradle -p android :app:assembleDebug :app:testDebugUnitTest --no-daemon --stacktrace --console=plain` passed; backend API/config/database tests passed, while scheduler integration tests could not run locally because the installed Go toolchain has CGO disabled and no C compiler is available for SQLite.
+- Confirmed GitHub Actions success: CI `31188357669`, Publish Server Images `31188357383`, Release Android APK `31189081194`; published release assets are signed `app-release.apk` and `changelog.json` at `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.8.25`.
+- No Broutschek rollout was performed because no backend/admin source changed. Public production health and live health remain green on runtime `srv-369.1`; rollback was not required.
+
