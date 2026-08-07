@@ -1,0 +1,10 @@
+{
+  "version": "0.8.25",
+  "title": "Stabilere Sitzung und korrigierter Offline-Header",
+  "highlights": [
+    "Bei einem kurzen Netzfehler waehrend der Sitzungserneuerung bleibt die Anmeldung erhalten; Daily versucht es spaeter erneut.",
+    "Nach einer tatsaechlich abgelaufenen oder widerrufenen Sitzung werden Hintergrundabrufe sofort gestoppt und die Anmeldung klar angezeigt.",
+    "Der Header zeigt neben Daily wieder nur den gewuenschten Verbindungsindikator; die farbige Offline-Uebergangsspur erscheint nur waehrend der Geste.",
+    "Diagnose-Exporte unterscheiden jetzt klar zwischen der aktuellen App-Sitzung und der rollierenden HTTP-Historie."
+  ]
+}

@@ -2024,6 +2024,19 @@ class AppRepo(
     @Volatile
     private var lastAuthTransitionReason: String = "startup"
 
+    /** A refresh can fail because the session is gone, or merely because the network
+     * disappeared while the refresh was in flight.  Only the former may log a user out. */
+    private sealed interface RefreshAttempt {
+        data object Success : RefreshAttempt
+        data object MissingRefreshToken : RefreshAttempt
+        data object Rejected : RefreshAttempt
+        data class Deferred(val cause: Throwable) : RefreshAttempt
+    }
+
+    private class RefreshDeferredException(endpoint: String, cause: Throwable) : IOException(
+        "session refresh temporarily unavailable for $endpoint", cause
+    )
+
     fun token(): String = accessToken()
 
     private fun warmCacheDir(): File = File(context.filesDir, "warm-cache").apply { mkdirs() }
@@ -2297,21 +2310,31 @@ class AppRepo(
 
     private fun authHeader(): String = AuthSessionCoordinator.snapshot(context).authHeader()
 
-    private suspend fun tryRefreshSessionLocked(expectedHeader: String? = null): Boolean {
+    private suspend fun tryRefreshSessionLocked(expectedHeader: String? = null): RefreshAttempt {
         val before = AuthSessionCoordinator.snapshot(context)
         if (!expectedHeader.isNullOrBlank() && before.hasAccessToken() && before.authHeader() != expectedHeader) {
-            return true
+            return RefreshAttempt.Success
         }
-        if (!before.hasRefreshToken()) return false
-        val response = runCatching { api.refresh(RefreshRequest(before.refreshToken)) }.getOrElse { return false }
+        if (!before.hasRefreshToken()) return RefreshAttempt.MissingRefreshToken
+        val response = try {
+            api.refresh(RefreshRequest(before.refreshToken))
+        } catch (error: Throwable) {
+            return if (error is HttpException && (error.code() == 401 || error.code() == 403)) {
+                RefreshAttempt.Rejected
+            } else {
+                RefreshAttempt.Deferred(error)
+            }
+        }
         val nextAccess = response.accessToken.trim().ifBlank { response.token.trim() }
         val nextRefresh = response.refreshToken.trim()
-        if (nextAccess.isBlank() || nextRefresh.isBlank()) return false
+        if (nextAccess.isBlank() || nextRefresh.isBlank()) {
+            return RefreshAttempt.Deferred(IllegalStateException("invalid_refresh_payload"))
+        }
         saveAuthSession(response, source = "refresh_session_success")
-        return true
+        return RefreshAttempt.Success
     }
 
-    private suspend fun tryRefreshSession(expectedHeader: String? = null): Boolean =
+    private suspend fun tryRefreshSession(expectedHeader: String? = null): RefreshAttempt =
         AuthSessionCoordinator.withRefreshLock { tryRefreshSessionLocked(expectedHeader) }
 
     private suspend fun <T> authorizedCall(endpoint: String, block: suspend (header: String) -> T): T {
@@ -2336,17 +2359,28 @@ class AppRepo(
             if (latestHeader.length > "Bearer ".length && latestHeader != firstHeader) {
                 return block(latestHeader)
             }
-            val refreshed = tryRefreshSession(firstHeader)
-            if (!refreshed) {
-                logDebug(
-                    type = "auth_refresh_failed",
-                    message = "Session-Refresh fehlgeschlagen",
-                    meta = "endpoint=$endpoint;http=401;failureClass=token_expired_refresh_failed;sessionId=${currentSessionId().ifBlank { "-" }}"
-                )
-                clearToken(reason = "after_401_refresh_failed", endpoint = endpoint)
-                throw IllegalStateException("token_expired_refresh_failed", http)
+            when (val refresh = tryRefreshSession(firstHeader)) {
+                RefreshAttempt.Success -> return block(authHeader())
+                is RefreshAttempt.Deferred -> {
+                    logDebug(
+                        type = "auth_refresh_deferred",
+                        message = "Session-Refresh voruebergehend nicht moeglich",
+                        meta = "endpoint=$endpoint;http=401;sessionId=${currentSessionId().ifBlank { "-" }};root=${refresh.cause::class.java.simpleName}"
+                    )
+                    throw RefreshDeferredException(endpoint, refresh.cause)
+                }
+                RefreshAttempt.MissingRefreshToken,
+                RefreshAttempt.Rejected -> {
+                    val failureClass = if (refresh == RefreshAttempt.MissingRefreshToken) "missing_refresh_token" else "session_rejected"
+                    logDebug(
+                        type = "auth_refresh_failed",
+                        message = "Session-Refresh fehlgeschlagen",
+                        meta = "endpoint=$endpoint;http=401;failureClass=$failureClass;sessionId=${currentSessionId().ifBlank { "-" }}"
+                    )
+                    clearToken(reason = "after_401_refresh_failed", endpoint = endpoint)
+                    throw IllegalStateException("token_expired_refresh_failed", http)
+                }
             }
-            return block(authHeader())
         }
     }
 
@@ -2712,6 +2746,27 @@ class AppRepo(
         }
         val aggregateRows = rows.filter { it.aggregateCount > 1 }
         val rawRows = rows.filter { it.aggregateCount <= 1 }
+        // Debug events are deliberately restricted to the current app session,
+        // while the HTTP ledger is a rolling history. Keep both scopes visible so
+        // a "0 DNS errors" session summary cannot contradict older HTTP rows.
+        val networkTimeline = NetworkUsageLedger.diagnosticTimeline(context)
+        val timelineFamilies = linkedMapOf(
+            "dns" to 0,
+            "no_active_network" to 0,
+            "ssl_handshake" to 0,
+            "cert_path_validator" to 0
+        )
+        networkTimeline.forEach { entry ->
+            val failure = entry.failureClass.lowercase()
+            val family = when {
+                failure.contains("certpathvalidator") -> "cert_path_validator"
+                failure.contains("sslhandshake") -> "ssl_handshake"
+                failure.contains("unknownhost") || failure.contains("gaiexception") -> "dns"
+                entry.network == "offline" && entry.status < 0 -> "no_active_network"
+                else -> ""
+            }
+            if (family.isNotBlank()) timelineFamilies[family] = (timelineFamilies[family] ?: 0) + 1
+        }
         val lines = buildString {
             appendLine("Daily Diagnose Export")
             appendLine("Generated: ${OffsetDateTime.now()}")
@@ -2726,13 +2781,10 @@ class AppRepo(
             appendLine("Ausgeschlossen (andere App-Version): $olderVersionsExcluded")
             appendLine("")
             appendLine("Zusammenfassung")
-            appendLine("- DNS-Fehler: ${families["dns"] ?: 0}x")
-            appendLine("- Keine aktive Verbindung: ${families["no_active_network"] ?: 0}x")
-            appendLine("- TLS-Handshake: ${families["ssl_handshake"] ?: 0}x")
-            appendLine("- Zertifikatspfad: ${families["cert_path_validator"] ?: 0}x")
+            appendLine("- Diagnoseereignisse (aktuelle Sitzung): DNS=${families["dns"] ?: 0}x;keine_aktive_verbindung=${families["no_active_network"] ?: 0}x;tls_handshake=${families["ssl_handshake"] ?: 0}x;zertifikatspfad=${families["cert_path_validator"] ?: 0}x")
+            appendLine("- HTTP-Timeline (rollierendes Fenster, nicht aufsummieren): DNS=${timelineFamilies["dns"] ?: 0}x;keine_aktive_verbindung=${timelineFamilies["no_active_network"] ?: 0}x;tls_handshake=${timelineFamilies["ssl_handshake"] ?: 0}x;zertifikatspfad=${timelineFamilies["cert_path_validator"] ?: 0}x")
             appendLine("- Datenverbrauch: ${NetworkUsageLedger.diagnosticSummary(context)}")
             appendLine("")
-            val networkTimeline = NetworkUsageLedger.diagnosticTimeline(context)
             appendLine("Lokale HTTP-Endpoint-Timeline (offline erfasst)")
             if (networkTimeline.isEmpty()) {
                 appendLine("- Keine langsamen oder fehlgeschlagenen HTTP-Aufrufe im lokalen Aufbewahrungsfenster.")
@@ -6895,7 +6947,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (state.offlineMode) return false
         if (repo.token().isBlank()) return false
         val started = System.currentTimeMillis()
-        return runCatching {
+        return try {
             val bootstrap = repo.dashboardCore()
             val marker = "${bootstrap.prompt.day}:${bootstrap.prompt.triggered ?: ""}"
             val shouldPopup = bootstrap.prompt.canUpload && !bootstrap.prompt.triggered.isNullOrBlank() && !bootstrap.prompt.hasPromptPostedToday && marker != repo.seenPromptMarker()
@@ -6910,9 +6962,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.saveCoreWarmCache(bootstrap.me.user.id, bootstrap.me, bootstrap.inviteCode, bootstrap.prompt, bootstrap.promptRules, bootstrap.specialMomentStatus)
             repo.logDebug("startup_core_applied", "slim startup bootstrap applied", "durationMs=${System.currentTimeMillis() - started}")
             true
-        }.onFailure {
-            repo.logDebug("startup_core_failed", debugFailureMessage(it), "durationMs=${System.currentTimeMillis() - started}")
-        }.getOrDefault(false)
+        } catch (error: Throwable) {
+            // LaunchedEffect is cancelled normally when its composition disappears.
+            // Do not turn that lifecycle event into a false startup failure.
+            if (isBenignCancellation(error)) throw error
+            repo.logDebug("startup_core_failed", debugFailureMessage(error), "durationMs=${System.currentTimeMillis() - started};root=${rootCause(error)::class.java.simpleName}")
+            false
+        }
     }
 
     suspend fun runDeferredStartupHydration() {
@@ -9286,6 +9342,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             }
             if (actual is IllegalStateException && actual.message == "migration_required") {
                 handleMigrationRequiredState()
+                return false
+            }
+            if (isAuthCriticalFailure(actual)) {
+                // clearToken() has already removed persisted credentials.  Mirroring
+                // that state immediately stops every token-keyed LaunchedEffect, so
+                // Hub/Calendar jobs cannot keep producing missing-token failures.
+                state = refreshConnectionHealthState(state.copy(
+                    token = "",
+                    loading = false,
+                    communityStatsLoading = false,
+                    message = apiError(actual, "Sitzung abgelaufen. Bitte erneut einloggen.")
+                ))
                 return false
             }
             if (isBenignCancellation(t)) {
@@ -16169,17 +16237,20 @@ private fun OfflineModeHeader(
                 }
                 .graphicsLayer { alpha = 1f - progress.value }
         )
-        // A tiny spectrum trail makes the colour appear to peel away while dragging.
-        Canvas(
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    translationX = progress.value * logoToDateTravelPx
-                    alpha = (1f - progress.value) * .8f
+        // The spectrum trail is transitional feedback only. Rendering it while idle
+        // created a second, misleading row of status dots beside the Daily logo.
+        if (dragActive) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        translationX = progress.value * logoToDateTravelPx
+                        alpha = (1f - progress.value) * .8f
+                    }
+            ) {
+                repeat(6) { index ->
+                    drawCircle(rainbowColor(hue + index * 52f), radius = 3.dp.toPx(), center = Offset(size.width * (.22f + index * .09f), size.height / 2f))
                 }
-        ) {
-            repeat(6) { index ->
-                drawCircle(rainbowColor(hue + index * 52f), radius = 3.dp.toPx(), center = Offset(size.width * (.22f + index * .09f), size.height / 2f))
             }
         }
         Text(
