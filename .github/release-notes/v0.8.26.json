@@ -1,0 +1,9 @@
+{
+  "version": "0.8.26",
+  "title": "Community-Beitraege landen wieder im richtigen Post",
+  "highlights": [
+    "Bilder, die andere Mitglieder ueber den Community-Button aufnehmen, werden jetzt dem aktiven Community-Post statt dem eigenen Daily hinzugefuegt.",
+    "Der normale Button zum Ergaenzen des eigenen letzten Beitrags behaelt seine bisherige sichere Zielpruefung.",
+    "Wenn ein Community-Post waehrend der Aufnahme nicht mehr aktiv ist, zeigt Daily eine klare Meldung und verhindert eine falsche Zuordnung."
+  ]
+}

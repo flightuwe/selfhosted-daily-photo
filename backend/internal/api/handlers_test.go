@@ -2186,6 +2186,142 @@ func TestHandlePhotoAttachmentCreateAllowsOlderVisiblePostOfSameDay(t *testing.T
 	}
 }
 
+func TestHandlePhotoAttachmentCreateAllowsOtherUserOnActiveCommunityPost(t *testing.T) {
+	server := newSearchTestServer(t)
+	owner := models.User{Username: "community-owner", PasswordHash: "x"}
+	contributor := models.User{Username: "community-contributor", PasswordHash: "x"}
+	if err := server.DB.Create(&owner).Error; err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	if err := server.DB.Create(&contributor).Error; err != nil {
+		t.Fatalf("create contributor: %v", err)
+	}
+	now := time.Now().UTC()
+	activatedAt := now.Add(-time.Minute)
+	community := models.Photo{
+		UserID: owner.ID, User: owner, Day: now.Format("2006-01-02"),
+		FilePath: "community/primary.jpg", CommunityPost: true,
+		CommunityActivatedAt: &activatedAt, CreatedAt: activatedAt,
+	}
+	contributorsOwnPost := models.Photo{
+		UserID: contributor.ID, User: contributor, Day: now.Format("2006-01-02"),
+		FilePath: "contributor/own-daily.jpg", CreatedAt: now.Add(-2 * time.Minute),
+	}
+	if err := server.DB.Create(&community).Error; err != nil {
+		t.Fatalf("create community post: %v", err)
+	}
+	if err := server.DB.Create(&contributorsOwnPost).Error; err != nil {
+		t.Fatalf("create contributor own post: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("photo", "community-contribution.jpg")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write([]byte("community-contribution")); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/photos/%d/attachments", community.ID), &body)
+	context.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	context.Set("user", contributor)
+	context.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", community.ID)}}
+	server.handlePhotoAttachmentCreate(context)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("community attachment status = %d, want 201, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var attachment models.PhotoAttachment
+	if err := server.DB.Where("photo_id = ?", community.ID).First(&attachment).Error; err != nil {
+		t.Fatalf("find community attachment: %v", err)
+	}
+	if attachment.UserID != contributor.ID {
+		t.Fatalf("attachment user_id = %d, want contributor %d", attachment.UserID, contributor.ID)
+	}
+	var ownAttachmentCount int64
+	if err := server.DB.Model(&models.PhotoAttachment{}).Where("photo_id = ?", contributorsOwnPost.ID).Count(&ownAttachmentCount).Error; err != nil {
+		t.Fatalf("count own-post attachments: %v", err)
+	}
+	if ownAttachmentCount != 0 {
+		t.Fatalf("contributor own-post attachment count = %d, want 0", ownAttachmentCount)
+	}
+
+	var response struct {
+		Photo struct {
+			CommunityContributors []struct {
+				ID uint `json:"id"`
+			} `json:"communityContributors"`
+		} `json:"photo"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Photo.CommunityContributors) != 2 {
+		t.Fatalf("community contributors = %#v, want owner and contributor", response.Photo.CommunityContributors)
+	}
+	if response.Photo.CommunityContributors[0].ID != owner.ID || response.Photo.CommunityContributors[1].ID != contributor.ID {
+		t.Fatalf("community contributors = %#v, want owner=%d contributor=%d", response.Photo.CommunityContributors, owner.ID, contributor.ID)
+	}
+}
+
+func TestHandlePhotoAttachmentCreateRejectsOtherUserOnNormalPost(t *testing.T) {
+	server := newSearchTestServer(t)
+	owner := models.User{Username: "normal-owner", PasswordHash: "x"}
+	otherUser := models.User{Username: "normal-other", PasswordHash: "x"}
+	if err := server.DB.Create(&owner).Error; err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	if err := server.DB.Create(&otherUser).Error; err != nil {
+		t.Fatalf("create other user: %v", err)
+	}
+	photo := models.Photo{
+		UserID: owner.ID, User: owner, Day: time.Now().UTC().Format("2006-01-02"),
+		FilePath: "normal/primary.jpg", CreatedAt: time.Now().UTC().Add(-time.Minute),
+	}
+	if err := server.DB.Create(&photo).Error; err != nil {
+		t.Fatalf("create normal post: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("photo", "forbidden.jpg")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write([]byte("forbidden-contribution")); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/photos/%d/attachments", photo.ID), &body)
+	context.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	context.Set("user", otherUser)
+	context.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", photo.ID)}}
+	server.handlePhotoAttachmentCreate(context)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("normal foreign attachment status = %d, want 403, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var attachmentCount int64
+	if err := server.DB.Model(&models.PhotoAttachment{}).Where("photo_id = ?", photo.ID).Count(&attachmentCount).Error; err != nil {
+		t.Fatalf("count normal-post attachments: %v", err)
+	}
+	if attachmentCount != 0 {
+		t.Fatalf("normal foreign attachment count = %d, want 0", attachmentCount)
+	}
+}
+
 func TestHandlePhotoAttachmentCreateAcceptsCapturedAtWithoutSeconds(t *testing.T) {
 	server := newSearchTestServer(t)
 	user := models.User{Username: "owner", PasswordHash: "x"}
