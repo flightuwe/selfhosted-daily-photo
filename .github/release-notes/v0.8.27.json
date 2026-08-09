@@ -1,0 +1,11 @@
+{
+  "version": "0.8.27",
+  "title": "Optionale E-Mail-Absicherung und Passwort-Wiederherstellung",
+  "highlights": [
+    "Du kannst dein Daily-Konto jetzt optional mit einer bestaetigten E-Mail-Adresse absichern.",
+    "Vergessene Passwoerter lassen sich ueber einen einmalig gueltigen Link sicher zuruecksetzen.",
+    "Bestaetigungs- und Reset-Links oeffnen Daily direkt; ohne installierte App steht eine geschuetzte Browser-Ansicht bereit.",
+    "Newsletter-Zustimmung bleibt getrennt, freiwillig und standardmaessig ausgeschaltet.",
+    "Die neuen E-Mail-Funktionen werden vom Betreiber erst nach erfolgreicher Server- und Versandpruefung freigeschaltet."
+  ]
+}
