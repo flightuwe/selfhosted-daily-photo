@@ -738,6 +738,54 @@ data class PromptResponse(
     val requestedByUser: String? = null,
     val momentKind: String? = null
 )
+
+internal enum class PhotoAttachmentTargetKind {
+    OWN_LATEST,
+    COMMUNITY
+}
+
+internal enum class PhotoAttachmentTargetRejection {
+    INVALID_TARGET,
+    OWN_LATEST_UNAVAILABLE,
+    COMMUNITY_POST_INACTIVE
+}
+
+internal data class PhotoAttachmentTargetResolution(
+    val photoId: Long? = null,
+    val rejection: PhotoAttachmentTargetRejection? = null
+)
+
+internal fun resolvePhotoAttachmentTarget(
+    requestedPhotoId: Long,
+    kind: PhotoAttachmentTargetKind,
+    prompt: PromptResponse?
+): PhotoAttachmentTargetResolution {
+    if (requestedPhotoId <= 0L) {
+        return PhotoAttachmentTargetResolution(rejection = PhotoAttachmentTargetRejection.INVALID_TARGET)
+    }
+    if (prompt == null) {
+        return PhotoAttachmentTargetResolution(photoId = requestedPhotoId)
+    }
+    return when (kind) {
+        PhotoAttachmentTargetKind.OWN_LATEST -> {
+            val ownTarget = prompt.appendTargetPhotoId
+            if (prompt.canAppendToOwnLatestPost && ownTarget != null && ownTarget > 0L) {
+                PhotoAttachmentTargetResolution(photoId = ownTarget)
+            } else {
+                PhotoAttachmentTargetResolution(rejection = PhotoAttachmentTargetRejection.OWN_LATEST_UNAVAILABLE)
+            }
+        }
+        PhotoAttachmentTargetKind.COMMUNITY -> {
+            val community = prompt.activeCommunityPost
+            if (community?.id == requestedPhotoId && community.communityPost && community.communityActive) {
+                PhotoAttachmentTargetResolution(photoId = requestedPhotoId)
+            } else {
+                PhotoAttachmentTargetResolution(rejection = PhotoAttachmentTargetRejection.COMMUNITY_POST_INACTIVE)
+            }
+        }
+    }
+}
+
 data class PromptMeta(
     val day: String = "",
     val triggeredAt: String? = null,
@@ -10187,29 +10235,49 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }.isSuccess
     }
 
-    suspend fun appendPhotoToLatestPost(
+    suspend fun appendPhotoToOwnLatestPost(
         photoId: Long,
         uri: Uri,
         shareLocation: Boolean
+    ): Boolean = appendPhotoToPost(photoId, uri, shareLocation, PhotoAttachmentTargetKind.OWN_LATEST)
+
+    suspend fun appendPhotoToCommunityPost(
+        photoId: Long,
+        uri: Uri,
+        shareLocation: Boolean
+    ): Boolean = appendPhotoToPost(photoId, uri, shareLocation, PhotoAttachmentTargetKind.COMMUNITY)
+
+    private suspend fun appendPhotoToPost(
+        requestedPhotoId: Long,
+        uri: Uri,
+        shareLocation: Boolean,
+        targetKind: PhotoAttachmentTargetKind
     ): Boolean {
         state = state.copy(loading = true)
         val freshPrompt = runCatching { repo.prompt() }.getOrNull()
-        val targetPhotoId = freshPrompt?.appendTargetPhotoId ?: photoId
+        val resolution = resolvePhotoAttachmentTarget(requestedPhotoId, targetKind, freshPrompt)
+        val targetPhotoId = resolution.photoId
         repo.logDebug(
             type = "append_target_resolved",
             message = "append target resolved",
-            meta = "requestedPhotoId=$photoId;resolvedPhotoId=$targetPhotoId;promptAvailable=${freshPrompt != null};canAppend=${freshPrompt?.canAppendToOwnLatestPost ?: false};promptDay=${freshPrompt?.day ?: "-"}"
+            meta = "targetKind=$targetKind;requestedPhotoId=$requestedPhotoId;resolvedPhotoId=${targetPhotoId ?: -1};rejection=${resolution.rejection ?: "-"};promptAvailable=${freshPrompt != null};canAppend=${freshPrompt?.canAppendToOwnLatestPost ?: false};activeCommunityPhotoId=${freshPrompt?.activeCommunityPost?.id ?: -1};promptDay=${freshPrompt?.day ?: "-"}"
         )
-        if (freshPrompt != null && (!freshPrompt.canAppendToOwnLatestPost || freshPrompt.appendTargetPhotoId == null)) {
+        if (targetPhotoId == null) {
             repo.logDebug(
                 type = "append_target_rejected",
                 message = "append target rejected",
-                meta = "requestedPhotoId=$photoId;resolvedPhotoId=$targetPhotoId;canAppend=${freshPrompt.canAppendToOwnLatestPost};appendTargetPhotoId=${freshPrompt.appendTargetPhotoId ?: -1};promptDay=${freshPrompt.day}"
+                meta = "targetKind=$targetKind;requestedPhotoId=$requestedPhotoId;rejection=${resolution.rejection ?: "unknown"};canAppend=${freshPrompt?.canAppendToOwnLatestPost ?: false};appendTargetPhotoId=${freshPrompt?.appendTargetPhotoId ?: -1};activeCommunityPhotoId=${freshPrompt?.activeCommunityPost?.id ?: -1};promptDay=${freshPrompt?.day ?: "-"}"
             )
             state = state.copy(
                 loading = false,
-                prompt = freshPrompt,
-                message = "Zum aktuellen letzten sichtbaren Beitrag von heute kann gerade kein Bild angehaengt werden."
+                prompt = freshPrompt ?: state.prompt,
+                message = when (resolution.rejection) {
+                    PhotoAttachmentTargetRejection.COMMUNITY_POST_INACTIVE ->
+                        "Dieser Community-Post ist nicht mehr aktiv. Bitte aktualisiere die Ansicht."
+                    PhotoAttachmentTargetRejection.OWN_LATEST_UNAVAILABLE ->
+                        "Zum aktuellen letzten sichtbaren Beitrag von heute kann gerade kein Bild angehaengt werden."
+                    else -> "Ungueltiges Ziel fuer den Anhang."
+                }
             )
             return false
         }
@@ -10220,16 +10288,25 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             repo.logDebug(
                 type = "append_upload_enqueued",
                 message = "append upload queued",
-                meta = "targetPhotoId=$targetPhotoId;promptDay=${freshPrompt?.day ?: state.prompt?.day ?: "-"};shareLocation=$shareLocation"
+                meta = "targetKind=$targetKind;targetPhotoId=$targetPhotoId;promptDay=${freshPrompt?.day ?: state.prompt?.day ?: "-"};shareLocation=$shareLocation"
             )
             state = state.copy(
                 loading = false,
                 prompt = freshPrompt ?: state.prompt,
                 uploadQueue = repo.uploadQueue(),
-                message = "Bild zum letzten Beitrag eingeplant."
+                message = if (targetKind == PhotoAttachmentTargetKind.COMMUNITY) {
+                    "Bild zum Community-Post eingeplant."
+                } else {
+                    "Bild zum eigenen letzten Beitrag eingeplant."
+                }
             )
         }.onFailure {
-            state = state.copy(loading = false, message = apiError(it, "Anhang fehlgeschlagen"))
+            val fallback = if (targetKind == PhotoAttachmentTargetKind.COMMUNITY) {
+                "Community-Anhang fehlgeschlagen"
+            } else {
+                "Anhang fehlgeschlagen"
+            }
+            state = state.copy(loading = false, message = apiError(it, fallback))
         }.isSuccess
     }
 
@@ -12603,6 +12680,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     var captureUri by remember { mutableStateOf<Uri?>(null) }
     var captureTarget by remember { mutableStateOf<String?>(null) }
     var appendCapturePhotoId by remember { mutableStateOf<Long?>(null) }
+    var appendCaptureTargetKind by remember { mutableStateOf(PhotoAttachmentTargetKind.OWN_LATEST) }
     var pendingFotomojiCapture by remember { mutableStateOf<PendingFotomojiCapture?>(null) }
     var pendingProfileFotomojiTemplateEmoji by remember { mutableStateOf<String?>(null) }
     var captureAsPrompt by remember { mutableStateOf(true) }
@@ -12692,9 +12770,15 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     if (shotUri != null) {
                         val targetPhotoId = appendCapturePhotoId
                         if (targetPhotoId != null) {
+                            val targetKind = appendCaptureTargetKind
                             val shareLocation = cameraLocationShareEnabled && (state.user?.locationFeatureEnabled == true) && locationPermissionGranted
                             scope.launch {
-                                val ok = vm.appendPhotoToLatestPost(targetPhotoId, shotUri, shareLocation)
+                                val ok = when (targetKind) {
+                                    PhotoAttachmentTargetKind.OWN_LATEST ->
+                                        vm.appendPhotoToOwnLatestPost(targetPhotoId, shotUri, shareLocation)
+                                    PhotoAttachmentTargetKind.COMMUNITY ->
+                                        vm.appendPhotoToCommunityPost(targetPhotoId, shotUri, shareLocation)
+                                }
                                 if (ok) {
                                     vm.refreshAll(refreshFeedWindow = true)
                                     vm.setTab(AppTab.FEED)
@@ -12741,6 +12825,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         captureUri = null
         captureTarget = null
         appendCapturePhotoId = null
+        appendCaptureTargetKind = PhotoAttachmentTargetKind.OWN_LATEST
     }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -12766,8 +12851,9 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         cameraLauncher.launch(uri)
     }
 
-    fun startAppendCapture(photoId: Long) {
+    fun startAppendCapture(photoId: Long, targetKind: PhotoAttachmentTargetKind) {
         appendCapturePhotoId = photoId
+        appendCaptureTargetKind = targetKind
         cameraUploadPercent = 0
         cameraUploadError = ""
         cameraUploadDone = false
@@ -13767,7 +13853,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onCaptureExtra = { capsule -> startDualCapture(false, capsule) },
                     onCaptureCommunity = { startDualCapture(false, CapsuleUploadOptions(), true) },
                     onRequestSpecialMoment = { showSpecialMomentConfirm = true },
-                    onAppendToLatestPost = { photoId -> startAppendCapture(photoId) },
+                    onAppendToCommunityPost = { photoId -> startAppendCapture(photoId, PhotoAttachmentTargetKind.COMMUNITY) },
+                    onAppendToOwnLatestPost = { photoId -> startAppendCapture(photoId, PhotoAttachmentTargetKind.OWN_LATEST) },
                     hasOpenExtraDraft = vm.hasOpenExtraDraft(),
                     onAppendToOpenExtraDraft = ::startPendingExtraAppendCapture,
                     onReset = {
@@ -14429,7 +14516,8 @@ fun CameraTab(
     onCaptureExtra: (CapsuleUploadOptions) -> Unit,
     onCaptureCommunity: () -> Unit,
     onRequestSpecialMoment: () -> Unit,
-    onAppendToLatestPost: (Long) -> Unit,
+    onAppendToCommunityPost: (Long) -> Unit,
+    onAppendToOwnLatestPost: (Long) -> Unit,
     hasOpenExtraDraft: Boolean,
     onAppendToOpenExtraDraft: () -> Unit,
     onReset: () -> Unit,
@@ -14627,7 +14715,7 @@ fun CameraTab(
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Aktiver Community-Post", fontWeight = FontWeight.Bold)
                     Text("${community.communityContributors.size} Beteiligte · ${community.mediaCount} Bilder")
-                    Button(onClick = { onAppendToLatestPost(community.id) }, modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = { onAppendToCommunityPost(community.id) }, modifier = Modifier.fillMaxWidth()) {
                         Text("Community-Post Bild hinzufuegen")
                     }
                 }
@@ -14709,7 +14797,7 @@ fun CameraTab(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         OutlinedButton(
-                            onClick = { onAppendToLatestPost(prompt.appendTargetPhotoId) },
+                            onClick = { onAppendToOwnLatestPost(prompt.appendTargetPhotoId) },
                             modifier = Modifier.fillMaxWidth()
                         ) { Text("Dem eigenen letzten Beitrag Bild hinzufuegen") }
                         if (!prompt.appendMediaUnlimited) {
