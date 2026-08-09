@@ -232,3 +232,13 @@ This file is append-only operational history for Forge-side Daily continuity.
 - Confirmed GitHub Actions success: CI `31188357669`, Publish Server Images `31188357383`, Release Android APK `31189081194`; published release assets are signed `app-release.apk` and `changelog.json` at `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.8.25`.
 - No Broutschek rollout was performed because no backend/admin source changed. Public production health and live health remain green on runtime `srv-369.1`; rollback was not required.
 
+## 2026-08-09
+
+- Released Android patch `v0.8.26` from `main` commit `11c79669add9dc00a27d9b0c6232edbae4abc703` via PR `#6` after fixing the Community-Post attachment target mix-up.
+- Split Android attachment capture into explicit own-latest and Community target types. Community captures now preserve the active Community-Post ID through prompt refresh and queueing instead of being rewritten to the contributor's own Daily; stale Community targets are rejected with a clear message.
+- Added Android resolver coverage for own-target refresh, Community-target preservation, stale-target rejection and prompt-refresh failure, plus backend multi-user regression tests confirming `PhotoAttachment.UserID`, Community contributor aggregation, unchanged contributor-owned posts and `403` protection for foreign normal posts.
+- Local verification passed with `gradle -p android :app:assembleDebug :app:testDebugUnitTest --no-daemon --stacktrace --console=plain`, targeted backend attachment API tests and `npm run build`; the downloaded release APK reports `versionName=0.8.26` and `versionCode=142026`. The local full Go run remains limited only by the known CGO-disabled scheduler/SQLite environment, while GitHub's complete backend suite passed.
+- Confirmed GitHub Actions success: PR CI `31329584629`, main CI `31329818198`, Publish Server Images `31329818195` (`srv-374.1`) and Release Android APK `31330041892`.
+- Published signed `app-release.apk` (13,954,589 bytes, SHA-256 `638ac625edc6624d321dc57fa09bb6b1ff3e76847a951e9ad665706fcc85db3f`) and matching `changelog.json` at `https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v0.8.26`.
+- No Broutschek rollout was performed because no backend/admin production source changed. Public production health remains green on `srv-373.1`; rollback was not required.
+
