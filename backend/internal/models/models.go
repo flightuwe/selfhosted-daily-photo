@@ -6,6 +6,13 @@ type User struct {
 	ID                                  uint       `gorm:"primaryKey" json:"id"`
 	Username                            string     `gorm:"uniqueIndex;size:64;not null" json:"username"`
 	PasswordHash                        string     `gorm:"not null" json:"-"`
+	AuthVersion                         uint64     `gorm:"not null;default:1" json:"-"`
+	Email                               string     `gorm:"size:254" json:"-"`
+	EmailNormalized                     string     `gorm:"size:254;index" json:"-"`
+	EmailVerifiedAt                     *time.Time `gorm:"index" json:"-"`
+	PendingEmail                        string     `gorm:"size:254" json:"-"`
+	PendingEmailNormalized              string     `gorm:"size:254;index" json:"-"`
+	PendingEmailRequestedAt             *time.Time `json:"-"`
 	IsAdmin                             bool       `gorm:"default:false" json:"isAdmin"`
 	FavoriteColor                       string     `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
 	ChatPushEnabled                     bool       `gorm:"default:false" json:"chatPushEnabled"`
@@ -141,6 +148,111 @@ type AppSettings struct {
 	MigrationBaselineUserCount      int64      `gorm:"default:0" json:"migrationBaselineUserCount"`
 	CreatedAt                       time.Time  `json:"createdAt"`
 	UpdatedAt                       time.Time  `json:"updatedAt"`
+}
+
+// EmailSettings is the singleton runtime SMTP configuration. SecretCiphertext
+// is never serialized and is encrypted with the deployment-owned master key.
+type EmailSettings struct {
+	ID                 uint       `gorm:"primaryKey" json:"id"`
+	Enabled            bool       `gorm:"default:false" json:"enabled"`
+	Host               string     `gorm:"size:255" json:"host"`
+	Port               int        `gorm:"default:587" json:"port"`
+	TLSMode            string     `gorm:"size:24;default:'starttls'" json:"tlsMode"`
+	AuthMode           string     `gorm:"size:24;default:'auto'" json:"authMode"`
+	Username           string     `gorm:"size:254" json:"username"`
+	SecretCiphertext   string     `gorm:"type:text" json:"-"`
+	FromName           string     `gorm:"size:120" json:"fromName"`
+	FromAddress        string     `gorm:"size:254" json:"fromAddress"`
+	ReplyTo            string     `gorm:"size:254" json:"replyTo"`
+	ActionBaseURL      string     `gorm:"size:500" json:"actionBaseUrl"`
+	LastTestAt         *time.Time `json:"lastTestAt"`
+	LastTestOK         bool       `json:"lastTestOk"`
+	LastTestStage      string     `gorm:"size:32" json:"lastTestStage"`
+	LastTestError      string     `gorm:"size:500" json:"lastTestError"`
+	LastTestConfigHash string     `gorm:"size:64" json:"-"`
+	LastDeliveryAt     *time.Time `json:"lastDeliveryAt"`
+	LastDeliveryError  string     `gorm:"size:500" json:"lastDeliveryError"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+}
+
+type EmailAction struct {
+	ID                       uint       `gorm:"primaryKey" json:"id"`
+	UserID                   uint       `gorm:"index;not null" json:"userId"`
+	Purpose                  string     `gorm:"size:32;index;not null" json:"purpose"`
+	TokenHash                string     `gorm:"size:64;uniqueIndex;not null" json:"-"`
+	TokenCiphertext          string     `gorm:"type:text" json:"-"`
+	PendingEmail             string     `gorm:"size:254" json:"-"`
+	PendingEmailNormalized   string     `gorm:"size:254;index" json:"-"`
+	NewsletterOptInRequested bool       `gorm:"default:false" json:"-"`
+	ConsentVersion           string     `gorm:"size:64" json:"-"`
+	Source                   string     `gorm:"size:64" json:"-"`
+	AppVersion               string     `gorm:"size:40" json:"-"`
+	RequestIPHash            string     `gorm:"size:64;index" json:"-"`
+	SentAt                   *time.Time `gorm:"index" json:"sentAt"`
+	ExpiresAt                *time.Time `gorm:"index" json:"expiresAt"`
+	ConsumedAt               *time.Time `gorm:"index" json:"consumedAt"`
+	InvalidatedAt            *time.Time `gorm:"index" json:"invalidatedAt"`
+	CreatedAt                time.Time  `gorm:"index" json:"createdAt"`
+	UpdatedAt                time.Time  `json:"updatedAt"`
+}
+
+type EmailDelivery struct {
+	ID             uint       `gorm:"primaryKey" json:"id"`
+	ActionID       *uint      `gorm:"index" json:"actionId"`
+	UserID         uint       `gorm:"index" json:"userId"`
+	Kind           string     `gorm:"size:40;index;not null" json:"kind"`
+	Recipient      string     `gorm:"size:254;not null" json:"-"`
+	Status         string     `gorm:"size:24;index;not null;default:'queued'" json:"status"`
+	Attempts       int        `gorm:"default:0" json:"attempts"`
+	NextAttemptAt  time.Time  `gorm:"index" json:"nextAttemptAt"`
+	LockedBy       string     `gorm:"size:120;index" json:"lockedBy"`
+	LockedUntil    *time.Time `gorm:"index" json:"lockedUntil"`
+	LastStage      string     `gorm:"size:32" json:"lastStage"`
+	SMTPResultCode int        `json:"smtpResultCode"`
+	LastError      string     `gorm:"size:500" json:"lastError"`
+	MessageID      string     `gorm:"size:255" json:"messageId"`
+	SentAt         *time.Time `gorm:"index" json:"sentAt"`
+	CreatedAt      time.Time  `gorm:"index" json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
+type EmailRateLimit struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Scope       string    `gorm:"uniqueIndex:idx_email_rate_limit,priority:1;size:32;not null" json:"-"`
+	KeyHash     string    `gorm:"uniqueIndex:idx_email_rate_limit,priority:2;size:64;not null" json:"-"`
+	WindowStart time.Time `gorm:"uniqueIndex:idx_email_rate_limit,priority:3;not null" json:"-"`
+	Count       int       `gorm:"not null;default:0" json:"-"`
+	CreatedAt   time.Time `json:"-"`
+	UpdatedAt   time.Time `json:"-"`
+}
+
+type NewsletterSubscription struct {
+	ID              uint       `gorm:"primaryKey" json:"id"`
+	UserID          uint       `gorm:"uniqueIndex;not null" json:"userId"`
+	Email           string     `gorm:"size:254" json:"-"`
+	EmailNormalized string     `gorm:"size:254;index" json:"-"`
+	Status          string     `gorm:"size:24;index;not null;default:'unsubscribed'" json:"status"`
+	ConsentVersion  string     `gorm:"size:64" json:"consentVersion"`
+	Source          string     `gorm:"size:64" json:"source"`
+	RequestedAt     *time.Time `json:"requestedAt"`
+	ConfirmedAt     *time.Time `json:"confirmedAt"`
+	RevokedAt       *time.Time `json:"revokedAt"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
+}
+
+type UserPromptState struct {
+	ID               uint       `gorm:"primaryKey" json:"id"`
+	UserID           uint       `gorm:"uniqueIndex:idx_user_prompt_state,priority:1;not null" json:"userId"`
+	RuleID           string     `gorm:"uniqueIndex:idx_user_prompt_state,priority:2;size:80;not null" json:"ruleId"`
+	LastShownVersion string     `gorm:"size:40" json:"lastShownVersion"`
+	LastShownAt      *time.Time `gorm:"index" json:"lastShownAt"`
+	LastEvent        string     `gorm:"size:24" json:"lastEvent"`
+	AcceptedAt       *time.Time `json:"acceptedAt"`
+	CompletedAt      *time.Time `json:"completedAt"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
 }
 
 type MigrationUserStatus struct {

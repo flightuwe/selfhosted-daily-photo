@@ -16,6 +16,7 @@ import (
 	"github.com/yosho/selfhosted-bereal/backend/internal/auth"
 	"github.com/yosho/selfhosted-bereal/backend/internal/config"
 	"github.com/yosho/selfhosted-bereal/backend/internal/db"
+	mailservice "github.com/yosho/selfhosted-bereal/backend/internal/email"
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 	"github.com/yosho/selfhosted-bereal/backend/internal/notify"
 	"github.com/yosho/selfhosted-bereal/backend/internal/scheduler"
@@ -62,6 +63,11 @@ func main() {
 		log.Printf("notifications: provider=%s", notifier.Name())
 	}
 	hostName, _ := os.Hostname()
+	emailSecrets, emailSecretsErr := mailservice.NewSecrets(cfg.EmailMasterKeyB64, cfg.EmailPreviousMasterKeyB64)
+	if emailSecretsErr != nil {
+		log.Printf("email support disabled until EMAIL_MASTER_KEY_B64 is configured: %v", emailSecretsErr)
+		emailSecrets = nil
+	}
 	promptService := &scheduler.DailyPromptService{
 		DB:             database,
 		Location:       location,
@@ -70,16 +76,19 @@ func main() {
 	}
 	monitor := api.NewMonitor(database, location)
 	server := &api.Server{
-		DB:          database,
-		Config:      cfg,
-		Auth:        auth.NewManager(cfg.JWTSecret, cfg.TokenTTL),
-		Store:       store,
-		Notifier:    notifier,
-		Prompt:      promptService,
-		Location:    location,
-		Monitor:     monitor,
-		FeedCache:   api.NewFeedDayCache(12 * time.Second),
-		FeedLimiter: api.NewFeedPollLimiter(28, 30*time.Second),
+		DB:            database,
+		Config:        cfg,
+		Auth:          auth.NewManager(cfg.JWTSecret, cfg.TokenTTL),
+		Store:         store,
+		Notifier:      notifier,
+		Prompt:        promptService,
+		Location:      location,
+		Monitor:       monitor,
+		FeedCache:     api.NewFeedDayCache(12 * time.Second),
+		FeedLimiter:   api.NewFeedPollLimiter(28, 30*time.Second),
+		EmailSecrets:  emailSecrets,
+		EmailSender:   mailservice.GoMailSender{},
+		EmailWorkerID: hostName,
 	}
 	if err := server.EnsureHubVersionSystemEvent(time.Now().In(location)); err != nil {
 		log.Printf("hub system event bootstrap failed: %v", err)
@@ -88,6 +97,7 @@ func main() {
 	defer runtimeCancel()
 	go server.RunAutoBookmarkCleanupLoop(runtimeCtx, 30*time.Minute)
 	go server.RunMediaDerivativeLoop(runtimeCtx, 5*time.Second)
+	go server.RunEmailDeliveryLoop(runtimeCtx, 3*time.Second)
 	if fixed, cleanupErr := server.CleanupInvalidPromptOnlyPhotosRecent(14); cleanupErr != nil {
 		log.Printf("prompt cleanup failed: %v", cleanupErr)
 	} else if fixed > 0 {

@@ -51,7 +51,7 @@ func (s *Server) issueSessionTokens(user models.User, deviceName string) (authTo
 	if err := s.DB.Create(&session).Error; err != nil {
 		return authTokens{}, err
 	}
-	accessToken, signErr := s.Auth.SignAccess(user.ID, user.Username, user.IsAdmin, sessionID)
+	accessToken, signErr := s.Auth.SignAccess(user.ID, user.Username, user.IsAdmin, sessionID, user.AuthVersion)
 	if signErr != nil {
 		_ = s.DB.Delete(&models.UserSession{}, session.ID).Error
 		return authTokens{}, signErr
@@ -130,7 +130,7 @@ func (s *Server) rotateSessionTokens(rawRefreshToken string) (authTokens, models
 			return authTokens{}, models.User{}, gorm.ErrRecordNotFound
 		}
 	}
-	accessToken, signErr := s.Auth.SignAccess(user.ID, user.Username, user.IsAdmin, session.SessionID)
+	accessToken, signErr := s.Auth.SignAccess(user.ID, user.Username, user.IsAdmin, session.SessionID, user.AuthVersion)
 	if signErr != nil {
 		return authTokens{}, models.User{}, signErr
 	}

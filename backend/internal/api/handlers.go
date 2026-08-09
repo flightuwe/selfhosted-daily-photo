@@ -32,6 +32,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/yosho/selfhosted-bereal/backend/internal/auth"
 	"github.com/yosho/selfhosted-bereal/backend/internal/config"
+	mailservice "github.com/yosho/selfhosted-bereal/backend/internal/email"
 	"github.com/yosho/selfhosted-bereal/backend/internal/models"
 	"github.com/yosho/selfhosted-bereal/backend/internal/notify"
 	"github.com/yosho/selfhosted-bereal/backend/internal/scheduler"
@@ -41,6 +42,7 @@ import (
 
 type userPromptRule struct {
 	ID            string `json:"id"`
+	Action        string `json:"action"`
 	Enabled       bool   `json:"enabled"`
 	TriggerType   string `json:"triggerType"`
 	Title         string `json:"title"`
@@ -68,6 +70,9 @@ type Server struct {
 	photoSearchReady   bool
 	performanceCacheMu sync.Mutex
 	performanceCache   map[string]performanceCacheEntry
+	EmailSecrets       *mailservice.Secrets
+	EmailSender        mailservice.Sender
+	EmailWorkerID      string
 }
 
 const photoTimeShiftThreshold = 5 * time.Minute
@@ -270,6 +275,9 @@ func (s *Server) Router() *gin.Engine {
 		c.Next()
 	})
 	uploads.StaticFS("/", http.Dir(s.Config.UploadDir))
+	r.GET("/.well-known/assetlinks.json", s.handleAssetLinks)
+	r.GET("/email-action/verify", s.handleEmailActionPage)
+	r.GET("/email-action/reset", s.handleEmailActionPage)
 
 	api := r.Group("/api")
 	{
@@ -285,6 +293,9 @@ func (s *Server) Router() *gin.Engine {
 		api.POST("/auth/register/confirm", s.handleInviteRegister)
 		api.POST("/auth/login", s.handleLogin)
 		api.POST("/auth/refresh", s.handleAuthRefresh)
+		api.POST("/auth/password-reset/request", s.handlePasswordResetRequest)
+		api.POST("/auth/password-reset/confirm", s.handlePasswordResetConfirm)
+		api.POST("/email-actions/confirm", s.handleEmailActionConfirm)
 
 		protected := api.Group("")
 		protected.Use(s.requireAuth)
@@ -293,6 +304,13 @@ func (s *Server) Router() *gin.Engine {
 			protected.POST("/auth/logout-all", s.handleAuthLogoutAll)
 			protected.GET("/me", s.handleMe)
 			protected.GET("/me/user-prompts/evaluate", s.handleEvaluateUserPrompts)
+			protected.POST("/me/user-prompts/:id/events", s.handleUserPromptEvent)
+			protected.GET("/me/email", s.handleGetMyEmail)
+			protected.POST("/me/email/verification", s.handleRequestEmailVerification)
+			protected.DELETE("/me/email/pending", s.handleDeletePendingEmail)
+			protected.DELETE("/me/email", s.handleDeleteMyEmail)
+			protected.POST("/me/newsletter/subscribe", s.handleNewsletterSubscribe)
+			protected.DELETE("/me/newsletter", s.handleNewsletterUnsubscribe)
 			protected.GET("/users/:id/profile", s.handleUserProfile)
 			protected.POST("/debug/client-log", s.handleClientDebugLog)
 			protected.GET("/me/invite", s.handleMyInvite)
@@ -363,6 +381,11 @@ func (s *Server) Router() *gin.Engine {
 		{
 			admin.GET("/settings", s.handleGetSettings)
 			admin.PUT("/settings", s.handleUpdateSettings)
+			admin.GET("/email/settings", s.handleAdminGetEmailSettings)
+			admin.PUT("/email/settings", s.handleAdminUpdateEmailSettings)
+			admin.POST("/email/test-connection", s.handleAdminTestEmailConnection)
+			admin.POST("/email/test-message", s.handleAdminTestEmailMessage)
+			admin.GET("/email/status", s.handleAdminEmailStatus)
 			admin.GET("/media/renditions", s.handleAdminMediaRenditions)
 			admin.PUT("/media/renditions", s.handleAdminMediaRenditionsUpdate)
 			admin.GET("/stats", s.handleAdminStats)
@@ -419,6 +442,7 @@ func (s *Server) Router() *gin.Engine {
 			admin.POST("/users/:id/token", s.handleAdminIssueUserToken)
 			admin.PUT("/users/:id", s.handleAdminUpdateUser)
 			admin.DELETE("/users/:id", s.handleAdminDeleteUser)
+			admin.DELETE("/users/:id/email", s.handleAdminDeleteUserEmail)
 			admin.GET("/migration", s.handleAdminMigrationGet)
 			admin.PUT("/migration", s.handleAdminMigrationPut)
 			admin.POST("/migration/activate", s.handleAdminMigrationActivate)
@@ -472,10 +496,12 @@ type invitePreviewRequest struct {
 }
 
 type inviteRegisterRequest struct {
-	InviteCode string `json:"inviteCode" binding:"required,min=6,max=32"`
-	Username   string `json:"username" binding:"required,min=3,max=64"`
-	Password   string `json:"password" binding:"required,min=6,max=128"`
-	DeviceName string `json:"deviceName" binding:"max=120"`
+	InviteCode      string `json:"inviteCode" binding:"required,min=6,max=32"`
+	Username        string `json:"username" binding:"required,min=3,max=64"`
+	Password        string `json:"password" binding:"required,min=6,max=128"`
+	DeviceName      string `json:"deviceName" binding:"max=120"`
+	Email           string `json:"email" binding:"max=254"`
+	NewsletterOptIn bool   `json:"newsletterOptIn"`
 }
 
 func (s *Server) handleRegister(c *gin.Context) {
@@ -528,6 +554,21 @@ func (s *Server) handleInviteRegister(c *gin.Context) {
 	if len(username) < 3 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username too short"})
 		return
+	}
+	registrationEmail := ""
+	registrationEmailNormalized := ""
+	if strings.TrimSpace(req.Email) != "" {
+		var emailErr error
+		registrationEmail, registrationEmailNormalized, emailErr = mailservice.NormalizeAddress(req.Email)
+		if emailErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid email address"})
+			return
+		}
+		var collision int64
+		if err := s.DB.Model(&models.User{}).Where("email_normalized = ?", registrationEmailNormalized).Count(&collision).Error; err != nil || collision > 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "email address unavailable"})
+			return
+		}
 	}
 
 	hash, err := auth.HashPassword(req.Password)
@@ -584,6 +625,20 @@ func (s *Server) handleInviteRegister(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "register failed"})
 		return
 	}
+	emailVerificationQueued := false
+	if registrationEmail != "" && s.EmailSecrets != nil {
+		now := time.Now().UTC()
+		queueErr := s.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]any{"pending_email": registrationEmail, "pending_email_normalized": registrationEmailNormalized, "pending_email_requested_at": now}).Error; err != nil {
+				return err
+			}
+			return s.queueAction(tx, user.ID, emailActionVerify, registrationEmail, registrationEmailNormalized, req.NewsletterOptIn, "registration", s.Config.AppVersion, "")
+		})
+		emailVerificationQueued = queueErr == nil
+		if emailVerificationQueued {
+			user.PendingEmail, user.PendingEmailNormalized, user.PendingEmailRequestedAt = registrationEmail, registrationEmailNormalized, &now
+		}
+	}
 
 	welcomeText := fmt.Sprintf("Herzlich willkommen %s (Einladung von %s erhalten)", user.Username, inviter.Username)
 	_ = s.DB.Create(&models.ChatMessage{
@@ -610,11 +665,12 @@ func (s *Server) handleInviteRegister(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
-		"token":        tokens.AccessToken,
-		"accessToken":  tokens.AccessToken,
-		"refreshToken": tokens.RefreshToken,
-		"sessionId":    tokens.SessionID,
-		"user":         s.userOwnJSON(user),
+		"token":                   tokens.AccessToken,
+		"accessToken":             tokens.AccessToken,
+		"refreshToken":            tokens.RefreshToken,
+		"sessionId":               tokens.SessionID,
+		"emailVerificationQueued": emailVerificationQueued,
+		"user":                    s.userOwnJSON(user),
 		"inviter": gin.H{
 			"id":            inviter.ID,
 			"username":      inviter.Username,
@@ -1154,16 +1210,12 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "current password invalid"})
 		return
 	}
-	hash, err := auth.HashPassword(req.NewPassword)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "hash failed"})
-		return
-	}
-	if err := s.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("password_hash", hash).Error; err != nil {
+	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		return setPasswordTx(tx, user.ID, req.NewPassword, time.Now().UTC())
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
 		return
 	}
-	s.revokeAllSessionsByUserID(user.ID)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -1783,26 +1835,36 @@ func (s *Server) handleEvaluateUserPrompts(c *gin.Context) {
 	settings = normalizeSettings(settings)
 	rules := parseUserPromptRulesJSON(settings.UserPromptRulesJSON)
 	appVersion := strings.TrimSpace(c.Query("appVersion"))
+	var promptStates []models.UserPromptState
+	_ = s.DB.Where("user_id = ?", user.ID).Find(&promptStates).Error
+	states := make(map[string]models.UserPromptState, len(promptStates))
+	for _, state := range promptStates {
+		states[state.RuleID] = state
+	}
+	now := time.Now().In(s.Location)
 
 	items := make([]gin.H, 0)
 	for _, rule := range rules {
 		if !rule.Enabled {
 			continue
 		}
+		state := states[rule.ID]
+		versionChanged := appVersion != "" && !strings.EqualFold(appVersion, state.LastShownVersion)
+		cooldown := time.Duration(rule.CooldownHours) * time.Hour
+		cooldownElapsed := state.LastShownAt == nil || cooldown == 0 || now.Sub(*state.LastShownAt) >= cooldown
 		shouldShow := false
-		switch rule.TriggerType {
-		case "app_version":
-			shouldShow = appVersion != "" && !user.DiagnosticsConsentGranted
-		case "app_start":
-			shouldShow = !user.DiagnosticsConsentGranted
-		case "time_based":
-			shouldShow = false
+		switch rule.Action {
+		case "diagnostics_consent":
+			shouldShow = !user.DiagnosticsConsentGranted && cooldownElapsed && (rule.TriggerType != "app_version" || versionChanged)
+		case "add_recovery_email":
+			shouldShow = s.emailDeliveryEnabled() && user.EmailVerifiedAt == nil && strings.TrimSpace(user.PendingEmailNormalized) == "" && (versionChanged || state.LastShownAt == nil || now.Sub(*state.LastShownAt) >= 30*24*time.Hour)
 		}
 		if !shouldShow {
 			continue
 		}
 		items = append(items, gin.H{
 			"id":            rule.ID,
+			"action":        rule.Action,
 			"enabled":       rule.Enabled,
 			"triggerType":   rule.TriggerType,
 			"title":         rule.Title,
@@ -1817,7 +1879,7 @@ func (s *Server) handleEvaluateUserPrompts(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"items":      items,
 		"appVersion": appVersion,
-		"serverNow":  time.Now().In(s.Location),
+		"serverNow":  now,
 	})
 }
 
@@ -3454,6 +3516,12 @@ func (s *Server) handleAdminListUsers(c *gin.Context) {
 		debugByUserID[row.UserID] = entry
 	}
 
+	newsletterByUserID := make(map[uint]models.NewsletterSubscription, len(users))
+	var newsletterRows []models.NewsletterSubscription
+	_ = s.DB.Find(&newsletterRows).Error
+	for _, row := range newsletterRows {
+		newsletterByUserID[row.UserID] = row
+	}
 	out := make([]gin.H, 0, len(users))
 	for _, u := range users {
 		var photoCount int64
@@ -3496,7 +3564,7 @@ func (s *Server) handleAdminListUsers(c *gin.Context) {
 		if lastAppVersion == "" || strings.EqualFold(lastAppVersion, "unknown") {
 			lastAppVersion = latestDeviceVersion
 		}
-		out = append(out, toAdminUser(
+		item := toAdminUser(
 			u,
 			photoCount,
 			tokenCount,
@@ -3515,7 +3583,14 @@ func (s *Server) handleAdminListUsers(c *gin.Context) {
 				return &t
 			}(),
 			dbg.LastSuccess,
-		))
+		)
+		if newsletter, ok := newsletterByUserID[u.ID]; ok {
+			item["newsletterStatus"] = newsletter.Status
+			item["newsletterConfirmedAt"] = newsletter.ConfirmedAt
+		} else {
+			item["newsletterStatus"] = "unsubscribed"
+		}
+		out = append(out, item)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"items": out})
@@ -4153,27 +4228,34 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
 		return
 	}
 
+	passwordChanged := false
 	if req.Password != nil {
-		if len(strings.TrimSpace(*req.Password)) < 6 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 6 chars"})
+		if len(*req.Password) < 6 || len(*req.Password) > 128 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be between 6 and 128 chars"})
 			return
 		}
-		hash, err := auth.HashPassword(*req.Password)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "hash failed"})
-			return
-		}
-		user.PasswordHash = hash
+		passwordChanged = true
 	}
 
 	if req.IsAdmin != nil {
 		user.IsAdmin = *req.IsAdmin
 	}
 
-	if err := s.DB.Save(&user).Error; err != nil {
+	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if req.IsAdmin != nil {
+			if err := tx.Model(&models.User{}).Where("id = ?", user.ID).Update("is_admin", *req.IsAdmin).Error; err != nil {
+				return err
+			}
+		}
+		if passwordChanged {
+			return setPasswordTx(tx, user.ID, *req.Password, time.Now().UTC())
+		}
+		return nil
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
 		return
 	}
+	_ = s.DB.First(&user, user.ID).Error
 
 	var photoCount int64
 	var tokenCount int64
@@ -4196,7 +4278,7 @@ func (s *Server) handleAdminIssueUserToken(c *gin.Context) {
 		return
 	}
 
-	token, err := s.Auth.Sign(user.ID, user.Username, user.IsAdmin)
+	token, err := s.Auth.Sign(user.ID, user.Username, user.IsAdmin, user.AuthVersion)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token create failed"})
 		return
@@ -4241,6 +4323,10 @@ func (s *Server) handleAdminDeleteUser(c *gin.Context) {
 
 	_ = s.DB.Where("user_id = ?", id).Delete(&models.DeviceToken{}).Error
 	_ = s.DB.Where("user_id = ?", id).Delete(&models.Photo{}).Error
+	_ = s.DB.Where("user_id = ?", id).Delete(&models.EmailDelivery{}).Error
+	_ = s.DB.Where("user_id = ?", id).Delete(&models.EmailAction{}).Error
+	_ = s.DB.Where("user_id = ?", id).Delete(&models.NewsletterSubscription{}).Error
+	_ = s.DB.Where("user_id = ?", id).Delete(&models.UserPromptState{}).Error
 	if err := s.DB.Delete(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
@@ -9368,9 +9454,13 @@ func (s *Server) handleHealth(c *gin.Context) {
 		"version":  s.Config.AppVersion,
 		"provider": s.Notifier.Name(),
 		"features": gin.H{
-			"chatDelete":    true,
-			"commentDelete": true,
+			"chatDelete":           true,
+			"commentDelete":        true,
+			"emailSupport":         s.emailSupportAvailable(),
+			"emailDeliveryEnabled": s.emailDeliveryEnabled(),
 		},
+		"emailSupport":         s.emailSupportAvailable(),
+		"emailDeliveryEnabled": s.emailDeliveryEnabled(),
 		"mediaCapabilities": gin.H{
 			"renditions":  s.Config.MediaRenditionsEnabled,
 			"formats":     formats,
@@ -12056,6 +12146,8 @@ func (s *Server) userOwnJSON(u models.User) gin.H {
 		"diagnosticsConsentGranted":           u.DiagnosticsConsentGranted,
 		"diagnosticsConsentUpdatedAt":         u.DiagnosticsConsentUpdatedAt,
 		"diagnosticsConsentSource":            strings.TrimSpace(u.DiagnosticsConsentSource),
+		"hasVerifiedEmail":                    u.EmailVerifiedAt != nil && strings.TrimSpace(u.EmailNormalized) != "",
+		"hasPendingEmail":                     strings.TrimSpace(u.PendingEmailNormalized) != "",
 		"createdAt":                           u.CreatedAt,
 	}
 }
@@ -12065,6 +12157,7 @@ func (s *Server) userPublicJSON(viewerID uint, u models.User) gin.H {
 	out := gin.H{
 		"id":                                  u.ID,
 		"username":                            u.Username,
+		"hasVerifiedEmail":                    u.EmailVerifiedAt != nil && strings.TrimSpace(u.EmailNormalized) != "",
 		"isAdmin":                             u.IsAdmin,
 		"favoriteColor":                       defaultColor(u.FavoriteColor),
 		"chatPushEnabled":                     false,
@@ -12242,18 +12335,22 @@ func toAdminUser(
 	lastProfileOkAt *time.Time,
 ) gin.H {
 	out := gin.H{
-		"id":              u.ID,
-		"username":        u.Username,
-		"isAdmin":         u.IsAdmin,
-		"createdAt":       u.CreatedAt,
-		"photoCount":      photoCount,
-		"deviceCount":     tokenCount,
-		"deviceNames":     deviceNames,
-		"deviceDetails":   deviceDetails,
-		"lastAppVersion":  strings.TrimSpace(lastAppVersion),
-		"lastError":       strings.TrimSpace(lastError),
-		"lastErrorAt":     lastErrorAt,
-		"lastProfileOkAt": lastProfileOkAt,
+		"id":                 u.ID,
+		"username":           u.Username,
+		"isAdmin":            u.IsAdmin,
+		"createdAt":          u.CreatedAt,
+		"photoCount":         photoCount,
+		"deviceCount":        tokenCount,
+		"deviceNames":        deviceNames,
+		"deviceDetails":      deviceDetails,
+		"lastAppVersion":     strings.TrimSpace(lastAppVersion),
+		"lastError":          strings.TrimSpace(lastError),
+		"lastErrorAt":        lastErrorAt,
+		"lastProfileOkAt":    lastProfileOkAt,
+		"emailMasked":        maskEmailForAdmin(u.Email),
+		"emailVerifiedAt":    u.EmailVerifiedAt,
+		"emailPending":       strings.TrimSpace(u.PendingEmailNormalized) != "",
+		"pendingEmailMasked": maskEmailForAdmin(u.PendingEmail),
 	}
 	if invitedByID != 0 {
 		out["invitedById"] = invitedByID
@@ -12263,6 +12360,21 @@ func toAdminUser(
 		out["invitedAt"] = invitedAt
 	}
 	return out
+}
+
+func maskEmailForAdmin(value string) string {
+	parts := strings.Split(strings.TrimSpace(value), "@")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	local := []rune(parts[0])
+	visible := string(local[0])
+	if len(local) > 2 {
+		visible += strings.Repeat("*", minInt(len(local)-2, 6)) + string(local[len(local)-1])
+	} else {
+		visible += "*"
+	}
+	return visible + "@" + parts[1]
 }
 
 func (s *Server) userHasPostedForDay(userID uint, day string) (bool, error) {
@@ -13845,6 +13957,7 @@ func defaultUserPromptRules() []userPromptRule {
 	return []userPromptRule{
 		{
 			ID:            "diagnostics_consent_v1",
+			Action:        "diagnostics_consent",
 			Enabled:       true,
 			TriggerType:   "app_version",
 			Title:         "Diagnose & Performance teilen?",
@@ -13854,6 +13967,18 @@ func defaultUserPromptRules() []userPromptRule {
 			CooldownHours: 0,
 			Priority:      10,
 		},
+		{
+			ID:            "email_recovery_v1",
+			Action:        "add_recovery_email",
+			Enabled:       true,
+			TriggerType:   "app_version",
+			Title:         "Konto mit E-Mail absichern",
+			Body:          "Mit einer bestätigten E-Mail-Adresse kannst du dein Passwort zuverlässig zurücksetzen. Die Adresse bleibt optional und wird nicht öffentlich angezeigt.",
+			ConfirmLabel:  "E-Mail hinzufügen",
+			DeclineLabel:  "Später",
+			CooldownHours: 24 * 30,
+			Priority:      5,
+		},
 	}
 }
 
@@ -13862,12 +13987,20 @@ func sanitizeUserPromptRules(in []userPromptRule) []userPromptRule {
 	seen := map[string]struct{}{}
 	for _, rule := range in {
 		id := strings.TrimSpace(rule.ID)
+		action := strings.TrimSpace(strings.ToLower(rule.Action))
+		if action == "" {
+			if strings.HasPrefix(id, "diagnostics_") {
+				action = "diagnostics_consent"
+			} else if strings.HasPrefix(id, "email_recovery") {
+				action = "add_recovery_email"
+			}
+		}
 		trigger := strings.TrimSpace(strings.ToLower(rule.TriggerType))
 		title := strings.TrimSpace(rule.Title)
 		body := strings.TrimSpace(rule.Body)
 		confirm := strings.TrimSpace(rule.ConfirmLabel)
 		decline := strings.TrimSpace(rule.DeclineLabel)
-		if id == "" || title == "" || body == "" || confirm == "" || decline == "" {
+		if id == "" || title == "" || body == "" || confirm == "" || decline == "" || (action != "diagnostics_consent" && action != "add_recovery_email") {
 			continue
 		}
 		if _, exists := seen[id]; exists {
@@ -13894,6 +14027,7 @@ func sanitizeUserPromptRules(in []userPromptRule) []userPromptRule {
 		}
 		out = append(out, userPromptRule{
 			ID:            id,
+			Action:        action,
 			Enabled:       rule.Enabled,
 			TriggerType:   trigger,
 			Title:         title,
@@ -13905,8 +14039,12 @@ func sanitizeUserPromptRules(in []userPromptRule) []userPromptRule {
 		})
 		seen[id] = struct{}{}
 	}
-	if len(out) == 0 {
-		return defaultUserPromptRules()
+	defaults := defaultUserPromptRules()
+	for _, required := range defaults {
+		if _, exists := seen[required.ID]; !exists {
+			out = append(out, required)
+			seen[required.ID] = struct{}{}
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority > out[j].Priority })
 	return out
@@ -13936,6 +14074,10 @@ func validateUserPromptRulesRequest(rules []userPromptRule) error {
 		}
 		seen[id] = struct{}{}
 		trigger := strings.ToLower(strings.TrimSpace(rule.TriggerType))
+		action := strings.ToLower(strings.TrimSpace(rule.Action))
+		if action != "" && action != "diagnostics_consent" && action != "add_recovery_email" {
+			return errors.New("invalid user prompt action")
+		}
 		switch trigger {
 		case "app_version", "app_start", "time_based":
 		default:

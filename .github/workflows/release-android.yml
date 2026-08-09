@@ -16,6 +16,9 @@ jobs:
     env:
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       ANDROID_HOME: /usr/local/lib/android/sdk
+      DAILY_API_BASE_URL: ${{ vars.DAILY_API_BASE_URL }}
+      DAILY_APP_LINK_HOST_PRIMARY: ${{ vars.DAILY_APP_LINK_HOST_PRIMARY }}
+      DAILY_APP_LINK_HOST_SECONDARY: ${{ vars.DAILY_APP_LINK_HOST_SECONDARY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -105,6 +108,9 @@ jobs:
           [ -n "$ANDROID_KEYSTORE_PASSWORD" ] || (echo "::error::Missing secret ANDROID_KEYSTORE_PASSWORD" && exit 1)
           [ -n "$ANDROID_KEY_PASSWORD" ] || (echo "::error::Missing secret ANDROID_KEY_PASSWORD" && exit 1)
           [ -n "$ANDROID_GOOGLE_SERVICES_JSON_BASE64" ] || (echo "::error::Missing secret ANDROID_GOOGLE_SERVICES_JSON_BASE64" && exit 1)
+          [ -n "$DAILY_API_BASE_URL" ] || (echo "::error::Missing repository variable DAILY_API_BASE_URL" && exit 1)
+          [ -n "$DAILY_APP_LINK_HOST_PRIMARY" ] || (echo "::error::Missing repository variable DAILY_APP_LINK_HOST_PRIMARY" && exit 1)
+          [ -n "$DAILY_APP_LINK_HOST_SECONDARY" ] || (echo "::error::Missing repository variable DAILY_APP_LINK_HOST_SECONDARY" && exit 1)
       - name: Decode keystore
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}

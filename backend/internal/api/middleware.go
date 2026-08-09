@@ -39,6 +39,10 @@ func (s *Server) requireAuth(c *gin.Context) {
 		s.abortAuth(c, "user_not_found", "user not found")
 		return
 	}
+	if claims.AuthVersion == 0 || claims.AuthVersion != user.AuthVersion {
+		s.abortAuth(c, "credentials_changed", "credentials_changed")
+		return
+	}
 	route := c.FullPath()
 	if route == "" {
 		route = c.Request.URL.Path

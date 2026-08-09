@@ -1,74 +1,76 @@
 package auth
 
 import (
-    "errors"
-    "time"
+	"errors"
+	"time"
 
-    "github.com/golang-jwt/jwt/v5"
-    "golang.org/x/crypto/bcrypt"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Manager struct {
-    secret []byte
-    ttl    time.Duration
+	secret []byte
+	ttl    time.Duration
 }
 
 type Claims struct {
-    UserID   uint   `json:"userId"`
-    Username string `json:"username"`
-    IsAdmin  bool   `json:"isAdmin"`
-	SessionID string `json:"sid,omitempty"`
-	TokenType string `json:"typ,omitempty"`
-    jwt.RegisteredClaims
+	UserID      uint   `json:"userId"`
+	Username    string `json:"username"`
+	IsAdmin     bool   `json:"isAdmin"`
+	SessionID   string `json:"sid,omitempty"`
+	TokenType   string `json:"typ,omitempty"`
+	AuthVersion uint64 `json:"ver"`
+	jwt.RegisteredClaims
 }
 
 func NewManager(secret string, ttl time.Duration) *Manager {
-    return &Manager{secret: []byte(secret), ttl: ttl}
+	return &Manager{secret: []byte(secret), ttl: ttl}
 }
 
 func HashPassword(raw string) (string, error) {
-    b, err := bcrypt.GenerateFromPassword([]byte(raw), bcrypt.DefaultCost)
-    return string(b), err
+	b, err := bcrypt.GenerateFromPassword([]byte(raw), bcrypt.DefaultCost)
+	return string(b), err
 }
 
 func CheckPassword(hash, raw string) bool {
-    return bcrypt.CompareHashAndPassword([]byte(hash), []byte(raw)) == nil
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(raw)) == nil
 }
 
-func (m *Manager) Sign(userID uint, username string, isAdmin bool) (string, error) {
-    return m.SignAccess(userID, username, isAdmin, "")
+func (m *Manager) Sign(userID uint, username string, isAdmin bool, authVersion uint64) (string, error) {
+	return m.SignAccess(userID, username, isAdmin, "", authVersion)
 }
 
-func (m *Manager) SignAccess(userID uint, username string, isAdmin bool, sessionID string) (string, error) {
-    now := time.Now().UTC()
-    claims := Claims{
-        UserID:   userID,
-        Username: username,
-        IsAdmin:  isAdmin,
-        SessionID: sessionID,
-        TokenType: "access",
-        RegisteredClaims: jwt.RegisteredClaims{
-            IssuedAt:  jwt.NewNumericDate(now),
-            ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl)),
-        },
-    }
+func (m *Manager) SignAccess(userID uint, username string, isAdmin bool, sessionID string, authVersion uint64) (string, error) {
+	now := time.Now().UTC()
+	claims := Claims{
+		UserID:      userID,
+		Username:    username,
+		IsAdmin:     isAdmin,
+		SessionID:   sessionID,
+		TokenType:   "access",
+		AuthVersion: authVersion,
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl)),
+		},
+	}
 
-    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-    return token.SignedString(m.secret)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(m.secret)
 }
 
 func (m *Manager) Parse(token string) (*Claims, error) {
-    parsed, err := jwt.ParseWithClaims(token, &Claims{}, func(t *jwt.Token) (any, error) {
-        return m.secret, nil
-    })
-    if err != nil {
-        return nil, err
-    }
+	parsed, err := jwt.ParseWithClaims(token, &Claims{}, func(t *jwt.Token) (any, error) {
+		return m.secret, nil
+	})
+	if err != nil {
+		return nil, err
+	}
 
-    claims, ok := parsed.Claims.(*Claims)
-    if !ok || !parsed.Valid {
-        return nil, errors.New("invalid token")
-    }
+	claims, ok := parsed.Claims.(*Claims)
+	if !ok || !parsed.Valid {
+		return nil, errors.New("invalid token")
+	}
 
-    return claims, nil
+	return claims, nil
 }

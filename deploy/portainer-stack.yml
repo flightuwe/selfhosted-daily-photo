@@ -37,6 +37,11 @@ services:
       - FCM_SERVICE_ACCOUNT_FILE=/app/secrets/firebase-service-account.json
       - FORENSIC_BACKEND_LOG_PATH=/app/logs/backend.log
       - FORENSIC_GATEWAY_LOG_PATH=/app/gateway-logs/access.log
+      - EMAIL_MASTER_KEY_B64=${EMAIL_MASTER_KEY_B64}
+      - EMAIL_PREVIOUS_MASTER_KEY_B64=${EMAIL_PREVIOUS_MASTER_KEY_B64:-}
+      - EMAIL_ALLOWED_ACTION_HOSTS=${EMAIL_ALLOWED_ACTION_HOSTS:-daily.example.tld,daily-alt.example.tld}
+      - ANDROID_APP_PACKAGE=${ANDROID_APP_PACKAGE:-com.selfhosted.daily}
+      - ANDROID_APP_CERT_SHA256=${ANDROID_APP_CERT_SHA256:-}
     volumes:
       - /volume1/docker/selfhosted-daily-photo/backend-data:/app/data:rw
       - /volume1/docker/selfhosted-daily-photo/secrets:/app/secrets:ro

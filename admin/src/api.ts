@@ -5,6 +5,7 @@ export type AuthResponse = {
 
 export type UserPromptRule = {
   id: string;
+  action?: "diagnostics_consent" | "add_recovery_email";
   enabled: boolean;
   triggerType: "app_version" | "app_start" | "time_based";
   title: string;
@@ -115,6 +116,42 @@ export type AdminUser = {
   lastError?: string;
   lastErrorAt?: string;
   lastProfileOkAt?: string;
+  emailMasked?: string;
+  emailVerifiedAt?: string | null;
+  emailPending?: boolean;
+  pendingEmailMasked?: string;
+  newsletterStatus?: "pending" | "subscribed" | "unsubscribed";
+  newsletterConfirmedAt?: string | null;
+};
+
+export type AdminEmailSettings = {
+  enabled: boolean;
+  provider?: "custom" | "posteo";
+  host: string;
+  port: number;
+  tlsMode: "starttls" | "implicit";
+  authMode: "auto" | "plain" | "login";
+  username: string;
+  password?: string;
+  passwordConfigured: boolean;
+  clearPassword?: boolean;
+  fromName: string;
+  fromAddress: string;
+  replyTo: string;
+  actionBaseUrl: string;
+  lastTestAt?: string | null;
+  lastTestOk?: boolean;
+  lastTestStage?: string;
+  lastTestError?: string;
+  lastDeliveryAt?: string | null;
+  lastDeliveryError?: string;
+};
+
+export type AdminEmailStatus = {
+  queueLength: number;
+  failedJobs: number;
+  deliveryEnabled: boolean;
+  recentFailures?: Array<{ id: number; kind: string; status: string; attempts: number; lastStage: string; smtpResultCode: number; lastError: string; updatedAt: string }>;
 };
 
 export type AdminUserAccessToken = {
@@ -1125,6 +1162,7 @@ const settingsDefaults: Settings = {
   userPromptRules: [
     {
       id: "diagnostics_consent_v1",
+      action: "diagnostics_consent",
       enabled: true,
       triggerType: "app_version",
       title: "Diagnose & Performance teilen?",
@@ -1153,6 +1191,7 @@ function normalizeSettings(raw: any): Settings {
     rawRules.length > 0
       ? rawRules.map((rule: any, idx: number) => ({
           id: String(rule?.id ?? `rule_${idx + 1}`),
+          action: rule?.action ? String(rule.action) as UserPromptRule["action"] : undefined,
           enabled: Boolean(rule?.enabled ?? true),
           triggerType: String(
             rule?.triggerType ?? "app_version",
@@ -1394,6 +1433,36 @@ export async function updateSettings(
   });
   const data = await parse<any>(res);
   return normalizeSettings(data);
+}
+
+export async function getAdminEmailSettings(token: string): Promise<AdminEmailSettings> {
+  const res = await fetch(`${apiBase}/admin/email/settings`, { headers: { Authorization: `Bearer ${token}` } });
+  return parse<AdminEmailSettings>(res);
+}
+
+export async function updateAdminEmailSettings(token: string, settings: AdminEmailSettings): Promise<AdminEmailSettings> {
+  const res = await fetch(`${apiBase}/admin/email/settings`, { method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(settings) });
+  return parse<AdminEmailSettings>(res);
+}
+
+export async function testAdminEmailConnection(token: string, settings: AdminEmailSettings): Promise<{ ok: boolean; stage: string; message?: string }> {
+  const res = await fetch(`${apiBase}/admin/email/test-connection`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(settings) });
+  return parse(res);
+}
+
+export async function sendAdminEmailTest(token: string, settings: AdminEmailSettings, to: string): Promise<{ ok: boolean; message: string }> {
+  const res = await fetch(`${apiBase}/admin/email/test-message`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ settings, to }) });
+  return parse(res);
+}
+
+export async function getAdminEmailStatus(token: string): Promise<AdminEmailStatus> {
+  const res = await fetch(`${apiBase}/admin/email/status`, { headers: { Authorization: `Bearer ${token}` } });
+  return parse(res);
+}
+
+export async function deleteUserEmail(token: string, userId: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${apiBase}/admin/users/${userId}/email`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+  return parse(res);
 }
 
 export async function getAdminMediaRenditions(token: string): Promise<AdminMediaRenditions> {

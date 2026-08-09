@@ -87,6 +87,12 @@ import {
   getAdminMediaRenditions,
   updateAdminMediaRenditions,
   updateUser,
+  getAdminEmailSettings,
+  updateAdminEmailSettings,
+  testAdminEmailConnection,
+  sendAdminEmailTest,
+  getAdminEmailStatus,
+  deleteUserEmail,
   type AdminReportItem,
   type AdminPerformanceOverview,
   type AdminPerformanceSloState,
@@ -132,6 +138,8 @@ import {
   type AdminMediaRenditions,
   type SystemHealth,
   type UserPromptRule,
+  type AdminEmailSettings,
+  type AdminEmailStatus,
 } from "./api";
 
 type Tab =
@@ -156,7 +164,8 @@ type Tab =
   | "settings"
   | "migration"
   | "locations"
-  | "media";
+  | "media"
+  | "email";
 type AdminArea = "operations" | "analytics" | "config";
 type OperationsSubtab =
   | "cockpit"
@@ -176,7 +185,7 @@ type AnalyticsSubtab =
   | "upload_timeline"
   | "debug"
   | "system";
-type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration" | "media";
+type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration" | "media" | "email";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
 
 type SavedView = {
@@ -232,6 +241,7 @@ const DEFAULT_SETTINGS: Settings = {
   userPromptRules: [
     {
       id: "diagnostics_consent_v1",
+      action: "diagnostics_consent",
       enabled: true,
       triggerType: "app_version",
       title: "Diagnose & Performance teilen?",
@@ -281,6 +291,7 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
     settings: "settings",
     migration: "migration",
     media: "media",
+    email: "email",
   },
 };
 
@@ -313,6 +324,7 @@ const areaSubtabs: Record<
     { key: "events", label: "Events & Notifications" },
     { key: "commands", label: "Chat-Commands" },
     { key: "settings", label: "Einstellungen" },
+    { key: "email", label: "E-Mail" },
     { key: "migration", label: "Migration" },
     { key: "media", label: "Medien & AVIF" },
   ],
@@ -326,6 +338,22 @@ const emptyStats: AdminStats = {
   totalImages: 0,
   runningDays: 0,
   storageBytes: 0,
+};
+
+const emptyEmailSettings: AdminEmailSettings = {
+  enabled: false,
+  provider: "custom",
+  host: "",
+  port: 587,
+  tlsMode: "starttls",
+  authMode: "auto",
+  username: "",
+  password: "",
+  passwordConfigured: false,
+  fromName: "Daily",
+  fromAddress: "",
+  replyTo: "",
+  actionBaseUrl: "",
 };
 
 type CommandDraft = {
@@ -442,6 +470,10 @@ function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
       return { area: "config", subtab: "commands" };
     case "migration":
       return { area: "config", subtab: "migration" };
+    case "media":
+      return { area: "config", subtab: "media" };
+    case "email":
+      return { area: "config", subtab: "email" };
     case "settings":
     default:
       return { area: "config", subtab: "settings" };
@@ -568,6 +600,9 @@ export function App() {
   const [settings, setSettings] = useState<Settings>(emptySettings);
   const [savedSettings, setSavedSettings] = useState<Settings>(emptySettings);
   const [mediaRenditions, setMediaRenditions] = useState<AdminMediaRenditions | null>(null);
+  const [emailSettings, setEmailSettings] = useState<AdminEmailSettings>(emptyEmailSettings);
+  const [emailStatus, setEmailStatus] = useState<AdminEmailStatus | null>(null);
+  const [emailTestRecipient, setEmailTestRecipient] = useState("");
   const [stats, setStats] = useState<AdminStats>(emptyStats);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
@@ -1382,6 +1417,12 @@ export function App() {
   async function loadAdminData(authToken: string) {
     try {
       void getAdminMediaRenditions(authToken).then(setMediaRenditions).catch(() => setMediaRenditions(null));
+      void Promise.all([getAdminEmailSettings(authToken), getAdminEmailStatus(authToken)])
+        .then(([smtp, status]) => {
+          setEmailSettings({ ...smtp, provider: smtp.host === "smtp.posteo.de" ? "posteo" : "custom", password: "", clearPassword: false });
+          setEmailStatus(status);
+        })
+        .catch(() => setEmailStatus(null));
       const [
         s,
         st,
@@ -2545,6 +2586,7 @@ export function App() {
         ...prev.userPromptRules,
         {
           id: `rule_${Date.now()}`,
+          action: "diagnostics_consent",
           enabled: true,
           triggerType: "app_version",
           title: "",
@@ -3061,6 +3103,7 @@ export function App() {
             >
               Einstellungen
             </button>
+            <button className={activeTab === "email" ? "tab active" : "tab"} onClick={() => navigateTab("email")}>E-Mail</button>
             <button
               className={activeTab === "migration" ? "tab active" : "tab"}
               onClick={() => navigateTab("migration")}
@@ -3760,6 +3803,7 @@ export function App() {
                   <th>Eingeladen von</th>
                   <th>Registriert am</th>
                   <th>Rolle</th>
+                  <th>E-Mail</th>
                   <th>Fotos</th>
                   <th>GerÃ¤te</th>
                   <th>Letzte App/Fehler</th>
@@ -3785,6 +3829,7 @@ export function App() {
                         <option value="admin">Admin</option>
                       </select>
                     </td>
+                    <td><div className="stack"><span>{u.emailMasked || u.pendingEmailMasked || "–"}</span><span className="small">{u.emailVerifiedAt ? `verifiziert · ${formatDateTime(u.emailVerifiedAt)}` : u.emailPending ? "Bestätigung ausstehend" : "keine Recovery-Adresse"}</span><span className="small">Newsletter: {u.newsletterStatus || "unsubscribed"}</span>{(u.emailMasked || u.emailPending) && <button className="danger" onClick={async () => { if (!confirm(`E-Mail-Verknüpfung von ${u.username} entfernen?`)) return; try { await deleteUserEmail(token, u.id); setUsers(await listUsers(token)); setMessage("E-Mail-Verknüpfung entfernt; der Nutzer wurde nicht gelöscht."); } catch (error) { setMessage(error instanceof Error ? error.message : "Entfernen fehlgeschlagen"); } }}>E-Mail entfernen</button>}</div></td>
                     <td>{u.photoCount}</td>
                     <td>
                       <div className="stack">
@@ -7619,6 +7664,51 @@ export function App() {
           </div>
         )}
 
+        {activeTab === "email" && (
+          <div className="stack">
+            <article className="settings-current">
+              <h2>E-Mail & SMTP</h2>
+              <p className="small">Transaktionale E-Mails bleiben deaktiviert, bis Verbindung und Zugangsdaten erfolgreich geprüft und die Konfiguration ausdrücklich aktiviert wurden. SMTP-Annahme bedeutet nicht garantierte Zustellung.</p>
+              <div className="settings-grid">
+                <CardStat title="Versand" value={emailStatus?.deliveryEnabled ? "aktiv" : "deaktiviert"} />
+                <CardStat title="Queue" value={emailStatus?.queueLength ?? "–"} />
+                <CardStat title="Fehlgeschlagen" value={emailStatus?.failedJobs ?? "–"} />
+                <CardStat title="Letzter Test" value={emailSettings.lastTestAt ? `${emailSettings.lastTestOk ? "OK" : "Fehler"} · ${new Date(emailSettings.lastTestAt).toLocaleString()}` : "noch nicht"} />
+              </div>
+              {emailSettings.lastTestError && <p className="error">{emailSettings.lastTestStage}: {emailSettings.lastTestError}</p>}
+              <div className="form-grid">
+                <label>Provider-Preset<select value={emailSettings.provider || "custom"} onChange={(event) => {
+                  const provider = event.target.value as "custom" | "posteo";
+                  setEmailSettings((current) => provider === "posteo" ? { ...current, provider, host: "smtp.posteo.de", port: 587, tlsMode: "starttls" } : { ...current, provider });
+                }}><option value="posteo">Posteo</option><option value="custom">Benutzerdefiniert</option></select></label>
+                <label>SMTP-Host<input value={emailSettings.host} onChange={(event) => setEmailSettings({ ...emailSettings, host: event.target.value })} /></label>
+                <label>Port<input type="number" min={1} max={65535} value={emailSettings.port} onChange={(event) => setEmailSettings({ ...emailSettings, port: Number(event.target.value) })} /></label>
+                <label>TLS<select value={emailSettings.tlsMode} onChange={(event) => setEmailSettings({ ...emailSettings, tlsMode: event.target.value as AdminEmailSettings["tlsMode"] })}><option value="starttls">STARTTLS (zwingend)</option><option value="implicit">Implicit TLS</option></select></label>
+                <label>Authentifizierung<select value={emailSettings.authMode} onChange={(event) => setEmailSettings({ ...emailSettings, authMode: event.target.value as AdminEmailSettings["authMode"] })}><option value="auto">Auto</option><option value="plain">PLAIN</option><option value="login">LOGIN</option></select></label>
+                <label>Benutzername<input autoComplete="username" value={emailSettings.username} onChange={(event) => setEmailSettings({ ...emailSettings, username: event.target.value })} /></label>
+                <label>Passwort<input type="password" autoComplete="new-password" placeholder={emailSettings.passwordConfigured ? "Gespeichertes Passwort beibehalten" : "SMTP-Passwort"} value={emailSettings.password || ""} onChange={(event) => setEmailSettings({ ...emailSettings, password: event.target.value, clearPassword: false })} /></label>
+                <label>Absendername<input value={emailSettings.fromName} onChange={(event) => setEmailSettings({ ...emailSettings, fromName: event.target.value })} /></label>
+                <label>Absenderadresse<input type="email" value={emailSettings.fromAddress} onChange={(event) => setEmailSettings({ ...emailSettings, fromAddress: event.target.value })} /></label>
+                <label>Reply-To<input type="email" value={emailSettings.replyTo} onChange={(event) => setEmailSettings({ ...emailSettings, replyTo: event.target.value })} /></label>
+                <label>Action-Base-URL<input type="url" placeholder="https://daily.example.com" value={emailSettings.actionBaseUrl} onChange={(event) => setEmailSettings({ ...emailSettings, actionBaseUrl: event.target.value })} /></label>
+                <label><input type="checkbox" checked={emailSettings.enabled} onChange={(event) => setEmailSettings({ ...emailSettings, enabled: event.target.checked })} /> E-Mail-Versand aktivieren</label>
+              </div>
+              <div className="row">
+                <button onClick={async () => { try { const result = await testAdminEmailConnection(token, emailSettings); setMessage(result.message || "SMTP-Verbindung erfolgreich geprüft."); setEmailSettings({ ...emailSettings, lastTestAt: new Date().toISOString(), lastTestOk: true, lastTestStage: result.stage || "accepted", lastTestError: "" }); setEmailStatus(await getAdminEmailStatus(token)); } catch (error) { setMessage(error instanceof Error ? error.message : "SMTP-Test fehlgeschlagen"); } }}>Verbindung testen</button>
+                <button onClick={async () => { try { const saved = await updateAdminEmailSettings(token, emailSettings); setEmailSettings({ ...saved, password: "", provider: saved.host === "smtp.posteo.de" ? "posteo" : "custom" }); setEmailStatus(await getAdminEmailStatus(token)); setMessage("E-Mail-Konfiguration gespeichert."); } catch (error) { setMessage(error instanceof Error ? error.message : "Speichern fehlgeschlagen"); } }}>Speichern</button>
+                {emailSettings.passwordConfigured && <button className="danger" onClick={() => setEmailSettings({ ...emailSettings, password: "", clearPassword: true, enabled: false })}>Passwort beim Speichern löschen</button>}
+              </div>
+            </article>
+            <article className="settings-current">
+              <h2>Testmail</h2>
+              <p className="small">Verwendet den aktuellen, noch nicht gespeicherten Entwurf einschließlich eines neu eingegebenen Passworts.</p>
+              <div className="row"><input type="email" placeholder="Zieladresse" value={emailTestRecipient} onChange={(event) => setEmailTestRecipient(event.target.value)} /><button onClick={async () => { try { const result = await sendAdminEmailTest(token, emailSettings, emailTestRecipient); setMessage(result.message); setEmailSettings({ ...emailSettings, lastTestAt: new Date().toISOString(), lastTestOk: true, lastTestStage: "accepted", lastTestError: "" }); setEmailStatus(await getAdminEmailStatus(token)); } catch (error) { setMessage(error instanceof Error ? error.message : "Testmail fehlgeschlagen"); } }}>Testmail senden</button></div>
+              <p className="small">Letzte reguläre SMTP-Annahme: {emailSettings.lastDeliveryAt ? new Date(emailSettings.lastDeliveryAt).toLocaleString() : "noch keine"}</p>
+            </article>
+            {(emailStatus?.recentFailures?.length || 0) > 0 && <article className="settings-current"><h2>Letzte fehlgeschlagene Jobs</h2><div className="table-wrap"><table><thead><tr><th>Zeit</th><th>Art</th><th>Versuche</th><th>Stufe/Code</th><th>Bereinigter Fehler</th></tr></thead><tbody>{emailStatus?.recentFailures?.map((failure) => <tr key={failure.id}><td>{formatDateTime(failure.updatedAt)}</td><td>{failure.kind}</td><td>{failure.attempts}</td><td>{failure.lastStage || "–"} / {failure.smtpResultCode || "–"}</td><td>{failure.lastError || "–"}</td></tr>)}</tbody></table></div></article>}
+          </div>
+        )}
+
         {activeTab === "media" && (
           <div className="stack">
             <article className="settings-current">
@@ -7991,6 +8081,13 @@ export function App() {
                         }
                       />
                       Aktiv
+                    </label>
+                    <label>
+                      Fachliche Aktion
+                      <select value={rule.action || "diagnostics_consent"} onChange={(e) => updateUserPromptRule(idx, { action: e.target.value as UserPromptRule["action"] })}>
+                        <option value="diagnostics_consent">Diagnose-Einwilligung</option>
+                        <option value="add_recovery_email">Recovery-E-Mail ergänzen</option>
+                      </select>
                     </label>
                     <label>
                       Trigger

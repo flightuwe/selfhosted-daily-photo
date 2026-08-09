@@ -489,7 +489,9 @@ data class User(
     val quietHoursEnd: String = "07:00",
     val diagnosticsConsentGranted: Boolean = false,
     val diagnosticsConsentUpdatedAt: String? = null,
-    val diagnosticsConsentSource: String? = null
+    val diagnosticsConsentSource: String? = null,
+    val hasVerifiedEmail: Boolean = false,
+    val hasPendingEmail: Boolean = false
 )
 data class MeResponse(
     val user: User,
@@ -541,6 +543,7 @@ data class PreferencesUpdateRequest(
 )
 data class UserPromptRule(
     val id: String,
+    val action: String = "diagnostics_consent",
     val enabled: Boolean = true,
     val triggerType: String = "app_version",
     val title: String = "",
@@ -559,7 +562,8 @@ data class AuthResponse(
     val accessToken: String = "",
     val refreshToken: String = "",
     val sessionId: String = "",
-    val user: User
+    val user: User,
+    val emailVerificationQueued: Boolean = false
 )
 data class LoginRequest(val username: String, val password: String, val deviceName: String? = null)
 data class InviteCodeRequest(val inviteCode: String)
@@ -567,7 +571,9 @@ data class InviteRegisterRequest(
     val inviteCode: String,
     val username: String,
     val password: String,
-    val deviceName: String? = null
+    val deviceName: String? = null,
+    val email: String? = null,
+    val newsletterOptIn: Boolean = false
 )
 data class RefreshRequest(val refreshToken: String)
 data class InviteOwner(val id: Long, val username: String, val favoriteColor: String = "#1F5FBF")
@@ -575,6 +581,23 @@ data class InvitePreviewResponse(val inviteCode: String, val inviter: InviteOwne
 data class InviteCodeResponse(val inviteCode: String)
 data class DeviceTokenRequest(val token: String, val deviceName: String = "", val appVersion: String = BuildConfig.VERSION_NAME)
 data class PasswordChangeRequest(val currentPassword: String, val newPassword: String)
+data class PasswordResetRequest(val email: String)
+data class PasswordResetConfirmRequest(val token: String, val password: String)
+data class EmailActionConfirmRequest(val token: String, val purpose: String)
+data class EmailVerificationRequest(val email: String, val currentPassword: String, val newsletterOptIn: Boolean = false)
+data class CurrentPasswordRequest(val currentPassword: String)
+data class PromptEventRequest(val event: String, val appVersion: String = BuildConfig.VERSION_NAME)
+data class EmailState(
+    val email: String = "",
+    val verifiedAt: String? = null,
+    val pendingEmail: String = "",
+    val pendingRequestedAt: String? = null,
+    val pendingNewsletterOptIn: Boolean = false,
+    val newsletterStatus: String = "unsubscribed",
+    val emailSupport: Boolean = false,
+    val deliveryEnabled: Boolean = false
+)
+data class BasicOkResponse(val ok: Boolean = false, val message: String = "")
 data class ChatMessageRequest(
     val body: String,
     val clientMessageId: String? = null
@@ -1630,6 +1653,15 @@ interface Api {
     @POST("auth/refresh")
     suspend fun refresh(@Body body: RefreshRequest): AuthResponse
 
+    @POST("auth/password-reset/request")
+    suspend fun requestPasswordReset(@Body body: PasswordResetRequest): BasicOkResponse
+
+    @POST("auth/password-reset/confirm")
+    suspend fun confirmPasswordReset(@Body body: PasswordResetConfirmRequest): BasicOkResponse
+
+    @POST("email-actions/confirm")
+    suspend fun confirmEmailAction(@Body body: EmailActionConfirmRequest): BasicOkResponse
+
     @POST("auth/register/preview")
     suspend fun previewInvite(@Body body: InviteCodeRequest): InvitePreviewResponse
 
@@ -1650,6 +1682,27 @@ interface Api {
         @Header("Authorization") token: String,
         @Query("appVersion") appVersion: String
     ): UserPromptEvaluationResponse
+
+    @POST("me/user-prompts/{id}/events")
+    suspend fun recordUserPromptEvent(@Header("Authorization") token: String, @Path("id") id: String, @Body body: PromptEventRequest): BasicOkResponse
+
+    @GET("me/email")
+    suspend fun myEmail(@Header("Authorization") token: String): EmailState
+
+    @POST("me/email/verification")
+    suspend fun requestEmailVerification(@Header("Authorization") token: String, @Body body: EmailVerificationRequest): BasicOkResponse
+
+    @DELETE("me/email/pending")
+    suspend fun cancelPendingEmail(@Header("Authorization") token: String): BasicOkResponse
+
+    @retrofit2.http.HTTP(method = "DELETE", path = "me/email", hasBody = true)
+    suspend fun removeEmail(@Header("Authorization") token: String, @Body body: CurrentPasswordRequest): BasicOkResponse
+
+    @POST("me/newsletter/subscribe")
+    suspend fun subscribeNewsletter(@Header("Authorization") token: String): BasicOkResponse
+
+    @DELETE("me/newsletter")
+    suspend fun unsubscribeNewsletter(@Header("Authorization") token: String): BasicOkResponse
 
     @GET("users/{id}/profile")
     suspend fun userProfile(
@@ -3365,13 +3418,15 @@ class AppRepo(
     suspend fun previewInvite(inviteCode: String): InvitePreviewResponse =
         api.previewInvite(InviteCodeRequest(inviteCode.trim()))
 
-    suspend fun registerWithInvite(inviteCode: String, username: String, password: String): User {
+    suspend fun registerWithInvite(inviteCode: String, username: String, password: String, email: String = "", newsletterOptIn: Boolean = false): Pair<User, Boolean> {
         val res = api.registerWithInvite(
             InviteRegisterRequest(
                 inviteCode = inviteCode.trim(),
                 username = username,
                 password = password,
-                deviceName = currentDeviceName()
+                deviceName = currentDeviceName(),
+                email = email.trim().ifBlank { null },
+                newsletterOptIn = newsletterOptIn
             )
         )
         saveAuthSession(res, source = "register_success")
@@ -3383,7 +3438,7 @@ class AppRepo(
             )
             throw IllegalStateException("invalid_auth_payload")
         }
-        return res.user
+        return res.user to res.emailVerificationQueued
     }
 
     suspend fun health(): HealthResponse = api.health()
@@ -3412,6 +3467,33 @@ class AppRepo(
     suspend fun me(): MeResponse = authorizedCall("/api/me") { token -> api.me(token) }
     suspend fun evaluateUserPrompts(appVersion: String): UserPromptEvaluationResponse =
         authorizedCall("/api/me/user-prompts/evaluate") { token -> api.evaluateUserPrompts(token, appVersion) }
+
+    suspend fun recordUserPromptEvent(id: String, event: String) =
+        authorizedCall("/api/me/user-prompts/:id/events") { token -> api.recordUserPromptEvent(token, id, PromptEventRequest(event)) }
+
+    suspend fun emailState(): EmailState = authorizedCall("/api/me/email") { token -> api.myEmail(token) }
+
+    suspend fun requestEmailVerification(email: String, currentPassword: String, newsletterOptIn: Boolean) =
+        authorizedCall("/api/me/email/verification") { token -> api.requestEmailVerification(token, EmailVerificationRequest(email, currentPassword, newsletterOptIn)) }
+
+    suspend fun cancelPendingEmail() = authorizedCall("/api/me/email/pending") { token -> api.cancelPendingEmail(token) }
+
+    suspend fun removeEmail(currentPassword: String) = authorizedCall("/api/me/email") { token -> api.removeEmail(token, CurrentPasswordRequest(currentPassword)) }
+
+    suspend fun subscribeNewsletter() = authorizedCall("/api/me/newsletter/subscribe") { token -> api.subscribeNewsletter(token) }
+
+    suspend fun unsubscribeNewsletter() = authorizedCall("/api/me/newsletter") { token -> api.unsubscribeNewsletter(token) }
+
+    suspend fun requestPasswordReset(email: String) = api.requestPasswordReset(PasswordResetRequest(email.trim()))
+
+    suspend fun consumeEmailAction(action: EmailActionLink, newPassword: String = ""): BasicOkResponse {
+        val originApi = buildApiService("${action.origin.trimEnd('/')}/api/", httpClient)
+        return if (action.purpose == "password_reset") {
+            originApi.confirmPasswordReset(PasswordResetConfirmRequest(action.token, newPassword))
+        } else {
+            originApi.confirmEmailAction(EmailActionConfirmRequest(action.token, action.purpose))
+        }
+    }
     suspend fun myInviteCode(): String =
         authorizedCall("/api/me/invite") { token -> api.myInviteCode(token).inviteCode }
     suspend fun rollMyInviteCode(): String =
@@ -5129,6 +5211,9 @@ data class UiState(
     val diagnosticsConsentUpdatedAt: String? = null,
     val showDiagnosticsConsentDialog: Boolean = false,
     val diagnosticsConsentPrompt: UserPromptRule? = null,
+    val showEmailRecoveryDialog: Boolean = false,
+    val emailRecoveryPrompt: UserPromptRule? = null,
+    val emailState: EmailState = EmailState(),
     val debugLogs: List<DebugLogEntry> = emptyList(),
     val notificationDebugEnabled: Boolean = false,
     val notificationDebugExpiresAt: String = "",
@@ -7023,6 +7108,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         if (state.offlineMode) return
         delay(1_500)
         refreshAll(reason = "startup_deferred", refreshFeedWindow = false, bypassCooldown = true, showLoading = false)
+        refreshEmailState()
         runCatching { checkForUpdate(silent = true) }
         state = state.copy(startupDeferredHydrationComplete = true)
         repo.logDebug("startup_deferred_hydration_completed", "deferred startup hydration completed", "")
@@ -7076,21 +7162,22 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(invitePreview = null)
     }
 
-    suspend fun registerWithInvite(inviteCode: String, username: String, password: String) {
+    suspend fun registerWithInvite(inviteCode: String, username: String, password: String, email: String = "", newsletterOptIn: Boolean = false) {
         if (!repo.hasConfiguredApiBaseUrl()) {
             state = state.copy(loading = false, message = "Bitte zuerst eine Server-URL eintragen.", serverSetupRequired = true)
             return
         }
         state = state.copy(loading = true, message = "")
-        runCatching { repo.registerWithInvite(inviteCode, username, password) }
-            .onSuccess { user ->
+        runCatching { repo.registerWithInvite(inviteCode, username, password, email, newsletterOptIn) }
+            .onSuccess { (user, emailQueued) ->
                 migrationSessionTokenSnapshot = ""
                 state = state.copy(
                     user = user,
                     token = repo.token(),
                     loading = false,
                     invitePreview = null,
-                    migrationCanUseSessionShortcut = false
+                    migrationCanUseSessionShortcut = false,
+                    message = if (email.isNotBlank() && !emailQueued) "Registrierung erfolgreich. Der Server konnte noch keine Bestätigungs-E-Mail einplanen; du kannst sie später im Profil ergänzen." else if (emailQueued) "Registrierung erfolgreich. Bitte bestätige deine E-Mail-Adresse." else ""
                 )
                 runCatching { repo.syncDeviceTokenIfNeeded(force = true) }
                 refreshAll()
@@ -7103,6 +7190,46 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                 logApiFailure("auth_register_failed", "/api/auth/register/confirm", it, "username=${username.trim().lowercase()}")
                 state = state.copy(loading = false, message = apiError(it, "Registrierung fehlgeschlagen"))
             }
+    }
+
+    suspend fun requestPasswordReset(email: String) {
+        runCatching { repo.requestPasswordReset(email) }
+            .onSuccess { state = state.copy(message = "Wenn die Adresse zu einem bestätigten Konto gehört, wurde eine E-Mail versendet.") }
+            .onFailure { state = state.copy(message = apiError(it, "Anfrage konnte nicht verarbeitet werden")) }
+    }
+
+    suspend fun consumeEmailAction(action: EmailActionLink, newPassword: String = ""): Boolean {
+        return runCatching { repo.consumeEmailAction(action, newPassword) }
+            .onSuccess {
+                if (action.purpose == "password_reset") repo.clearToken("password_reset_completed", "/api/auth/password-reset/confirm")
+                state = state.copy(token = repo.token(), user = if (action.purpose == "password_reset") null else state.user, message = if (action.purpose == "password_reset") "Passwort geändert. Bitte melde dich neu an." else "E-Mail-Aktion erfolgreich bestätigt.")
+                if (action.purpose != "password_reset" && repo.token().isNotBlank()) refreshEmailState()
+            }
+            .onFailure { state = state.copy(message = apiError(it, "Link ungültig oder abgelaufen")) }
+            .isSuccess
+    }
+
+    suspend fun refreshEmailState() {
+        if (repo.token().isBlank()) return
+        runCatching { repo.emailState() }.onSuccess { state = state.copy(emailState = it) }
+    }
+
+    suspend fun requestEmailVerification(email: String, currentPassword: String, newsletterOptIn: Boolean) {
+        runCatching { repo.requestEmailVerification(email, currentPassword, newsletterOptIn) }
+            .onSuccess { refreshEmailState(); state = state.copy(message = "Bestätigungs-E-Mail wurde eingeplant.") }
+            .onFailure { state = state.copy(message = apiError(it, "E-Mail konnte nicht hinzugefügt werden")) }
+    }
+
+    suspend fun cancelPendingEmail() {
+        runCatching { repo.cancelPendingEmail() }.onSuccess { refreshEmailState() }.onFailure { state = state.copy(message = apiError(it, "Ausstehende Adresse konnte nicht entfernt werden")) }
+    }
+
+    suspend fun removeEmail(currentPassword: String) {
+        runCatching { repo.removeEmail(currentPassword) }.onSuccess { refreshEmailState(); state = state.copy(message = "Recovery-E-Mail entfernt.") }.onFailure { state = state.copy(message = apiError(it, "E-Mail konnte nicht entfernt werden")) }
+    }
+
+    suspend fun setNewsletterSubscribed(subscribed: Boolean) {
+        runCatching { if (subscribed) repo.subscribeNewsletter() else repo.unsubscribeNewsletter() }.onSuccess { refreshEmailState() }.onFailure { state = state.copy(message = apiError(it, "Newsletter-Status konnte nicht geändert werden")) }
     }
 
     suspend fun rollInviteCode() {
@@ -7279,6 +7406,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     }
 
     fun setDiagnosticsConsentGranted(granted: Boolean, source: String = "profile_toggle") {
+		val completedPrompt = state.diagnosticsConsentPrompt
         repo.setDiagnosticsConsentLocal(granted)
         if (!granted) {
             repo.setDiagnosticsUploadEnabled(false)
@@ -7289,10 +7417,13 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             diagnosticsConsentUpdatedAt = OffsetDateTime.now().toString(),
             showDiagnosticsConsentDialog = false,
             diagnosticsConsentPrompt = null,
+            showEmailRecoveryDialog = state.emailRecoveryPrompt != null,
             message = if (granted) "Danke, Diagnose-Freigabe aktiviert." else "Diagnose-Freigabe deaktiviert."
         )
         val current = state.user ?: return
-        viewModelScope.launch {
+		viewModelScope.launch {
+			completedPrompt?.let { runCatching { repo.recordUserPromptEvent(it.id, if (granted) "completed" else "declined") } }
+			state.emailRecoveryPrompt?.takeIf { state.showEmailRecoveryDialog }?.let { runCatching { repo.recordUserPromptEvent(it.id, "shown") } }
             runCatching {
                 repo.updatePreferences(
                     chatPushEnabled = current.chatPushEnabled,
@@ -7319,9 +7450,27 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
     }
 
-    fun dismissDiagnosticsConsentDialogLater() {
-        state = state.copy(showDiagnosticsConsentDialog = false, diagnosticsConsentPrompt = null)
-    }
+	fun dismissDiagnosticsConsentDialogLater() {
+		val prompt = state.diagnosticsConsentPrompt
+		state = state.copy(showDiagnosticsConsentDialog = false, diagnosticsConsentPrompt = null, showEmailRecoveryDialog = state.emailRecoveryPrompt != null)
+		viewModelScope.launch {
+			prompt?.let { runCatching { repo.recordUserPromptEvent(it.id, "later") } }
+			state.emailRecoveryPrompt?.takeIf { state.showEmailRecoveryDialog }?.let { runCatching { repo.recordUserPromptEvent(it.id, "shown") } }
+		}
+	}
+
+	fun acceptEmailRecoveryPrompt() {
+		val prompt = state.emailRecoveryPrompt
+		state = state.copy(showEmailRecoveryDialog = false, emailRecoveryPrompt = null, activeTab = AppTab.PROFILE)
+		setProfileSectionExpanded("profile_account", true)
+		viewModelScope.launch { prompt?.let { runCatching { repo.recordUserPromptEvent(it.id, "accepted") } }; refreshEmailState() }
+	}
+
+	fun dismissEmailRecoveryPromptLater() {
+		val prompt = state.emailRecoveryPrompt
+		state = state.copy(showEmailRecoveryDialog = false, emailRecoveryPrompt = null)
+		viewModelScope.launch { prompt?.let { runCatching { repo.recordUserPromptEvent(it.id, "later") } } }
+	}
 
     fun refreshDebugLogs() {
         state = withNotificationDebugState(state.copy(
@@ -7483,20 +7632,18 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         val user = state.user ?: return
         val version = BuildConfig.VERSION_NAME
         if (version.isBlank()) return
-        if (repo.hasSeenUserPromptVersion(version)) return
-        if (user.diagnosticsConsentGranted) {
-            repo.markUserPromptVersionSeen(version)
-            return
-        }
         val result = runCatching { repo.evaluateUserPrompts(version) }.getOrNull() ?: return
-        val prompt = result.items
-            .filter { it.enabled && it.triggerType.equals("app_version", ignoreCase = true) }
-            .maxByOrNull { it.priority }
-            ?: return
-        repo.markUserPromptVersionSeen(version)
+		val eligible = result.items.filter { it.enabled }.sortedByDescending { it.priority }
+		val prompt = eligible.firstOrNull { it.action == "diagnostics_consent" && !user.diagnosticsConsentGranted }
+		val emailPrompt = eligible.firstOrNull { it.action == "add_recovery_email" }
+		if (prompt == null && emailPrompt == null) return
+		prompt?.let { runCatching { repo.recordUserPromptEvent(it.id, "shown") } }
+		if (prompt == null) emailPrompt?.let { runCatching { repo.recordUserPromptEvent(it.id, "shown") } }
         state = state.copy(
-            showDiagnosticsConsentDialog = true,
-            diagnosticsConsentPrompt = prompt
+			showDiagnosticsConsentDialog = prompt != null,
+			diagnosticsConsentPrompt = prompt,
+			showEmailRecoveryDialog = prompt == null && emailPrompt != null,
+			emailRecoveryPrompt = emailPrompt
         )
     }
 
@@ -10913,7 +11060,7 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
     suspend fun changePassword(current: String, next: String) {
         state = state.copy(loading = true)
         runCatching { repo.changePassword(current, next) }
-            .onSuccess { state = state.copy(loading = false, message = "Passwort geaendert") }
+			.onSuccess { repo.clearToken("password_changed", "/api/me/password"); state = state.copy(token = "", user = null, loading = false, message = "Passwort geändert. Bitte melde dich neu an.") }
             .onFailure { state = state.copy(loading = false, message = apiError(it, "Passwort aendern fehlgeschlagen")) }
     }
 
@@ -12676,6 +12823,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
     var authMode by remember { mutableStateOf(AuthMode.LOGIN) }
     var inviteCodeInput by remember { mutableStateOf("") }
     var inviteConfirmed by remember { mutableStateOf(false) }
+    var registrationEmail by remember { mutableStateOf("") }
+    var registrationNewsletter by remember { mutableStateOf(false) }
+    var forgotPasswordMode by remember { mutableStateOf(false) }
+    var recoveryEmail by remember { mutableStateOf("") }
+    var pendingEmailAction by remember { mutableStateOf<EmailActionLink?>(null) }
+    var resetPassword by remember { mutableStateOf("") }
+    var resetPasswordRepeat by remember { mutableStateOf("") }
 
     var captureUri by remember { mutableStateOf<Uri?>(null) }
     var captureTarget by remember { mutableStateOf<String?>(null) }
@@ -13000,6 +13154,15 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         vm.refreshAll(refreshFeedWindow = vm.state.activeTab != AppTab.FEED)
     }
 
+    LaunchedEffect(launchIntentTick) {
+        val activity = context as? MainActivity ?: return@LaunchedEffect
+        val hosts = setOf(BuildConfig.APP_LINK_HOST_PRIMARY, BuildConfig.APP_LINK_HOST_SECONDARY).filter { it.isNotBlank() }.toSet()
+        EmailActionLinks.parse(activity.intent?.data?.toString(), hosts)?.let { action ->
+            pendingEmailAction = action
+            activity.intent?.data = null
+        }
+    }
+
     LaunchedEffect(state.token, state.startupDone, state.activeTab, state.offlineMode) {
         if (state.offlineMode) return@LaunchedEffect
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
@@ -13018,6 +13181,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         if (state.token.isBlank() || !state.startupDone) return@LaunchedEffect
         if (state.activeTab != AppTab.PROFILE) return@LaunchedEffect
         vm.refreshFotomojiTemplates()
+        vm.refreshEmailState()
     }
 
     LaunchedEffect(state.token, state.startupDeferredHydrationComplete, state.diagnosticsUploadEnabled) {
@@ -13524,6 +13688,38 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
         )
     }
 
+    pendingEmailAction?.let { action ->
+        AlertDialog(
+            onDismissRequest = { pendingEmailAction = null },
+            title = { Text(if (action.purpose == "password_reset") "Passwort zurücksetzen" else "E-Mail bestätigen") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (action.purpose == "password_reset") "Lege ein neues Daily-Passwort fest. Danach meldest du dich normal wieder an." else "Bestätige diese einmalige E-Mail-Aktion für dein Daily-Konto.")
+                    if (action.purpose == "password_reset") {
+                        OutlinedTextField(value = resetPassword, onValueChange = { resetPassword = it }, label = { Text("Neues Passwort") }, visualTransformation = PasswordVisualTransformation())
+                        OutlinedTextField(value = resetPasswordRepeat, onValueChange = { resetPasswordRepeat = it }, label = { Text("Passwort wiederholen") }, visualTransformation = PasswordVisualTransformation())
+                    }
+                }
+            },
+            confirmButton = {
+                Button(enabled = action.purpose != "password_reset" || (isPasswordValid(resetPassword) && resetPassword == resetPasswordRepeat), onClick = { scope.launch { if (vm.consumeEmailAction(action, resetPassword)) { pendingEmailAction = null; resetPassword = ""; resetPasswordRepeat = "" } } }) { Text("Bestätigen") }
+            },
+            dismissButton = { TextButton(onClick = { pendingEmailAction = null }) { Text("Abbrechen") } }
+        )
+    }
+
+    state.emailRecoveryPrompt?.let { emailPrompt ->
+        if (state.showEmailRecoveryDialog) {
+            AlertDialog(
+                onDismissRequest = { vm.dismissEmailRecoveryPromptLater() },
+                confirmButton = { TextButton(onClick = { vm.acceptEmailRecoveryPrompt() }) { Text(emailPrompt.confirmLabel.ifBlank { "E-Mail hinzufügen" }) } },
+                dismissButton = { TextButton(onClick = { vm.dismissEmailRecoveryPromptLater() }) { Text(emailPrompt.declineLabel.ifBlank { "Später" }) } },
+                title = { Text(emailPrompt.title.ifBlank { "Konto mit E-Mail absichern" }) },
+                text = { Text(emailPrompt.body.ifBlank { "Mit einer bestätigten E-Mail-Adresse kannst du dein Passwort zuverlässig zurücksetzen. Die Adresse bleibt optional und wird nicht öffentlich angezeigt." }) }
+            )
+        }
+    }
+
     if (state.token.isBlank()) {
         var loginPasswordVisible by rememberSaveable { mutableStateOf(false) }
         var registerPasswordVisible by rememberSaveable { mutableStateOf(false) }
@@ -13669,6 +13865,17 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     enabled = !state.loading,
                     modifier = Modifier.fillMaxWidth()
                 )
+                TextButton(onClick = { forgotPasswordMode = !forgotPasswordMode }) { Text(if (forgotPasswordMode) "Zurück zur Anmeldung" else "Passwort vergessen?") }
+                if (forgotPasswordMode) {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Recovery per E-Mail", fontWeight = FontWeight.SemiBold)
+                            Text("Aus Datenschutzgründen ist die Antwort immer gleich – unabhängig davon, ob die Adresse bekannt ist.", style = MaterialTheme.typography.bodySmall)
+                            OutlinedTextField(value = recoveryEmail, onValueChange = { recoveryEmail = it }, label = { Text("Bestätigte E-Mail-Adresse") }, modifier = Modifier.fillMaxWidth())
+                            Button(onClick = { scope.launch { vm.requestPasswordReset(recoveryEmail) } }, enabled = recoveryEmail.contains('@'), modifier = Modifier.fillMaxWidth()) { Text("Reset-Link anfordern") }
+                        }
+                    }
+                }
             } else {
                 OutlinedTextField(
                     value = inviteCodeInput,
@@ -13720,13 +13927,19 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                             )
                         }
                     )
+                    Text("Optional: Eine bestätigte E-Mail-Adresse ist die zuverlässigste Möglichkeit, dein Passwort später zurückzusetzen.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(value = registrationEmail, onValueChange = { registrationEmail = it }, label = { Text("E-Mail (optional)") }, modifier = Modifier.fillMaxWidth())
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = registrationNewsletter, onCheckedChange = { registrationNewsletter = it })
+                        Text("Info-Newsletter abonnieren (separate Bestätigung)")
+                    }
                     Button(
                         onClick = {
                             if (!isPasswordValid(password)) {
                                 vm.setMessage("Das Passwort muss mindestens 6 Zeichen haben.")
                             } else {
                                 scope.launch {
-                                    vm.registerWithInvite(inviteCodeInput, username, password)
+                                    vm.registerWithInvite(inviteCodeInput, username, password, registrationEmail, registrationNewsletter)
                                 }
                             }
                         },
@@ -14109,6 +14322,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     bookmarksGivenCount = state.bookmarksGivenCount,
                     bookmarksReceivedCount = state.bookmarksReceivedCount,
                     promptRules = state.promptRules,
+                    emailState = state.emailState,
                     photos = state.photos,
                     themeMode = themeModeValue(state.darkMode, state.oledMode),
                     currentPassword = pwCurrent,
@@ -14305,6 +14519,10 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     },
                     onConsumeSetupJumpTarget = { vm.consumeProfileSetupJumpTarget() },
                     onCurrentPasswordChange = { pwCurrent = it },
+                    onRequestEmailVerification = { email, current, newsletter -> scope.launch { vm.requestEmailVerification(email, current, newsletter) } },
+                    onCancelPendingEmail = { scope.launch { vm.cancelPendingEmail() } },
+                    onRemoveEmail = { current -> scope.launch { vm.removeEmail(current) } },
+                    onNewsletterChange = { subscribed -> scope.launch { vm.setNewsletterSubscribed(subscribed) } },
                     onNewPasswordChange = { pwNext = it },
                     onChangePassword = {
                         if (!isPasswordValid(pwNext)) {
@@ -19599,6 +19817,7 @@ fun ProfileTab(
     bookmarksGivenCount: Int,
     bookmarksReceivedCount: Int,
     promptRules: PromptRulesResponse?,
+    emailState: EmailState,
     photos: List<PromptPhoto>,
     themeMode: Int,
     currentPassword: String,
@@ -19753,6 +19972,10 @@ fun ProfileTab(
     ) -> Unit,
     onConsumeSetupJumpTarget: () -> Unit,
     onCurrentPasswordChange: (String) -> Unit,
+    onRequestEmailVerification: (String, String, Boolean) -> Unit,
+    onCancelPendingEmail: () -> Unit,
+    onRemoveEmail: (String) -> Unit,
+    onNewsletterChange: (Boolean) -> Unit,
     onNewPasswordChange: (String) -> Unit,
     onChangePassword: () -> Unit,
     onCheckUpdate: () -> Unit,
@@ -19791,6 +20014,9 @@ fun ProfileTab(
     var updatePulseTick by remember { mutableStateOf(0) }
     var updateChecked by remember { mutableStateOf(false) }
     var serverOverrideInput by remember(apiBaseUrlOverride) { mutableStateOf(apiBaseUrlOverride) }
+    var recoveryEmailInput by remember(emailState.email, emailState.pendingEmail) { mutableStateOf(emailState.pendingEmail.ifBlank { emailState.email }) }
+    var recoveryEmailPassword by remember { mutableStateOf("") }
+    var recoveryNewsletterRequested by remember(emailState.newsletterStatus, emailState.pendingNewsletterOptIn) { mutableStateOf(emailState.pendingNewsletterOptIn || emailState.newsletterStatus == "subscribed" || emailState.newsletterStatus == "pending") }
     val updateButtonScale = remember { Animatable(1f) }
     fun sectionExpanded(sectionId: String): Boolean = profileSectionsExpanded[sectionId] ?: false
     var bioValue by remember(bio) { mutableStateOf(bio) }
@@ -19972,6 +20198,33 @@ fun ProfileTab(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     SettingsSubsection("Konto", "Profilbild, Benutzername und Passwort") {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("Konto mit E-Mail absichern", fontWeight = FontWeight.SemiBold)
+                                Text("Optional und niemals öffentlich. Eine bestätigte Adresse ermöglicht den Passwort-Reset.", style = MaterialTheme.typography.bodySmall)
+                                when {
+                                    emailState.email.isNotBlank() -> Text("Bestätigt: ${emailState.email}", color = MaterialTheme.colorScheme.primary)
+                                    emailState.pendingEmail.isNotBlank() -> Text("Bestätigung ausstehend: ${emailState.pendingEmail}", color = MaterialTheme.colorScheme.tertiary)
+                                    !emailState.deliveryEnabled -> Text("E-Mail-Support ist auf diesem Server noch nicht aktiviert.", style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (emailState.deliveryEnabled && emailState.pendingEmail.isBlank()) {
+                                    OutlinedTextField(value = recoveryEmailInput, onValueChange = { recoveryEmailInput = it }, label = { Text(if (emailState.email.isBlank()) "Recovery-E-Mail" else "Neue E-Mail-Adresse") }, modifier = Modifier.fillMaxWidth())
+                                    OutlinedTextField(value = recoveryEmailPassword, onValueChange = { recoveryEmailPassword = it }, label = { Text("Aktuelles Passwort") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked = recoveryNewsletterRequested, onCheckedChange = { recoveryNewsletterRequested = it }); Text("Info-Newsletter (Double-Opt-in)") }
+                                    Button(onClick = { onRequestEmailVerification(recoveryEmailInput, recoveryEmailPassword, recoveryNewsletterRequested) }, enabled = recoveryEmailInput.contains('@') && recoveryEmailPassword.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text(if (emailState.email.isBlank()) "Bestätigungs-Mail senden" else "Änderung bestätigen") }
+                                }
+                                if (emailState.pendingEmail.isNotBlank()) {
+                                    OutlinedTextField(value = recoveryEmailPassword, onValueChange = { recoveryEmailPassword = it }, label = { Text("Aktuelles Passwort zum erneuten Senden") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                                    Button(onClick = { onRequestEmailVerification(emailState.pendingEmail, recoveryEmailPassword, emailState.pendingNewsletterOptIn) }, enabled = recoveryEmailPassword.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Bestätigungs-Mail erneut senden") }
+                                    OutlinedButton(onClick = onCancelPendingEmail, modifier = Modifier.fillMaxWidth()) { Text("Ausstehende Anfrage abbrechen") }
+                                }
+                                if (emailState.email.isNotBlank()) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked = emailState.newsletterStatus != "unsubscribed", enabled = emailState.newsletterStatus != "pending", onCheckedChange = onNewsletterChange); Text(if (emailState.newsletterStatus == "pending") "Newsletter-Bestätigung ausstehend" else "Info-Newsletter abonniert") }
+                                    OutlinedTextField(value = recoveryEmailPassword, onValueChange = { recoveryEmailPassword = it }, label = { Text("Aktuelles Passwort zum Entfernen") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                                    OutlinedButton(onClick = { onRemoveEmail(recoveryEmailPassword) }, enabled = recoveryEmailPassword.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Recovery-E-Mail entfernen") }
+                                }
+                            }
+                        }
                         if (avatarUrl.isNotBlank()) {
                             AsyncImage(
                                 model = avatarUrl,

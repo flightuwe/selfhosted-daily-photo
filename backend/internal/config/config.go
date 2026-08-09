@@ -9,32 +9,37 @@ import (
 )
 
 type Config struct {
-	Address                  string
-	DatabasePath             string
-	UploadDir                string
-	JWTSecret                string
-	TokenTTL                 time.Duration
-	RefreshTokenTTL          time.Duration
-	AllowedOrigins           []string
-	PublicBaseURL            string
-	AdminBaseURL             string
-	Timezone                 string
-	SchedulerEnabled         bool
-	SchedulerLeaseTimeoutSec int
-	AppVersion               string
-	FCMEnabled               bool
-	FCMProjectID             string
-	FCMServiceAccountFile    string
-	ForensicBackendLogPath   string
-	ForensicGatewayLogPath   string
-	MigrationReportEnabled   bool
-	MigrationReportTarget    string
-	MigrationReportSecret    string
-	MigrationReportSource    string
-	MediaRenditionsEnabled   bool
-	MediaAVIFEnabled         bool
-	MediaDerivativeMaxBytes  int64
-	RenditionLogOffsetPath   string
+	Address                   string
+	DatabasePath              string
+	UploadDir                 string
+	JWTSecret                 string
+	TokenTTL                  time.Duration
+	RefreshTokenTTL           time.Duration
+	AllowedOrigins            []string
+	PublicBaseURL             string
+	AdminBaseURL              string
+	Timezone                  string
+	SchedulerEnabled          bool
+	SchedulerLeaseTimeoutSec  int
+	AppVersion                string
+	FCMEnabled                bool
+	FCMProjectID              string
+	FCMServiceAccountFile     string
+	ForensicBackendLogPath    string
+	ForensicGatewayLogPath    string
+	MigrationReportEnabled    bool
+	MigrationReportTarget     string
+	MigrationReportSecret     string
+	MigrationReportSource     string
+	MediaRenditionsEnabled    bool
+	MediaAVIFEnabled          bool
+	MediaDerivativeMaxBytes   int64
+	RenditionLogOffsetPath    string
+	EmailMasterKeyB64         string
+	EmailPreviousMasterKeyB64 string
+	EmailAllowedActionHosts   []string
+	AndroidAppPackage         string
+	AndroidAppCertSHA256      []string
 }
 
 func Load() Config {
@@ -46,33 +51,49 @@ func Load() Config {
 		adminBaseURL,
 	)
 	return Config{
-		Address:                  getEnv("APP_ADDRESS", ":8080"),
-		DatabasePath:             getEnv("DB_PATH", "./data/app.db"),
-		UploadDir:                getEnv("UPLOAD_DIR", "./data/uploads"),
-		JWTSecret:                getEnv("JWT_SECRET", "dev-secret-change-me"),
-		TokenTTL:                 time.Duration(getInt("TOKEN_TTL_HOURS", 24)) * time.Hour,
-		RefreshTokenTTL:          time.Duration(getInt("REFRESH_TOKEN_TTL_DAYS", 3650)) * 24 * time.Hour,
-		AllowedOrigins:           allowedOrigins,
-		PublicBaseURL:            publicBaseURL,
-		AdminBaseURL:             adminBaseURL,
-		Timezone:                 getEnv("APP_TIMEZONE", "Europe/Berlin"),
-		SchedulerEnabled:         getBool("SCHEDULER_ENABLED", true),
-		SchedulerLeaseTimeoutSec: getInt("SCHEDULER_LEASE_TIMEOUT_SEC", 60),
-		AppVersion:               getEnv("APP_VERSION", "dev"),
-		FCMEnabled:               getBool("FCM_ENABLED", false),
-		FCMProjectID:             getEnv("FCM_PROJECT_ID", ""),
-		FCMServiceAccountFile:    getEnv("FCM_SERVICE_ACCOUNT_FILE", ""),
-		ForensicBackendLogPath:   getEnv("FORENSIC_BACKEND_LOG_PATH", "/app/logs/backend.log"),
-		ForensicGatewayLogPath:   getEnv("FORENSIC_GATEWAY_LOG_PATH", "/app/gateway-logs/access.log"),
-		MigrationReportEnabled:   getBool("MIGRATION_REPORT_ENABLED", false),
-		MigrationReportTarget:    getEnv("MIGRATION_REPORT_TARGET", ""),
-		MigrationReportSecret:    getEnv("MIGRATION_REPORT_SECRET", ""),
-		MigrationReportSource:    getEnv("MIGRATION_REPORT_SOURCE", ""),
-		MediaRenditionsEnabled:   getBool("MEDIA_RENDITIONS_ENABLED", true),
-		MediaAVIFEnabled:         getBool("MEDIA_AVIF_ENABLED", false),
-		MediaDerivativeMaxBytes:  getInt64("MEDIA_DERIVATIVE_MAX_BYTES", 5*1024*1024*1024),
-		RenditionLogOffsetPath:   getEnv("RENDITION_LOG_OFFSET_PATH", "/app/data/rendition-gateway.offset"),
+		Address:                   getEnv("APP_ADDRESS", ":8080"),
+		DatabasePath:              getEnv("DB_PATH", "./data/app.db"),
+		UploadDir:                 getEnv("UPLOAD_DIR", "./data/uploads"),
+		JWTSecret:                 getEnv("JWT_SECRET", "dev-secret-change-me"),
+		TokenTTL:                  time.Duration(getInt("TOKEN_TTL_HOURS", 24)) * time.Hour,
+		RefreshTokenTTL:           time.Duration(getInt("REFRESH_TOKEN_TTL_DAYS", 3650)) * 24 * time.Hour,
+		AllowedOrigins:            allowedOrigins,
+		PublicBaseURL:             publicBaseURL,
+		AdminBaseURL:              adminBaseURL,
+		Timezone:                  getEnv("APP_TIMEZONE", "Europe/Berlin"),
+		SchedulerEnabled:          getBool("SCHEDULER_ENABLED", true),
+		SchedulerLeaseTimeoutSec:  getInt("SCHEDULER_LEASE_TIMEOUT_SEC", 60),
+		AppVersion:                getEnv("APP_VERSION", "dev"),
+		FCMEnabled:                getBool("FCM_ENABLED", false),
+		FCMProjectID:              getEnv("FCM_PROJECT_ID", ""),
+		FCMServiceAccountFile:     getEnv("FCM_SERVICE_ACCOUNT_FILE", ""),
+		ForensicBackendLogPath:    getEnv("FORENSIC_BACKEND_LOG_PATH", "/app/logs/backend.log"),
+		ForensicGatewayLogPath:    getEnv("FORENSIC_GATEWAY_LOG_PATH", "/app/gateway-logs/access.log"),
+		MigrationReportEnabled:    getBool("MIGRATION_REPORT_ENABLED", false),
+		MigrationReportTarget:     getEnv("MIGRATION_REPORT_TARGET", ""),
+		MigrationReportSecret:     getEnv("MIGRATION_REPORT_SECRET", ""),
+		MigrationReportSource:     getEnv("MIGRATION_REPORT_SOURCE", ""),
+		MediaRenditionsEnabled:    getBool("MEDIA_RENDITIONS_ENABLED", true),
+		MediaAVIFEnabled:          getBool("MEDIA_AVIF_ENABLED", false),
+		MediaDerivativeMaxBytes:   getInt64("MEDIA_DERIVATIVE_MAX_BYTES", 5*1024*1024*1024),
+		RenditionLogOffsetPath:    getEnv("RENDITION_LOG_OFFSET_PATH", "/app/data/rendition-gateway.offset"),
+		EmailMasterKeyB64:         getEnv("EMAIL_MASTER_KEY_B64", ""),
+		EmailPreviousMasterKeyB64: getEnv("EMAIL_PREVIOUS_MASTER_KEY_B64", ""),
+		EmailAllowedActionHosts:   splitCSVNoFallback(getEnv("EMAIL_ALLOWED_ACTION_HOSTS", "")),
+		AndroidAppPackage:         getEnv("ANDROID_APP_PACKAGE", "com.selfhosted.daily"),
+		AndroidAppCertSHA256:      splitCSVNoFallback(getEnv("ANDROID_APP_CERT_SHA256", "")),
 	}
+}
+
+func splitCSVNoFallback(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if clean := strings.TrimSpace(part); clean != "" {
+			out = append(out, clean)
+		}
+	}
+	return out
 }
 
 func ResolveAppVersion(configured string, build string) string {

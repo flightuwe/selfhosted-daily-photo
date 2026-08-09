@@ -45,14 +45,27 @@ Use this checklist before every real deploy or release.
 - `SCHEDULER_LEASE_TIMEOUT_SEC`
 - Validate scheduler behavior in admin runtime view after deploy.
 
+9. E-mail runtime controls
+- `EMAIL_MASTER_KEY_B64`: Base64 of exactly 32 random bytes.
+- `EMAIL_PREVIOUS_MASTER_KEY_B64`: only during a documented rotation.
+- `EMAIL_ALLOWED_ACTION_HOSTS`: all approved HTTPS action hosts.
+- `ANDROID_APP_PACKAGE` and `ANDROID_APP_CERT_SHA256`: values served via `assetlinks.json`.
+- Configure/test Posteo in Admin → Konfiguration → E-Mail before enabling delivery.
+
 ## Android Release-specific Checks
 
-9. `android/app/build.gradle.kts`
+10. Android repository variables
+- `DAILY_API_BASE_URL`
+- `DAILY_APP_LINK_HOST_PRIMARY`
+- `DAILY_APP_LINK_HOST_SECONDARY`
+- Defaults in the public repository remain non-production placeholders.
+
+11. `android/app/build.gradle.kts`
 - `versionName` matches release tag (`vX.Y.Z` <-> `X.Y.Z`).
 - `versionCode` increases vs previous release.
 - `BuildConfig.API_BASE_URL` points to intended environment for this release track.
 
-10. GitHub release secrets
+12. GitHub release secrets
 - `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEYSTORE_PASSWORD`
@@ -61,17 +74,17 @@ Use this checklist before every real deploy or release.
 
 ## Post-Deploy Verification (Minimum)
 
-11. Health
+13. Health
 - `GET /api/health` returns `ok: true`.
 
-12. Auth and admin
+14. Auth and admin
 - Admin login works.
 - Token flows are healthy.
 
-13. Storage paths
+15. Storage paths
 - Upload succeeds and file is retrievable.
 
-14. Runtime controls
+16. Runtime controls
 - Trigger/scheduler runtime endpoints are healthy.
 - No abnormal lock/duplicate trend.
 

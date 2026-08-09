@@ -31,6 +31,12 @@ func Connect(path string) (*gorm.DB, error) {
 		&models.DeviceToken{},
 		&models.UserSession{},
 		&models.AppSettings{},
+		&models.EmailSettings{},
+		&models.EmailAction{},
+		&models.EmailDelivery{},
+		&models.EmailRateLimit{},
+		&models.NewsletterSubscription{},
+		&models.UserPromptState{},
 		&models.MigrationUserStatus{},
 		&models.SchedulerLease{},
 		&models.DailyDispatch{},
@@ -71,6 +77,9 @@ func Connect(path string) (*gorm.DB, error) {
 	if err := ensureDefaultSettings(database); err != nil {
 		return nil, err
 	}
+	if err := ensureEmailSchema(database); err != nil {
+		return nil, err
+	}
 	if err := configureSQLite(database); err != nil {
 		return nil, err
 	}
@@ -103,6 +112,24 @@ func Connect(path string) (*gorm.DB, error) {
 	}
 
 	return database, nil
+}
+
+func ensureEmailSchema(database *gorm.DB) error {
+	if err := database.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_verified_email_unique
+		ON users(email_normalized) WHERE email_normalized <> ''`).Error; err != nil {
+		return err
+	}
+	if err := database.Model(&models.User{}).Where("auth_version = 0").Update("auth_version", 1).Error; err != nil {
+		return err
+	}
+	var count int64
+	if err := database.Model(&models.EmailSettings{}).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return database.Create(&models.EmailSettings{Port: 587, TLSMode: "starttls", AuthMode: "auto", FromName: "Daily"}).Error
+	}
+	return nil
 }
 
 // Attachments predating community posts could only be created by the post

@@ -194,6 +194,18 @@ Critical migration rule:
 - Revert DNS/proxy to previous known-good endpoint.
 - Document rollback reason and symptom class in `reports/daily-ops-changelog.md`.
 
+## E-mail Support Rollout
+
+1. Roll out backend/admin migrations while SMTP remains disabled.
+2. Configure the e-mail master key, approved action hosts, Android package and release/debug fingerprints on CT `9204`.
+3. Route every action domain to the gateway and verify `/.well-known/assetlinks.json` before publishing the APK.
+4. Test the Posteo draft connection and a real test message in Admin → Konfiguration → E-Mail; enable delivery only after both succeed.
+5. Publish Android with both App-Link hosts. Change `Action-Base-URL` only after the target host is live.
+6. Keep the old domain reachable for at least 30 days plus the maximum token lifetime.
+7. Watch queue depth, failed jobs and reset rate. Emergency rollback is the admin delivery switch; do not delete addresses, consent or encryption keys.
+
+Full configuration and security invariants: `docs/email-support.md`.
+
 ## Post-Deploy Smoke
 
 - `pwsh scripts/test-e2e-smoke.ps1 -BaseUrl <url> -AdminToken <token>`

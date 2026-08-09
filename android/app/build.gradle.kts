@@ -16,7 +16,15 @@ android {
         versionName = "0.8.26"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "API_BASE_URL", "\"https://daily.example.tld/api/\"")
+        val apiBaseUrl = System.getenv("DAILY_API_BASE_URL")?.trim().orEmpty().ifBlank { "https://daily.example.tld/api/" }
+        val appLinkHostPrimary = System.getenv("DAILY_APP_LINK_HOST_PRIMARY")?.trim().orEmpty().ifBlank { "daily.example.tld" }
+        val appLinkHostSecondary = System.getenv("DAILY_APP_LINK_HOST_SECONDARY")?.trim().orEmpty().ifBlank { "daily-alt.example.tld" }
+        fun quoted(value: String) = "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+        buildConfigField("String", "API_BASE_URL", quoted(apiBaseUrl))
+        buildConfigField("String", "APP_LINK_HOST_PRIMARY", quoted(appLinkHostPrimary))
+        buildConfigField("String", "APP_LINK_HOST_SECONDARY", quoted(appLinkHostSecondary))
+        manifestPlaceholders["dailyAppLinkHostPrimary"] = appLinkHostPrimary
+        manifestPlaceholders["dailyAppLinkHostSecondary"] = appLinkHostSecondary
     }
 
     val keystorePathEnv = System.getenv("ANDROID_KEYSTORE_PATH")
