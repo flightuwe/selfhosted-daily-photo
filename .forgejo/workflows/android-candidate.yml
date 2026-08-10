@@ -17,7 +17,7 @@ jobs:
       DAILY_APP_LINK_HOST_PRIMARY: daily.harzcloud.de
       DAILY_APP_LINK_HOST_SECONDARY: daily.broutschek.de
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Prepare build inputs
@@ -34,9 +34,10 @@ jobs:
           printf '{"commit":"%s","ref":"%s","builtAt":"%s","signed":false}\n' \
             "$GITHUB_SHA" "$GITHUB_REF" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/provenance.json
       - name: Upload unsigned candidate
-        uses: actions/upload-artifact@v4
+        # Forgejo 11 implements the v3 artifact protocol. GitHub's v4 action
+        # intentionally rejects non-GitHub servers, so use Forgejo's mirror.
+        uses: https://data.forgejo.org/actions/upload-artifact@v3
         with:
           name: daily-android-unsigned-candidate
           path: dist/
           if-no-files-found: error
-
