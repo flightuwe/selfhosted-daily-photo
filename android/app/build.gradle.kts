@@ -12,8 +12,8 @@ android {
         applicationId = "com.selfhosted.daily"
         minSdk = 26
         targetSdk = 34
-        versionCode = 142027
-        versionName = "0.8.27"
+        versionCode = 142028
+        versionName = "0.8.28"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         val apiBaseUrl = System.getenv("DAILY_API_BASE_URL")?.trim().orEmpty().ifBlank { "https://daily.example.tld/api/" }
