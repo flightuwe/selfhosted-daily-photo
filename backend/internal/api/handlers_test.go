@@ -2271,6 +2271,60 @@ func TestHandlePhotoAttachmentCreateAllowsOtherUserOnActiveCommunityPost(t *test
 	}
 }
 
+func TestCommunityContributorsForViewerHonorsAvatarPrivacy(t *testing.T) {
+	server := newSearchTestServer(t)
+	owner := models.User{
+		Username: "community-owner", PasswordHash: "x", FavoriteColor: "#112233",
+		AvatarPath: "avatars/owner.jpg", ProfileVisible: false, AvatarVisible: false,
+	}
+	publicContributor := models.User{
+		Username: "public-contributor", PasswordHash: "x", FavoriteColor: "#445566",
+		AvatarPath: "avatars/public.jpg", ProfileVisible: true, AvatarVisible: true,
+	}
+	privateContributor := models.User{
+		Username: "private-contributor", PasswordHash: "x", FavoriteColor: "#778899",
+		AvatarPath: "avatars/private.jpg", ProfileVisible: true, AvatarVisible: false,
+	}
+	for _, user := range []*models.User{&owner, &publicContributor, &privateContributor} {
+		if err := server.DB.Create(user).Error; err != nil {
+			t.Fatalf("create user %s: %v", user.Username, err)
+		}
+	}
+
+	photo := models.Photo{UserID: owner.ID, User: owner, CommunityPost: true}
+	attachments := []models.PhotoAttachment{
+		{UserID: publicContributor.ID},
+		{UserID: privateContributor.ID},
+		{UserID: publicContributor.ID},
+	}
+
+	rows := server.communityContributorsForViewer(owner.ID, photo, attachments)
+	if len(rows) != 3 {
+		t.Fatalf("contributors = %#v, want three unique users", rows)
+	}
+	if rows[0]["id"] != owner.ID || rows[1]["id"] != publicContributor.ID || rows[2]["id"] != privateContributor.ID {
+		t.Fatalf("contributors order = %#v, want owner then first contribution order", rows)
+	}
+	if rows[0]["avatarVisible"] != true || rows[0]["avatarUrl"] == "" {
+		t.Fatalf("owner avatar = %#v, want visible to owner", rows[0])
+	}
+	if rows[1]["avatarVisible"] != true || rows[1]["avatarUrl"] == "" {
+		t.Fatalf("public avatar = %#v, want visible", rows[1])
+	}
+	if rows[2]["avatarVisible"] != false || rows[2]["avatarUrl"] != "" {
+		t.Fatalf("private avatar = %#v, want hidden from owner", rows[2])
+	}
+
+	privateRows := server.communityContributorsForViewer(privateContributor.ID, photo, attachments)
+	if privateRows[2]["avatarVisible"] != true || privateRows[2]["avatarUrl"] == "" {
+		t.Fatalf("private contributor avatar = %#v, want visible to self", privateRows[2])
+	}
+	publicRows := server.communityContributorsForViewer(0, photo, attachments)
+	if publicRows[0]["avatarVisible"] != false || publicRows[0]["avatarUrl"] != "" {
+		t.Fatalf("owner public avatar = %#v, want hidden", publicRows[0])
+	}
+}
+
 func TestHandlePhotoAttachmentCreateRejectsOtherUserOnNormalPost(t *testing.T) {
 	server := newSearchTestServer(t)
 	owner := models.User{Username: "normal-owner", PasswordHash: "x"}

@@ -2,6 +2,7 @@ package com.selfhosted.daily
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.DownloadManager
 import android.content.Context
@@ -43,6 +44,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -96,6 +98,7 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
@@ -276,6 +279,9 @@ import java.util.Locale
 import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLException
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 import kotlin.coroutines.resume
 
@@ -702,7 +708,47 @@ data class PromptPhoto(
     val marks: List<PhotoMarkOverlay> = emptyList(),
     val paints: List<PhotoPaintOverlay> = emptyList()
 )
-data class CommunityContributor(val id: Long, val username: String, val color: String = "#1F5FBF")
+data class CommunityContributor(
+    val id: Long,
+    val username: String,
+    val color: String = "#1F5FBF",
+    val avatarUrl: String = "",
+    val avatarVisible: Boolean = false
+)
+
+internal fun resolvedCommunityContributors(
+    contributors: List<CommunityContributor>,
+    ownerId: Long,
+    ownerUsername: String,
+    ownerColor: String,
+    ownerAvatarUrl: String,
+    ownerAvatarVisible: Boolean
+): List<CommunityContributor> {
+    val owner = contributors.firstOrNull { it.id == ownerId } ?: CommunityContributor(
+        id = ownerId,
+        username = ownerUsername,
+        color = ownerColor,
+        avatarUrl = ownerAvatarUrl.takeIf { ownerAvatarVisible }.orEmpty(),
+        avatarVisible = ownerAvatarVisible && ownerAvatarUrl.isNotBlank()
+    )
+    val seen = mutableSetOf(ownerId)
+    return buildList {
+        add(owner)
+        contributors.forEach { contributor ->
+            if (seen.add(contributor.id)) add(contributor)
+        }
+    }
+}
+
+internal fun communityParticipantsChipLabel(count: Int): String =
+    if (count == 1) "Community · 1 Person" else "Community · $count Beteiligte"
+
+internal fun communityContributorInitial(username: String): String =
+    username.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+
+internal fun communityGradientColors(contributors: List<CommunityContributor>): List<Color> =
+    contributors.ifEmpty { listOf(CommunityContributor(0, "", "#1F5FBF")) }.map { parseUserColor(it.color) }
+
 data class PhotoMarkOverlay(
     val id: Long,
     val userId: Long,
@@ -16297,6 +16343,25 @@ private fun FeedPostCard(
     onOpenMarkModeration: () -> Unit
 ) {
     var showCommunityPostDisclaimer by remember(item.photo.id) { mutableStateOf(false) }
+    var showCommunityContributorsDialog by remember(item.photo.id) { mutableStateOf(false) }
+    val communityContributors = remember(
+        item.photo.communityContributors,
+        item.user.id,
+        item.user.username,
+        item.user.favoriteColor,
+        item.user.avatarUrl,
+        item.user.avatarVisible,
+        viewerId
+    ) {
+        resolvedCommunityContributors(
+            contributors = item.photo.communityContributors,
+            ownerId = item.user.id,
+            ownerUsername = item.user.username,
+            ownerColor = item.user.favoriteColor,
+            ownerAvatarUrl = item.user.avatarUrl,
+            ownerAvatarVisible = item.user.avatarVisible || viewerId == item.user.id
+        )
+    }
     PostCanvasCard(
         item = item,
         secondaryTextColor = secondaryTextColor,
@@ -16320,16 +16385,18 @@ private fun FeedPostCard(
         onOpenExternalUrl = onOpenExternalUrl,
         onOpenHashtagSearch = onOpenHashtagSearch,
         onRevealNsfw = onRevealNsfw,
+        headerLeading = if (item.photo.communityPost) {
+            {
+                CommunityParticipantsChip(
+                    count = communityContributors.size,
+                    onClick = { showCommunityContributorsDialog = true }
+                )
+            }
+        } else {
+            null
+        },
         headerTrailing = {
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                if (item.photo.communityPost) {
-                    Text("COMMUNITY", color = Color(0xFF8A4B00), fontWeight = FontWeight.Bold)
-                    Text(
-                        "Gemeinsam von " + item.photo.communityContributors.joinToString(", ") { it.username },
-                        color = Color(0xFF8A4B00),
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
                 if (showPublicPostNumbers && !item.photo.publicNumber.isNullOrBlank()) {
                     Text(
                         "#${item.photo.publicNumber}",
@@ -16442,6 +16509,17 @@ private fun FeedPostCard(
             PhotoPaintLayer(item.photo, frameRect, Modifier.fillMaxSize())
         }
     )
+    if (showCommunityContributorsDialog) {
+        CommunityContributorsDialog(
+            contributors = communityContributors,
+            ownerId = item.user.id,
+            onDismiss = { showCommunityContributorsDialog = false },
+            onOpenUserProfile = { userId ->
+                showCommunityContributorsDialog = false
+                onOpenUserProfile(userId)
+            }
+        )
+    }
     if (showCommunityPostDisclaimer) {
         AlertDialog(
             onDismissRequest = { showCommunityPostDisclaimer = false },
@@ -16451,6 +16529,128 @@ private fun FeedPostCard(
             dismissButton = { TextButton(onClick = { showCommunityPostDisclaimer = false }) { Text("Abbrechen") } }
         )
     }
+}
+
+@Composable
+private fun CommunityParticipantsChip(
+    count: Int,
+    onClick: () -> Unit
+) {
+    val label = communityParticipantsChipLabel(count)
+    Row(
+        modifier = Modifier
+            .defaultMinSize(minHeight = 48.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.78f))
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f),
+                shape = RoundedCornerShape(999.dp)
+            )
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = "$label anzeigen" }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Groups,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurface
+        )
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
+private fun CommunityContributorsDialog(
+    contributors: List<CommunityContributor>,
+    ownerId: Long,
+    onDismiss: () -> Unit,
+    onOpenUserProfile: (Long) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Beteiligte (${contributors.size})") },
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 320.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items(contributors, key = { it.id }) { contributor ->
+                    val isOwner = contributor.id == ownerId
+                    val contributorColor = parseUserColor(contributor.color)
+                    val initialColor = if (contributorColor.luminance() > 0.5f) Color.Black else Color.White
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onOpenUserProfile(contributor.id) }
+                            .semantics {
+                                contentDescription = if (isOwner) {
+                                    "${contributor.username}, Initiator, Profil öffnen"
+                                } else {
+                                    "${contributor.username}, Profil öffnen"
+                                }
+                            }
+                            .padding(horizontal = 8.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .background(contributorColor, CircleShape)
+                                .border(2.dp, contributorColor, CircleShape)
+                                .clip(CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = communityContributorInitial(contributor.username),
+                                color = initialColor,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (contributor.avatarVisible && contributor.avatarUrl.isNotBlank()) {
+                                AsyncImage(
+                                    model = contributor.avatarUrl,
+                                    contentDescription = "Profilbild von ${contributor.username}",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = contributor.username,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (isOwner) {
+                                Text(
+                                    text = "Initiator",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Schließen") }
+        }
+    )
 }
 
 /** Hidden, tactile entry point for the persisted offline mode. */
@@ -16630,6 +16830,25 @@ private fun OfflineModeHeader(
     }
 }
 
+private fun communityGradientBrush(colors: List<Color>, angleDegrees: Float, size: IntSize): Brush {
+    val stops = when {
+        colors.isEmpty() -> listOf(Color(0xFF1F5FBF), Color(0xFF1F5FBF))
+        colors.size == 1 -> listOf(colors.first(), colors.first())
+        else -> colors
+    }
+    if (size.width <= 0 || size.height <= 0) return Brush.linearGradient(stops)
+    val radians = Math.toRadians(angleDegrees.toDouble())
+    val directionX = cos(radians).toFloat()
+    val directionY = sin(radians).toFloat()
+    val center = Offset(size.width / 2f, size.height / 2f)
+    val radius = sqrt(size.width.toFloat() * size.width + size.height.toFloat() * size.height) / 2f
+    return Brush.linearGradient(
+        colors = stops,
+        start = Offset(center.x - directionX * radius, center.y - directionY * radius),
+        end = Offset(center.x + directionX * radius, center.y + directionY * radius)
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PostCanvasCard(
@@ -16656,6 +16875,7 @@ private fun PostCanvasCard(
     onOpenExternalUrl: ((String) -> Unit)?,
     onOpenHashtagSearch: (String) -> Unit,
     onRevealNsfw: () -> Unit,
+    headerLeading: @Composable (() -> Unit)? = null,
     headerTrailing: @Composable (() -> Unit)? = null,
     overlay: @Composable (Rect) -> Unit = {}
 ) {
@@ -16677,6 +16897,55 @@ private fun PostCanvasCard(
     }
     val comments = remember(item.comments) {
         item.comments.orEmpty().sortedWith(compareBy<PhotoCommentItem>({ parseOffsetOrLocalDateTime(it.createdAt) ?: LocalDateTime.MIN }, { it.id }))
+    }
+    val isCommunityPost = item.photo.communityPost
+    val displayCommunityContributors = remember(
+        item.photo.communityContributors,
+        item.user.id,
+        item.user.username,
+        item.user.favoriteColor,
+        item.user.avatarUrl,
+        item.user.avatarVisible
+    ) {
+        resolvedCommunityContributors(
+            contributors = item.photo.communityContributors,
+            ownerId = item.user.id,
+            ownerUsername = item.user.username,
+            ownerColor = item.user.favoriteColor,
+            ownerAvatarUrl = item.user.avatarUrl,
+            ownerAvatarVisible = item.user.avatarVisible
+        )
+    }
+    val communityColors = remember(displayCommunityContributors) {
+        communityGradientColors(displayCommunityContributors)
+    }
+    val animationsEnabled = remember { ValueAnimator.areAnimatorsEnabled() }
+    val gradientAngle = if (isCommunityPost && communityColors.size > 1 && animationsEnabled) {
+        val transition = rememberInfiniteTransition(label = "community-post-gradient")
+        val animatedAngle by transition.animateFloat(
+            initialValue = 25f,
+            targetValue = 385f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 36_000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "community-post-gradient-angle"
+        )
+        animatedAngle
+    } else {
+        25f
+    }
+    var communityCardSize by remember(item.photo.id) { mutableStateOf(IntSize.Zero) }
+    var communityHeaderSize by remember(item.photo.id) { mutableStateOf(IntSize.Zero) }
+    val communityBorderBrush = remember(communityColors, gradientAngle, communityCardSize) {
+        communityGradientBrush(communityColors, gradientAngle, communityCardSize)
+    }
+    val communityHeaderBrush = remember(communityColors, gradientAngle, communityHeaderSize) {
+        communityGradientBrush(
+            communityColors.map { it.copy(alpha = 0.16f) },
+            gradientAngle,
+            communityHeaderSize
+        )
     }
     val nsfwHidden = item.photo.nsfw && !showNsfwByDefault && !nsfwRevealed
     val obscuredModifier = if (nsfwHidden) {
@@ -16700,7 +16969,12 @@ private fun PostCanvasCard(
         )
     }
 
-    Card(modifier = modifier) {
+    Card(
+        modifier = modifier.then(
+            if (isCommunityPost) Modifier.onSizeChanged { communityCardSize = it } else Modifier
+        ),
+        border = if (isCommunityPost) BorderStroke(3.dp, communityBorderBrush) else null
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -16714,7 +16988,18 @@ private fun PostCanvasCard(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (isCommunityPost) {
+                                Modifier
+                                    .onSizeChanged { communityHeaderSize = it }
+                                    .background(communityHeaderBrush, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                            } else {
+                                Modifier
+                            }
+                        ),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.Top
                 ) {
@@ -16722,6 +17007,7 @@ private fun PostCanvasCard(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
+                        headerLeading?.invoke()
                         Text(
                             item.user.username,
                             style = MaterialTheme.typography.titleLarge,

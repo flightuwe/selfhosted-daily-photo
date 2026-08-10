@@ -11805,6 +11805,10 @@ func (s *Server) photoJSON(p models.Photo) gin.H {
 }
 
 func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.PhotoAttachment, queueMissing ...bool) gin.H {
+	return s.photoJSONWithAttachmentsForViewer(0, p, attachments, queueMissing...)
+}
+
+func (s *Server) photoJSONWithAttachmentsForViewer(viewerID uint, p models.Photo, attachments []models.PhotoAttachment, queueMissing ...bool) gin.H {
 	shouldQueueMissing := true
 	if len(queueMissing) > 0 {
 		shouldQueueMissing = queueMissing[0]
@@ -11859,7 +11863,7 @@ func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.P
 		"communityPost":         p.CommunityPost,
 		"communityActive":       s.isActiveCommunityPost(p),
 		"communityActivatedAt":  p.CommunityActivatedAt,
-		"communityContributors": s.communityContributors(p, attachments),
+		"communityContributors": s.communityContributorsForViewer(viewerID, p, attachments),
 	}
 	if thumbnailURL := s.photoThumbnailURL(p.FilePath); thumbnailURL != "" {
 		out["thumbnailUrl"] = thumbnailURL
@@ -11884,7 +11888,7 @@ func (s *Server) photoJSONWithAttachments(p models.Photo, attachments []models.P
 	return out
 }
 
-func (s *Server) communityContributors(p models.Photo, attachments []models.PhotoAttachment) []gin.H {
+func (s *Server) communityContributorsForViewer(viewerID uint, p models.Photo, attachments []models.PhotoAttachment) []gin.H {
 	if !p.CommunityPost {
 		return []gin.H{}
 	}
@@ -11906,7 +11910,18 @@ func (s *Server) communityContributors(p models.Photo, attachments []models.Phot
 	out := make([]gin.H, 0, len(ids))
 	for _, id := range ids {
 		if u, ok := byID[id]; ok {
-			out = append(out, gin.H{"id": u.ID, "username": u.Username, "color": defaultColor(u.FavoriteColor)})
+			avatarURL := ""
+			avatarVisible := strings.TrimSpace(u.AvatarPath) != "" && (viewerID == u.ID || (u.ProfileVisible && u.AvatarVisible))
+			if avatarVisible {
+				avatarURL = s.avatarURL(u.AvatarPath)
+			}
+			out = append(out, gin.H{
+				"id":            u.ID,
+				"username":      u.Username,
+				"color":         defaultColor(u.FavoriteColor),
+				"avatarUrl":     avatarURL,
+				"avatarVisible": avatarVisible,
+			})
 		}
 	}
 	return out
@@ -11927,7 +11942,7 @@ func (s *Server) photoJSONForViewerWithAttachments(viewerID uint, p models.Photo
 }
 
 func (s *Server) photoJSONForViewerWithAttachmentsAndQueue(viewerID uint, p models.Photo, decorations *viewerPhotoDecorations, attachments []models.PhotoAttachment, queueMissing bool) gin.H {
-	row := s.photoJSONWithAttachments(p, attachments, queueMissing)
+	row := s.photoJSONWithAttachmentsForViewer(viewerID, p, attachments, queueMissing)
 	creativeMode := normalizeCreativePostMode(strings.TrimSpace(p.User.CreativePostMode))
 	if decorations != nil {
 		if decorations.bookmarkMap != nil {
