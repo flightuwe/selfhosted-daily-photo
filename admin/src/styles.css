@@ -186,6 +186,17 @@ button.danger {
   background: var(--btn-danger);
 }
 
+button.secondary {
+  background: var(--tab-bg);
+  color: var(--tab-fg);
+  border: 1px solid var(--input-border);
+}
+
+button.compact {
+  padding: 0.48rem 0.72rem;
+  font-size: 0.82rem;
+}
+
 .checkbox {
   grid-template-columns: auto 1fr;
   align-items: center;
@@ -372,6 +383,150 @@ button.danger {
 
 .table tbody tr:nth-child(2n) {
   background: color-mix(in srgb, var(--soft-card) 72%, transparent);
+}
+
+.user-admin-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.25rem;
+}
+
+.user-admin-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.user-admin-card {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--table-border);
+  border-radius: 16px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--soft-card) 96%, transparent), color-mix(in srgb, var(--glass-bg) 88%, transparent));
+  box-shadow: 0 10px 28px rgba(31, 67, 138, 0.08);
+}
+
+.user-admin-card-head,
+.user-admin-section-head,
+.user-admin-actions,
+.user-admin-email-actions,
+.user-admin-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.user-admin-card-head,
+.user-admin-section-head {
+  justify-content: space-between;
+}
+
+.user-admin-identity {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.user-admin-title-row {
+  justify-content: flex-start;
+}
+
+.user-admin-title-row h3 {
+  overflow-wrap: anywhere;
+}
+
+.user-admin-role {
+  min-width: 130px;
+}
+
+.user-admin-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.35fr) minmax(180px, 0.8fr) minmax(230px, 1fr);
+  gap: 0.75rem;
+  align-items: stretch;
+}
+
+.user-admin-section {
+  display: grid;
+  align-content: start;
+  gap: 0.48rem;
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--table-border);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--glass-bg) 72%, transparent);
+}
+
+.user-admin-section h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.user-admin-email-section {
+  border-color: color-mix(in srgb, #3478f6 35%, var(--table-border));
+}
+
+.user-admin-email-value {
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+.user-admin-email-actions,
+.user-admin-actions {
+  flex-wrap: wrap;
+}
+
+.user-admin-actions {
+  justify-content: flex-start;
+  padding-top: 0.1rem;
+}
+
+.user-admin-password-action {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) auto;
+  gap: 0.55rem;
+  flex: 1 1 360px;
+  max-width: 520px;
+}
+
+.user-admin-delete {
+  margin-left: auto;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 0.28rem 0.62rem;
+  font-size: 0.74rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.status-chip.neutral {
+  color: var(--tab-fg);
+  background: var(--tab-bg);
+}
+
+.status-chip.info {
+  color: #255fc6;
+  background: rgba(61, 122, 255, 0.15);
+}
+
+.status-chip.ok {
+  color: #16704a;
+  background: rgba(45, 178, 116, 0.17);
+}
+
+.status-chip.warn {
+  color: #9a5c08;
+  background: rgba(214, 147, 42, 0.18);
 }
 
 .debug-toolbar {
@@ -783,6 +938,91 @@ button.danger {
   margin: 0;
 }
 
+.email-delivery-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem 0;
+  padding: 1rem 1.1rem;
+  border: 2px solid var(--input-border);
+  border-radius: 16px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--tab-bg) 82%, transparent), color-mix(in srgb, var(--soft-card) 94%, transparent));
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.email-delivery-toggle.enabled {
+  border-color: rgba(35, 169, 111, 0.72);
+  background: linear-gradient(135deg, rgba(45, 178, 116, 0.16), color-mix(in srgb, var(--soft-card) 94%, transparent));
+  box-shadow: 0 10px 28px rgba(35, 169, 111, 0.14);
+}
+
+.email-delivery-toggle-copy {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.email-delivery-toggle-copy strong {
+  font-size: 1rem;
+}
+
+.email-delivery-toggle-copy span {
+  color: var(--small);
+  font-size: 0.85rem;
+}
+
+.toggle-control {
+  position: relative;
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 0.65rem;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toggle-control input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.toggle-track {
+  display: block;
+  width: 66px;
+  height: 36px;
+  padding: 4px;
+  border-radius: 999px;
+  background: #8d99b3;
+  box-shadow: inset 0 1px 4px rgba(12, 25, 54, 0.25);
+  transition: background 0.2s ease;
+}
+
+.toggle-track span {
+  display: block;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 7px rgba(12, 25, 54, 0.28);
+  transition: transform 0.2s ease;
+}
+
+.toggle-control input:checked + .toggle-track {
+  background: #1fa66e;
+}
+
+.toggle-control input:checked + .toggle-track span {
+  transform: translateX(30px);
+}
+
+.toggle-control input:focus-visible + .toggle-track {
+  outline: 3px solid rgba(79, 149, 255, 0.35);
+  outline-offset: 3px;
+}
+
 @keyframes driftA {
   0% {
     transform: translate(0, 0) scale(1);
@@ -847,11 +1087,44 @@ button.danger {
     grid-template-columns: 1fr;
   }
 
+  .user-admin-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .email-delivery-toggle {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .table {
     font-size: 0.9rem;
     display: block;
     overflow-x: auto;
     white-space: nowrap;
+  }
+}
+
+@media (max-width: 620px) {
+  .user-admin-card-head,
+  .user-admin-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .user-admin-role,
+  .user-admin-password-action,
+  .user-admin-actions > button {
+    width: 100%;
+    max-width: none;
+  }
+
+  .user-admin-password-action {
+    flex: 0 0 auto;
+    grid-template-columns: 1fr;
+  }
+
+  .user-admin-delete {
+    margin-left: 0;
   }
 }
 

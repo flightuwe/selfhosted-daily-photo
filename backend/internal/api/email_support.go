@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -105,7 +106,7 @@ func (s *Server) validateEmailSettingsInput(input emailSettingsInput, existing m
 	next := existing
 	if strings.EqualFold(strings.TrimSpace(input.Provider), "posteo") {
 		if strings.TrimSpace(input.Host) == "" {
-			input.Host = "smtp.posteo.de"
+			input.Host = "posteo.de"
 		}
 		if input.Port == 0 {
 			input.Port = 587
@@ -649,6 +650,46 @@ func (s *Server) handleAdminDeleteUserEmail(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) handleAdminGetUserEmail(c *gin.Context) {
+	id, err := parseUintParam(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	var user models.User
+	if err := s.DB.First(&user, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "email lookup failed"})
+		return
+	}
+
+	newsletterStatus := "unsubscribed"
+	var newsletter models.NewsletterSubscription
+	if err := s.DB.Where("user_id = ?", id).First(&newsletter).Error; err == nil {
+		newsletterStatus = newsletter.Status
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "newsletter lookup failed"})
+		return
+	}
+
+	admin, _ := userFromContext(c)
+	log.Printf("admin_email_reveal adminUserID=%d targetUserID=%d requestId=%s", admin.ID, id, requestIDFromContext(c))
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	c.JSON(http.StatusOK, gin.H{
+		"email":                   user.Email,
+		"emailVerifiedAt":         user.EmailVerifiedAt,
+		"pendingEmail":            user.PendingEmail,
+		"pendingEmailRequestedAt": user.PendingEmailRequestedAt,
+		"newsletterStatus":        newsletterStatus,
+		"newsletterConfirmedAt":   newsletter.ConfirmedAt,
+	})
 }
 
 func (s *Server) removeUserEmail(userID uint, notifyOld bool) error {

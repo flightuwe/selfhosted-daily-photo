@@ -442,6 +442,7 @@ func (s *Server) Router() *gin.Engine {
 			admin.POST("/users/:id/token", s.handleAdminIssueUserToken)
 			admin.PUT("/users/:id", s.handleAdminUpdateUser)
 			admin.DELETE("/users/:id", s.handleAdminDeleteUser)
+			admin.GET("/users/:id/email", s.handleAdminGetUserEmail)
 			admin.DELETE("/users/:id/email", s.handleAdminDeleteUserEmail)
 			admin.GET("/migration", s.handleAdminMigrationGet)
 			admin.PUT("/migration", s.handleAdminMigrationPut)

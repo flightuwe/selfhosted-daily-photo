@@ -124,6 +124,15 @@ export type AdminUser = {
   newsletterConfirmedAt?: string | null;
 };
 
+export type AdminUserEmailDetails = {
+  email: string;
+  emailVerifiedAt?: string | null;
+  pendingEmail: string;
+  pendingEmailRequestedAt?: string | null;
+  newsletterStatus: "pending" | "subscribed" | "unsubscribed";
+  newsletterConfirmedAt?: string | null;
+};
+
 export type AdminEmailSettings = {
   enabled: boolean;
   provider?: "custom" | "posteo";
@@ -1463,6 +1472,14 @@ export async function getAdminEmailStatus(token: string): Promise<AdminEmailStat
 export async function deleteUserEmail(token: string, userId: number): Promise<{ ok: boolean }> {
   const res = await fetch(`${apiBase}/admin/users/${userId}/email`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
   return parse(res);
+}
+
+export async function getAdminUserEmail(token: string, userId: number): Promise<AdminUserEmailDetails> {
+  const res = await fetch(`${apiBase}/admin/users/${userId}/email`, {
+    cache: "no-store",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<AdminUserEmailDetails>(res);
 }
 
 export async function getAdminMediaRenditions(token: string): Promise<AdminMediaRenditions> {

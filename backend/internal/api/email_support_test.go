@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -167,6 +168,86 @@ func TestEmailSettingsRetainAndRequireMatchingDraftTest(t *testing.T) {
 	input.Host = "untested.example"
 	if _, _, err := server.validateEmailSettingsInput(input, existing); err == nil {
 		t.Fatal("changed untested draft was enabled")
+	}
+	preset, _, err := server.validateEmailSettingsInput(emailSettingsInput{
+		Provider:      "posteo",
+		Port:          0,
+		TLSMode:       "",
+		AuthMode:      "auto",
+		FromAddress:   "daily@example.com",
+		ActionBaseURL: "https://daily.example",
+	}, models.EmailSettings{})
+	if err != nil {
+		t.Fatalf("posteo preset failed: %v", err)
+	}
+	if preset.Host != "posteo.de" || preset.Port != 587 || preset.TLSMode != "starttls" {
+		t.Fatalf("unexpected posteo preset: %#v", preset)
+	}
+}
+
+func TestAdminEmailRevealIsExplicitAndNoStore(t *testing.T) {
+	s, _ := emailTestServer(t)
+	now := time.Now().UTC()
+	admin := models.User{Username: "email-reveal-admin", PasswordHash: "x", AuthVersion: 1, IsAdmin: true}
+	target := models.User{
+		Username:                "email-reveal-target",
+		PasswordHash:            "x",
+		AuthVersion:             1,
+		Email:                   "secret@example.com",
+		EmailNormalized:         "secret@example.com",
+		EmailVerifiedAt:         &now,
+		PendingEmail:            "next@example.com",
+		PendingEmailNormalized:  "next@example.com",
+		PendingEmailRequestedAt: &now,
+	}
+	nonAdmin := models.User{Username: "email-reveal-user", PasswordHash: "x", AuthVersion: 1}
+	for _, user := range []*models.User{&admin, &target, &nonAdmin} {
+		if err := s.DB.Create(user).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.DB.Create(&models.NewsletterSubscription{UserID: target.ID, Email: target.Email, EmailNormalized: target.EmailNormalized, Status: "subscribed", ConfirmedAt: &now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	adminToken, err := s.Auth.Sign(admin.ID, admin.Username, true, admin.AuthVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userToken, err := s.Auth.Sign(nonAdmin.ID, nonAdmin.Username, false, nonAdmin.AuthVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := s.Router()
+
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	listRequest.Header.Set("Authorization", "Bearer "+adminToken)
+	listResponse := httptest.NewRecorder()
+	router.ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf("list users = %d %s", listResponse.Code, listResponse.Body.String())
+	}
+	if strings.Contains(listResponse.Body.String(), target.Email) || !strings.Contains(listResponse.Body.String(), "s****t@example.com") {
+		t.Fatalf("admin list did not remain masked: %s", listResponse.Body.String())
+	}
+
+	revealPath := fmt.Sprintf("/api/admin/users/%d/email", target.ID)
+	revealRequest := httptest.NewRequest(http.MethodGet, revealPath, nil)
+	revealRequest.Header.Set("Authorization", "Bearer "+adminToken)
+	revealResponse := httptest.NewRecorder()
+	router.ServeHTTP(revealResponse, revealRequest)
+	if revealResponse.Code != http.StatusOK || !strings.Contains(revealResponse.Body.String(), target.Email) || !strings.Contains(revealResponse.Body.String(), target.PendingEmail) {
+		t.Fatalf("reveal email = %d %s", revealResponse.Code, revealResponse.Body.String())
+	}
+	if revealResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("reveal response can be cached: %q", revealResponse.Header().Get("Cache-Control"))
+	}
+
+	forbiddenRequest := httptest.NewRequest(http.MethodGet, revealPath, nil)
+	forbiddenRequest.Header.Set("Authorization", "Bearer "+userToken)
+	forbiddenResponse := httptest.NewRecorder()
+	router.ServeHTTP(forbiddenResponse, forbiddenRequest)
+	if forbiddenResponse.Code != http.StatusForbidden {
+		t.Fatalf("non-admin reveal = %d %s", forbiddenResponse.Code, forbiddenResponse.Body.String())
 	}
 }
 

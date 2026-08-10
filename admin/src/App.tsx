@@ -92,6 +92,7 @@ import {
   testAdminEmailConnection,
   sendAdminEmailTest,
   getAdminEmailStatus,
+  getAdminUserEmail,
   deleteUserEmail,
   type AdminReportItem,
   type AdminPerformanceOverview,
@@ -109,6 +110,7 @@ import {
   type AdminSearchResult,
   type AdminSearchScope,
   type AdminStats,
+  type AdminUserEmailDetails,
   type AdminHistoryDay,
   type AdminHistoryAnomaly,
   type AdminHistoryCohortEntry,
@@ -355,6 +357,21 @@ const emptyEmailSettings: AdminEmailSettings = {
   replyTo: "",
   actionBaseUrl: "",
 };
+
+const posteoSmtpHost = "posteo.de";
+const legacyPosteoSmtpHost = "smtp.posteo.de";
+
+function normalizeAdminEmailSettings(settings: AdminEmailSettings): AdminEmailSettings {
+  const legacyPosteo = settings.host.trim().toLowerCase() === legacyPosteoSmtpHost;
+  const host = legacyPosteo ? posteoSmtpHost : settings.host;
+  return {
+    ...settings,
+    host,
+    provider: host.trim().toLowerCase() === posteoSmtpHost ? "posteo" : "custom",
+    password: "",
+    clearPassword: false,
+  };
+}
 
 type CommandDraft = {
   name: string;
@@ -605,6 +622,10 @@ export function App() {
   const [emailTestRecipient, setEmailTestRecipient] = useState("");
   const [stats, setStats] = useState<AdminStats>(emptyStats);
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [revealedUserEmails, setRevealedUserEmails] = useState<
+    Record<number, AdminUserEmailDetails>
+  >({});
+  const [revealingEmailForUserId, setRevealingEmailForUserId] = useState(0);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [feedMonthRecap, setFeedMonthRecap] = useState<MonthlyRecap | null>(
     null,
@@ -1419,7 +1440,7 @@ export function App() {
       void getAdminMediaRenditions(authToken).then(setMediaRenditions).catch(() => setMediaRenditions(null));
       void Promise.all([getAdminEmailSettings(authToken), getAdminEmailStatus(authToken)])
         .then(([smtp, status]) => {
-          setEmailSettings({ ...smtp, provider: smtp.host === "smtp.posteo.de" ? "posteo" : "custom", password: "", clearPassword: false });
+          setEmailSettings(normalizeAdminEmailSettings(smtp));
           setEmailStatus(status);
         })
         .catch(() => setEmailStatus(null));
@@ -2789,6 +2810,44 @@ export function App() {
     }
   }
 
+  async function onRevealUserEmail(user: AdminUser) {
+    if (revealedUserEmails[user.id]) {
+      setRevealedUserEmails((current) => {
+        const next = { ...current };
+        delete next[user.id];
+        return next;
+      });
+      return;
+    }
+    setMessage("");
+    setRevealingEmailForUserId(user.id);
+    try {
+      const details = await getAdminUserEmail(token, user.id);
+      setRevealedUserEmails((current) => ({ ...current, [user.id]: details }));
+    } catch (err) {
+      setMessage((err as Error).message);
+    } finally {
+      setRevealingEmailForUserId(0);
+    }
+  }
+
+  async function onRemoveUserEmail(user: AdminUser) {
+    if (!confirm(`E-Mail-Verknüpfung von ${user.username} entfernen?`)) return;
+    setMessage("");
+    try {
+      await deleteUserEmail(token, user.id);
+      setRevealedUserEmails((current) => {
+        const next = { ...current };
+        delete next[user.id];
+        return next;
+      });
+      setUsers(await listUsers(token));
+      setMessage("E-Mail-Verknüpfung entfernt; der Nutzer wurde nicht gelöscht.");
+    } catch (err) {
+      setMessage((err as Error).message);
+    }
+  }
+
   async function onResetPassword(user: AdminUser) {
     const pwd = resetPassword[user.id]?.trim();
     if (!pwd) {
@@ -3793,32 +3852,43 @@ export function App() {
             </form>
 
             <h2>Bestehende Nutzer</h2>
-            <div className="row">
+            <div className="user-admin-toolbar">
+              <p className="small">
+                {users.length} Konten · sensible E-Mail-Adressen werden nur auf
+                ausdrückliche Anforderung vollständig angezeigt.
+              </p>
               <button onClick={onCopyAdminToken}>Admin-Token kopieren</button>
             </div>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>User</th>
-                  <th>Eingeladen von</th>
-                  <th>Registriert am</th>
-                  <th>Rolle</th>
-                  <th>E-Mail</th>
-                  <th>Fotos</th>
-                  <th>GerÃ¤te</th>
-                  <th>Letzte App/Fehler</th>
-                  <th>Token</th>
-                  <th>Passwort Ã¤ndern</th>
-                  <th>LÃ¶schen</th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((u) => (
-                  <tr key={u.id}>
-                    <td>{u.username}</td>
-                    <td>{u.invitedBy || "Direkt angelegt"}</td>
-                    <td>{formatDateTime(u.createdAt)}</td>
-                    <td>
+            <div className="user-admin-list">
+              {users.map((u) => {
+                const revealedEmail = revealedUserEmails[u.id];
+                const hasEmail = Boolean(
+                  u.emailMasked || u.pendingEmailMasked || u.emailPending,
+                );
+                const displayedEmail = revealedEmail
+                  ? revealedEmail.email || revealedEmail.pendingEmail || "–"
+                  : u.emailMasked || u.pendingEmailMasked || "–";
+                const newsletterStatus =
+                  revealedEmail?.newsletterStatus ||
+                  u.newsletterStatus ||
+                  "unsubscribed";
+                return (
+                  <article className="user-admin-card" key={u.id}>
+                    <header className="user-admin-card-head">
+                      <div className="user-admin-identity">
+                        <div className="row user-admin-title-row">
+                          <h3>{u.username}</h3>
+                          <span className={`status-chip ${u.isAdmin ? "info" : "neutral"}`}>
+                            {u.isAdmin ? "Admin" : "User"}
+                          </span>
+                        </div>
+                        <p className="small">
+                          Eingeladen von {u.invitedBy || "direkt angelegt"} ·
+                          registriert {formatDateTime(u.createdAt)}
+                        </p>
+                      </div>
+                      <label className="user-admin-role">
+                        Rolle
                       <select
                         value={u.isAdmin ? "admin" : "user"}
                         onChange={(e) =>
@@ -3828,12 +3898,70 @@ export function App() {
                         <option value="user">User</option>
                         <option value="admin">Admin</option>
                       </select>
-                    </td>
-                    <td><div className="stack"><span>{u.emailMasked || u.pendingEmailMasked || "–"}</span><span className="small">{u.emailVerifiedAt ? `verifiziert · ${formatDateTime(u.emailVerifiedAt)}` : u.emailPending ? "Bestätigung ausstehend" : "keine Recovery-Adresse"}</span><span className="small">Newsletter: {u.newsletterStatus || "unsubscribed"}</span>{(u.emailMasked || u.emailPending) && <button className="danger" onClick={async () => { if (!confirm(`E-Mail-Verknüpfung von ${u.username} entfernen?`)) return; try { await deleteUserEmail(token, u.id); setUsers(await listUsers(token)); setMessage("E-Mail-Verknüpfung entfernt; der Nutzer wurde nicht gelöscht."); } catch (error) { setMessage(error instanceof Error ? error.message : "Entfernen fehlgeschlagen"); } }}>E-Mail entfernen</button>}</div></td>
-                    <td>{u.photoCount}</td>
-                    <td>
-                      <div className="stack">
-                        <strong>{u.deviceCount}</strong>
+                      </label>
+                    </header>
+
+                    <div className="user-admin-grid">
+                      <section className="user-admin-section user-admin-email-section">
+                        <div className="user-admin-section-head">
+                          <h4>E-Mail & Newsletter</h4>
+                          <span
+                            className={`status-chip ${
+                              u.emailVerifiedAt ? "ok" : u.emailPending ? "warn" : "neutral"
+                            }`}
+                          >
+                            {u.emailVerifiedAt
+                              ? "Verifiziert"
+                              : u.emailPending
+                                ? "Ausstehend"
+                                : "Nicht hinterlegt"}
+                          </span>
+                        </div>
+                        <strong className="user-admin-email-value">{displayedEmail}</strong>
+                        {revealedEmail?.email && revealedEmail.pendingEmail && (
+                          <p className="small">
+                            Neue Adresse ausstehend: {revealedEmail.pendingEmail}
+                          </p>
+                        )}
+                        <p className="small">
+                          {u.emailVerifiedAt
+                            ? `Bestätigt ${formatDateTime(u.emailVerifiedAt)}`
+                            : u.emailPending
+                              ? "Bestätigung steht noch aus"
+                              : "Keine Recovery-Adresse"}
+                        </p>
+                        <p className="small">
+                          Newsletter: {newsletterStatus === "subscribed" ? "abonniert" : newsletterStatus === "pending" ? "Bestätigung ausstehend" : "nicht abonniert"}
+                        </p>
+                        {hasEmail && (
+                          <div className="user-admin-email-actions">
+                            <button
+                              className="secondary"
+                              disabled={revealingEmailForUserId === u.id}
+                              onClick={() => void onRevealUserEmail(u)}
+                            >
+                              {revealingEmailForUserId === u.id
+                                ? "Lädt …"
+                                : revealedEmail
+                                  ? "Adresse verbergen"
+                                  : "Adresse vollständig anzeigen"}
+                            </button>
+                            <button
+                              className="danger compact"
+                              onClick={() => void onRemoveUserEmail(u)}
+                            >
+                              E-Mail entfernen
+                            </button>
+                          </div>
+                        )}
+                      </section>
+
+                      <section className="user-admin-section">
+                        <div className="user-admin-section-head">
+                          <h4>Aktivität</h4>
+                          <span className="status-chip neutral">{u.photoCount} Fotos</span>
+                        </div>
+                        <strong>{u.deviceCount} Geräte</strong>
                         {u.deviceDetails && u.deviceDetails.length > 0 ? (
                           u.deviceDetails.map((device, idx) => (
                             <span key={`${u.id}-${idx}`} className="small">
@@ -3846,13 +3974,16 @@ export function App() {
                           </span>
                         ) : (
                           <span className="small">
-                            Keine Geraetenamen gemeldet
+                            Keine Gerätenamen gemeldet
                           </span>
                         )}
-                      </div>
-                    </td>
-                    <td>
-                      <div className="stack">
+                      </section>
+
+                      <section className="user-admin-section">
+                        <div className="user-admin-section-head">
+                          <h4>App & Diagnose</h4>
+                          <span className="status-chip neutral">{u.lastAppVersion || "–"}</span>
+                        </div>
                         <span className="small">
                           <strong>App:</strong> {u.lastAppVersion || "-"}
                         </span>
@@ -3870,9 +4001,10 @@ export function App() {
                             ? formatDateTime(u.lastProfileOkAt)
                             : "-"}
                         </span>
-                      </div>
-                    </td>
-                    <td>
+                      </section>
+                    </div>
+
+                    <footer className="user-admin-actions">
                       <button
                         onClick={() => onCopyUserToken(u)}
                         disabled={issuingTokenForUserId === u.id}
@@ -3881,12 +4013,11 @@ export function App() {
                           ? "Erzeuge..."
                           : "Token kopieren"}
                       </button>
-                    </td>
-                    <td>
-                      <div className="row">
+                      <div className="user-admin-password-action">
                         <input
                           type="password"
                           placeholder="Neues Passwort"
+                          aria-label={`Neues Passwort für ${u.username}`}
                           value={resetPassword[u.id] || ""}
                           onChange={(e) =>
                             setResetPassword((prev) => ({
@@ -3896,22 +4027,20 @@ export function App() {
                           }
                         />
                         <button onClick={() => onResetPassword(u)}>
-                          Setzen
+                          Passwort setzen
                         </button>
                       </div>
-                    </td>
-                    <td>
                       <button
-                        className="danger"
+                        className="danger user-admin-delete"
                         onClick={() => onDeleteUser(u)}
                       >
-                        LÃ¶schen
+                        Nutzer löschen
                       </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </footer>
+                  </article>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -7679,7 +7808,7 @@ export function App() {
               <div className="form-grid">
                 <label>Provider-Preset<select value={emailSettings.provider || "custom"} onChange={(event) => {
                   const provider = event.target.value as "custom" | "posteo";
-                  setEmailSettings((current) => provider === "posteo" ? { ...current, provider, host: "smtp.posteo.de", port: 587, tlsMode: "starttls" } : { ...current, provider });
+                  setEmailSettings((current) => provider === "posteo" ? { ...current, provider, host: posteoSmtpHost, port: 587, tlsMode: "starttls" } : { ...current, provider });
                 }}><option value="posteo">Posteo</option><option value="custom">Benutzerdefiniert</option></select></label>
                 <label>SMTP-Host<input value={emailSettings.host} onChange={(event) => setEmailSettings({ ...emailSettings, host: event.target.value })} /></label>
                 <label>Port<input type="number" min={1} max={65535} value={emailSettings.port} onChange={(event) => setEmailSettings({ ...emailSettings, port: Number(event.target.value) })} /></label>
@@ -7691,11 +7820,29 @@ export function App() {
                 <label>Absenderadresse<input type="email" value={emailSettings.fromAddress} onChange={(event) => setEmailSettings({ ...emailSettings, fromAddress: event.target.value })} /></label>
                 <label>Reply-To<input type="email" value={emailSettings.replyTo} onChange={(event) => setEmailSettings({ ...emailSettings, replyTo: event.target.value })} /></label>
                 <label>Action-Base-URL<input type="url" placeholder="https://daily.example.com" value={emailSettings.actionBaseUrl} onChange={(event) => setEmailSettings({ ...emailSettings, actionBaseUrl: event.target.value })} /></label>
-                <label><input type="checkbox" checked={emailSettings.enabled} onChange={(event) => setEmailSettings({ ...emailSettings, enabled: event.target.checked })} /> E-Mail-Versand aktivieren</label>
+              </div>
+              <div className={`email-delivery-toggle ${emailSettings.enabled ? "enabled" : "disabled"}`}>
+                <div className="email-delivery-toggle-copy">
+                  <strong>Transaktionalen E-Mail-Versand aktivieren</strong>
+                  <span>
+                    {emailSettings.enabled
+                      ? "Verifizierungen, Passwort-Resets und Double-Opt-in werden versendet."
+                      : "Es werden keine automatischen E-Mails an Nutzer versendet."}
+                  </span>
+                </div>
+                <label className="toggle-control">
+                  <input
+                    type="checkbox"
+                    checked={emailSettings.enabled}
+                    onChange={(event) => setEmailSettings({ ...emailSettings, enabled: event.target.checked })}
+                  />
+                  <span className="toggle-track" aria-hidden="true"><span /></span>
+                  <strong>{emailSettings.enabled ? "Aktiv" : "Deaktiviert"}</strong>
+                </label>
               </div>
               <div className="row">
                 <button onClick={async () => { try { const result = await testAdminEmailConnection(token, emailSettings); setMessage(result.message || "SMTP-Verbindung erfolgreich geprüft."); setEmailSettings({ ...emailSettings, lastTestAt: new Date().toISOString(), lastTestOk: true, lastTestStage: result.stage || "accepted", lastTestError: "" }); setEmailStatus(await getAdminEmailStatus(token)); } catch (error) { setMessage(error instanceof Error ? error.message : "SMTP-Test fehlgeschlagen"); } }}>Verbindung testen</button>
-                <button onClick={async () => { try { const saved = await updateAdminEmailSettings(token, emailSettings); setEmailSettings({ ...saved, password: "", provider: saved.host === "smtp.posteo.de" ? "posteo" : "custom" }); setEmailStatus(await getAdminEmailStatus(token)); setMessage("E-Mail-Konfiguration gespeichert."); } catch (error) { setMessage(error instanceof Error ? error.message : "Speichern fehlgeschlagen"); } }}>Speichern</button>
+                <button onClick={async () => { try { const saved = await updateAdminEmailSettings(token, emailSettings); setEmailSettings(normalizeAdminEmailSettings(saved)); setEmailStatus(await getAdminEmailStatus(token)); setMessage("E-Mail-Konfiguration gespeichert."); } catch (error) { setMessage(error instanceof Error ? error.message : "Speichern fehlgeschlagen"); } }}>Speichern</button>
                 {emailSettings.passwordConfigured && <button className="danger" onClick={() => setEmailSettings({ ...emailSettings, password: "", clearPassword: true, enabled: false })}>Passwort beim Speichern löschen</button>}
               </div>
             </article>
