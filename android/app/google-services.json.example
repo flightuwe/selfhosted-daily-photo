@@ -1,3 +1,29 @@
 {
-  "note": "Put your real Firebase google-services.json for package com.selfhosted.daily here for local builds. In GitHub Actions use secret ANDROID_GOOGLE_SERVICES_JSON_BASE64."
+  "project_info": {
+    "project_number": "678115270027",
+    "project_id": "daily-4c368",
+    "storage_bucket": "daily-4c368.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:678115270027:android:d4abd7cc66734158bf638e",
+        "android_client_info": {
+          "package_name": "com.selfhosted.daily"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB1VW7x9BlbKax2O3prBgfT-nwolhqZguU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
 }
