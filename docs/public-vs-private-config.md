@@ -65,7 +65,7 @@ Use this checklist before every real deploy or release.
 - `versionCode` increases vs previous release.
 - `BuildConfig.API_BASE_URL` points to intended environment for this release track.
 
-12. GitHub release secrets
+12. Protected Android release-signing secrets
 - `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEYSTORE_PASSWORD`

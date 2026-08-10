@@ -33,7 +33,7 @@ Datenhaltung:
 
 ### 1. Accounts und Dienste, die du brauchst
 Pflicht:
-- GitHub Account (Repo + Actions)
+- Zugriff auf das Forgejo-Repository unter `code.harzcloud.de`
 - Synology mit Docker/Portainer
 - Eigene Domain/Subdomain (z. B. `daily.deine-domain.tld`)
 
@@ -93,41 +93,32 @@ Hinweis:
 - Origins werden robust normalisiert (z. B. mit/ohne Quotes, ohne Pfad, ohne trailing `/`).
 - Fehlende Origins fuehren im Browser oft zu `403 Forbidden` bei Login/Requests trotz korrekter Credentials.
 
-## GitHub Setup (CI/CD)
+## Harzcloud Forgejo (Quellcode und CI)
 
 ### Workflows
-- `CI`: Backend-Tests, Admin-Build und Android-Debug-Build fuer Pushes auf `main` und Pull Requests
-- `Publish Server Images`: baut und pusht Backend- und Admin-Images nach GHCR bei Push auf `main`
-- `Release Android APK`: baut die signierte APK bei semantischen Tags `v*` und erstellt das GitHub Release
+- `CI` (`.forgejo/workflows/ci.yml`): Backend-Tests, Admin-Build und Android-Debug-Build
+- `Android unsigned candidate` (`.forgejo/workflows/android-candidate.yml`): reproduzierbarer Release-Build mit APK, SHA-256 und Provenance als Forgejo-Artefakt
+- Alle Jobs laufen auf dem getrennten Runner `daily-build`; er besitzt weder Produktions- noch Signierzugang.
 
-### Server-Image Tags
-Beim Push auf `main`:
-- `ghcr.io/flightuwe/daily-backend:latest`
-- `ghcr.io/flightuwe/daily-backend:sha-<shortsha>`
-- `ghcr.io/flightuwe/daily-backend:srv-<run>.<attempt>`
+Quellcode, Issues und Releases:
 
-Wichtig fuer App-Anzeige:
-- Wenn im Stack `APP_VERSION=dev` bleibt, zeigt der Server trotzdem die Build-Version `srv-...` an.
-- So kannst du in der App unter Profil sofort sehen, welche Server-Version wirklich laeuft.
+- `https://code.harzcloud.de/daily-harzcloud/daily`
+- `https://releases.daily.harzcloud.de/`
 
-## GitHub Secrets (vollstaendig)
+## Geschuetzter Android-Signierpfad
 
-### Fuer Android Release (Pflicht)
-Diese 5 Secrets muessen gesetzt sein:
+Ein veroeffentlichbares Update muss weiterhin mit der bestehenden Produktionsidentitaet signiert werden. Die folgenden Werte gehoeren ausschliesslich in den approval-gated Signer, niemals in Repository oder Build-Runner:
+
 - `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEYSTORE_PASSWORD`
 - `ANDROID_KEY_PASSWORD`
 - `ANDROID_GOOGLE_SERVICES_JSON_BASE64`
 
-### Fuer GHCR Pull auf Synology (nur wenn Images privat)
-- In Portainer Registry hinterlegen (GitHub PAT mit `read:packages`)
-- Name/Passwort dann in Portainer, nicht zwingend als GitHub Secret
-
 ### Fuer den laufenden Betrieb
-- Laufende Backend-/Push-Konfiguration liegt nicht in GitHub Actions, sondern in `deploy/` und den Umgebungsvariablen des Servers
+- Laufende Backend-/Push-Konfiguration liegt in `deploy/` und den Umgebungsvariablen des Servers
 - Relevante Betriebswerte wie `JWT_SECRET`, `PUBLIC_BASE_URL`, `FCM_PROJECT_ID` und `APP_VERSION` werden auf dem Zielsystem gesetzt
-- GitHub Actions braucht nur die Secrets, die wirklich fuer Release oder Registry-Zugriff noetig sind
+- Der oeffentliche Runner erhaelt diese Werte nicht.
 
 ## Android Build/Release
 
@@ -136,18 +127,14 @@ Diese 5 Secrets muessen gesetzt sein:
    - `versionCode` erhoehen
    - `versionName` erhoehen
 2. Commit auf `main`
-3. Tag pushen:
-   - `git tag vX.Y.Z`
-   - `git push origin vX.Y.Z`
-4. APK liegt danach im GitHub Release als `app-release.apk`
-5. Changelog wird aus der kanonischen `.github/release-notes/vX.Y.Z.json` validiert und erzeugt:
-   - GitHub-Release-Body
-   - Asset `changelog.json` fuer die App
+3. Forgejo-Candidate-Workflow starten und APK, SHA-256 sowie Provenance pruefen.
+4. Candidate ausserhalb des oeffentlichen Runners mit dem bestehenden Produktionsschluessel signieren.
+5. Signatur-Fingerprint und SHA-256 pruefen; danach Tag und Forgejo-Release mit `app-release.apk` und `changelog.json` veroeffentlichen.
+6. Den Release-Index unter `releases.daily.harzcloud.de` zuletzt atomar aktualisieren.
 
 Hinweis:
-- Der Android-Release-Workflow ist absichtlich **tag-only** und akzeptiert nur semantische Tags `vX.Y.Z`.
-- Neue Release-Notes bestehen aus `.github/release-notes/vX.Y.Z.json`; alte Markdown-Dateien bleiben historische Dokumentation.
-- Details zur Policy stehen in `.github/release-notes/README.md`
+- Releases verwenden semantische Tags `vX.Y.Z`.
+- Neue Release-Notes bleiben aus Kompatibilitaetsgruenden unter `.github/release-notes/vX.Y.Z.json`; der Verzeichnisname bezeichnet kein aktives Hosting.
 
 ## E2E Testen vor Release
 - Vollstaendige Checkliste:
@@ -184,8 +171,7 @@ Option A (manuell, schnell):
 - In Portainer Stack: `Pull latest image` + `Redeploy`
 
 Option B (empfohlen):
-- GitHub Actions Deploy via SSH auf Synology (automatisches `docker compose pull && up -d`)
-- Dann musst du nicht jedes Mal Portainer oeffnen
+- kontrollierter Forgejo-Release und anschliessender operatorgefuehrter Rollout
 
 ## Debugging
 - Debug-UI (Dozzle) im Stack enthalten
@@ -230,14 +216,14 @@ Siehe `backend/.env.example`:
 - Hard reload im Browser (`Ctrl+F5`)
 
 ### Android Release bricht ab
-- Einer der 5 Android-Secrets fehlt/falsch
-- Workflow `Release Android APK` Log pruefen
+- Candidate-Workflow in Forgejo pruefen
+- Signiermaterial nur im geschuetzten Signer pruefen, niemals auf dem Runner
 
 ## Feedback und Triage
 - In-App-Feedback und Fehler landen zuerst als Reports im Admin-Panel
-- GitHub Issues sind die kuratierte technische Nachverfolgung, nicht der einzige Eingangskanal
+- Forgejo Issues sind die kuratierte technische Nachverfolgung, nicht der einzige Eingangskanal
 - Fuer oeffentliche Releases sollten Changelogs immer Problem, Fix und Nutzerwirkung kurz benennen
-- Admin-Reports und GitHub-Issues sollten inhaltlich aufeinander referenzieren, aber nicht doppelt gepflegt werden
+- Admin-Reports und Forgejo-Issues sollten inhaltlich aufeinander referenzieren, aber nicht doppelt gepflegt werden
 
 ## Sicherheit (kurz)
 - Starkes `JWT_SECRET`

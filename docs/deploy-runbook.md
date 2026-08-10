@@ -7,11 +7,12 @@ Default production shape:
 - Gateway `nginx` container exposing Daily service
 - Backend + admin containers in the same stack network
 - SQLite DB and uploads on mounted persistent volume
-- Manual container update after successful GitHub image publish
+- Manual container update after an accepted Forgejo commit and verified build artifact
 
 Current active production target:
 
-- Public runtime: `https://daily.broutschek.de`
+- Primary public runtime: `https://daily.harzcloud.de`
+- Compatibility runtime: `https://daily.broutschek.de`
 - Internal Daily target: `http://10.20.10.30:13379`
 - Proxmox CT: `9204`
 - Stack path inside container: `/opt/daily/stack`
@@ -49,36 +50,28 @@ Known production notes:
 - `CORS_ORIGINS` must include both internal and public origin values
 - in the current Docker-in-LXC setup, the live gateway config may use fixed upstream IPs (`172.18.0.2` / `172.18.0.3`) to avoid `502`
 
-## GitHub To Production Model
+## Forgejo To Production Model
 
 Code and image path:
 
 1. `git push origin main`
-2. GitHub runs `CI`
-3. GitHub runs `Publish Server Images`
-4. GHCR publishes fresh `backend` and `admin` images
-5. Production rollout on Broutschek remains manual
+2. Forgejo runs `CI`
+3. Operator selects or builds immutable backend and admin artifacts from the accepted commit
+4. Production rollout remains manual and rollback-capable
 
 Android path:
 
 1. bump `android/app/build.gradle.kts`
 2. push `main`
-3. wait for successful `CI`
-4. push semantic tag like `v0.4.28`
-5. GitHub runs `Release Android APK`
-6. GitHub publishes signed APK release with `changelog.json`
-
-Server image tags produced by GitHub:
-
-- `ghcr.io/flightuwe/daily-backend:latest`
-- `ghcr.io/flightuwe/daily-backend:sha-<shortsha>`
-- `ghcr.io/flightuwe/daily-backend:srv-<run>.<attempt>`
-- same tag pattern for `daily-admin`
+3. wait for successful Forgejo `CI`
+4. run and verify the unsigned-candidate workflow
+5. sign in the protected signer and verify the production certificate
+6. push a semantic tag and publish the signed Forgejo release with `changelog.json`
 
 ## Standard Deploy Procedure
 
-1. Confirm `CI` and `Publish Server Images` are successful on target commit.
-2. Confirm intended GHCR image tags (`latest`, `sha-*`, `srv-*`).
+1. Confirm Forgejo `CI` is successful on the exact target commit.
+2. Confirm the immutable deployment artifact and digest from that commit.
 3. Update stack configuration and runtime environment values where needed.
 4. Pull and recreate the relevant service containers.
 5. Validate:
@@ -134,7 +127,7 @@ pct exec 9204 -- sh -lc 'cd /opt/daily/stack && docker compose logs --tail=100 b
 External health check:
 
 ```bash
-curl -fsSL https://daily.broutschek.de/api/health/live
+curl -fsSL https://daily.harzcloud.de/api/health/live
 ```
 
 Expected response shape:
@@ -142,7 +135,7 @@ Expected response shape:
 - `ok: true`
 - `status: "live"`
 - `provider: "fcm"`
-- `version` shows the current GHCR runtime build, for example `srv-249.1`
+- `version` identifies the intended runtime build
 
 ## Storage Operations
 

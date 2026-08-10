@@ -2,7 +2,7 @@
 
 ## Release Types
 
-- Server release: implicit on each `main` push via GHCR image publish
+- Server release: operator-controlled deployment from an accepted Forgejo commit
 - Android release: explicit via semantic Git tag `vX.Y.Z`
 
 ## Versioning Policy
@@ -21,8 +21,8 @@ Historical decision: `v0.8.0` was accepted as an exceptional minor increment for
 
 1. Merge to `main`.
 2. `CI` must pass.
-3. `Publish Server Images` pushes `daily-backend` and `daily-admin` tags.
-4. Deploy target image version and verify runtime health.
+3. Build or select the deployment artifact from the accepted Forgejo commit.
+4. Deploy the exact target version and verify runtime health.
 
 ## Android Release Path
 
@@ -32,9 +32,10 @@ Precondition for workstations with the local Android toolchain:
 
 1. Set `versionName` and increment `versionCode` in `android/app/build.gradle.kts`.
 2. Prepare and validate the canonical release notes: `.github/release-notes/vX.Y.Z.json`.
-3. Push tag `vX.Y.Z`.
-4. Workflow validates CI gate, version matching and secret availability.
-5. Release publishes APK and `changelog.json` assets.
+3. Run the Forgejo unsigned-candidate workflow for the exact commit.
+4. Verify provenance/SHA-256, then sign in the approval-gated signer.
+5. Verify the existing production certificate, push tag `vX.Y.Z`, and publish APK plus `changelog.json` as Forgejo release assets.
+6. Publish the external release index last.
 
 ## Mandatory Acceptance Checks
 

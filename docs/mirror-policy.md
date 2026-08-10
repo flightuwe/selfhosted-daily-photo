@@ -2,30 +2,25 @@
 
 ## Objective
 
-Keep internal operators fully effective from Forge while preserving GitHub as the write source for Daily code.
+Keep the public Harzcloud Forgejo authoritative for publishable Daily code while preserving private operational context in the internal cluster Forge.
 
 ## Source-of-Truth Split
 
-- Code authoring and merge authority: GitHub (`flightuwe/selfhosted-daily-photo`)
-- Internal knowledge hub and operations continuity: Gitea (`app-daily`)
+- Code authoring and merge authority: Forgejo (`daily-harzcloud/daily`)
+- Internal knowledge hub and operations continuity: cluster Gitea (`app-daily`)
 
 ## Mirror Mechanism
 
-- Canonical path: internal pull job from cluster side
-- Script: `ops-runbooks/scripts/daily-github-to-gitea-sync.ps1`
-- Runbook: `ops-runbooks/runbooks/daily-github-gitea-mirror.md`
-- Trigger recommendation: scheduled task every 5 to 15 minutes on an internal host
-- Action:
-  - fetch `main` from GitHub
-  - push `main` to Gitea mirror target
-  - write status to `ops-runbooks/artifacts/daily/mirror-status.json`
+- Public code changes are merged on `code.harzcloud.de`.
+- Internal-only runbooks, inventory and secrets stay in the private Forge and must not be copied into the public repository.
+- A later read-only archival mirror may copy public `main` inward, but it must never overwrite internal-only documentation.
 
 ## Drift Rule
 
-If mismatch occurs between GitHub and Gitea code trees:
+If publishable code differs between public Forgejo and an internal working copy:
 
-1. Treat GitHub commit history as canonical code truth.
-2. Run internal mirror sync and verify target branch head.
+1. Treat the public Forgejo `main` history as canonical code truth.
+2. Refresh the internal working copy from public Forgejo without overwriting private operator documents.
 3. Document incident and recovery in `reports/daily-ops-changelog.md` and mirror status JSON.
 
 ## Operational Stamp
@@ -37,7 +32,7 @@ Last successful mirror metadata is written by automation into:
 Fields:
 
 - UTC timestamp
-- GitHub commit SHA
+- Forgejo commit SHA
 - Internal mirror run timestamp
 - Target Gitea repo
 

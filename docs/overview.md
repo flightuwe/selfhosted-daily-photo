@@ -5,8 +5,8 @@
 This document is the canonical high-level entrypoint for Daily in Forge.
 
 - Product: private self-hosted Daily-Moment platform
-- Code source of truth: GitHub (`flightuwe/selfhosted-daily-photo`)
-- Internal operations and institutional knowledge: Gitea (`app-daily` mirror)
+- Public code source of truth: Forgejo (`https://code.harzcloud.de/daily-harzcloud/daily`)
+- Internal operations and institutional knowledge: cluster Gitea (`app-daily`)
 
 ## System Model
 
@@ -14,11 +14,12 @@ Daily is composed of three core parts:
 
 - `backend/`: Go API, scheduler, SQLite persistence, upload handling, admin APIs
 - `admin/`: React/Vite admin UI for moderation, trigger runtime, incident export and ops checks
-- `android/`: Kotlin/Compose mobile client with release artifacts from GitHub tags
+- `android/`: Kotlin/Compose mobile client with release artifacts from Forgejo tags
 
 Current production runtime:
 
-- Public production endpoint: `https://daily.broutschek.de`
+- Primary public endpoint and website: `https://daily.harzcloud.de`
+- Compatibility endpoint during migration: `https://daily.broutschek.de`
 - Internal target inside cluster/LXC: `http://10.20.10.30:13379`
 - Retired migration/source endpoints like `daily.teacloud.synology.me` and `192.168.178.80:13379` are not production anymore
 
@@ -37,7 +38,7 @@ Runtime deployment uses:
 
 ## Canonical Operational Documents
 
-- GitHub process and CI/CD: `docs/github-operations.md`
+- Forgejo process and CI/CD: `docs/forgejo-operations.md`
 - Deploy and migration flow: `docs/deploy-runbook.md`
 - Trigger/scheduler incidents: `docs/incident-runbook.md`
 - App/server release lifecycle: `docs/release-process.md`
@@ -53,6 +54,6 @@ Runtime deployment uses:
 When an operator starts from Forge only:
 
 1. Read this file.
-2. Read `docs/mirror-policy.md` to confirm mirror state.
+2. Read `docs/mirror-policy.md` to confirm the public/internal source split.
 3. Follow the specific runbook for deploy, release or incident work.
-4. Use GitHub workflow metadata as implementation signal, but keep internal decisions in Forge docs.
+4. Use Forgejo workflow metadata as implementation signal, but keep internal decisions in the internal Forge docs.

@@ -6,15 +6,15 @@ This document defines the local Windows setup for Android CI-parity checks in th
 
 Goal:
 
-- catch Android/Kotlin regressions before pushing to GitHub
-- reproduce the same debug build target that runs in `.github/workflows/ci.yml`
+- catch Android/Kotlin regressions before pushing to Forgejo
+- reproduce the same debug build target that runs in `.forgejo/workflows/ci.yml`
 - keep repo-local helper files out of version control
 
 Important:
 
-- GitHub Actions does not depend on this local SDK
+- Forgejo Actions does not depend on this local SDK
 - local Android setup is only for faster pre-push verification on this workstation
-- release builds still require the real signing secrets and the real `google-services.json` from GitHub secrets
+- final releases still require the production signing identity and Firebase configuration in the protected signer
 
 ## Repo Requirements
 
@@ -78,7 +78,7 @@ These files are intentionally ignored by Git and can be created locally:
 sdk.dir=C:\\Users\\<user>\\AppData\\Local\\Android\\Sdk
 ```
 
-For local debug verification without production Firebase secrets, a placeholder `android/app/google-services.json` is sufficient. GitHub CI already generates the same kind of placeholder for the debug build.
+For local debug verification, copy the non-secret Firebase application metadata from `android/app/google-services.json.example`. Forgejo CI uses the same input.
 
 ## Verification Commands
 
