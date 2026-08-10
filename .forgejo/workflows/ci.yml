@@ -1,0 +1,44 @@
+name: Forgejo CI
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: daily-build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Go backend
+        run: |
+          cd backend
+          go test ./...
+
+  admin:
+    runs-on: daily-build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build admin frontend
+        run: |
+          cd admin
+          npm ci
+          npm run build
+
+  android-debug:
+    runs-on: daily-build
+    env:
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      ANDROID_HOME: /opt/android-sdk
+      DAILY_API_BASE_URL: https://daily.harzcloud.de/api/
+      DAILY_APP_LINK_HOST_PRIMARY: daily.harzcloud.de
+      DAILY_APP_LINK_HOST_SECONDARY: daily.broutschek.de
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare non-secret Firebase placeholder
+        run: |
+          cp android/app/google-services.json.example android/app/google-services.json
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+      - name: Build debug APK
+        run: gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain
+

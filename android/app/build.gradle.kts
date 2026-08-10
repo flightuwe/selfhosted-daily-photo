@@ -12,13 +12,13 @@ android {
         applicationId = "com.selfhosted.daily"
         minSdk = 26
         targetSdk = 34
-        versionCode = 142027
-        versionName = "0.8.27"
+        versionCode = 142028
+        versionName = "0.8.28"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        val apiBaseUrl = System.getenv("DAILY_API_BASE_URL")?.trim().orEmpty().ifBlank { "https://daily.example.tld/api/" }
-        val appLinkHostPrimary = System.getenv("DAILY_APP_LINK_HOST_PRIMARY")?.trim().orEmpty().ifBlank { "daily.example.tld" }
-        val appLinkHostSecondary = System.getenv("DAILY_APP_LINK_HOST_SECONDARY")?.trim().orEmpty().ifBlank { "daily-alt.example.tld" }
+        val apiBaseUrl = System.getenv("DAILY_API_BASE_URL")?.trim().orEmpty().ifBlank { "https://daily.harzcloud.de/api/" }
+        val appLinkHostPrimary = System.getenv("DAILY_APP_LINK_HOST_PRIMARY")?.trim().orEmpty().ifBlank { "daily.harzcloud.de" }
+        val appLinkHostSecondary = System.getenv("DAILY_APP_LINK_HOST_SECONDARY")?.trim().orEmpty().ifBlank { "daily.broutschek.de" }
         fun quoted(value: String) = "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
         buildConfigField("String", "API_BASE_URL", quoted(apiBaseUrl))
         buildConfigField("String", "APP_LINK_HOST_PRIMARY", quoted(appLinkHostPrimary))

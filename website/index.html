@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Daily – die private, selbst gehostete Moment-App für kleine Gruppen.">
+  <title>Daily – dein Moment, jeden Tag</title>
+  <link rel="icon" href="/assets/daily-logo.png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="nav">
+    <a class="brand" href="/"><img src="/assets/daily-logo.png" alt=""><span>Daily</span></a>
+    <nav aria-label="Hauptnavigation">
+      <a href="#idee">Idee</a>
+      <a href="#download">Download</a>
+      <a href="/installation.html">Installation</a>
+      <a href="https://code.harzcloud.de/daily-harzcloud/daily">Quellcode</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Ein Moment statt endlosem Scrollen</p>
+        <h1>Dein Daily.<br>Ein echter Moment am Tag.</h1>
+        <p class="lead">Daily ist eine private, selbst gehostete Foto-App für kleine Gruppen. Poste deinen Tagesmoment, teile Extras und öffne Time Capsules – ohne Werbenetzwerk und ohne öffentlichen Feed.</p>
+        <div class="actions">
+          <a id="download-button" class="button primary disabled" href="#download" aria-disabled="true">APK wird vorbereitet</a>
+          <a class="button secondary" href="https://code.harzcloud.de/daily-harzcloud/daily">Forge öffnen</a>
+        </div>
+        <p id="release-status" class="status">Der erste verifizierte Harzcloud-Build wird vorbereitet.</p>
+      </div>
+      <div class="visual" aria-hidden="true">
+        <div class="sun"></div>
+        <div class="card card-one"><span>Heute</span><strong>Daily-Moment</strong></div>
+        <div class="card card-two"><span>Später</span><strong>Time Capsule</strong></div>
+      </div>
+    </section>
+
+    <section id="idee" class="section">
+      <p class="eyebrow">Warum Daily?</p>
+      <h2>Klein, bewusst und für deine Gruppe.</h2>
+      <div class="grid">
+        <article><span>01</span><h3>Ein echter Tagesmoment</h3><p>Der heutige Feed öffnet sich, sobald du selbst einen sichtbaren Moment geteilt hast.</p></article>
+        <article><span>02</span><h3>Extras ohne Druck</h3><p>Außerhalb des Daily-Fensters bleiben spontane Bilder als Extras möglich.</p></article>
+        <article><span>03</span><h3>Time Capsules</h3><p>Fotos bleiben bis zum gewählten Zeitpunkt verborgen und werden gemeinsam sichtbar.</p></article>
+        <article><span>04</span><h3>Selbst gehostet</h3><p>Server, Code und Releases liegen auf der Harzcloud-Infrastruktur und sind nachvollziehbar dokumentiert.</p></article>
+      </div>
+    </section>
+
+    <section id="download" class="section download">
+      <div>
+        <p class="eyebrow">Android APK</p>
+        <h2>Direkt und nachvollziehbar installieren.</h2>
+        <p>Jede veröffentlichte APK erhält eine SHA-256-Prüfsumme und wird mit derselben Signatur wie die bestehende Daily-App geprüft. Android verlangt vor der Installation deine Bestätigung.</p>
+      </div>
+      <div class="release-card">
+        <dl>
+          <div><dt>Version</dt><dd id="release-version">Noch nicht veröffentlicht</dd></div>
+          <div><dt>SHA-256</dt><dd id="release-sha">–</dd></div>
+          <div><dt>Veröffentlicht</dt><dd id="release-date">–</dd></div>
+        </dl>
+        <a id="release-link" class="text-link" href="https://code.harzcloud.de/daily-harzcloud/daily/releases">Release-Verlauf ansehen →</a>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Daily auf Harzcloud</span>
+    <nav><a href="/datenschutz.html">Datenschutz</a><a href="/impressum.html">Impressum</a><a href="https://code.harzcloud.de/daily-harzcloud/daily/issues">Issues</a></nav>
+  </footer>
+  <script src="/site.js" defer></script>
+</body>
+</html>
+

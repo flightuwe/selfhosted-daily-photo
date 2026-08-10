@@ -32,7 +32,7 @@ data class ChangelogHistoryResult(
     val cachedAt: Long = 0L
 )
 
-/** GitHub remains the canonical source; the cache only makes it reliable offline. */
+/** Public Forgejo is the canonical changelog source; the cache keeps it usable offline. */
 class ReleaseHistoryRepository(
     context: Context,
     private val releaseFetcher: (() -> List<ChangelogEntry>)? = null,
@@ -110,8 +110,7 @@ class ReleaseHistoryRepository(
     private fun get(url: String): String? {
         val request = Request.Builder()
             .url(url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("Accept", "application/json")
             .build()
         return runCatching {
             http.newCall(request).execute().use { response ->
@@ -167,7 +166,7 @@ class ReleaseHistoryRepository(
     }
 
     private companion object {
-        const val RELEASES_URL = "https://api.github.com/repos/flightuwe/selfhosted-daily-photo/releases"
+        const val RELEASES_URL = "https://code.harzcloud.de/api/v1/repos/daily-harzcloud/daily/releases"
         const val CACHE_KEY = "github_release_history_v1"
         const val CACHE_AT_KEY = "github_release_history_cached_at_v1"
         const val CACHE_TTL_MS = 24L * 60L * 60L * 1000L

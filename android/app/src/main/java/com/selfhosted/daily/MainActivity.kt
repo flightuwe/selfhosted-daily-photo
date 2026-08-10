@@ -4586,7 +4586,8 @@ class AppRepo(
 
     fun downloadLatestApk(update: UpdateInfo): Long {
         OfflineModeManager.requireOnline(context)
-        val fallbackUrl = "https://github.com/flightuwe/selfhosted-daily-photo/releases/latest/download/app-release.apk"
+        val fallbackVersion = update.latestVersion.trim().removePrefix("v").ifBlank { "latest" }
+        val fallbackUrl = "https://releases.daily.harzcloud.de/apk/v$fallbackVersion/app-release.apk"
         val apkUrl = update.apkUrl?.trim().takeUnless { it.isNullOrBlank() } ?: fallbackUrl
         val safeVersion = update.latestVersion.trim().ifBlank { "latest" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val request = DownloadManager.Request(Uri.parse(apkUrl))
@@ -13499,8 +13500,8 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             },
             dismissButton = {
                 TextButton(onClick = {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/flightuwe/selfhosted-daily-photo/releases")))
-                }) { Text("GitHub") }
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://code.harzcloud.de/daily-harzcloud/daily/releases")))
+                }) { Text("Releases") }
             },
             title = { Text("Gesamter Changelog") },
             text = {
@@ -14551,7 +14552,7 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                         val code = state.myInviteCode.trim()
                         if (code.isNotBlank()) {
                             val inviter = state.user?.username?.ifBlank { "ein Mitglied" } ?: "ein Mitglied"
-                            val apkUrl = "https://github.com/flightuwe/selfhosted-daily-photo/releases/latest/download/app-release.apk"
+                            val apkUrl = "https://daily.harzcloud.de/#download"
                             val shortGuide = "1) APK installieren  2) App oeffnen -> Registrieren  3) Invite-Code eingeben"
                             val text = buildString {
                                 appendLine("Daily Invite von @$inviter")
@@ -18539,7 +18540,7 @@ private fun buildLocalAppUpdateTimelineItem(
         body = body,
         occurredAt = occurredAt,
         unread = unread,
-        targetUrl = "https://github.com/flightuwe/selfhosted-daily-photo/releases/tag/v$version"
+        targetUrl = "https://code.harzcloud.de/daily-harzcloud/daily/releases/tag/v$version"
     )
 }
 
@@ -22542,7 +22543,7 @@ private fun safeApiString(value: String?, fallback: String = ""): String {
 
 private fun fallbackChangelogLines(): List<String> {
     return listOf(
-        "Release-Infos konnten nicht von GitHub geladen werden.",
+        "Release-Infos konnten nicht von Harzcloud geladen werden.",
         "Bitte pruefe spaeter erneut oder oeffne die Release-Seite im Browser."
     )
 }
@@ -22618,10 +22619,10 @@ private fun helpLines(): List<String> = listOf(
     "- Optional: eigener Benachrichtigungston + Ton-Test.",
     "",
     "Updates und Changelog",
-    "- Update pruefen sucht nach neuen Releases auf GitHub.",
+    "- Update pruefen sucht nach neuen Releases auf Harzcloud.",
     "- Das Symbol ! oeffnet den Changelog-Dialog.",
     "- Bei neuer App-Version wird der Changelog beim ersten Start automatisch angezeigt; bei mehreren Updates auch fuer die uebersprungenen Versionen.",
-    "- Im Changelog kannst du den gesamten Release-Verlauf von GitHub oeffnen; er bleibt fuer Offline-Nutzung zwischengespeichert.",
+    "- Im Changelog kannst du den gesamten Release-Verlauf der Daily-Forge oeffnen; er bleibt fuer Offline-Nutzung zwischengespeichert.",
     "",
     "Hinweis",
     "- Einige Funktionen (z. B. Push-Zustellung) haengen von korrekter Server/FCM-Konfiguration ab."

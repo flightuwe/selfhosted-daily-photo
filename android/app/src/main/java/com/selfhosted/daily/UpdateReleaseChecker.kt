@@ -6,7 +6,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
-import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 object UpdateReleaseChecker {
@@ -15,13 +14,14 @@ object UpdateReleaseChecker {
         .readTimeout(8, TimeUnit.SECONDS)
         .callTimeout(10, TimeUnit.SECONDS)
         .build()
-    private const val RELEASES_LATEST_URL = "https://api.github.com/repos/flightuwe/selfhosted-daily-photo/releases/latest"
-    private const val RELEASES_TAG_URL_PREFIX = "https://api.github.com/repos/flightuwe/selfhosted-daily-photo/releases/tags/"
-    private const val RELEASES_DOWNLOAD_URL_PREFIX = "https://github.com/flightuwe/selfhosted-daily-photo/releases/download/"
+    private const val RELEASE_INDEX_URL = "https://releases.daily.harzcloud.de/index.json"
+    private const val FORGEJO_RELEASES_LATEST_URL = "https://code.harzcloud.de/api/v1/repos/daily-harzcloud/daily/releases/latest"
+    private const val FORGEJO_RELEASES_TAG_URL_PREFIX = "https://code.harzcloud.de/api/v1/repos/daily-harzcloud/daily/releases/tags/"
+    private const val STATIC_RELEASES_BASE_URL = "https://releases.daily.harzcloud.de/apk/"
 
     suspend fun checkForUpdate(currentVersion: String, allowNetwork: Boolean): UpdateInfo? = withContext(Dispatchers.IO) {
         if (!allowNetwork) return@withContext null
-        val release = fetchRelease(RELEASES_LATEST_URL) ?: return@withContext null
+        val release = fetchIndexedRelease() ?: fetchForgeRelease(FORGEJO_RELEASES_LATEST_URL) ?: return@withContext null
         if (isVersionNewer(release.version, currentVersion)) {
             UpdateInfo(release.version, release.releaseUrl, release.apkUrl)
         } else {
@@ -35,22 +35,66 @@ object UpdateReleaseChecker {
         if (normalized.isBlank()) return@withContext emptyList()
         val tag = "v$normalized"
 
+        val indexed = fetchIndexedRelease(normalized)
+        if (indexed?.notes?.isNotEmpty() == true) return@withContext indexed.notes
+
         val fromAsset = fetchChangelogAsset(tag)
         if (fromAsset.isNotEmpty()) return@withContext fromAsset
 
-        val byTag = fetchRelease("${RELEASES_TAG_URL_PREFIX}$tag")
+        val byTag = fetchForgeRelease("${FORGEJO_RELEASES_TAG_URL_PREFIX}$tag")
         if (byTag?.notes?.isNotEmpty() == true) return@withContext byTag.notes
 
-        val latest = fetchRelease(RELEASES_LATEST_URL)
+        val latest = fetchIndexedRelease() ?: fetchForgeRelease(FORGEJO_RELEASES_LATEST_URL)
         if (latest?.notes?.isNotEmpty() == true) return@withContext latest.notes
-        listOf("Release-Infos konnten nicht von GitHub geladen werden.")
+        listOf("Release-Infos konnten nicht von Harzcloud geladen werden.")
     }
 
-    private fun fetchRelease(url: String): GitHubRelease? {
+    private fun fetchIndexedRelease(version: String? = null): DailyRelease? {
+        val req = Request.Builder()
+            .url(RELEASE_INDEX_URL)
+            .header("Accept", "application/json")
+            .build()
+
+        return runCatching {
+            http.newCall(req).execute().use { response ->
+                if (!response.isSuccessful) return@use null
+                val body = response.body?.string() ?: return@use null
+                val root = JSONObject(body)
+                val releases = root.optJSONArray("releases") ?: return@use null
+                val requested = version?.trim()?.removePrefix("v").orEmpty()
+                val latest = clean(root.optString("latest")).removePrefix("v")
+                val selected = if (requested.isNotBlank()) requested else latest
+                if (selected.isBlank()) return@use null
+                for (index in 0 until releases.length()) {
+                    val item = releases.optJSONObject(index) ?: continue
+                    val itemVersion = clean(item.optString("version")).removePrefix("v")
+                    if (itemVersion != selected) continue
+                    val tag = "v$itemVersion"
+                    val releaseUrl = clean(item.optString("releaseUrl")).ifBlank {
+                        "https://code.harzcloud.de/daily-harzcloud/daily/releases/tag/$tag"
+                    }
+                    val apkUrl = clean(item.optString("apkUrl")).ifBlank {
+                        "$STATIC_RELEASES_BASE_URL$tag/app-release.apk"
+                    }
+                    val notes = item.optJSONArray("highlights").toStringList(limit = 24) +
+                        item.optJSONArray("details").toStringList(limit = 24)
+                    return@use DailyRelease(
+                        version = itemVersion,
+                        releaseUrl = releaseUrl,
+                        apkUrl = apkUrl,
+                        notes = notes.distinct().take(24),
+                        publishedAt = clean(item.optString("releasedAt"))
+                    )
+                }
+                null
+            }
+        }.getOrNull()
+    }
+
+    private fun fetchForgeRelease(url: String): DailyRelease? {
         val req = Request.Builder()
             .url(url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("Accept", "application/json")
             .build()
 
         http.newCall(req).execute().use { response ->
@@ -74,13 +118,13 @@ object UpdateReleaseChecker {
             }
             val notes = extractNotes(clean(json.optString("body")))
             val publishedAt = clean(json.optString("published_at"))
-            return GitHubRelease(tag, releaseUrl, apkUrl, notes, publishedAt)
+            return DailyRelease(tag, releaseUrl, apkUrl, notes, publishedAt)
         }
     }
 
     private fun fetchChangelogAsset(tag: String): List<String> {
         val req = Request.Builder()
-            .url("${RELEASES_DOWNLOAD_URL_PREFIX}$tag/changelog.json")
+            .url("$STATIC_RELEASES_BASE_URL$tag/changelog.json")
             .header("Accept", "application/json")
             .build()
 
@@ -108,42 +152,6 @@ object UpdateReleaseChecker {
         return out
     }
 
-    private fun fetchActionTitlesSince(sinceIso: String?, limit: Int): List<String> {
-        val req = Request.Builder()
-            .url("https://api.github.com/repos/flightuwe/selfhosted-daily-photo/actions/runs?per_page=50")
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .build()
-
-        http.newCall(req).execute().use { response ->
-            if (!response.isSuccessful) return emptyList()
-            val body = response.body?.string() ?: return emptyList()
-            val json = JSONObject(body)
-            val runs = json.optJSONArray("workflow_runs") ?: JSONArray()
-            val since = parseInstantOrNull(sinceIso)
-
-            val out = mutableListOf<String>()
-            for (i in 0 until runs.length()) {
-                val run = runs.getJSONObject(i)
-                val createdAt = parseInstantOrNull(clean(run.optString("created_at")))
-                if (since != null && createdAt != null && createdAt.isBefore(since)) continue
-
-                val workflowName = clean(run.optString("name"))
-                val displayTitle = clean(run.optString("display_title"))
-                val title = when {
-                    displayTitle.isNotBlank() && workflowName.isNotBlank() -> "$workflowName: $displayTitle"
-                    displayTitle.isNotBlank() -> displayTitle
-                    workflowName.isNotBlank() -> workflowName
-                    else -> ""
-                }
-                if (title.isBlank()) continue
-                out += title
-                if (out.size >= limit) break
-            }
-            return out
-        }
-    }
-
     private fun extractNotes(markdown: String): List<String> {
         if (markdown.isBlank()) return emptyList()
         return markdown
@@ -169,14 +177,9 @@ object UpdateReleaseChecker {
         return if (v.equals("null", ignoreCase = true)) "" else v
     }
 
-    private fun parseInstantOrNull(value: String?): Instant? {
-        val raw = value?.trim().orEmpty()
-        if (raw.isBlank()) return null
-        return runCatching { Instant.parse(raw) }.getOrNull()
-    }
 }
 
-private data class GitHubRelease(
+private data class DailyRelease(
     val version: String,
     val releaseUrl: String,
     val apkUrl: String?,

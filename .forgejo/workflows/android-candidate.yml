@@ -1,0 +1,42 @@
+name: Android unsigned candidate
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  candidate:
+    runs-on: daily-build
+    timeout-minutes: 40
+    env:
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      ANDROID_HOME: /opt/android-sdk
+      DAILY_API_BASE_URL: https://daily.harzcloud.de/api/
+      DAILY_APP_LINK_HOST_PRIMARY: daily.harzcloud.de
+      DAILY_APP_LINK_HOST_SECONDARY: daily.broutschek.de
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare build inputs
+        run: |
+          cp android/app/google-services.json.example android/app/google-services.json
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+      - name: Build unsigned release candidate
+        run: gradle -p android :app:assembleRelease --no-daemon --stacktrace --console=plain
+      - name: Create provenance and checksums
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/*-unsigned.apk dist/app-release-unsigned.apk
+          sha256sum dist/app-release-unsigned.apk > dist/SHA256SUMS
+          printf '{"commit":"%s","ref":"%s","builtAt":"%s","signed":false}\n' \
+            "$GITHUB_SHA" "$GITHUB_REF" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/provenance.json
+      - name: Upload unsigned candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-android-unsigned-candidate
+          path: dist/
+          if-no-files-found: error
+
