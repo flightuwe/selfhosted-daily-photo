@@ -143,6 +143,7 @@ import {
   type AdminEmailSettings,
   type AdminEmailStatus,
 } from "./api";
+import { DistributionPanel } from "./distribution/DistributionPanel";
 
 type Tab =
   | "dashboard"
@@ -167,7 +168,8 @@ type Tab =
   | "migration"
   | "locations"
   | "media"
-  | "email";
+  | "email"
+  | "distribution";
 type AdminArea = "operations" | "analytics" | "config";
 type OperationsSubtab =
   | "cockpit"
@@ -187,7 +189,7 @@ type AnalyticsSubtab =
   | "upload_timeline"
   | "debug"
   | "system";
-type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration" | "media" | "email";
+type ConfigSubtab = "users" | "events" | "commands" | "settings" | "migration" | "media" | "email" | "distribution";
 type AdminSubtab = OperationsSubtab | AnalyticsSubtab | ConfigSubtab;
 
 type SavedView = {
@@ -294,6 +296,7 @@ const subtabToTab: Record<AdminArea, Record<string, Tab>> = {
     migration: "migration",
     media: "media",
     email: "email",
+    distribution: "distribution",
   },
 };
 
@@ -326,6 +329,7 @@ const areaSubtabs: Record<
     { key: "events", label: "Events & Notifications" },
     { key: "commands", label: "Chat-Commands" },
     { key: "settings", label: "Einstellungen" },
+    { key: "distribution", label: "App-Verteilung" },
     { key: "email", label: "E-Mail" },
     { key: "migration", label: "Migration" },
     { key: "media", label: "Medien & AVIF" },
@@ -491,6 +495,8 @@ function tabToAreaSubtab(tab: Tab): { area: AdminArea; subtab: AdminSubtab } {
       return { area: "config", subtab: "media" };
     case "email":
       return { area: "config", subtab: "email" };
+    case "distribution":
+      return { area: "config", subtab: "distribution" };
     case "settings":
     default:
       return { area: "config", subtab: "settings" };
@@ -3161,6 +3167,12 @@ export function App() {
               onClick={() => navigateTab("settings")}
             >
               Einstellungen
+            </button>
+            <button
+              className={activeTab === "distribution" ? "tab active" : "tab"}
+              onClick={() => navigateTab("distribution")}
+            >
+              App-Verteilung
             </button>
             <button className={activeTab === "email" ? "tab active" : "tab"} onClick={() => navigateTab("email")}>E-Mail</button>
             <button
@@ -7792,6 +7804,8 @@ export function App() {
             </div>
           </div>
         )}
+
+        {activeTab === "distribution" && <DistributionPanel token={token} />}
 
         {activeTab === "email" && (
           <div className="stack">

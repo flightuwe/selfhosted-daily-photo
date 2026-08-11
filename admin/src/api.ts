@@ -1,3 +1,10 @@
+import type {
+  DistributionAuditItem,
+  DistributionProfile,
+  DistributionProfilesResponse,
+  DistributionTestResult,
+} from "./distribution/distributionTypes";
+
 export type AuthResponse = {
   token: string;
   user: { id: number; username: string; isAdmin: boolean };
@@ -122,6 +129,7 @@ export type AdminUser = {
   pendingEmailMasked?: string;
   newsletterStatus?: "pending" | "subscribed" | "unsubscribed";
   newsletterConfirmedAt?: string | null;
+  distributionProfileId?: number | null;
 };
 
 export type AdminUserEmailDetails = {
@@ -2887,4 +2895,102 @@ export async function deleteReports(
     headers: { Authorization: `Bearer ${token}` },
   });
   return parse<{ ok: boolean; deletedCount: number }>(res);
+}
+
+export async function getDistributionProfiles(
+  token: string,
+): Promise<DistributionProfilesResponse> {
+  const res = await fetch(`${apiBase}/admin/distribution/profiles`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<DistributionProfilesResponse>(res);
+}
+
+export async function createDistributionProfile(
+  token: string,
+  profile: DistributionProfile,
+): Promise<{ profile: DistributionProfile }> {
+  const res = await fetch(`${apiBase}/admin/distribution/profiles`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(profile),
+  });
+  return parse<{ profile: DistributionProfile }>(res);
+}
+
+export async function updateDistributionProfile(
+  token: string,
+  profile: DistributionProfile,
+): Promise<{ profile: DistributionProfile }> {
+  const res = await fetch(
+    `${apiBase}/admin/distribution/profiles/${profile.id}`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(profile),
+    },
+  );
+  return parse<{ profile: DistributionProfile }>(res);
+}
+
+export async function deleteDistributionProfile(
+  token: string,
+  profileId: number,
+): Promise<{ ok: boolean }> {
+  const res = await fetch(
+    `${apiBase}/admin/distribution/profiles/${profileId}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+  return parse<{ ok: boolean }>(res);
+}
+
+export async function testDistributionProfile(
+  token: string,
+  profileId: number,
+): Promise<{ result: DistributionTestResult }> {
+  const res = await fetch(
+    `${apiBase}/admin/distribution/profiles/${profileId}/test`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+  return parse<{ result: DistributionTestResult }>(res);
+}
+
+export async function getDistributionAudit(
+  token: string,
+): Promise<{ items: DistributionAuditItem[] }> {
+  const res = await fetch(`${apiBase}/admin/distribution/audit`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<{ items: DistributionAuditItem[] }>(res);
+}
+
+export async function assignUserDistributionProfile(
+  token: string,
+  userId: number,
+  distributionProfileId: number | null,
+): Promise<{ userId: number; distributionProfileId: number | null }> {
+  const res = await fetch(
+    `${apiBase}/admin/users/${userId}/distribution-profile`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ distributionProfileId }),
+    },
+  );
+  return parse<{ userId: number; distributionProfileId: number | null }>(res);
 }
