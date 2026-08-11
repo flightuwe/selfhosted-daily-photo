@@ -34,6 +34,18 @@ compose_up() {
   (cd "$STACK_DIR" && docker compose "${COMPOSE_ARGS[@]}" up -d --no-deps backend admin)
 }
 
+require_deploy_prerequisites() {
+  local command_name
+  for command_name in docker curl flock python3 sqlite3; do
+    command -v "$command_name" >/dev/null 2>&1 || {
+      echo "missing required command: $command_name" >&2
+      return 1
+    }
+  done
+  [ -f "$BASE_FILE" ] || { echo "missing compose base: $BASE_FILE" >&2; return 1; }
+  [ -f "$DB_FILE" ] || { echo "missing database: $DB_FILE" >&2; return 1; }
+}
+
 wait_healthy() {
   local expected="$1" i body version
   for i in $(seq 1 60); do
@@ -68,6 +80,7 @@ case "${1:-}" in
   deploy)
     sha="${2:-}"
     [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || usage
+    require_deploy_prerequisites
     short="${sha:0:7}"
     expected="srv-forgejo-${short}"
     backend_tag="$REGISTRY_ROOT/backend:sha-$sha"
