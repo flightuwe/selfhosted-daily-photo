@@ -1,0 +1,95 @@
+name: Forgejo server images
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  validate-server:
+    runs-on: daily-build
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test backend
+        run: |
+          cd backend
+          go test ./...
+      - name: Build admin
+        run: |
+          cd admin
+          npm ci
+          npm run build
+
+  publish-images:
+    needs: [validate-server]
+    runs-on: daily-build
+    timeout-minutes: 45
+    env:
+      REGISTRY: code.harzcloud.de
+      IMAGE_ROOT: code.harzcloud.de/daily-harzcloud/daily
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate publisher inputs
+        env:
+          REGISTRY_USER: ${{ secrets.DAILY_REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.DAILY_REGISTRY_TOKEN }}
+        run: |
+          set -eu
+          test -n "$REGISTRY_USER"
+          test -n "$REGISTRY_TOKEN"
+          test "${#GITHUB_SHA}" -eq 40
+          podman --version
+      - name: Login to Forgejo OCI registry
+        env:
+          REGISTRY_USER: ${{ secrets.DAILY_REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.DAILY_REGISTRY_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | podman login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
+      - name: Build and publish immutable server images
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p dist
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          version="srv-forgejo-${short_sha}"
+          for component in backend admin; do
+            image="${IMAGE_ROOT}/${component}"
+            full_tag="${image}:sha-${GITHUB_SHA}"
+            short_tag="${image}:sha-${short_sha}"
+            main_tag="${image}:main"
+            podman build --pull=always --format docker \
+              --label "org.opencontainers.image.source=https://code.harzcloud.de/daily-harzcloud/daily" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --build-arg "APP_VERSION=${version}" \
+              --tag "$full_tag" "$component"
+            podman push --digestfile "dist/${component}.digest" "$full_tag"
+            podman tag "$full_tag" "$short_tag"
+            podman tag "$full_tag" "$main_tag"
+            podman push "$short_tag"
+            podman push "$main_tag"
+          done
+          python3 - <<'PY'
+          import json, os
+          root=os.environ['IMAGE_ROOT']; sha=os.environ['GITHUB_SHA']; short=sha[:7]
+          data={'schemaVersion':1,'commit':sha,'version':f'srv-forgejo-{short}','images':{}}
+          for component in ('backend','admin'):
+              digest=open(f'dist/{component}.digest',encoding='utf-8').read().strip()
+              data['images'][component]={'repository':f'{root}/{component}','immutableTag':f'sha-{sha}','digest':digest,'reference':f'{root}/{component}@{digest}'}
+          open('dist/server-images.json','w',encoding='utf-8').write(json.dumps(data,indent=2,sort_keys=True)+'\n')
+          PY
+          sha256sum dist/server-images.json > dist/SHA256SUMS
+      - name: Upload image provenance
+        uses: https://data.forgejo.org/actions/upload-artifact@v3
+        with:
+          name: daily-server-images-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+      - name: Logout and clean local images
+        if: always()
+        run: |
+          podman logout "$REGISTRY" || true
+          podman image prune -f || true
