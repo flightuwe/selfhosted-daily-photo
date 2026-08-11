@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS builder
+FROM docker.io/library/golang:1.25-alpine AS builder
 WORKDIR /src
 RUN apk add --no-cache gcc musl-dev
 ARG APP_VERSION=dev
@@ -8,7 +8,7 @@ COPY . .
 RUN go mod tidy
 RUN CGO_ENABLED=1 GOOS=linux go build -ldflags "-X main.buildVersion=${APP_VERSION}" -o /out/server ./cmd/server
 
-FROM alpine:3.21
+FROM docker.io/library/alpine:3.21
 WORKDIR /app
 RUN apk add --no-cache tzdata libwebp-tools libavif-apps && adduser -D app
 COPY --from=builder /out/server /app/server
