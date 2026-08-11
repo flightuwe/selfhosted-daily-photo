@@ -3,6 +3,8 @@ name: Forgejo CI
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
@@ -10,6 +12,8 @@ jobs:
     runs-on: daily-build
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Test Go backend
         run: |
           cd backend
@@ -19,6 +23,8 @@ jobs:
     runs-on: daily-build
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Build admin frontend
         run: |
           cd admin
@@ -35,7 +41,9 @@ jobs:
       DAILY_APP_LINK_HOST_SECONDARY: daily.broutschek.de
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
-      - name: Prepare non-secret Firebase placeholder
+        with:
+          persist-credentials: false
+      - name: Prepare non-secret Firebase client configuration
         run: |
           cp android/app/google-services.json.example android/app/google-services.json
           echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
