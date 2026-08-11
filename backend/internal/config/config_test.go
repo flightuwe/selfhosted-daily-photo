@@ -27,3 +27,21 @@ func TestResolveAppVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadDistributionSecurityPolicy(t *testing.T) {
+	t.Setenv("ALLOW_INSECURE_DISTRIBUTION_URLS", "true")
+	t.Setenv("DISTRIBUTION_PRIVATE_HOST_ALLOWLIST", "internal.example,10.20.10.0/24")
+	t.Setenv("DISTRIBUTION_MANIFEST_MAX_BYTES", "2048")
+	t.Setenv("DISTRIBUTION_APK_MAX_BYTES", "4096")
+
+	cfg := Load()
+	if !cfg.AllowInsecureDistributionURLs {
+		t.Fatal("insecure distribution URL policy was not loaded")
+	}
+	if len(cfg.DistributionPrivateHostAllowlist) != 2 {
+		t.Fatalf("private allowlist = %#v", cfg.DistributionPrivateHostAllowlist)
+	}
+	if cfg.DistributionManifestMaxBytes != 2048 || cfg.DistributionAPKMaxBytes != 4096 {
+		t.Fatalf("distribution limits = manifest:%d apk:%d", cfg.DistributionManifestMaxBytes, cfg.DistributionAPKMaxBytes)
+	}
+}
