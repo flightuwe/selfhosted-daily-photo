@@ -1,0 +1,184 @@
+package com.selfhosted.daily
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.File
+import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+import java.util.UUID
+
+data class PendingUpdateApk(
+    val temporaryFile: File,
+    val sha256: String,
+    val sizeBytes: Long,
+    val finalUrl: String
+)
+
+class UpdateDownloadException(val errorClass: String, message: String) : IOException(message)
+
+class UpdateApkDownloader(
+    private val updatesDir: File,
+    httpClient: OkHttpClient,
+    private val maxBytes: Long = DEFAULT_MAX_BYTES
+) {
+    private val client = httpClient.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
+
+    suspend fun download(update: UpdateInfo): PendingUpdateApk = withContext(Dispatchers.IO) {
+        val announcedUrl = update.apkUrl?.trim().orEmpty()
+        if (announcedUrl.isBlank()) throw UpdateDownloadException("missing_apk_url", "Keine APK-URL vorhanden.")
+        if (update.apkSize != null && (update.apkSize <= 0 || update.apkSize > maxBytes)) {
+            throw UpdateDownloadException("invalid_announced_size", "Die angekuendigte APK-Groesse ist ungueltig.")
+        }
+        val expectedHash = update.apkSha256?.trim()?.lowercase().orEmpty()
+        if (expectedHash.isNotBlank() && !SHA256.matches(expectedHash)) {
+            throw UpdateDownloadException("invalid_announced_hash", "Der angekuendigte APK-Hash ist ungueltig.")
+        }
+        if (expectedHash.isBlank() && !update.legacyOfficialArtifact) {
+            throw UpdateDownloadException("missing_apk_hash", "Fuer diese APK fehlt ein SHA-256-Hash.")
+        }
+
+        updatesDir.mkdirs()
+        if (!updatesDir.isDirectory) throw UpdateDownloadException("storage_unavailable", "Privater Update-Speicher ist nicht verfuegbar.")
+        cleanupTemporaryFiles()
+        val temporary = File(updatesDir, ".update-${UUID.randomUUID()}.part")
+        try {
+            var current = validateUrl(announcedUrl)
+            var redirects = 0
+            while (true) {
+                val request = Request.Builder()
+                    .url(current)
+                    .header("Accept", "application/vnd.android.package-archive, application/octet-stream")
+                    .build()
+                val response = client.newCall(request).execute()
+                if (response.code in REDIRECT_CODES) {
+                    val location = response.header("Location")
+                    response.close()
+                    if (redirects >= MAX_REDIRECTS) {
+                        throw UpdateDownloadException("redirect_limit", "Zu viele APK-Weiterleitungen.")
+                    }
+                    val next = location?.let(current::resolve)
+                        ?: throw UpdateDownloadException("invalid_redirect", "APK-Weiterleitung ohne gueltiges Ziel.")
+                    if (current.isHttps && !next.isHttps) {
+                        throw UpdateDownloadException("redirect_downgrade", "HTTPS-zu-HTTP-Weiterleitung wurde blockiert.")
+                    }
+                    current = validateUrl(next.toString())
+                    redirects += 1
+                    continue
+                }
+
+                response.use { finalResponse ->
+                    if (update.legacyOfficialArtifact && current.host != LEGACY_OFFICIAL_HOST) {
+                        throw UpdateDownloadException("legacy_host_mismatch", "Die temporaere Legacy-Ausnahme gilt nur fuer den offiziellen APK-Host.")
+                    }
+                    if (!finalResponse.isSuccessful) {
+                        throw UpdateDownloadException("http_status", "APK-Download fehlgeschlagen (HTTP ${finalResponse.code}).")
+                    }
+                    val body = finalResponse.body
+                        ?: throw UpdateDownloadException("empty_response", "APK-Download enthielt keine Daten.")
+                    val contentLength = body.contentLength()
+                    if (contentLength > maxBytes) {
+                        throw UpdateDownloadException("size_limit", "APK ueberschreitet das Downloadlimit.")
+                    }
+                    update.apkSize?.let { expected ->
+                        if (contentLength >= 0 && contentLength != expected) {
+                            throw UpdateDownloadException("size_mismatch", "APK-Groesse stimmt nicht mit dem Releaseeintrag ueberein.")
+                        }
+                    }
+
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    var total = 0L
+                    temporary.outputStream().buffered().use { output ->
+                        body.byteStream().use { input ->
+                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                            while (true) {
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                total += read
+                                if (total > maxBytes || (update.apkSize != null && total > update.apkSize)) {
+                                    throw UpdateDownloadException("size_limit", "APK ueberschreitet die erlaubte Groesse.")
+                                }
+                                digest.update(buffer, 0, read)
+                                output.write(buffer, 0, read)
+                            }
+                        }
+                    }
+                    if (total == 0L) throw UpdateDownloadException("empty_response", "APK-Datei ist leer.")
+                    if (update.apkSize != null && total != update.apkSize) {
+                        throw UpdateDownloadException("size_mismatch", "APK-Groesse stimmt nicht mit dem Releaseeintrag ueberein.")
+                    }
+                    val actualHash = digest.digest().joinToString("") { "%02x".format(it) }
+                    if (expectedHash.isNotBlank() && actualHash != expectedHash) {
+                        throw UpdateDownloadException("hash_mismatch", "SHA-256-Pruefung der APK ist fehlgeschlagen.")
+                    }
+                    return@withContext PendingUpdateApk(temporary, actualHash, total, current.toString())
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            throw UpdateDownloadException("download_state", "APK-Download wurde unerwartet beendet.")
+        } catch (error: Throwable) {
+            temporary.delete()
+            throw error
+        }
+    }
+
+    fun finalizeVerified(pending: PendingUpdateApk, versionName: String): File {
+        require(pending.temporaryFile.parentFile?.canonicalFile == updatesDir.canonicalFile) { "unexpected update path" }
+        val safeVersion = versionName.trim().removePrefix("v").replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "update" }
+        val finalFile = File(updatesDir, "daily-v$safeVersion.apk")
+        if (finalFile.exists() && !finalFile.delete()) {
+            throw UpdateDownloadException("storage_finalize", "Vorherige Update-Datei konnte nicht ersetzt werden.")
+        }
+        try {
+            Files.move(
+                pending.temporaryFile.toPath(),
+                finalFile.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(pending.temporaryFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+        return finalFile
+    }
+
+    fun discard(pending: PendingUpdateApk) {
+        pending.temporaryFile.delete()
+    }
+
+    private fun cleanupTemporaryFiles() {
+        val staleBefore = System.currentTimeMillis() - TEMP_FILE_MAX_AGE_MS
+        updatesDir.listFiles()?.filter {
+            it.isFile && it.name.startsWith(".update-") && it.name.endsWith(".part") && it.lastModified() < staleBefore
+        }
+            ?.forEach(File::delete)
+    }
+
+    private fun validateUrl(raw: String): HttpUrl {
+        val url = raw.toHttpUrlOrNull()
+            ?: throw UpdateDownloadException("invalid_url", "Ungueltige APK-URL.")
+        if (url.scheme !in setOf("https", "http") || url.host.isBlank() || url.username.isNotBlank() || url.password.isNotBlank()) {
+            throw UpdateDownloadException("invalid_url", "APK-URL enthaelt ein unzulaessiges Ziel.")
+        }
+        if (url.fragment != null) throw UpdateDownloadException("invalid_url", "APK-URL darf kein Fragment enthalten.")
+        return url
+    }
+
+    companion object {
+        const val DEFAULT_MAX_BYTES = 250L * 1024L * 1024L
+        private const val MAX_REDIRECTS = 3
+        private const val LEGACY_OFFICIAL_HOST = "releases.daily.harzcloud.de"
+        private const val TEMP_FILE_MAX_AGE_MS = 24L * 60L * 60L * 1000L
+        private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
+        private val SHA256 = Regex("^[a-f0-9]{64}$")
+    }
+}

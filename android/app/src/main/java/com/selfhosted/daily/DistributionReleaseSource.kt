@@ -80,7 +80,10 @@ class DistributionReleaseSource(
         apkSha256 = direct.sha256.trim().lowercase(),
         apkSize = direct.size,
         packageName = config.expectedPackageName.trim(),
-        signingCertSha256 = config.expectedSigningCertSha256.trim().lowercase()
+        signingCertSha256 = config.expectedSigningCertSha256.trim().lowercase(),
+        profilePackageName = config.expectedPackageName.trim(),
+        profileSigningCertSha256 = config.expectedSigningCertSha256.trim().lowercase(),
+        installable = true
     )
 
     internal fun parseIndex(raw: String, config: DistributionConfigResponse): List<DistributionRelease> {
@@ -100,13 +103,21 @@ class DistributionReleaseSource(
                 val releaseUrl = clean(item.optString("releaseUrl")).ifBlank { config.releasePageUrl.trim() }
                 val sha = clean(item.optString("apkSha256")).ifBlank { clean(item.optString("sha256")) }
                     .lowercase().ifBlank { null }
+                val versionCode = item.optLong("versionCode").takeIf { it > 0 }
+                val itemPackageName = clean(item.optString("packageName"))
+                val itemSigningCert = clean(item.optString("signingCertSha256")).lowercase()
                 val size = when {
                     item.has("apkSize") -> item.optLong("apkSize").takeIf { it > 0 }
                     else -> item.optLong("size").takeIf { it > 0 }
                 }
+                val completeIntegrityMetadata = apkUrl != null && versionCode != null &&
+                    sha?.matches(SHA256) == true && itemPackageName.isNotBlank() && itemSigningCert.matches(SHA256)
+                val legacyOfficial = isLegacyOfficialArtifact(apkUrl) && !completeIntegrityMetadata
+                val profileIdentityPresent = config.expectedPackageName.isNotBlank() &&
+                    config.expectedSigningCertSha256.trim().lowercase().matches(SHA256)
                 add(DistributionRelease(
                     version = version,
-                    versionCode = item.optLong("versionCode").takeIf { it > 0 },
+                    versionCode = versionCode,
                     title = clean(item.optString("title")).ifBlank { "Daily $version" },
                     highlights = item.optJSONArray("highlights").stringList(),
                     details = item.optJSONArray("details").stringList(),
@@ -115,11 +126,12 @@ class DistributionReleaseSource(
                     apkUrl = apkUrl,
                     apkSha256 = sha,
                     apkSize = size,
-                    packageName = clean(item.optString("packageName")).ifBlank { config.expectedPackageName.trim() },
-                    signingCertSha256 = clean(item.optString("signingCertSha256")).ifBlank {
-                        config.expectedSigningCertSha256.trim()
-                    }.lowercase(),
-                    legacyOfficialArtifact = isLegacyOfficialArtifact(apkUrl)
+                    packageName = itemPackageName.ifBlank { config.expectedPackageName.trim() },
+                    signingCertSha256 = itemSigningCert,
+                    profilePackageName = config.expectedPackageName.trim(),
+                    profileSigningCertSha256 = config.expectedSigningCertSha256.trim().lowercase(),
+                    legacyOfficialArtifact = legacyOfficial,
+                    installable = profileIdentityPresent && (completeIntegrityMetadata || (legacyOfficial && apkUrl != null))
                 ))
             }
         }.distinctBy { it.version }
@@ -187,5 +199,6 @@ class DistributionReleaseSource(
         private const val CACHE_TTL_MS = 24L * 60L * 60L * 1000L
         private const val MAX_INDEX_BYTES = 1024 * 1024
         private const val MAX_RELEASES = 500
+        private val SHA256 = Regex("^[a-f0-9]{64}$")
     }
 }

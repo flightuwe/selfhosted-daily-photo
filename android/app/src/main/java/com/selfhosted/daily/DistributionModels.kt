@@ -61,7 +61,10 @@ data class DistributionRelease(
     val apkSize: Long? = null,
     val packageName: String = "",
     val signingCertSha256: String = "",
-    val legacyOfficialArtifact: Boolean = false
+    val profilePackageName: String = "",
+    val profileSigningCertSha256: String = "",
+    val legacyOfficialArtifact: Boolean = false,
+    val installable: Boolean = false
 )
 
 data class UpdateInfo(
@@ -73,5 +76,10 @@ data class UpdateInfo(
     val apkSize: Long? = null,
     val packageName: String = "",
     val signingCertSha256: String = "",
+    val profilePackageName: String = "",
+    val profileSigningCertSha256: String = "",
     val legacyOfficialArtifact: Boolean = false
-)
+) {
+    val targetHost: String
+        get() = runCatching { java.net.URI(apkUrl ?: releaseUrl).host.orEmpty() }.getOrDefault("")
+}

@@ -4,7 +4,7 @@ package com.selfhosted.daily
 object UpdateReleaseChecker {
     fun findUpdate(currentVersion: String, releases: List<DistributionRelease>): UpdateInfo? {
         val release = releases
-            .filter { isVersionNewer(it.version, currentVersion) }
+            .filter { it.installable && isVersionNewer(it.version, currentVersion) }
             .maxWithOrNull { left, right -> ReleaseHistoryParser.compareVersions(left.version, right.version) }
             ?: return null
         return UpdateInfo(
@@ -16,6 +16,8 @@ object UpdateReleaseChecker {
             apkSize = release.apkSize,
             packageName = release.packageName,
             signingCertSha256 = release.signingCertSha256,
+            profilePackageName = release.profilePackageName,
+            profileSigningCertSha256 = release.profileSigningCertSha256,
             legacyOfficialArtifact = release.legacyOfficialArtifact
         )
     }

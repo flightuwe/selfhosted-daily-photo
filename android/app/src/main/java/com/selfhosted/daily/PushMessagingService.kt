@@ -271,8 +271,12 @@ class PushMessagingService : FirebaseMessagingService() {
             val tone = toneConfig(prefs)
             val channelId = ensureUpdateChannel(context, tone)
 
-            val target = update.apkUrl ?: update.releaseUrl
-            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(target))
+            val intent = Intent(context, MainActivity::class.java).apply {
+                action = "com.selfhosted.daily.OPEN_UPDATE"
+                putExtra(EXTRA_LAUNCH_ACTION, "open_update")
+                putExtra(EXTRA_LAUNCH_TYPE, "app_update")
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
             val pending = PendingIntent.getActivity(
                 context,
                 2001,

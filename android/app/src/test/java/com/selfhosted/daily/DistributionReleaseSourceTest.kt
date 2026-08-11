@@ -33,6 +33,7 @@ class DistributionReleaseSourceTest {
         assertEquals(1234L, releases.single().apkSize)
         assertEquals("com.selfhosted.daily", releases.single().packageName)
         assertTrue(releases.single().legacyOfficialArtifact)
+        assertTrue(releases.single().installable)
     }
 
     @Test
@@ -58,9 +59,26 @@ class DistributionReleaseSourceTest {
         val release = DistributionRelease(version = "0.9.0", releaseUrl = "https://project.invalid/release")
         val update = UpdateReleaseChecker.findUpdate("0.8.28", listOf(release))
 
-        assertEquals("0.9.0", update?.latestVersion)
-        assertNull(update?.apkUrl)
+        assertNull(update)
         assertFalse(UpdateReleaseChecker.isVersionNewer("0.8.27", "0.8.28"))
+    }
+
+    @Test
+    fun completeGenericManifestEntryIsInstallableWithoutLegacyMode() {
+        val source = DistributionReleaseSource(context, buildStandardHttpClient(), responseFetcher = { null })
+        val raw = """
+            {"schemaVersion":1,"latest":"0.9.2","releases":[{
+              "version":"0.9.2","versionCode":142092,
+              "apkUrl":"https://downloads.invalid/app.apk","sha256":"${"ab".repeat(32)}","size":1234,
+              "packageName":"com.selfhosted.daily","signingCertSha256":"${DistributionConfigRepository.OFFICIAL_SIGNING_CERT_SHA256}"
+            }]}
+        """.trimIndent()
+
+        val release = source.parseIndex(raw, config(profileId = 9)).single()
+
+        assertTrue(release.installable)
+        assertFalse(release.legacyOfficialArtifact)
+        assertEquals("0.9.2", UpdateReleaseChecker.findUpdate("0.8.28", listOf(release))?.latestVersion)
     }
 
     private fun resolved(profileId: Long) = ResolvedDistributionConfig(
