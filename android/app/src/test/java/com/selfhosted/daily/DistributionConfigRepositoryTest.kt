@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -59,6 +60,45 @@ class DistributionConfigRepositoryTest {
     }
 
     @Test
+    fun cacheNeverCrossesApiOriginsForTheSameUser() = runBlocking {
+        persistUser(4)
+        val repository = DistributionConfigRepository(context, fetcher = { validConfig(profileId = 4) })
+        repository.resolve(allowNetwork = true)
+
+        setApiBaseUrlOverride(context, "https://other.invalid/api/")
+
+        assertNull(repository.resolve(allowNetwork = false))
+    }
+
+    @Test
+    fun normalizedOriginKeepsSchemeHostAndEffectivePortButIgnoresPath() {
+        assertEquals(
+            "https://tenant.invalid",
+            DistributionConfigRepository.normalizedApiOrigin("HTTPS://Tenant.Invalid:443/api/v1/")
+        )
+        assertEquals(
+            "https://tenant.invalid:8443",
+            DistributionConfigRepository.normalizedApiOrigin("https://tenant.invalid:8443/other/path")
+        )
+        assertEquals(
+            "http://tenant.invalid",
+            DistributionConfigRepository.normalizedApiOrigin("http://tenant.invalid:80/api")
+        )
+    }
+
+    @Test
+    fun logoutClearsPersistentDistributionIdentity() {
+        persistUser(14)
+        assertEquals(14L, AuthSessionCoordinator.snapshot(context).userId)
+
+        AuthSessionCoordinator.clear(context)
+
+        val cleared = AuthSessionCoordinator.snapshot(context)
+        assertEquals(0L, cleared.userId)
+        assertTrue(cleared.accessToken.isBlank())
+    }
+
+    @Test
     fun expiredCacheFallsBackOnlyForKnownOfficialOrigin() = runBlocking {
         var now = 1_000L
         persistUser(3)
@@ -86,6 +126,48 @@ class DistributionConfigRepositoryTest {
         assertEquals(false, online?.config?.enabled)
         assertEquals(false, offline?.config?.enabled)
         assertEquals(DistributionConfigSource.LAST_KNOWN_GOOD, offline?.source)
+    }
+
+    @Test
+    fun authenticatedBackendMayReturnDeploymentApprovedHttpTarget() = runBlocking {
+        persistUser(6)
+        val repository = DistributionConfigRepository(context, fetcher = {
+            validConfig(6).copy(releaseIndexUrl = "http://updates.lan/index.json")
+        })
+
+        assertEquals("http://updates.lan/index.json", repository.resolve(allowNetwork = true)?.config?.releaseIndexUrl)
+    }
+
+    @Test
+    fun profileSigningFingerprintIsOptionalButMustBeValidWhenConfigured() = runBlocking {
+        persistUser(12)
+        val optional = DistributionConfigRepository(context, fetcher = {
+            validConfig(12).copy(expectedSigningCertSha256 = "")
+        })
+        assertEquals(12L, optional.resolve(allowNetwork = true)?.config?.profileId)
+
+        persistUser(13)
+        val malformed = DistributionConfigRepository(context, fetcher = {
+            validConfig(13).copy(expectedSigningCertSha256 = "not-a-sha256")
+        })
+        assertNull(malformed.resolve(allowNetwork = true))
+    }
+
+    @Test
+    fun existingSessionLearnsDistributionIdentityFromSuccessfulMeBootstrap() = runBlocking {
+        context.getSharedPreferences("app", Context.MODE_PRIVATE).edit().putString("access_token", "legacy-token").commit()
+        var fetches = 0
+        val repository = DistributionConfigRepository(context, fetcher = {
+            fetches++
+            validConfig(11)
+        })
+        assertNull(repository.resolve(allowNetwork = true))
+
+        AuthSessionCoordinator.persistUserId(context, 77)
+        val resolved = repository.resolve(allowNetwork = true)
+
+        assertEquals(1, fetches)
+        assertEquals(77L, resolved?.userId)
     }
 
     private fun persistUser(id: Long) {

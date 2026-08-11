@@ -66,6 +66,27 @@ class ApkIntegrityVerifierTest {
         assertFailure("profile_signer_mismatch", validActual, update.copy(profileSigningCertSha256 = "12".repeat(32)))
     }
 
+    @Test
+    fun profileFingerprintMayBeOmittedBecauseInstalledSignerStillPinsIdentity() {
+        assertEquals(validActual, verifier.validateMetadata(validActual, installed, update.copy(profileSigningCertSha256 = "")))
+    }
+
+    @Test
+    fun multipleCurrentApkSignersAreRejected() {
+        assertFailure(
+            "unexpected_signer_count",
+            validActual.copy(signerSha256 = setOf(signer, "cd".repeat(32))),
+            update
+        )
+    }
+
+    @Test
+    fun multipleInstalledCurrentSignersAreRejected() {
+        val installedWithTwoSigners = installed.copy(signerSha256 = setOf(signer, "cd".repeat(32)))
+        val error = runCatching { verifier.validateMetadata(validActual, installedWithTwoSigners, update) }.exceptionOrNull()
+        assertEquals("unexpected_signer_count", (error as ApkIntegrityException).errorClass)
+    }
+
     private fun assertFailure(errorClass: String, actual: ApkIdentity, candidate: UpdateInfo) {
         val error = runCatching { verifier.validateMetadata(actual, installed, candidate) }.exceptionOrNull()
         assertEquals(errorClass, (error as ApkIntegrityException).errorClass)

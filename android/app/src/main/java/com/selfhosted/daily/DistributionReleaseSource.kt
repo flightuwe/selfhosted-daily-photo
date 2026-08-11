@@ -41,7 +41,8 @@ class DistributionReleaseSource(
         val cacheKey = cacheKey(resolved, forHistory)
         val cached = parseIndex(prefs.getString("$CACHE_PREFIX$cacheKey", "").orEmpty(), config)
         val cachedAt = prefs.getLong("$CACHE_AT_PREFIX$cacheKey", 0L)
-        val fresh = cached.isNotEmpty() && nowMillis() - cachedAt <= CACHE_TTL_MS
+        val cacheAge = nowMillis() - cachedAt
+        val fresh = cached.isNotEmpty() && cacheAge in 0..CACHE_TTL_MS
         if (!allowNetwork) {
             return@withContext if (cached.isNotEmpty()) {
                 DistributionReleaseResult(cached, ChangelogHistorySource.OFFLINE_CACHE, cachedAt)
@@ -83,24 +84,31 @@ class DistributionReleaseSource(
         signingCertSha256 = config.expectedSigningCertSha256.trim().lowercase(),
         profilePackageName = config.expectedPackageName.trim(),
         profileSigningCertSha256 = config.expectedSigningCertSha256.trim().lowercase(),
-        installable = true
+        installable = true,
+        isLatest = true
     )
 
     internal fun parseIndex(raw: String, config: DistributionConfigResponse): List<DistributionRelease> {
         if (raw.isBlank() || raw.toByteArray().size > MAX_INDEX_BYTES) return emptyList()
         val root = runCatching { JSONObject(raw) }.getOrNull() ?: return emptyList()
         if (root.optInt("schemaVersion", 0) != 1) return emptyList()
+        val latestVersion = clean(root.optString("latest")).removePrefix("v")
+        if (latestVersion.isBlank()) return emptyList()
+        val rootChannel = clean(root.optString("channel")).lowercase().ifBlank { DEFAULT_CHANNEL }
+        val configuredChannel = config.channel.trim().lowercase()
         val items = root.optJSONArray("releases") ?: return emptyList()
         return buildList {
             for (index in 0 until minOf(items.length(), MAX_RELEASES)) {
                 val item = items.optJSONObject(index) ?: continue
                 val version = clean(item.optString("version")).removePrefix("v")
                 if (version.isBlank()) continue
+                val itemChannel = clean(item.optString("channel")).lowercase().ifBlank { rootChannel }
+                if (itemChannel != configuredChannel) continue
                 val prerelease = item.optBoolean("prerelease", !ReleaseHistoryParser.isStableVersion(version))
                 if (prerelease && !config.allowPrerelease) continue
-                val apkUrl = clean(item.optString("apkUrl")).ifBlank { null }
-                if (apkUrl != null && !isHttpUrl(apkUrl)) continue
-                val releaseUrl = clean(item.optString("releaseUrl")).ifBlank { config.releasePageUrl.trim() }
+                val apkUrl = clean(item.optString("apkUrl")).ifBlank { null }?.takeIf(::isHttpUrl)
+                val releaseUrl = clean(item.optString("releaseUrl")).takeIf(::isHttpUrl)
+                    ?: config.releasePageUrl.trim()
                 val sha = clean(item.optString("apkSha256")).ifBlank { clean(item.optString("sha256")) }
                     .lowercase().ifBlank { null }
                 val versionCode = item.optLong("versionCode").takeIf { it > 0 }
@@ -113,8 +121,9 @@ class DistributionReleaseSource(
                 val completeIntegrityMetadata = apkUrl != null && versionCode != null &&
                     sha?.matches(SHA256) == true && itemPackageName.isNotBlank() && itemSigningCert.matches(SHA256)
                 val legacyOfficial = isLegacyOfficialArtifact(apkUrl) && !completeIntegrityMetadata
+                val configuredSigner = config.expectedSigningCertSha256.trim().lowercase()
                 val profileIdentityPresent = config.expectedPackageName.isNotBlank() &&
-                    config.expectedSigningCertSha256.trim().lowercase().matches(SHA256)
+                    (configuredSigner.isBlank() || configuredSigner.matches(SHA256))
                 add(DistributionRelease(
                     version = version,
                     versionCode = versionCode,
@@ -131,7 +140,8 @@ class DistributionReleaseSource(
                     profilePackageName = config.expectedPackageName.trim(),
                     profileSigningCertSha256 = config.expectedSigningCertSha256.trim().lowercase(),
                     legacyOfficialArtifact = legacyOfficial,
-                    installable = profileIdentityPresent && (completeIntegrityMetadata || (legacyOfficial && apkUrl != null))
+                    installable = profileIdentityPresent && (completeIntegrityMetadata || (legacyOfficial && apkUrl != null)),
+                    isLatest = version == latestVersion
                 ))
             }
         }.distinctBy { it.version }
@@ -199,6 +209,7 @@ class DistributionReleaseSource(
         private const val CACHE_TTL_MS = 24L * 60L * 60L * 1000L
         private const val MAX_INDEX_BYTES = 1024 * 1024
         private const val MAX_RELEASES = 500
+        private const val DEFAULT_CHANNEL = "stable"
         private val SHA256 = Regex("^[a-f0-9]{64}$")
     }
 }

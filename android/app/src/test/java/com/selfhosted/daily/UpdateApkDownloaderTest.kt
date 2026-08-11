@@ -83,6 +83,21 @@ class UpdateApkDownloaderTest {
         assertTrue(dir.listFiles().orEmpty().isEmpty())
     }
 
+    @Test
+    fun releaseVersionCannotEscapePrivateUpdateDirectory() {
+        val dir = temporaryFolder.newFolder("path-traversal")
+        val temporary = java.io.File(dir, ".update-test.part").apply { writeText("verified") }
+        val pending = PendingUpdateApk(temporary, "ab".repeat(32), temporary.length(), server.url("/app.apk").toString())
+        val downloader = UpdateApkDownloader(dir, OkHttpClient(), maxBytes = 1024)
+
+        val final = downloader.finalizeVerified(pending, "../../outside\\evil")
+
+        assertEquals(dir.canonicalFile, final.parentFile!!.canonicalFile)
+        assertFalse(final.name.contains(".."))
+        assertFalse(final.name.contains('/'))
+        assertFalse(final.name.contains('\\'))
+    }
+
     private fun update(bytes: ByteArray) = baseUpdate(apkSize = bytes.size.toLong(), apkSha256 = sha256(bytes))
 
     private fun baseUpdate(apkSize: Long?, apkSha256: String = "ab".repeat(32)) = UpdateInfo(

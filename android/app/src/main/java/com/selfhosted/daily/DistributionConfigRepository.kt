@@ -24,7 +24,7 @@ class DistributionConfigRepository(
         if (allowNetwork) {
             val fetched = runCatching { fetcher(session.authHeader()) }
                 .getOrNull()
-                ?.takeIf { isValid(it, apiOrigin) }
+                ?.takeIf(::isValid)
             if (fetched != null) {
                 val resolved = ResolvedDistributionConfig(
                     apiOrigin = apiOrigin,
@@ -39,7 +39,8 @@ class DistributionConfigRepository(
         }
 
         load(identityKey, apiOrigin, userId)?.let { cached ->
-            if (nowMillis() - cached.cachedAt <= LAST_KNOWN_GOOD_TTL_MS) return cached
+            val age = nowMillis() - cached.cachedAt
+            if (age in 0..LAST_KNOWN_GOOD_TTL_MS) return cached
         }
 
         return officialFallback(apiOrigin, userId)
@@ -59,7 +60,7 @@ class DistributionConfigRepository(
         val raw = prefs.getString("$CACHE_PREFIX$dimensionKey", "").orEmpty()
         val cached = runCatching { gson.fromJson(raw, ResolvedDistributionConfig::class.java) }.getOrNull()
             ?: return null
-        if (cached.apiOrigin != apiOrigin || cached.userId != userId || !isValid(cached.config, apiOrigin)) return null
+        if (cached.apiOrigin != apiOrigin || cached.userId != userId || !isValid(cached.config)) return null
         return cached.copy(source = DistributionConfigSource.LAST_KNOWN_GOOD)
     }
 
@@ -84,14 +85,13 @@ class DistributionConfigRepository(
         )
     }
 
-    internal fun isValid(config: DistributionConfigResponse, apiOrigin: String): Boolean {
+    internal fun isValid(config: DistributionConfigResponse): Boolean {
         if (config.schemaVersion != 1) return false
         if (!config.enabled) return true
         if (config.profileId <= 0 || config.channel.isBlank() || config.profileUpdatedAt.isBlank()) return false
-        val allowHttp = apiOrigin.startsWith("http://")
         val urls = listOf(config.projectUrl, config.releaseIndexUrl, config.releaseHistoryUrl, config.releasePageUrl) +
             listOfNotNull(config.directApk?.url)
-        if (urls.filter { it.isNotBlank() }.any { !isAllowedUrl(it, allowHttp) }) return false
+        if (urls.filter { it.isNotBlank() }.any { !isAllowedUrl(it) }) return false
         val direct = config.directApk
         if (direct != null) {
             if (direct.versionName.isBlank() || direct.versionCode <= 0 || direct.url.isBlank()) return false
@@ -105,10 +105,12 @@ class DistributionConfigRepository(
             (configuredSigner.isBlank() || SHA256.matches(configuredSigner))
     }
 
-    private fun isAllowedUrl(raw: String, allowHttp: Boolean): Boolean = runCatching {
+    // The authenticated backend is the policy authority for optional HTTP distribution URLs.
+    // It only persists them when ALLOW_INSECURE_DISTRIBUTION_URLS is deployment-enabled.
+    private fun isAllowedUrl(raw: String): Boolean = runCatching {
         val uri = URI(raw.trim())
         uri.host?.isNotBlank() == true && uri.userInfo == null && uri.fragment == null &&
-            (uri.scheme.equals("https", true) || (allowHttp && uri.scheme.equals("http", true)))
+            (uri.scheme.equals("https", true) || uri.scheme.equals("http", true))
     }.getOrDefault(false)
 
     companion object {

@@ -48,7 +48,10 @@ class ApkIntegrityVerifier(private val context: Context) {
         if (announcedCode != null && actual.versionCode != announcedCode) {
             throw ApkIntegrityException("version_code_mismatch", "APK-VersionCode stimmt nicht mit dem Releaseeintrag ueberein.")
         }
-        if (actual.signerSha256.isEmpty() || installed.signerSha256.isEmpty() || actual.signerSha256 != installed.signerSha256) {
+        if (actual.signerSha256.size != 1 || installed.signerSha256.size != 1) {
+            throw ApkIntegrityException("unexpected_signer_count", "APK und installierte App muessen genau einen aktuellen Signierer haben.")
+        }
+        if (actual.signerSha256 != installed.signerSha256) {
             throw ApkIntegrityException("signer_mismatch", "APK-Signatur stimmt nicht mit der installierten App ueberein.")
         }
         val announcedSigner = normalizeFingerprint(update.signingCertSha256)
@@ -56,8 +59,7 @@ class ApkIntegrityVerifier(private val context: Context) {
             throw ApkIntegrityException("release_signer_mismatch", "APK-Signatur stimmt nicht mit dem Releaseeintrag ueberein.")
         }
         val configuredSigner = normalizeFingerprint(update.profileSigningCertSha256)
-        if (configuredSigner.isBlank()) throw ApkIntegrityException("missing_profile_signer", "Im Verteilungsprofil fehlt der Signaturfingerprint.")
-        if (configuredSigner !in actual.signerSha256) {
+        if (configuredSigner.isNotBlank() && configuredSigner !in actual.signerSha256) {
             throw ApkIntegrityException("profile_signer_mismatch", "APK-Signatur stimmt nicht mit dem Verteilungsprofil ueberein.")
         }
         return actual

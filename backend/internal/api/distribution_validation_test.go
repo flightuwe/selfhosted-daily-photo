@@ -84,6 +84,81 @@ func TestDistributionRedirectPolicyRejectsDowngrade(t *testing.T) {
 	}
 }
 
+func TestDistributionRedirectPolicyRejectsMoreThanThreeRedirects(t *testing.T) {
+	client := newDistributionHTTPClient(config.Config{AllowInsecureDistributionURLs: true})
+	request, _ := http.NewRequest(http.MethodGet, "https://example.org/four", nil)
+	via := make([]*http.Request, 4)
+	for index := range via {
+		via[index], _ = http.NewRequest(http.MethodGet, "https://example.org/loop", nil)
+	}
+	err := client.CheckRedirect(request, via)
+	if err == nil || distributionErrorClass(err) != "redirect_limit" {
+		t.Fatalf("redirect limit error = %v", err)
+	}
+}
+
+func TestDistributionRedirectLoopStopsAtLimit(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		http.Redirect(w, request, server.URL+"/loop", http.StatusFound)
+	}))
+	defer server.Close()
+	cfg := config.Config{
+		AllowInsecureDistributionURLs: true, DistributionPrivateHostAllowlist: []string{"127.0.0.1"},
+		DistributionManifestMaxBytes: 1024,
+	}
+	profile := models.DistributionProfile{
+		Name: "Loop", Enabled: true, SourceMode: "manifest", Channel: "stable",
+		ReleaseIndexURL: server.URL + "/loop", ExpectedPackageName: "com.selfhosted.daily",
+	}
+	result := testDistributionProfile(context.Background(), cfg, profile)
+	if result.Success || result.ErrorClass != "redirect_limit" {
+		t.Fatalf("redirect loop result = %+v", result)
+	}
+}
+
+func TestDistributionProfileModeValidation(t *testing.T) {
+	validHash := strings.Repeat("A1", 32)
+	positiveSize := int64(1024)
+	tests := []struct {
+		name      string
+		profile   models.DistributionProfile
+		wantClass string
+	}{
+		{name: "manifest needs index", profile: models.DistributionProfile{Name: "Manifest", Enabled: true, SourceMode: "manifest", Channel: "stable", ExpectedPackageName: "com.selfhosted.daily"}, wantClass: "missing_url"},
+		{name: "direct complete", profile: models.DistributionProfile{Name: "Direct", Enabled: true, SourceMode: "direct", Channel: "stable", DirectAPKURL: "https://example.org/app.apk", DirectAPKVersionName: "1.2.3", DirectAPKVersionCode: 12, DirectAPKSHA256: validHash, DirectAPKSizeBytes: &positiveSize, ExpectedPackageName: "com.selfhosted.daily", ExpectedSigningCertSHA256: validHash}},
+		{name: "direct missing version", profile: models.DistributionProfile{Name: "Direct", Enabled: true, SourceMode: "direct", Channel: "stable", DirectAPKURL: "https://example.org/app.apk", DirectAPKVersionCode: 12, DirectAPKSHA256: validHash, ExpectedPackageName: "com.selfhosted.daily"}, wantClass: "incomplete_direct_apk"},
+		{name: "direct nonpositive version code", profile: models.DistributionProfile{Name: "Direct", Enabled: true, SourceMode: "direct", Channel: "stable", DirectAPKURL: "https://example.org/app.apk", DirectAPKVersionName: "1.2.3", DirectAPKSHA256: validHash, ExpectedPackageName: "com.selfhosted.daily"}, wantClass: "incomplete_direct_apk"},
+		{name: "bad APK hash", profile: models.DistributionProfile{Name: "Direct", Enabled: true, SourceMode: "direct", Channel: "stable", DirectAPKURL: "https://example.org/app.apk", DirectAPKVersionName: "1.2.3", DirectAPKVersionCode: 12, DirectAPKSHA256: "not-a-hash", ExpectedPackageName: "com.selfhosted.daily"}, wantClass: "invalid_apk_hash"},
+		{name: "bad signer fingerprint", profile: models.DistributionProfile{Name: "Disabled", Enabled: false, SourceMode: "disabled", Channel: "stable", ExpectedPackageName: "com.selfhosted.daily", ExpectedSigningCertSHA256: "not-a-fingerprint"}, wantClass: "invalid_signing_fingerprint"},
+		{name: "disabled needs no source", profile: models.DistributionProfile{Name: "Disabled", Enabled: false, SourceMode: "disabled", Channel: "stable", ExpectedPackageName: "com.selfhosted.daily"}},
+		{name: "unknown mode rejected", profile: models.DistributionProfile{Name: "Unknown", Enabled: true, SourceMode: "mystery", Channel: "stable", ExpectedPackageName: "com.selfhosted.daily"}, wantClass: "invalid_source_mode"},
+		{name: "bad package", profile: models.DistributionProfile{Name: "Bad package", Enabled: false, SourceMode: "disabled", Channel: "stable", ExpectedPackageName: "not-a-package"}, wantClass: "invalid_package_name"},
+		{name: "zero size", profile: models.DistributionProfile{Name: "Bad size", Enabled: true, SourceMode: "direct", Channel: "stable", DirectAPKURL: "https://example.org/app.apk", DirectAPKVersionName: "1", DirectAPKVersionCode: 1, DirectAPKSHA256: validHash, DirectAPKSizeBytes: func() *int64 { value := int64(0); return &value }(), ExpectedPackageName: "com.selfhosted.daily"}, wantClass: "invalid_apk_size"},
+		{name: "oversized", profile: models.DistributionProfile{Name: "Too large", Enabled: true, SourceMode: "direct", Channel: "stable", DirectAPKURL: "https://example.org/app.apk", DirectAPKVersionName: "1", DirectAPKVersionCode: 1, DirectAPKSHA256: validHash, DirectAPKSizeBytes: func() *int64 { value := int64(2049); return &value }(), ExpectedPackageName: "com.selfhosted.daily"}, wantClass: "apk_too_large"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateDistributionProfile(&test.profile, config.Config{DistributionAPKMaxBytes: 2048})
+			if test.wantClass == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if test.profile.DirectAPKSHA256 != "" && test.profile.DirectAPKSHA256 != strings.ToLower(validHash) {
+					t.Fatalf("hash was not normalized: %q", test.profile.DirectAPKSHA256)
+				}
+				if test.profile.ExpectedSigningCertSHA256 != "" && test.profile.ExpectedSigningCertSHA256 != strings.ToLower(validHash) {
+					t.Fatalf("signer fingerprint was not normalized: %q", test.profile.ExpectedSigningCertSHA256)
+				}
+				return
+			}
+			if err == nil || distributionErrorClass(err) != test.wantClass {
+				t.Fatalf("error=%v class=%q want=%q", err, distributionErrorClass(err), test.wantClass)
+			}
+		})
+	}
+}
+
 func TestDistributionManifestTestSuccessAndFailures(t *testing.T) {
 	tests := []struct {
 		name      string

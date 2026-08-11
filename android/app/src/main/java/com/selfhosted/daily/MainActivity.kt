@@ -3477,6 +3477,7 @@ class AppRepo(
     suspend fun probeHealth(baseUrl: String): HealthResponse =
         buildApiService(baseUrl, httpClient).health()
     suspend fun me(): MeResponse = authorizedCall("/api/me") { token -> api.me(token) }
+        .also { response -> AuthSessionCoordinator.persistUserId(context, response.user.id) }
     suspend fun evaluateUserPrompts(appVersion: String): UserPromptEvaluationResponse =
         authorizedCall("/api/me/user-prompts/evaluate") { token -> api.evaluateUserPrompts(token, appVersion) }
 
@@ -4629,12 +4630,17 @@ class AppRepo(
             updateDownloader.discard(pending)
             throw error
         }
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", verifiedFile)
-        val installer = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(uri, "application/vnd.android.package-archive")
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        markUpdateInstallPending(update.latestVersion)
-        context.startActivity(installer)
+        try {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", verifiedFile)
+            val installer = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(installer)
+            markUpdateInstallPending(update.latestVersion)
+        } catch (error: Throwable) {
+            verifiedFile.delete()
+            throw error
+        }
         return verifiedFile
     }
 

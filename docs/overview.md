@@ -47,6 +47,7 @@ Runtime deployment uses:
 - Mirror governance and drift policy: `docs/mirror-policy.md`
 - Cluster follow-up checklist for direct Forge work: `docs/gitea-direct-todo.md`
 - Deployment safety checklist for public vs private runtime values: `docs/public-vs-private-config.md`
+- Provider-neutral app distribution, release index and Android verification: `docs/app-distribution.md`
 - Ongoing ops history in Forge: `reports/daily-ops-changelog.md`
 
 ## Operator Default

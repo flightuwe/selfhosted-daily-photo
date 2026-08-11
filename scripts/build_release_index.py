@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,16 +22,30 @@ def sha256(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
+    parser.add_argument("--version-code", required=True, type=int)
+    parser.add_argument("--package-name", required=True)
+    parser.add_argument("--signing-cert-sha256", required=True)
     parser.add_argument("--apk", type=Path, required=True)
     parser.add_argument("--notes", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     version = args.version.strip().removeprefix("v")
+    if args.version_code < 1:
+        parser.error("--version-code must be positive")
+    package_name = args.package_name.strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", package_name):
+        parser.error("--package-name must be a valid Android application ID")
+    signing_cert_sha256 = re.sub(r"[^a-fA-F0-9]", "", args.signing_cert_sha256).lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", signing_cert_sha256):
+        parser.error("--signing-cert-sha256 must contain exactly 64 hexadecimal characters")
     notes = json.loads(args.notes.read_text(encoding="utf-8"))
     tag = f"v{version}"
     item = {
         "version": version,
+        "versionCode": args.version_code,
+        "packageName": package_name,
+        "signingCertSha256": signing_cert_sha256,
         "releasedAt": notes.get("releasedAt") or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "title": notes.get("title") or f"Daily {version}",
         "highlights": notes.get("highlights", []),

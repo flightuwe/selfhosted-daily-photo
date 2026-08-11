@@ -35,7 +35,8 @@ Precondition for workstations with the local Android toolchain:
 3. Run the Forgejo unsigned-candidate workflow for the exact commit.
 4. Verify provenance/SHA-256, then sign in the approval-gated signer.
 5. Verify the existing production certificate, push tag `vX.Y.Z`, and publish APK plus `changelog.json` as Forgejo release assets.
-6. Publish the external release index last.
+6. Generate the provider-neutral index with `versionCode`, package name and the verified public signing-certificate SHA-256 as documented in `docs/app-distribution.md`.
+7. Publish the external release index last and update it atomically.
 
 ## Mandatory Acceptance Checks
 

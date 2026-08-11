@@ -133,7 +133,11 @@ class UpdateApkDownloader(
 
     fun finalizeVerified(pending: PendingUpdateApk, versionName: String): File {
         require(pending.temporaryFile.parentFile?.canonicalFile == updatesDir.canonicalFile) { "unexpected update path" }
-        val safeVersion = versionName.trim().removePrefix("v").replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "update" }
+        val safeVersion = versionName.trim().removePrefix("v")
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .replace(Regex("\\.{2,}"), "_")
+            .trim('.')
+            .ifBlank { "update" }
         val finalFile = File(updatesDir, "daily-v$safeVersion.apk")
         if (finalFile.exists() && !finalFile.delete()) {
             throw UpdateDownloadException("storage_finalize", "Vorherige Update-Datei konnte nicht ersetzt werden.")

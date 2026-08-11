@@ -93,8 +93,10 @@ object ReleaseHistoryParser {
     fun isStableVersion(version: String): Boolean = Regex("^\\d+\\.\\d+\\.\\d+$").matches(version.trim())
 
     fun compareVersions(left: String, right: String): Int {
-        val a = left.trim().removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
-        val b = right.trim().removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
+        fun numericParts(value: String): List<Int> = value.trim().removePrefix("v").split('.')
+            .map { part -> part.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+        val a = numericParts(left)
+        val b = numericParts(right)
         for (index in 0..2) {
             val comparison = a.getOrElse(index) { 0 }.compareTo(b.getOrElse(index) { 0 })
             if (comparison != 0) return comparison

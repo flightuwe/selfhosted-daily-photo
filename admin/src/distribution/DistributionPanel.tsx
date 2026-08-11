@@ -163,6 +163,7 @@ export function DistributionPanel({ token }: Props) {
         schemaVersion: 1,
         enabled: draft.enabled && draft.sourceMode !== "disabled",
         profileId: draft.id,
+        profileUpdatedAt: draft.updatedAt,
         channel: draft.channel,
         projectUrl: draft.projectUrl,
         releaseIndexUrl: draft.releaseIndexUrl,

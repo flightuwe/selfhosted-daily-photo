@@ -27,6 +27,8 @@ Diese Checkliste ist verbindlich vor und nach einem App-Tag-Release.
 3. Release Workflow erfolgreich:
    - APK-Asset vorhanden
    - `changelog.json` vorhanden
+   - Indexeintrag enthaelt `versionCode`, `packageName`, `signingCertSha256`, `sha256` und `size`
+   - APK-Hash und oeffentlicher Zertifikatsfingerprint stimmen mit dem Index ueberein
 
 ## 3) Funktionale Abnahme auf Geraet
 
@@ -46,6 +48,13 @@ Diese Checkliste ist verbindlich vor und nach einem App-Tag-Release.
      fehlgeschlagene HTTP-Endpoints mit Dauer und Request-ID
 5. Queue:
    - Fehlermeldungen enthalten Fehlerklasse
+6. App-Verteilung:
+   - effektives Default- und Nutzerprofil werden korrekt aufgeloest
+   - deaktiviertes Profil ist ein erfolgreicher No-op
+   - Offline-Modus und ausgeloggter Worker erzeugen keinen Releaseabruf
+   - Update-Dialog zeigt Version und Zielhost
+   - manipulierte Hash-, Paket-, VersionCode- und Zertifikatswerte werden abgelehnt
+   - ungepruefte APK erscheint nie im oeffentlichen Downloadordner
 
 ## 4) Daily-Spike Test (15-30 min)
 

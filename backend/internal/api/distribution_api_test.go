@@ -87,12 +87,28 @@ func TestDistributionClientDefaultOverrideAndAdminRights(t *testing.T) {
 	if forbidden.Code != http.StatusForbidden {
 		t.Fatalf("regular user admin status = %d body=%s", forbidden.Code, forbidden.Body.String())
 	}
+	forbiddenAudit := distributionRequest(t, router, http.MethodGet, "/api/admin/distribution/audit", userToken, nil)
+	if forbiddenAudit.Code != http.StatusForbidden {
+		t.Fatalf("regular user audit status = %d body=%s", forbiddenAudit.Code, forbiddenAudit.Body.String())
+	}
 	defaultResponse := distributionRequest(t, router, http.MethodGet, "/api/app-distribution", userToken, nil)
 	if defaultResponse.Code != http.StatusOK || !strings.Contains(defaultResponse.Body.String(), `"enabled":true`) {
 		t.Fatalf("default response status=%d body=%s", defaultResponse.Code, defaultResponse.Body.String())
 	}
 	if got := defaultResponse.Header().Get("Cache-Control"); !strings.Contains(got, "private") {
 		t.Fatalf("Cache-Control = %q", got)
+	}
+	var defaultPayload map[string]any
+	if err := json.Unmarshal(defaultResponse.Body.Bytes(), &defaultPayload); err != nil {
+		t.Fatal(err)
+	}
+	if defaultPayload["profileUpdatedAt"] == nil {
+		t.Fatalf("client payload lacks profileUpdatedAt: %v", defaultPayload)
+	}
+	for _, forbiddenField := range []string{"actorUserId", "actorUsername", "audit", "deploymentPolicy", "privateHostAllowlistConfigured", "createdByUserId"} {
+		if _, exists := defaultPayload[forbiddenField]; exists {
+			t.Fatalf("client payload exposes %q: %v", forbiddenField, defaultPayload)
+		}
 	}
 
 	create := distributionRequest(t, router, http.MethodPost, "/api/admin/distribution/profiles", adminToken, map[string]any{
@@ -125,6 +141,29 @@ func TestDistributionClientDefaultOverrideAndAdminRights(t *testing.T) {
 	audit := distributionRequest(t, router, http.MethodGet, "/api/admin/distribution/audit", adminToken, nil)
 	if audit.Code != http.StatusOK || !strings.Contains(audit.Body.String(), "user_assignment_changed") || !strings.Contains(audit.Body.String(), "profile_delete_attempt") {
 		t.Fatalf("audit status=%d body=%s", audit.Code, audit.Body.String())
+	}
+}
+
+func TestDistributionClientEndpointNeverFetchesConfiguredSource(t *testing.T) {
+	server, _, user := newDistributionAPITestServer(t)
+	hits := 0
+	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"schemaVersion":1,"latest":"9.9.9","releases":[{"version":"9.9.9"}]}`))
+	}))
+	defer external.Close()
+	if err := server.DB.Model(&models.DistributionProfile{}).Where("is_default = ?", true).
+		Update("release_index_url", external.URL).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	response := distributionRequest(t, server.Router(), http.MethodGet, "/api/app-distribution", distributionToken(t, server, user), nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("client distribution status=%d body=%s", response.Code, response.Body.String())
+	}
+	if hits != 0 {
+		t.Fatalf("client endpoint performed %d external request(s)", hits)
 	}
 }
 
@@ -182,6 +221,31 @@ func TestDistributionProfileForeignKeyRejectsUnknownAssignment(t *testing.T) {
 	}
 	if stored.DistributionProfileID != nil {
 		t.Fatalf("unknown profile assignment was stored: %v", *stored.DistributionProfileID)
+	}
+}
+
+func TestDistributionMutationRollsBackWhenAuditInsertFails(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	if err := server.DB.Exec(`CREATE TRIGGER fail_distribution_audit
+		BEFORE INSERT ON distribution_profile_audit
+		BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	response := distributionRequest(t, server.Router(), http.MethodPost, "/api/admin/distribution/profiles", distributionToken(t, server, admin), map[string]any{
+		"name": "Must roll back", "enabled": true, "isDefault": false,
+		"sourceMode": "manifest", "channel": "stable",
+		"releaseIndexUrl":     "https://example.org/releases/index.json",
+		"expectedPackageName": "com.selfhosted.daily",
+	})
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("audit failure status=%d body=%s", response.Code, response.Body.String())
+	}
+	var profiles int64
+	if err := server.DB.Model(&models.DistributionProfile{}).Where("name = ?", "Must roll back").Count(&profiles).Error; err != nil {
+		t.Fatal(err)
+	}
+	if profiles != 0 {
+		t.Fatalf("profile mutation committed without audit: count=%d", profiles)
 	}
 }
 

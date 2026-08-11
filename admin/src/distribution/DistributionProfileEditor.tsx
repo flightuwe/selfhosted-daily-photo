@@ -144,12 +144,13 @@ export function DistributionProfileEditor({
         <button className="secondary compact" onClick={() => applyPreset("disabled")}>Deaktiviert</button>
       </div>
 
-      {(signatureChanged || profile.sourceMode === "direct" || integrityMissing || profile.isDefault && !profile.enabled || assignedUserCount > 0 || policy.allowInsecureHttp || policy.privateHostAllowlistConfigured) && (
+      {(signatureChanged || profile.sourceMode === "direct" || integrityMissing || profile.isDefault || assignedUserCount > 0 || policy.allowInsecureHttp || policy.privateHostAllowlistConfigured) && (
         <div className="distribution-warnings">
           {signatureChanged && <p>Warnung: Der erwartete Signaturfingerprint wurde verändert.</p>}
           {profile.sourceMode === "direct" && <p>Direkter APK-Modus: URL und Metadaten müssen immutable sein.</p>}
           {integrityMissing && <p>Integritätsangaben sind unvollständig.</p>}
           {profile.isDefault && !profile.enabled && <p>Ein Default-Profil darf nicht deaktiviert sein.</p>}
+          {profile.isDefault && <p>Das Default-Profil kann nicht gelÃ¶scht werden. Zuerst ein Ersatzprofil als Default setzen.</p>}
           {assignedUserCount > 0 && <p>Dieses Profil ist {assignedUserCount} Nutzer(n) zugeordnet.</p>}
           {policy.allowInsecureHttp && <p>Deployment erlaubt derzeit unsichere HTTP-Verteilungsziele.</p>}
           {policy.privateHostAllowlistConfigured && <p>Deployment enthält eine private Host-/CIDR-Allowlist.</p>}

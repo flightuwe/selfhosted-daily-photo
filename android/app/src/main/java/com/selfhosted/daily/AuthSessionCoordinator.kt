@@ -66,6 +66,14 @@ object AuthSessionCoordinator {
         return snapshot(context)
     }
 
+    fun persistUserId(context: Context, userId: Long) {
+        if (userId <= 0 || !snapshot(context).hasAccessToken()) return
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_USER_ID, userId)
+            .commit()
+    }
+
     fun clear(context: Context) {
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .edit()

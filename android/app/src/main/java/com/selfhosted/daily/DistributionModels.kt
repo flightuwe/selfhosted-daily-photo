@@ -64,7 +64,8 @@ data class DistributionRelease(
     val profilePackageName: String = "",
     val profileSigningCertSha256: String = "",
     val legacyOfficialArtifact: Boolean = false,
-    val installable: Boolean = false
+    val installable: Boolean = false,
+    val isLatest: Boolean = false
 )
 
 data class UpdateInfo(
