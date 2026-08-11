@@ -3,59 +3,104 @@ package models
 import "time"
 
 type User struct {
-	ID                                  uint       `gorm:"primaryKey" json:"id"`
-	Username                            string     `gorm:"uniqueIndex;size:64;not null" json:"username"`
-	PasswordHash                        string     `gorm:"not null" json:"-"`
-	AuthVersion                         uint64     `gorm:"not null;default:1" json:"-"`
-	Email                               string     `gorm:"size:254" json:"-"`
-	EmailNormalized                     string     `gorm:"size:254;index" json:"-"`
-	EmailVerifiedAt                     *time.Time `gorm:"index" json:"-"`
-	PendingEmail                        string     `gorm:"size:254" json:"-"`
-	PendingEmailNormalized              string     `gorm:"size:254;index" json:"-"`
-	PendingEmailRequestedAt             *time.Time `json:"-"`
-	IsAdmin                             bool       `gorm:"default:false" json:"isAdmin"`
-	FavoriteColor                       string     `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
-	ChatPushEnabled                     bool       `gorm:"default:false" json:"chatPushEnabled"`
-	PollPushEnabled                     bool       `gorm:"default:false" json:"pollPushEnabled"`
-	SpecialMomentPushEnabled            bool       `gorm:"default:false" json:"specialMomentPushEnabled"`
-	InviteRegistrationPushEnabled       bool       `gorm:"default:false" json:"inviteRegistrationPushEnabled"`
-	PhotoReactionPushEnabled            bool       `gorm:"default:false" json:"photoReactionPushEnabled"`
-	PhotoFotomojiPushEnabled            bool       `gorm:"default:false" json:"photoFotomojiPushEnabled"`
-	PhotoCommentPushEnabled             bool       `gorm:"default:false" json:"photoCommentPushEnabled"`
-	BookmarkedPhotoPushEnabled          bool       `gorm:"default:false" json:"bookmarkedPhotoPushEnabled"`
-	PostChangePushEnabled               bool       `gorm:"default:false" json:"postChangePushEnabled"`
-	AutoSubscribeInteractedPostsEnabled bool       `gorm:"default:false" json:"autoSubscribeInteractedPostsEnabled"`
-	OwnPostNumberInPushEnabled          bool       `gorm:"default:false" json:"ownPostNumberInPushEnabled"`
-	PostNumberInPushEnabled             bool       `gorm:"default:false" json:"postNumberInPushEnabled"`
-	YoloModeEnabled                     bool       `gorm:"default:false" json:"yoloModeEnabled"`
-	MediaDataMode                       string     `gorm:"size:16;default:'normal'" json:"mediaDataMode"`
-	MediaFormatPreference               string     `gorm:"size:16;default:'auto'" json:"mediaFormatPreference"`
-	AllowPhotoDownload                  bool       `gorm:"default:false" json:"allowPhotoDownload"`
-	AllowCommunityNsfwMarking           bool       `gorm:"default:false" json:"allowCommunityNsfwMarking"`
-	ShowNsfwByDefault                   bool       `gorm:"default:false" json:"showNsfwByDefault"`
-	CreativePostMode                    string     `gorm:"size:16;default:'none'" json:"creativePostMode"`
-	LocationFeatureEnabled              bool       `gorm:"default:false" json:"locationFeatureEnabled"`
-	LocationShareDefaultEnabled         bool       `gorm:"default:false" json:"locationShareDefaultEnabled"`
-	AllowCommunityPostPromotion         bool       `gorm:"default:false" json:"allowCommunityPostPromotion"`
-	CommunityContributionPushEnabled    bool       `gorm:"default:false" json:"communityContributionPushEnabled"`
-	AvatarPath                          string     `gorm:"size:255" json:"avatarUrl"`
-	Bio                                 string     `gorm:"size:280" json:"bio"`
-	StatusText                          string     `gorm:"size:120" json:"statusText"`
-	StatusEmoji                         string     `gorm:"size:16" json:"statusEmoji"`
-	StatusExpiresAt                     *time.Time `json:"statusExpiresAt"`
-	ProfileVisible                      bool       `gorm:"default:false;index" json:"profileVisible"`
-	AvatarVisible                       bool       `gorm:"default:false" json:"avatarVisible"`
-	BioVisible                          bool       `gorm:"default:false" json:"bioVisible"`
-	StatusVisible                       bool       `gorm:"default:false" json:"statusVisible"`
-	QuietHoursEnabled                   bool       `gorm:"default:false" json:"quietHoursEnabled"`
-	QuietHoursStart                     string     `gorm:"size:5;default:'22:00'" json:"quietHoursStart"`
-	QuietHoursEnd                       string     `gorm:"size:5;default:'07:00'" json:"quietHoursEnd"`
-	HubTimelineClearedAt                *time.Time `gorm:"index" json:"-"`
-	HubTimelineLastViewedAt             *time.Time `gorm:"index" json:"-"`
-	DiagnosticsConsentGranted           bool       `gorm:"default:false" json:"diagnosticsConsentGranted"`
-	DiagnosticsConsentUpdatedAt         *time.Time `json:"diagnosticsConsentUpdatedAt"`
-	DiagnosticsConsentSource            string     `gorm:"size:32" json:"diagnosticsConsentSource"`
-	CreatedAt                           time.Time  `json:"createdAt"`
+	ID                                  uint                 `gorm:"primaryKey" json:"id"`
+	Username                            string               `gorm:"uniqueIndex;size:64;not null" json:"username"`
+	PasswordHash                        string               `gorm:"not null" json:"-"`
+	AuthVersion                         uint64               `gorm:"not null;default:1" json:"-"`
+	Email                               string               `gorm:"size:254" json:"-"`
+	EmailNormalized                     string               `gorm:"size:254;index" json:"-"`
+	EmailVerifiedAt                     *time.Time           `gorm:"index" json:"-"`
+	PendingEmail                        string               `gorm:"size:254" json:"-"`
+	PendingEmailNormalized              string               `gorm:"size:254;index" json:"-"`
+	PendingEmailRequestedAt             *time.Time           `json:"-"`
+	IsAdmin                             bool                 `gorm:"default:false" json:"isAdmin"`
+	FavoriteColor                       string               `gorm:"size:7;default:'#1F5FBF'" json:"favoriteColor"`
+	ChatPushEnabled                     bool                 `gorm:"default:false" json:"chatPushEnabled"`
+	PollPushEnabled                     bool                 `gorm:"default:false" json:"pollPushEnabled"`
+	SpecialMomentPushEnabled            bool                 `gorm:"default:false" json:"specialMomentPushEnabled"`
+	InviteRegistrationPushEnabled       bool                 `gorm:"default:false" json:"inviteRegistrationPushEnabled"`
+	PhotoReactionPushEnabled            bool                 `gorm:"default:false" json:"photoReactionPushEnabled"`
+	PhotoFotomojiPushEnabled            bool                 `gorm:"default:false" json:"photoFotomojiPushEnabled"`
+	PhotoCommentPushEnabled             bool                 `gorm:"default:false" json:"photoCommentPushEnabled"`
+	BookmarkedPhotoPushEnabled          bool                 `gorm:"default:false" json:"bookmarkedPhotoPushEnabled"`
+	PostChangePushEnabled               bool                 `gorm:"default:false" json:"postChangePushEnabled"`
+	AutoSubscribeInteractedPostsEnabled bool                 `gorm:"default:false" json:"autoSubscribeInteractedPostsEnabled"`
+	OwnPostNumberInPushEnabled          bool                 `gorm:"default:false" json:"ownPostNumberInPushEnabled"`
+	PostNumberInPushEnabled             bool                 `gorm:"default:false" json:"postNumberInPushEnabled"`
+	YoloModeEnabled                     bool                 `gorm:"default:false" json:"yoloModeEnabled"`
+	MediaDataMode                       string               `gorm:"size:16;default:'normal'" json:"mediaDataMode"`
+	MediaFormatPreference               string               `gorm:"size:16;default:'auto'" json:"mediaFormatPreference"`
+	AllowPhotoDownload                  bool                 `gorm:"default:false" json:"allowPhotoDownload"`
+	AllowCommunityNsfwMarking           bool                 `gorm:"default:false" json:"allowCommunityNsfwMarking"`
+	ShowNsfwByDefault                   bool                 `gorm:"default:false" json:"showNsfwByDefault"`
+	CreativePostMode                    string               `gorm:"size:16;default:'none'" json:"creativePostMode"`
+	LocationFeatureEnabled              bool                 `gorm:"default:false" json:"locationFeatureEnabled"`
+	LocationShareDefaultEnabled         bool                 `gorm:"default:false" json:"locationShareDefaultEnabled"`
+	AllowCommunityPostPromotion         bool                 `gorm:"default:false" json:"allowCommunityPostPromotion"`
+	CommunityContributionPushEnabled    bool                 `gorm:"default:false" json:"communityContributionPushEnabled"`
+	AvatarPath                          string               `gorm:"size:255" json:"avatarUrl"`
+	Bio                                 string               `gorm:"size:280" json:"bio"`
+	StatusText                          string               `gorm:"size:120" json:"statusText"`
+	StatusEmoji                         string               `gorm:"size:16" json:"statusEmoji"`
+	StatusExpiresAt                     *time.Time           `json:"statusExpiresAt"`
+	ProfileVisible                      bool                 `gorm:"default:false;index" json:"profileVisible"`
+	AvatarVisible                       bool                 `gorm:"default:false" json:"avatarVisible"`
+	BioVisible                          bool                 `gorm:"default:false" json:"bioVisible"`
+	StatusVisible                       bool                 `gorm:"default:false" json:"statusVisible"`
+	QuietHoursEnabled                   bool                 `gorm:"default:false" json:"quietHoursEnabled"`
+	QuietHoursStart                     string               `gorm:"size:5;default:'22:00'" json:"quietHoursStart"`
+	QuietHoursEnd                       string               `gorm:"size:5;default:'07:00'" json:"quietHoursEnd"`
+	HubTimelineClearedAt                *time.Time           `gorm:"index" json:"-"`
+	HubTimelineLastViewedAt             *time.Time           `gorm:"index" json:"-"`
+	DiagnosticsConsentGranted           bool                 `gorm:"default:false" json:"diagnosticsConsentGranted"`
+	DiagnosticsConsentUpdatedAt         *time.Time           `json:"diagnosticsConsentUpdatedAt"`
+	DiagnosticsConsentSource            string               `gorm:"size:32" json:"diagnosticsConsentSource"`
+	DistributionProfileID               *uint                `gorm:"index" json:"distributionProfileId,omitempty"`
+	DistributionProfile                 *DistributionProfile `gorm:"constraint:OnUpdate:CASCADE,OnDelete:RESTRICT;" json:"-"`
+	CreatedAt                           time.Time            `json:"createdAt"`
+}
+
+type DistributionProfile struct {
+	ID                        uint      `gorm:"primaryKey" json:"id"`
+	Name                      string    `gorm:"size:120;not null" json:"name"`
+	Enabled                   bool      `gorm:"not null;default:true" json:"enabled"`
+	IsDefault                 bool      `gorm:"not null;default:false;index" json:"isDefault"`
+	SourceMode                string    `gorm:"size:16;not null;default:'manifest'" json:"sourceMode"`
+	Channel                   string    `gorm:"size:40;not null;default:'stable'" json:"channel"`
+	ProjectURL                string    `gorm:"size:500" json:"projectUrl"`
+	ReleaseIndexURL           string    `gorm:"size:500" json:"releaseIndexUrl"`
+	ReleaseHistoryURL         string    `gorm:"size:500" json:"releaseHistoryUrl"`
+	ReleasePageURL            string    `gorm:"size:500" json:"releasePageUrl"`
+	DirectAPKURL              string    `gorm:"size:500" json:"directApkUrl"`
+	DirectAPKVersionName      string    `gorm:"size:80" json:"directApkVersionName"`
+	DirectAPKVersionCode      int64     `gorm:"default:0" json:"directApkVersionCode"`
+	DirectAPKSHA256           string    `gorm:"size:64" json:"directApkSha256"`
+	DirectAPKSizeBytes        *int64    `json:"directApkSizeBytes"`
+	ExpectedPackageName       string    `gorm:"size:200;not null;default:'com.selfhosted.daily'" json:"expectedPackageName"`
+	ExpectedSigningCertSHA256 string    `gorm:"size:64" json:"expectedSigningCertSha256"`
+	MinSupportedVersionCode   *int64    `json:"minSupportedVersionCode"`
+	AllowPrerelease           bool      `gorm:"not null;default:false" json:"allowPrerelease"`
+	CreatedByUserID           *uint     `gorm:"index" json:"createdByUserId"`
+	CreatedAt                 time.Time `json:"createdAt"`
+	UpdatedAt                 time.Time `json:"updatedAt"`
+}
+
+type DistributionAuditEvent struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	ActorUserID    *uint     `gorm:"index" json:"actorUserId"`
+	ActorUsername  string    `gorm:"size:64" json:"actorUsername"`
+	Action         string    `gorm:"size:48;not null;index" json:"action"`
+	ProfileID      *uint     `gorm:"index" json:"profileId"`
+	TargetUserID   *uint     `gorm:"index" json:"targetUserId"`
+	BeforeJSON     string    `gorm:"type:text" json:"beforeJson"`
+	AfterJSON      string    `gorm:"type:text" json:"afterJson"`
+	TestResultJSON string    `gorm:"type:text" json:"testResultJson"`
+	ErrorClass     string    `gorm:"size:64" json:"errorClass"`
+	CreatedAt      time.Time `gorm:"index;not null" json:"createdAt"`
+}
+
+func (DistributionAuditEvent) TableName() string {
+	return "distribution_profile_audit"
 }
 
 type InviteCode struct {

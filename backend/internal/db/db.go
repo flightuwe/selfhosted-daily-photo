@@ -20,13 +20,15 @@ func Connect(path string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
 
-	database, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	database, err := gorm.Open(sqlite.Open(sqliteDSN(path)), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
 	if err := database.AutoMigrate(
+		&models.DistributionProfile{},
 		&models.User{},
+		&models.DistributionAuditEvent{},
 		&models.InviteCode{},
 		&models.DeviceToken{},
 		&models.UserSession{},
@@ -74,6 +76,9 @@ func Connect(path string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("automigrate: %w", err)
 	}
 
+	if err := ensureDistributionSchema(database); err != nil {
+		return nil, err
+	}
 	if err := ensureDefaultSettings(database); err != nil {
 		return nil, err
 	}
@@ -112,6 +117,122 @@ func Connect(path string) (*gorm.DB, error) {
 	}
 
 	return database, nil
+}
+
+func sqliteDSN(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_foreign_keys=on"
+}
+
+const (
+	officialDistributionProjectURL        = "https://code.harzcloud.de/daily-harzcloud/daily"
+	officialDistributionReleaseIndexURL   = "https://releases.daily.harzcloud.de/index.json"
+	officialDistributionReleasePageURL    = "https://code.harzcloud.de/daily-harzcloud/daily/releases"
+	officialDistributionPackageName       = "com.selfhosted.daily"
+	officialDistributionSigningCertSHA256 = "72e05a43a7be5837d83c922ad3496782499547fd94a5efa431dec712df6d4138"
+)
+
+func ensureDistributionSchema(database *gorm.DB) error {
+	if err := database.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_distribution_profiles_single_default
+		ON distribution_profiles(is_default) WHERE is_default = 1`).Error; err != nil {
+		return fmt.Errorf("create distribution default index: %w", err)
+	}
+	if err := database.Exec(`CREATE TRIGGER IF NOT EXISTS trg_distribution_default_enabled_insert
+		BEFORE INSERT ON distribution_profiles
+		WHEN NEW.is_default = 1 AND NEW.enabled != 1
+		BEGIN SELECT RAISE(ABORT, 'default distribution profile must be enabled'); END`).Error; err != nil {
+		return fmt.Errorf("create distribution default insert trigger: %w", err)
+	}
+	if err := database.Exec(`CREATE TRIGGER IF NOT EXISTS trg_distribution_default_enabled_update
+		BEFORE UPDATE OF is_default, enabled ON distribution_profiles
+		WHEN NEW.is_default = 1 AND NEW.enabled != 1
+		BEGIN SELECT RAISE(ABORT, 'default distribution profile must be enabled'); END`).Error; err != nil {
+		return fmt.Errorf("create distribution default update trigger: %w", err)
+	}
+	if err := ensureDefaultDistributionProfile(database); err != nil {
+		return fmt.Errorf("ensure default distribution profile: %w", err)
+	}
+	return nil
+}
+
+func ensureDefaultDistributionProfile(database *gorm.DB) error {
+	return database.Transaction(func(tx *gorm.DB) error {
+		var defaults []models.DistributionProfile
+		if err := tx.Where("is_default = ?", true).Find(&defaults).Error; err != nil {
+			return err
+		}
+		if len(defaults) > 1 {
+			return fmt.Errorf("distribution invariant violated: %d default profiles", len(defaults))
+		}
+		if len(defaults) == 1 {
+			if defaults[0].Enabled {
+				return nil
+			}
+			return tx.Model(&models.DistributionProfile{}).
+				Where("id = ?", defaults[0].ID).
+				Update("enabled", true).Error
+		}
+
+		var official models.DistributionProfile
+		err := tx.Where("release_index_url = ?", officialDistributionReleaseIndexURL).First(&official).Error
+		if err == nil {
+			return tx.Model(&models.DistributionProfile{}).
+				Where("id = ?", official.ID).
+				Updates(map[string]any{"enabled": true, "is_default": true}).Error
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		official = models.DistributionProfile{
+			Name:                      "Harzcloud Stable",
+			Enabled:                   true,
+			IsDefault:                 true,
+			SourceMode:                "manifest",
+			Channel:                   "stable",
+			ProjectURL:                officialDistributionProjectURL,
+			ReleaseIndexURL:           officialDistributionReleaseIndexURL,
+			ReleasePageURL:            officialDistributionReleasePageURL,
+			ExpectedPackageName:       officialDistributionPackageName,
+			ExpectedSigningCertSHA256: officialDistributionSigningCertSHA256,
+		}
+		return tx.Create(&official).Error
+	})
+}
+
+func SetDefaultDistributionProfile(database *gorm.DB, profileID uint) error {
+	if profileID == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return database.Transaction(func(tx *gorm.DB) error {
+		var next models.DistributionProfile
+		if err := tx.First(&next, profileID).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.DistributionProfile{}).
+			Where("is_default = ? AND id <> ?", true, profileID).
+			Update("is_default", false).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.DistributionProfile{}).
+			Where("id = ?", profileID).
+			Updates(map[string]any{"enabled": true, "is_default": true}).Error; err != nil {
+			return err
+		}
+		var activeDefaults int64
+		if err := tx.Model(&models.DistributionProfile{}).
+			Where("is_default = ? AND enabled = ?", true, true).
+			Count(&activeDefaults).Error; err != nil {
+			return err
+		}
+		if activeDefaults != 1 {
+			return fmt.Errorf("distribution invariant violated: active defaults=%d", activeDefaults)
+		}
+		return nil
+	})
 }
 
 func ensureEmailSchema(database *gorm.DB) error {
@@ -165,6 +286,7 @@ func configureSQLite(database *gorm.DB) error {
 
 func applySQLitePragmas(sqlDB *sql.DB) error {
 	pragmas := []string{
+		"PRAGMA foreign_keys=ON;",
 		"PRAGMA journal_mode=WAL;",
 		"PRAGMA synchronous=NORMAL;",
 		"PRAGMA temp_store=MEMORY;",
