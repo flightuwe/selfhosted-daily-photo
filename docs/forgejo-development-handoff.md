@@ -34,7 +34,7 @@ sudo /usr/local/sbin/daily-deploy-forgejo deploy <40-character-main-commit>
 sudo /usr/local/sbin/daily-deploy-forgejo status
 ```
 
-The deploy tool pulls both immutable tags, resolves their OCI digests, stops the backend briefly, creates and integrity-checks a SQLite backup, pins both services by digest, starts them and requires the exact `srv-forgejo-<shortsha>` health version plus a working admin container. A failed health gate restores the previous compose layer and database automatically.
+The production host must provide `docker`, Docker Compose, `curl`, `flock`, `python3` and `sqlite3`. The deploy tool verifies these dependencies and all required input files before it pulls images or stops the backend. It then pulls both immutable tags, resolves their OCI digests, stops the backend, creates and integrity-checks a SQLite backup, pins both services by digest, starts them and requires the exact `srv-forgejo-<shortsha>` health version plus a working admin container. A failed health gate restores the previous compose layer and database automatically.
 
 Rollback metadata and database snapshots are under `/opt/daily/deploy-backups`; current deployment metadata is `/var/lib/daily-forgejo-deploy/current.json`. Manual code rollback does not restore the database unless `--restore-db` is explicitly supplied, because doing so can discard user writes.
 
