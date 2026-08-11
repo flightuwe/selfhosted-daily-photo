@@ -27,6 +27,8 @@ jobs:
     runs-on: daily-build
     timeout-minutes: 45
     env:
+      HOME: /home/dailybuild
+      XDG_RUNTIME_DIR: /run/user/1000
       REGISTRY: code.harzcloud.de
       IMAGE_ROOT: code.harzcloud.de/daily-harzcloud/daily
     steps:
