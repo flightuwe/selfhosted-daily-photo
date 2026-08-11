@@ -1,13 +1,10 @@
 package com.selfhosted.daily
 
 import android.content.Context
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.json.JSONArray
-import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 data class ChangelogEntry(
     val version: String,
@@ -32,145 +29,61 @@ data class ChangelogHistoryResult(
     val cachedAt: Long = 0L
 )
 
-/** Public Forgejo is the canonical changelog source; the cache keeps it usable offline. */
+/**
+ * Small provider-neutral cache retained for isolated callers and tests. Production release loading
+ * uses [DistributionReleaseSource], whose key includes the complete distribution dimension.
+ */
 class ReleaseHistoryRepository(
     context: Context,
     private val releaseFetcher: (() -> List<ChangelogEntry>)? = null,
-    private val nowMillis: () -> Long = System::currentTimeMillis
+    private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val cacheDimension: () -> String = { "unscoped" }
 ) {
-    private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .callTimeout(15, TimeUnit.SECONDS)
-        .build()
+    private val prefs = context.applicationContext.getSharedPreferences("release_history_v2", Context.MODE_PRIVATE)
+    private val gson = Gson()
 
     suspend fun history(
         allowNetwork: Boolean,
         forceRefresh: Boolean = false,
         requiredVersion: String? = null
     ): ChangelogHistoryResult = withContext(Dispatchers.IO) {
-        val cached = cachedHistory()
-        if (!allowNetwork) return@withContext cached
-            .takeIf { it.isNotEmpty() }
-            ?.let { ChangelogHistoryResult(it, ChangelogHistorySource.OFFLINE_CACHE, cachedAt()) }
+        val key = DistributionConfigRepository.digest(cacheDimension())
+        val cached = cachedHistory(key)
+        val cachedAt = prefs.getLong("cached_at:$key", 0L)
+        if (!allowNetwork) return@withContext cached.takeIf(List<ChangelogEntry>::isNotEmpty)
+            ?.let { ChangelogHistoryResult(it, ChangelogHistorySource.OFFLINE_CACHE, cachedAt) }
             ?: ChangelogHistoryResult(emptyList(), ChangelogHistorySource.UNAVAILABLE)
 
-        val cachedAt = prefs.getLong(CACHE_AT_KEY, 0L)
-        val cacheFresh = cached.isNotEmpty() && nowMillis() - cachedAt < CACHE_TTL_MS
-        val normalizedRequiredVersion = requiredVersion?.trim()?.removePrefix("v").orEmpty()
-        val cacheContainsRequiredVersion = normalizedRequiredVersion.isBlank() ||
-            cached.any { it.version == normalizedRequiredVersion }
-        if (!forceRefresh && cacheFresh && cacheContainsRequiredVersion) {
+        val required = requiredVersion?.trim()?.removePrefix("v").orEmpty()
+        val fresh = cached.isNotEmpty() && nowMillis() - cachedAt < CACHE_TTL_MS
+        val containsRequired = required.isBlank() || cached.any { it.version == required }
+        if (!forceRefresh && fresh && containsRequired) {
             return@withContext ChangelogHistoryResult(cached, ChangelogHistorySource.FRESH_CACHE, cachedAt)
         }
 
-        val fresh = releaseFetcher?.invoke() ?: fetchAllReleases()
-        if (fresh.isNotEmpty()) {
-            saveHistory(fresh)
-            ChangelogHistoryResult(fresh, ChangelogHistorySource.NETWORK, nowMillis())
-        } else {
-            cached.takeIf { it.isNotEmpty() }
-                ?.let { ChangelogHistoryResult(it, ChangelogHistorySource.STALE_CACHE, cachedAt) }
-                ?: ChangelogHistoryResult(emptyList(), ChangelogHistorySource.UNAVAILABLE)
-        }
+        val fetched = releaseFetcher?.invoke().orEmpty().normalized()
+        if (fetched.isNotEmpty()) {
+            val now = nowMillis()
+            prefs.edit().putString("entries:$key", gson.toJson(fetched)).putLong("cached_at:$key", now).apply()
+            ChangelogHistoryResult(fetched, ChangelogHistorySource.NETWORK, now)
+        } else if (cached.isNotEmpty()) {
+            ChangelogHistoryResult(cached, ChangelogHistorySource.STALE_CACHE, cachedAt)
+        } else ChangelogHistoryResult(emptyList(), ChangelogHistorySource.UNAVAILABLE)
     }
 
-    private fun fetchAllReleases(): List<ChangelogEntry> {
-        val entries = mutableListOf<ChangelogEntry>()
-        var page = 1
-        while (page <= MAX_PAGES) {
-            val body = get("$RELEASES_URL?per_page=100&page=$page") ?: break
-            val releases = runCatching { JSONArray(body) }.getOrNull() ?: break
-            if (releases.length() == 0) break
-            for (index in 0 until releases.length()) {
-                val release = releases.optJSONObject(index) ?: continue
-                if (release.optBoolean("draft") || release.optBoolean("prerelease")) continue
-                val version = release.optString("tag_name").trim().removePrefix("v")
-                if (!ReleaseHistoryParser.isStableVersion(version)) continue
-                val bodyText = release.optString("body").trim()
-                val parsed = ReleaseHistoryParser.parseReleaseBody(bodyText)
-                entries += ChangelogEntry(
-                    version = version,
-                    title = parsed.title.ifBlank { "Daily $version" },
-                    highlights = parsed.highlights.ifEmpty { listOf("Keine Release-Details hinterlegt.") },
-                    details = parsed.details,
-                    releasedAt = release.optString("published_at").trim(),
-                    releaseUrl = release.optString("html_url").trim()
-                )
-            }
-            if (releases.length() < 100) break
-            page += 1
-        }
-        return entries
+    private fun cachedHistory(key: String): List<ChangelogEntry> {
+        val raw = prefs.getString("entries:$key", "").orEmpty()
+        val type = object : TypeToken<List<ChangelogEntry>>() {}.type
+        return runCatching { gson.fromJson<List<ChangelogEntry>>(raw, type).orEmpty().normalized() }.getOrDefault(emptyList())
+    }
+
+    private fun List<ChangelogEntry>.normalized(): List<ChangelogEntry> =
+        filter { ReleaseHistoryParser.isStableVersion(it.version) }
             .distinctBy { it.version }
             .sortedWith { left, right -> ReleaseHistoryParser.compareVersions(right.version, left.version) }
-    }
-
-    private fun get(url: String): String? {
-        val request = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .build()
-        return runCatching {
-            http.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) null else response.body?.string()
-            }
-        }.getOrNull()
-    }
-
-    private fun cachedHistory(): List<ChangelogEntry> {
-        val raw = prefs.getString(CACHE_KEY, "").orEmpty()
-        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
-        return buildList {
-            for (index in 0 until array.length()) {
-                val item = array.optJSONObject(index) ?: continue
-                val version = item.optString("version").trim()
-                if (!ReleaseHistoryParser.isStableVersion(version)) continue
-                add(ChangelogEntry(
-                    version = version,
-                    title = item.optString("title").trim().ifBlank { "Daily $version" },
-                    highlights = item.optJSONArray("highlights").stringList(),
-                    details = item.optJSONArray("details").stringList(),
-                    releasedAt = item.optString("releasedAt").trim(),
-                    releaseUrl = item.optString("releaseUrl").trim()
-                ))
-            }
-        }.sortedWith { left, right -> ReleaseHistoryParser.compareVersions(right.version, left.version) }
-    }
-
-    private fun saveHistory(entries: List<ChangelogEntry>) {
-        val array = JSONArray()
-        entries.forEach { entry ->
-            array.put(JSONObject().apply {
-                put("version", entry.version)
-                put("title", entry.title)
-                put("highlights", JSONArray(entry.highlights))
-                put("details", JSONArray(entry.details))
-                put("releasedAt", entry.releasedAt)
-                put("releaseUrl", entry.releaseUrl)
-            })
-        }
-        prefs.edit().putString(CACHE_KEY, array.toString()).putLong(CACHE_AT_KEY, nowMillis()).apply()
-    }
-
-    private fun cachedAt(): Long = prefs.getLong(CACHE_AT_KEY, 0L)
-
-    private fun JSONArray?.stringList(): List<String> {
-        if (this == null) return emptyList()
-        return buildList {
-            for (index in 0 until length()) {
-                optString(index).trim().takeIf { it.isNotBlank() }?.let(::add)
-            }
-        }
-    }
 
     private companion object {
-        const val RELEASES_URL = "https://code.harzcloud.de/api/v1/repos/daily-harzcloud/daily/releases"
-        const val CACHE_KEY = "github_release_history_v1"
-        const val CACHE_AT_KEY = "github_release_history_cached_at_v1"
         const val CACHE_TTL_MS = 24L * 60L * 60L * 1000L
-        const val MAX_PAGES = 5
     }
 }
 
@@ -183,7 +96,7 @@ object ReleaseHistoryParser {
         val a = left.trim().removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
         val b = right.trim().removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
         for (index in 0..2) {
-            val comparison = (a.getOrElse(index) { 0 }).compareTo(b.getOrElse(index) { 0 })
+            val comparison = a.getOrElse(index) { 0 }.compareTo(b.getOrElse(index) { 0 })
             if (comparison != 0) return comparison
         }
         return 0

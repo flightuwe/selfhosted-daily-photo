@@ -1308,7 +1308,6 @@ data class SpecialMomentStatus(
     val nextAllowedAt: String? = null,
     val lastRequestedAt: String? = null
 )
-data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
 data class HealthFeatures(val chatDelete: Boolean = false, val commentDelete: Boolean = false)
 data class MediaCapabilities(val renditions: Boolean = false, val formats: List<String> = emptyList(), val avifEnabled: Boolean = false)
 data class HealthResponse(
@@ -1640,6 +1639,9 @@ private fun extractJsonIntField(raw: String, field: String): Int? {
 interface Api {
     @GET("health")
     suspend fun health(): HealthResponse
+
+    @GET("app-distribution")
+    suspend fun appDistribution(@Header("Authorization") token: String): DistributionConfigResponse
 
     @GET("migration/info")
     suspend fun migrationInfo(): MigrationInfoResponse
@@ -2096,7 +2098,15 @@ class AppRepo(
     }
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     private val gson = Gson()
-    private val releaseHistory by lazy { ReleaseHistoryRepository(context) }
+    private val distributionConfig by lazy {
+        DistributionConfigRepository(
+            context = context,
+            fetcher = {
+                authorizedCall("/api/app-distribution") { token -> api.appDistribution(token) }
+            }
+        )
+    }
+    private val distributionReleases by lazy { DistributionReleaseSource(context, httpClient) }
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(context) }
     @Volatile
     private var api: Api = buildApiService(resolveApiBaseUrl(context), httpClient)
@@ -4569,20 +4579,43 @@ class AppRepo(
         )
     }
 
-    suspend fun checkForUpdate(currentVersion: String): UpdateInfo? =
-        UpdateReleaseChecker.checkForUpdate(currentVersion, allowNetwork = !OfflineModeManager.isEnabled(context))
+    suspend fun checkForUpdate(currentVersion: String): UpdateInfo? {
+        val allowNetwork = !OfflineModeManager.isEnabled(context)
+        val resolved = distributionConfig.resolve(allowNetwork) ?: return null
+        if (!resolved.config.enabled) return null
+        val releases = distributionReleases.releases(resolved, allowNetwork).releases
+        return UpdateReleaseChecker.findUpdate(currentVersion, releases)
+    }
 
-    suspend fun changelogLines(currentVersion: String): List<String> =
-        UpdateReleaseChecker.changelogLinesForVersion(currentVersion, allowNetwork = !OfflineModeManager.isEnabled(context))
+    suspend fun changelogLines(currentVersion: String): List<String> {
+        val allowNetwork = !OfflineModeManager.isEnabled(context)
+        val resolved = distributionConfig.resolve(allowNetwork) ?: return emptyList()
+        val releases = distributionReleases.releases(resolved, allowNetwork, forHistory = true).releases
+        return UpdateReleaseChecker.changelogLinesForVersion(currentVersion, releases)
+    }
 
     suspend fun changelogHistory(
         forceRefresh: Boolean = false,
         requiredVersion: String? = null
-    ): ChangelogHistoryResult = releaseHistory.history(
-        allowNetwork = !OfflineModeManager.isEnabled(context),
-        forceRefresh = forceRefresh,
-        requiredVersion = requiredVersion
-    )
+    ): ChangelogHistoryResult {
+        val allowNetwork = !OfflineModeManager.isEnabled(context)
+        val resolved = distributionConfig.resolve(allowNetwork)
+            ?: return ChangelogHistoryResult(emptyList(), ChangelogHistorySource.UNAVAILABLE)
+        val result = distributionReleases.releases(resolved, allowNetwork, forceRefresh, forHistory = true)
+        val entries = result.releases.map { release ->
+            ChangelogEntry(
+                version = release.version,
+                title = release.title.ifBlank { "Daily ${release.version}" },
+                highlights = release.highlights.ifEmpty { listOf("Keine Release-Details hinterlegt.") },
+                details = release.details,
+                releasedAt = release.releasedAt,
+                releaseUrl = release.releaseUrl
+            )
+        }
+        val required = requiredVersion?.trim()?.removePrefix("v").orEmpty()
+        val selected = if (required.isBlank() || entries.any { it.version == required }) entries else entries
+        return ChangelogHistoryResult(selected, result.source, result.cachedAt)
+    }
 
     fun downloadLatestApk(update: UpdateInfo): Long {
         OfflineModeManager.requireOnline(context)

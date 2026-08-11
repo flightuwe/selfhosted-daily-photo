@@ -19,6 +19,7 @@ class OfflineModeTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        context.getSharedPreferences("release_history_v2", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         WorkManagerTestInitHelper.initializeTestWorkManager(context)
     }
 
@@ -41,16 +42,16 @@ class OfflineModeTest {
 
     @Test
     fun changelogHistoryUsesOnlyItsLocalCacheWhenNetworkIsDisallowed() = runBlocking {
-        context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE)
-            .edit()
-            .putString(
-                "github_release_history_v1",
-                "[{\"version\":\"0.8.21\",\"title\":\"Cached\",\"highlights\":[\"Local\"]}]"
-            )
-            .apply()
+        var fetches = 0
+        val repository = ReleaseHistoryRepository(context, releaseFetcher = {
+            fetches++
+            listOf(ChangelogEntry("0.8.21", "Cached", listOf("Local")))
+        })
+        repository.history(allowNetwork = true)
 
-        val result = ReleaseHistoryRepository(context).history(allowNetwork = false, forceRefresh = true)
+        val result = repository.history(allowNetwork = false, forceRefresh = true)
 
+        assertEquals(1, fetches)
         assertEquals(ChangelogHistorySource.OFFLINE_CACHE, result.source)
         assertEquals(listOf("0.8.21"), result.entries.map { it.version })
     }
