@@ -25,8 +25,14 @@ func Connect(path string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
+	if err := database.AutoMigrate(&models.DistributionProfile{}); err != nil {
+		return nil, fmt.Errorf("automigrate distribution profiles: %w", err)
+	}
+	if err := ensureUserDistributionProfilePreflight(database); err != nil {
+		return nil, err
+	}
+
 	if err := database.AutoMigrate(
-		&models.DistributionProfile{},
 		&models.User{},
 		&models.DistributionAuditEvent{},
 		&models.InviteCode{},
@@ -75,6 +81,13 @@ func Connect(path string) (*gorm.DB, error) {
 	); err != nil {
 		return nil, fmt.Errorf("automigrate: %w", err)
 	}
+	if err := verifyUserDistributionProfileSchema(database); err != nil {
+		return nil, err
+	}
+	if err := database.Exec(`CREATE INDEX IF NOT EXISTS idx_users_distribution_profile_id
+		ON users(distribution_profile_id)`).Error; err != nil {
+		return nil, fmt.Errorf("create distribution assignment index: %w", err)
+	}
 
 	if err := ensureDistributionSchema(database); err != nil {
 		return nil, err
@@ -117,6 +130,98 @@ func Connect(path string) (*gorm.DB, error) {
 	}
 
 	return database, nil
+}
+
+type sqliteForeignKey struct {
+	ID       int    `gorm:"column:id"`
+	Sequence int    `gorm:"column:seq"`
+	Table    string `gorm:"column:table"`
+	From     string `gorm:"column:from"`
+	To       string `gorm:"column:to"`
+	OnUpdate string `gorm:"column:on_update"`
+	OnDelete string `gorm:"column:on_delete"`
+}
+
+func ensureUserDistributionProfilePreflight(database *gorm.DB) error {
+	var usersTableCount int64
+	if err := database.Raw(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'users'`).
+		Scan(&usersTableCount).Error; err != nil {
+		return fmt.Errorf("inspect users table: %w", err)
+	}
+	if usersTableCount == 0 {
+		return nil
+	}
+
+	var columnCount int64
+	if err := database.Raw(`SELECT count(*) FROM pragma_table_info('users') WHERE name = 'distribution_profile_id'`).
+		Scan(&columnCount).Error; err != nil {
+		return fmt.Errorf("inspect users distribution assignment column: %w", err)
+	}
+	if columnCount > 1 {
+		return fmt.Errorf("users.distribution_profile_id schema is ambiguous; manual schema repair required before startup")
+	}
+	if columnCount == 0 {
+		if err := database.Exec(`ALTER TABLE users
+			ADD COLUMN distribution_profile_id INTEGER CONSTRAINT fk_users_distribution_profile REFERENCES distribution_profiles(id)
+			ON UPDATE CASCADE
+			ON DELETE RESTRICT`).Error; err != nil {
+			return fmt.Errorf("add users distribution assignment column: %w", err)
+		}
+	}
+
+	if err := verifyUserDistributionProfileSchema(database); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyUserDistributionProfileSchema(database *gorm.DB) error {
+	var columnCount int64
+	if err := database.Raw(`SELECT count(*) FROM pragma_table_info('users') WHERE name = 'distribution_profile_id'`).
+		Scan(&columnCount).Error; err != nil {
+		return fmt.Errorf("verify users distribution assignment column: %w", err)
+	}
+
+	var foreignKeys []sqliteForeignKey
+	if err := database.Raw(`PRAGMA foreign_key_list('users')`).Scan(&foreignKeys).Error; err != nil {
+		return fmt.Errorf("verify users distribution assignment foreign key: %w", err)
+	}
+	matchingForeignKeys := 0
+	validForeignKey := false
+	for _, foreignKey := range foreignKeys {
+		if !strings.EqualFold(foreignKey.From, "distribution_profile_id") {
+			continue
+		}
+		matchingForeignKeys++
+		validForeignKey = strings.EqualFold(foreignKey.Table, "distribution_profiles") &&
+			strings.EqualFold(foreignKey.To, "id") &&
+			strings.EqualFold(foreignKey.OnUpdate, "CASCADE") &&
+			strings.EqualFold(foreignKey.OnDelete, "RESTRICT")
+	}
+
+	var usersDDL string
+	if err := database.Raw(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'`).
+		Scan(&usersDDL).Error; err != nil {
+		return fmt.Errorf("verify users table definition: %w", err)
+	}
+	normalizedDDL := strings.ToLower(usersDDL)
+	hasNamedConstraint := false
+	for _, constraintToken := range []string{
+		"constraint fk_users_distribution_profile",
+		"constraint `fk_users_distribution_profile`",
+		`constraint "fk_users_distribution_profile"`,
+		"constraint [fk_users_distribution_profile]",
+	} {
+		if strings.Contains(normalizedDDL, constraintToken) {
+			hasNamedConstraint = true
+			break
+		}
+	}
+	if columnCount != 1 || matchingForeignKeys != 1 || !validForeignKey || !hasNamedConstraint {
+		return fmt.Errorf("users.distribution_profile_id must use named foreign key fk_users_distribution_profile referencing distribution_profiles(id) ON UPDATE CASCADE ON DELETE RESTRICT; manual schema repair required before startup (columns=%d matching_foreign_keys=%d valid_foreign_key=%t named_constraint=%t)",
+			columnCount, matchingForeignKeys, validForeignKey, hasNamedConstraint)
+	}
+	return nil
 }
 
 func sqliteDSN(path string) string {
