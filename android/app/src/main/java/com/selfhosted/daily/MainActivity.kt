@@ -3672,9 +3672,10 @@ class AppRepo(
             includePhotos = includePhotos,
             includeCommunity = includeCommunity
         )
-    }
+    }.also { response -> AuthSessionCoordinator.persistUserId(context, response.me.user.id) }
     suspend fun dashboardCore(): DashboardBootstrapResponse =
         authorizedCall("/api/dashboard/core") { token -> api.dashboardCore(token) }
+            .also { response -> AuthSessionCoordinator.persistUserId(context, response.me.user.id) }
     suspend fun hubBootstrap(): HubBootstrapResponse =
         authorizedCall("/api/hub/bootstrap") { token -> api.hubBootstrap(token) }
     suspend fun hubTimeline(
