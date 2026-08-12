@@ -3,7 +3,6 @@ package com.selfhosted.daily
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -60,7 +59,8 @@ internal class UpdateApkDownloader(
     private val updatesDir: File,
     httpClient: OkHttpClient,
     private val maxBytes: Long = DEFAULT_MAX_BYTES,
-    timeoutProfile: ApkDownloadTimeoutProfile = ProductionApkDownloadTimeoutProfile
+    timeoutProfile: ApkDownloadTimeoutProfile = ProductionApkDownloadTimeoutProfile,
+    private val urlPolicy: DistributionUrlPolicy = DistributionUrlPolicy()
 ) {
     private val client = buildApkDownloadClient(httpClient, timeoutProfile)
 
@@ -83,7 +83,12 @@ internal class UpdateApkDownloader(
         cleanupTemporaryFiles()
         val temporary = File(updatesDir, ".update-${UUID.randomUUID()}.part")
         try {
-            var current = validateUrl(announcedUrl)
+            val announcedOrigin = if (update.apkUrlExplicitlyConfigured) {
+                urlPolicy.configured(announcedUrl)
+            } else {
+                urlPolicy.manifest(announcedUrl)
+            }
+            var current = announcedOrigin
             var redirects = 0
             while (true) {
                 val request = Request.Builder()
@@ -94,13 +99,13 @@ internal class UpdateApkDownloader(
                 if (response.code in REDIRECT_CODES) {
                     val location = response.header("Location")
                     response.close()
-                    if (redirects >= MAX_REDIRECTS) {
-                        throw UpdateDownloadException("redirect_limit", "Zu viele APK-Weiterleitungen.")
-                    }
-                    val next = location?.let(current::resolve)
-                        ?: throw UpdateDownloadException("invalid_redirect", "APK-Weiterleitung ohne gueltiges Ziel.")
+                    val next = runCatching { urlPolicy.redirect(announcedOrigin, current, location, redirects) }
+                        .getOrElse {
+                            val errorClass = (it as? DistributionUrlException)?.errorClass ?: "invalid_redirect"
+                            throw UpdateDownloadException(errorClass, "APK-Weiterleitung hat ein unzulaessiges Ziel.")
+                        }
                     validateApkRedirect(current, next)
-                    current = validateUrl(next.toString())
+                    current = next
                     redirects += 1
                     continue
                 }
@@ -196,19 +201,8 @@ internal class UpdateApkDownloader(
             ?.forEach(File::delete)
     }
 
-    private fun validateUrl(raw: String): HttpUrl {
-        val url = raw.toHttpUrlOrNull()
-            ?: throw UpdateDownloadException("invalid_url", "Ungueltige APK-URL.")
-        if (url.scheme !in setOf("https", "http") || url.host.isBlank() || url.username.isNotBlank() || url.password.isNotBlank()) {
-            throw UpdateDownloadException("invalid_url", "APK-URL enthaelt ein unzulaessiges Ziel.")
-        }
-        if (url.fragment != null) throw UpdateDownloadException("invalid_url", "APK-URL darf kein Fragment enthalten.")
-        return url
-    }
-
     companion object {
         const val DEFAULT_MAX_BYTES = 250L * 1024L * 1024L
-        private const val MAX_REDIRECTS = 3
         private const val LEGACY_OFFICIAL_HOST = "releases.daily.harzcloud.de"
         private const val TEMP_FILE_MAX_AGE_MS = 24L * 60L * 60L * 1000L
         private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)

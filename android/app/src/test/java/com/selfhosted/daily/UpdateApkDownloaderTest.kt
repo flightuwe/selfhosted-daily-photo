@@ -151,14 +151,14 @@ class UpdateApkDownloaderTest {
     }
 
     @Test
-    fun moreThanThreeRedirectsAreRejectedAndCleanedUp() = runBlocking {
+    fun configuredHttpSourceCannotRedirectOverHttp() = runBlocking {
         repeat(4) { server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "/next$it")) }
         val dir = temporaryFolder.newFolder("redirects")
         val downloader = UpdateApkDownloader(dir, OkHttpClient(), maxBytes = 1024)
 
         val error = runCatching { downloader.download(baseUpdate(apkSize = null)) }.exceptionOrNull()
 
-        assertEquals("redirect_limit", (error as UpdateDownloadException).errorClass)
+        assertEquals("redirect_not_https", (error as UpdateDownloadException).errorClass)
         assertTrue(dir.listFiles().orEmpty().isEmpty())
     }
 
@@ -201,7 +201,8 @@ class UpdateApkDownloaderTest {
         packageName = "com.selfhosted.daily",
         signingCertSha256 = "cd".repeat(32),
         profilePackageName = "com.selfhosted.daily",
-        profileSigningCertSha256 = "cd".repeat(32)
+        profileSigningCertSha256 = "cd".repeat(32),
+        apkUrlExplicitlyConfigured = true
     )
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")

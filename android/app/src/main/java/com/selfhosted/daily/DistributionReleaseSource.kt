@@ -21,6 +21,11 @@ class DistributionReleaseSource(
     private val nowMillis: () -> Long = System::currentTimeMillis
 ) {
     private val prefs = context.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+    private val urlPolicy = DistributionUrlPolicy()
+    private val distributionClient = httpClient.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
 
     suspend fun releases(
         resolved: ResolvedDistributionConfig,
@@ -84,12 +89,13 @@ class DistributionReleaseSource(
         signingCertSha256 = config.expectedSigningCertSha256.trim().lowercase(),
         profilePackageName = config.expectedPackageName.trim(),
         profileSigningCertSha256 = config.expectedSigningCertSha256.trim().lowercase(),
+        apkUrlExplicitlyConfigured = true,
         installable = true,
         isLatest = true
     )
 
     internal fun parseIndex(raw: String, config: DistributionConfigResponse): List<DistributionRelease> {
-        if (raw.isBlank() || raw.toByteArray().size > MAX_INDEX_BYTES) return emptyList()
+        if (raw.isBlank() || raw.toByteArray(Charsets.UTF_8).size > MAX_INDEX_BYTES) return emptyList()
         val root = runCatching { JSONObject(raw) }.getOrNull() ?: return emptyList()
         if (root.optInt("schemaVersion", 0) != 1) return emptyList()
         val latestVersion = clean(root.optString("latest")).removePrefix("v")
@@ -106,7 +112,7 @@ class DistributionReleaseSource(
                 if (itemChannel != configuredChannel) continue
                 val prerelease = item.optBoolean("prerelease", !ReleaseHistoryParser.isStableVersion(version))
                 if (prerelease && !config.allowPrerelease) continue
-                val apkUrl = clean(item.optString("apkUrl")).ifBlank { null }?.takeIf(::isHttpUrl)
+                val apkUrl = clean(item.optString("apkUrl")).ifBlank { null }?.takeIf(::isSafeManifestUrl)
                 val releaseUrl = clean(item.optString("releaseUrl")).takeIf(::isHttpUrl)
                     ?: config.releasePageUrl.trim()
                 val sha = clean(item.optString("apkSha256")).ifBlank { clean(item.optString("sha256")) }
@@ -139,6 +145,7 @@ class DistributionReleaseSource(
                     signingCertSha256 = itemSigningCert,
                     profilePackageName = config.expectedPackageName.trim(),
                     profileSigningCertSha256 = config.expectedSigningCertSha256.trim().lowercase(),
+                    apkUrlExplicitlyConfigured = false,
                     legacyOfficialArtifact = legacyOfficial,
                     installable = profileIdentityPresent && (completeIntegrityMetadata || (legacyOfficial && apkUrl != null)),
                     isLatest = version == latestVersion
@@ -149,29 +156,45 @@ class DistributionReleaseSource(
     }
 
     private fun get(url: String): String? {
-        if (!isHttpUrl(url)) return null
         responseFetcher?.let { return runCatching { it(url) }.getOrNull() }
-        val request = Request.Builder().url(url).header("Accept", "application/json").build()
-        return runCatching {
-            httpClient.newCall(request).execute().use body@{ response ->
-                if (!response.isSuccessful) return@body null
-                val length = response.body?.contentLength() ?: -1
-                if (length > MAX_INDEX_BYTES) return@body null
-                response.body?.charStream()?.use reader@{ reader ->
-                    val buffer = CharArray(8192)
-                    val out = StringBuilder()
-                    var total = 0
-                    while (true) {
-                        val read = reader.read(buffer)
-                        if (read < 0) break
-                        total += read
-                        if (total > MAX_INDEX_BYTES) return@reader null
-                        out.append(buffer, 0, read)
+        return try {
+            val configuredOrigin = urlPolicy.configured(url)
+            var current = configuredOrigin
+            var redirects = 0
+            while (true) {
+                val request = Request.Builder().url(current).header("Accept", "application/json").build()
+                val response = distributionClient.newCall(request).execute()
+                if (response.code in REDIRECT_CODES) {
+                    val next = response.use { urlPolicy.redirect(configuredOrigin, current, it.header("Location"), redirects) }
+                    current = next
+                    redirects += 1
+                    continue
+                }
+                return response.use body@{ finalResponse ->
+                    if (!finalResponse.isSuccessful) return@body null
+                    val body = finalResponse.body ?: return@body null
+                    val length = body.contentLength()
+                    if (length > MAX_INDEX_BYTES) return@body null
+                    body.byteStream().use { input ->
+                        val out = java.io.ByteArrayOutputStream()
+                        val buffer = ByteArray(8192)
+                        var total = 0
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            total += read
+                            if (total > MAX_INDEX_BYTES) return@body null
+                            out.write(buffer, 0, read)
+                        }
+                        out.toByteArray().toString(Charsets.UTF_8)
                     }
-                    out.toString()
                 }
             }
-        }.getOrNull()
+            @Suppress("UNREACHABLE_CODE")
+            null
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun cacheKey(resolved: ResolvedDistributionConfig, forHistory: Boolean): String =
@@ -192,6 +215,11 @@ class DistributionReleaseSource(
         uri.host?.isNotBlank() == true && uri.scheme.lowercase() in setOf("https", "http") && uri.userInfo == null
     }.getOrDefault(false)
 
+    private fun isSafeManifestUrl(value: String): Boolean = runCatching {
+        urlPolicy.manifestSyntax(value)
+        true
+    }.getOrDefault(false)
+
     private fun isLegacyOfficialArtifact(url: String?): Boolean = runCatching {
         java.net.URI(url.orEmpty()).host.equals("releases.daily.harzcloud.de", true)
     }.getOrDefault(false)
@@ -210,6 +238,7 @@ class DistributionReleaseSource(
         private const val MAX_INDEX_BYTES = 1024 * 1024
         private const val MAX_RELEASES = 500
         private const val DEFAULT_CHANNEL = "stable"
+        private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
         private val SHA256 = Regex("^[a-f0-9]{64}$")
     }
 }

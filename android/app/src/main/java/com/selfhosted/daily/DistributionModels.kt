@@ -63,6 +63,7 @@ data class DistributionRelease(
     val signingCertSha256: String = "",
     val profilePackageName: String = "",
     val profileSigningCertSha256: String = "",
+    val apkUrlExplicitlyConfigured: Boolean = false,
     val legacyOfficialArtifact: Boolean = false,
     val installable: Boolean = false,
     val isLatest: Boolean = false
@@ -79,6 +80,7 @@ data class UpdateInfo(
     val signingCertSha256: String = "",
     val profilePackageName: String = "",
     val profileSigningCertSha256: String = "",
+    val apkUrlExplicitlyConfigured: Boolean = false,
     val legacyOfficialArtifact: Boolean = false
 ) {
     val targetHost: String

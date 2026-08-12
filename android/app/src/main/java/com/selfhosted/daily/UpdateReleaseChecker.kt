@@ -18,6 +18,7 @@ object UpdateReleaseChecker {
             signingCertSha256 = release.signingCertSha256,
             profilePackageName = release.profilePackageName,
             profileSigningCertSha256 = release.profileSigningCertSha256,
+            apkUrlExplicitlyConfigured = release.apkUrlExplicitlyConfigured,
             legacyOfficialArtifact = release.legacyOfficialArtifact
         )
     }

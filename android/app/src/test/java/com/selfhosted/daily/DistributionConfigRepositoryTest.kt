@@ -10,6 +10,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import java.io.IOException
 
 @RunWith(RobolectricTestRunner::class)
 class DistributionConfigRepositoryTest {
@@ -68,6 +69,37 @@ class DistributionConfigRepositoryTest {
         setApiBaseUrlOverride(context, "https://other.invalid/api/")
 
         assertNull(repository.resolve(allowNetwork = false))
+    }
+
+    @Test
+    fun rejectedFetchThatClearsSessionNeverUsesLastKnownGood() = runBlocking {
+        persistUser(4)
+        DistributionConfigRepository(context, fetcher = { validConfig(4) }).resolve(allowNetwork = true)
+        var fetches = 0
+        val rejected = DistributionConfigRepository(context, fetcher = {
+            fetches++
+            AuthSessionCoordinator.clear(context)
+            throw IOException("wrapped auth rejection")
+        })
+
+        assertNull(rejected.resolve(allowNetwork = true))
+        assertEquals(1, fetches)
+        assertTrue(AuthSessionCoordinator.snapshot(context).accessToken.isBlank())
+    }
+
+    @Test
+    fun temporaryFailureUsesLkgOnlyWhileExactSessionRemains() = runBlocking {
+        persistUser(4)
+        DistributionConfigRepository(context, fetcher = { validConfig(4) }).resolve(allowNetwork = true)
+        val temporary = DistributionConfigRepository(context, fetcher = { throw IOException("offline") })
+
+        assertEquals(DistributionConfigSource.LAST_KNOWN_GOOD, temporary.resolve(allowNetwork = true)?.source)
+
+        val rotated = DistributionConfigRepository(context, fetcher = {
+            AuthSessionCoordinator.persist(context, AuthResponse(token = "rotated", user = User(4, "user4", false)))
+            throw IOException("failed after token change")
+        })
+        assertNull(rotated.resolve(allowNetwork = true))
     }
 
     @Test

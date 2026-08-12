@@ -3,7 +3,9 @@ package com.selfhosted.daily
 import android.content.Context
 import com.google.gson.Gson
 import java.net.URI
+import java.io.IOException
 import java.security.MessageDigest
+import retrofit2.HttpException
 
 class DistributionConfigRepository(
     context: Context,
@@ -22,10 +24,14 @@ class DistributionConfigRepository(
         val identityKey = digest("$apiOrigin|$userId")
 
         if (allowNetwork) {
-            val fetched = runCatching { fetcher(session.authHeader()) }
-                .getOrNull()
-                ?.takeIf(::isValid)
-            if (fetched != null) {
+            val attempt = runCatching { fetcher(session.authHeader()) }
+            val current = AuthSessionCoordinator.snapshot(appContext)
+            val currentOrigin = normalizedApiOrigin(resolveApiBaseUrl(appContext))
+            if (current.userId != userId || !current.hasAccessToken() || currentOrigin != apiOrigin) {
+                return null
+            }
+            val fetched = attempt.getOrNull()
+            if (fetched != null && isValid(fetched)) {
                 val resolved = ResolvedDistributionConfig(
                     apiOrigin = apiOrigin,
                     userId = userId,
@@ -36,6 +42,8 @@ class DistributionConfigRepository(
                 save(identityKey, resolved)
                 return resolved
             }
+            if (current.accessToken != session.accessToken) return null
+            if (attempt.isSuccess || !isTemporaryFailure(attempt.exceptionOrNull())) return null
         }
 
         load(identityKey, apiOrigin, userId)?.let { cached ->
@@ -83,6 +91,12 @@ class DistributionConfigRepository(
                 expectedSigningCertSha256 = OFFICIAL_SIGNING_CERT_SHA256
             )
         )
+    }
+
+    private fun isTemporaryFailure(error: Throwable?): Boolean = when (error) {
+        is IOException -> true
+        is HttpException -> error.code() == 408 || error.code() == 429 || error.code() >= 500
+        else -> false
     }
 
     internal fun isValid(config: DistributionConfigResponse): Boolean {
