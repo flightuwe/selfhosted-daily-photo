@@ -302,6 +302,7 @@ func (s *Server) Router() *gin.Engine {
 		{
 			protected.POST("/auth/logout", s.handleAuthLogout)
 			protected.POST("/auth/logout-all", s.handleAuthLogoutAll)
+			protected.GET("/app-distribution", s.handleAppDistribution)
 			protected.GET("/me", s.handleMe)
 			protected.GET("/me/user-prompts/evaluate", s.handleEvaluateUserPrompts)
 			protected.POST("/me/user-prompts/:id/events", s.handleUserPromptEvent)
@@ -441,7 +442,15 @@ func (s *Server) Router() *gin.Engine {
 			admin.POST("/users", s.handleAdminCreateUser)
 			admin.POST("/users/:id/token", s.handleAdminIssueUserToken)
 			admin.PUT("/users/:id", s.handleAdminUpdateUser)
+			admin.PUT("/users/:id/distribution-profile", s.handleAdminUserDistributionProfile)
 			admin.DELETE("/users/:id", s.handleAdminDeleteUser)
+			admin.GET("/distribution/profiles", s.handleAdminDistributionProfiles)
+			admin.POST("/distribution/profiles", s.handleAdminCreateDistributionProfile)
+			admin.PUT("/distribution/profiles/:id", s.handleAdminUpdateDistributionProfile)
+			admin.DELETE("/distribution/profiles/:id", s.handleAdminDeleteDistributionProfile)
+			admin.POST("/distribution/profiles/:id/test", s.handleAdminTestDistributionProfile)
+			admin.POST("/distribution/test", s.handleAdminTestDistributionDraft)
+			admin.GET("/distribution/audit", s.handleAdminDistributionAudit)
 			admin.GET("/users/:id/email", s.handleAdminGetUserEmail)
 			admin.DELETE("/users/:id/email", s.handleAdminDeleteUserEmail)
 			admin.GET("/migration", s.handleAdminMigrationGet)
@@ -9454,6 +9463,10 @@ func (s *Server) handleHealth(c *gin.Context) {
 		"ok":       true,
 		"version":  s.Config.AppVersion,
 		"provider": s.Notifier.Name(),
+		"publicConfig": gin.H{
+			"projectUrl":  strings.TrimSpace(s.Config.PublicProjectURL),
+			"downloadUrl": strings.TrimSpace(s.Config.PublicDownloadURL),
+		},
 		"features": gin.H{
 			"chatDelete":           true,
 			"commentDelete":        true,
@@ -12336,22 +12349,23 @@ func toAdminUser(
 	lastProfileOkAt *time.Time,
 ) gin.H {
 	out := gin.H{
-		"id":                 u.ID,
-		"username":           u.Username,
-		"isAdmin":            u.IsAdmin,
-		"createdAt":          u.CreatedAt,
-		"photoCount":         photoCount,
-		"deviceCount":        tokenCount,
-		"deviceNames":        deviceNames,
-		"deviceDetails":      deviceDetails,
-		"lastAppVersion":     strings.TrimSpace(lastAppVersion),
-		"lastError":          strings.TrimSpace(lastError),
-		"lastErrorAt":        lastErrorAt,
-		"lastProfileOkAt":    lastProfileOkAt,
-		"emailMasked":        maskEmailForAdmin(u.Email),
-		"emailVerifiedAt":    u.EmailVerifiedAt,
-		"emailPending":       strings.TrimSpace(u.PendingEmailNormalized) != "",
-		"pendingEmailMasked": maskEmailForAdmin(u.PendingEmail),
+		"id":                    u.ID,
+		"username":              u.Username,
+		"isAdmin":               u.IsAdmin,
+		"createdAt":             u.CreatedAt,
+		"photoCount":            photoCount,
+		"deviceCount":           tokenCount,
+		"deviceNames":           deviceNames,
+		"deviceDetails":         deviceDetails,
+		"lastAppVersion":        strings.TrimSpace(lastAppVersion),
+		"lastError":             strings.TrimSpace(lastError),
+		"lastErrorAt":           lastErrorAt,
+		"lastProfileOkAt":       lastProfileOkAt,
+		"distributionProfileId": u.DistributionProfileID,
+		"emailMasked":           maskEmailForAdmin(u.Email),
+		"emailVerifiedAt":       u.EmailVerifiedAt,
+		"emailPending":          strings.TrimSpace(u.PendingEmailNormalized) != "",
+		"pendingEmailMasked":    maskEmailForAdmin(u.PendingEmail),
 	}
 	if invitedByID != 0 {
 		out["invitedById"] = invitedByID

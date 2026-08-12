@@ -6,7 +6,8 @@ import kotlinx.coroutines.sync.Mutex
 data class AuthSessionSnapshot(
     val accessToken: String,
     val refreshToken: String,
-    val sessionId: String
+    val sessionId: String,
+    val userId: Long
 ) {
     fun authHeader(): String = "Bearer $accessToken"
     fun hasAccessToken(): Boolean = accessToken.isNotBlank()
@@ -32,6 +33,7 @@ object AuthSessionCoordinator {
     private const val KEY_ACCESS_TOKEN = "access_token"
     private const val KEY_REFRESH_TOKEN = "refresh_token"
     private const val KEY_SESSION_ID = "session_id"
+    private const val KEY_USER_ID = "distribution_user_id_v1"
 
     private val refreshCoordinator = RefreshLockCoordinator()
 
@@ -42,7 +44,8 @@ object AuthSessionCoordinator {
         return AuthSessionSnapshot(
             accessToken = access,
             refreshToken = prefs.getString(KEY_REFRESH_TOKEN, "")?.trim().orEmpty(),
-            sessionId = prefs.getString(KEY_SESSION_ID, "")?.trim().orEmpty()
+            sessionId = prefs.getString(KEY_SESSION_ID, "")?.trim().orEmpty(),
+            userId = prefs.getLong(KEY_USER_ID, 0L)
         )
     }
 
@@ -57,9 +60,18 @@ object AuthSessionCoordinator {
             .apply {
                 if (refresh.isNotBlank()) putString(KEY_REFRESH_TOKEN, refresh) else remove(KEY_REFRESH_TOKEN)
                 if (sessionId.isNotBlank()) putString(KEY_SESSION_ID, sessionId) else remove(KEY_SESSION_ID)
+                putLong(KEY_USER_ID, auth.user.id)
             }
             .commit()
         return snapshot(context)
+    }
+
+    fun persistUserId(context: Context, userId: Long) {
+        if (userId <= 0 || !snapshot(context).hasAccessToken()) return
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_USER_ID, userId)
+            .commit()
     }
 
     fun clear(context: Context) {
@@ -69,6 +81,7 @@ object AuthSessionCoordinator {
             .remove(KEY_ACCESS_TOKEN)
             .remove(KEY_REFRESH_TOKEN)
             .remove(KEY_SESSION_ID)
+            .remove(KEY_USER_ID)
             .commit()
     }
 

@@ -35,7 +35,10 @@ Precondition for workstations with the local Android toolchain:
 3. Run the Forgejo unsigned-candidate workflow for the exact commit.
 4. Verify provenance/SHA-256, then sign in the approval-gated signer.
 5. Verify the existing production certificate, push tag `vX.Y.Z`, and publish APK plus `changelog.json` as Forgejo release assets.
-6. Publish the external release index last.
+6. Generate the provider-neutral index with `versionCode`, package name and the verified public signing-certificate SHA-256 as documented in `docs/app-distribution.md`.
+7. Publish the external release index last and update it atomically.
+
+The current `android-candidate.yml` workflow stops at an unsigned candidate and provenance metadata. It does not invoke `build_release_index.py` and is not a signed index publisher. A future separately approved signing/release workflow must pass every mandatory generator argument documented in `docs/app-distribution.md` only after it has verified the signed APK; candidate metadata must never be published as the production index.
 
 ## Mandatory Acceptance Checks
 

@@ -20,13 +20,21 @@ func Connect(path string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
 
-	database, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	database, err := gorm.Open(sqlite.Open(sqliteDSN(path)), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
+	if err := database.AutoMigrate(&models.DistributionProfile{}); err != nil {
+		return nil, fmt.Errorf("automigrate distribution profiles: %w", err)
+	}
+	if err := ensureUserDistributionProfilePreflight(database); err != nil {
+		return nil, err
+	}
+
 	if err := database.AutoMigrate(
 		&models.User{},
+		&models.DistributionAuditEvent{},
 		&models.InviteCode{},
 		&models.DeviceToken{},
 		&models.UserSession{},
@@ -73,7 +81,17 @@ func Connect(path string) (*gorm.DB, error) {
 	); err != nil {
 		return nil, fmt.Errorf("automigrate: %w", err)
 	}
+	if err := verifyUserDistributionProfileSchema(database); err != nil {
+		return nil, err
+	}
+	if err := database.Exec(`CREATE INDEX IF NOT EXISTS idx_users_distribution_profile_id
+		ON users(distribution_profile_id)`).Error; err != nil {
+		return nil, fmt.Errorf("create distribution assignment index: %w", err)
+	}
 
+	if err := ensureDistributionSchema(database); err != nil {
+		return nil, err
+	}
 	if err := ensureDefaultSettings(database); err != nil {
 		return nil, err
 	}
@@ -112,6 +130,228 @@ func Connect(path string) (*gorm.DB, error) {
 	}
 
 	return database, nil
+}
+
+type sqliteForeignKey struct {
+	ID       int    `gorm:"column:id"`
+	Sequence int    `gorm:"column:seq"`
+	Table    string `gorm:"column:table"`
+	From     string `gorm:"column:from"`
+	To       string `gorm:"column:to"`
+	OnUpdate string `gorm:"column:on_update"`
+	OnDelete string `gorm:"column:on_delete"`
+}
+
+func ensureUserDistributionProfilePreflight(database *gorm.DB) error {
+	var usersTableCount int64
+	if err := database.Raw(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'users'`).
+		Scan(&usersTableCount).Error; err != nil {
+		return fmt.Errorf("inspect users table: %w", err)
+	}
+	if usersTableCount == 0 {
+		return nil
+	}
+
+	var columnCount int64
+	if err := database.Raw(`SELECT count(*) FROM pragma_table_info('users') WHERE name = 'distribution_profile_id'`).
+		Scan(&columnCount).Error; err != nil {
+		return fmt.Errorf("inspect users distribution assignment column: %w", err)
+	}
+	if columnCount > 1 {
+		return fmt.Errorf("users.distribution_profile_id schema is ambiguous; manual schema repair required before startup")
+	}
+	if columnCount == 0 {
+		if err := database.Exec(`ALTER TABLE users
+			ADD COLUMN distribution_profile_id INTEGER CONSTRAINT fk_users_distribution_profile REFERENCES distribution_profiles(id)
+			ON UPDATE CASCADE
+			ON DELETE RESTRICT`).Error; err != nil {
+			return fmt.Errorf("add users distribution assignment column: %w", err)
+		}
+	}
+
+	if err := verifyUserDistributionProfileSchema(database); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyUserDistributionProfileSchema(database *gorm.DB) error {
+	var columnCount int64
+	if err := database.Raw(`SELECT count(*) FROM pragma_table_info('users') WHERE name = 'distribution_profile_id'`).
+		Scan(&columnCount).Error; err != nil {
+		return fmt.Errorf("verify users distribution assignment column: %w", err)
+	}
+
+	var foreignKeys []sqliteForeignKey
+	if err := database.Raw(`PRAGMA foreign_key_list('users')`).Scan(&foreignKeys).Error; err != nil {
+		return fmt.Errorf("verify users distribution assignment foreign key: %w", err)
+	}
+	matchingForeignKeys := 0
+	validForeignKey := false
+	for _, foreignKey := range foreignKeys {
+		if !strings.EqualFold(foreignKey.From, "distribution_profile_id") {
+			continue
+		}
+		matchingForeignKeys++
+		validForeignKey = strings.EqualFold(foreignKey.Table, "distribution_profiles") &&
+			strings.EqualFold(foreignKey.To, "id") &&
+			strings.EqualFold(foreignKey.OnUpdate, "CASCADE") &&
+			strings.EqualFold(foreignKey.OnDelete, "RESTRICT")
+	}
+
+	var usersDDL string
+	if err := database.Raw(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'`).
+		Scan(&usersDDL).Error; err != nil {
+		return fmt.Errorf("verify users table definition: %w", err)
+	}
+	normalizedDDL := strings.ToLower(usersDDL)
+	hasNamedConstraint := false
+	for _, constraintToken := range []string{
+		"constraint fk_users_distribution_profile",
+		"constraint `fk_users_distribution_profile`",
+		`constraint "fk_users_distribution_profile"`,
+		"constraint [fk_users_distribution_profile]",
+	} {
+		if strings.Contains(normalizedDDL, constraintToken) {
+			hasNamedConstraint = true
+			break
+		}
+	}
+	if columnCount != 1 || matchingForeignKeys != 1 || !validForeignKey || !hasNamedConstraint {
+		return fmt.Errorf("users.distribution_profile_id must use named foreign key fk_users_distribution_profile referencing distribution_profiles(id) ON UPDATE CASCADE ON DELETE RESTRICT; manual schema repair required before startup (columns=%d matching_foreign_keys=%d valid_foreign_key=%t named_constraint=%t)",
+			columnCount, matchingForeignKeys, validForeignKey, hasNamedConstraint)
+	}
+	return nil
+}
+
+func sqliteDSN(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_foreign_keys=on"
+}
+
+const (
+	officialDistributionProjectURL        = "https://code.harzcloud.de/daily-harzcloud/daily"
+	officialDistributionReleaseIndexURL   = "https://releases.daily.harzcloud.de/index.json"
+	officialDistributionReleasePageURL    = "https://code.harzcloud.de/daily-harzcloud/daily/releases"
+	officialDistributionPackageName       = "com.selfhosted.daily"
+	officialDistributionSigningCertSHA256 = "72e05a43a7be5837d83c922ad3496782499547fd94a5efa431dec712df6d4138"
+)
+
+func ensureDistributionSchema(database *gorm.DB) error {
+	if err := database.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_distribution_profiles_single_default
+		ON distribution_profiles(is_default) WHERE is_default = 1`).Error; err != nil {
+		return fmt.Errorf("create distribution default index: %w", err)
+	}
+	if err := database.Exec(`CREATE TRIGGER IF NOT EXISTS trg_distribution_default_enabled_insert
+		BEFORE INSERT ON distribution_profiles
+		WHEN NEW.is_default = 1 AND NEW.enabled != 1
+		BEGIN SELECT RAISE(ABORT, 'default distribution profile must be enabled'); END`).Error; err != nil {
+		return fmt.Errorf("create distribution default insert trigger: %w", err)
+	}
+	if err := database.Exec(`CREATE TRIGGER IF NOT EXISTS trg_distribution_default_enabled_update
+		BEFORE UPDATE OF is_default, enabled ON distribution_profiles
+		WHEN NEW.is_default = 1 AND NEW.enabled != 1
+		BEGIN SELECT RAISE(ABORT, 'default distribution profile must be enabled'); END`).Error; err != nil {
+		return fmt.Errorf("create distribution default update trigger: %w", err)
+	}
+	if err := database.Exec(`CREATE TRIGGER IF NOT EXISTS trg_distribution_audit_append_only_update
+		BEFORE UPDATE ON distribution_profile_audit
+		BEGIN SELECT RAISE(ABORT, 'distribution audit is append-only'); END`).Error; err != nil {
+		return fmt.Errorf("create distribution audit update trigger: %w", err)
+	}
+	if err := database.Exec(`CREATE TRIGGER IF NOT EXISTS trg_distribution_audit_append_only_delete
+		BEFORE DELETE ON distribution_profile_audit
+		BEGIN SELECT RAISE(ABORT, 'distribution audit is append-only'); END`).Error; err != nil {
+		return fmt.Errorf("create distribution audit delete trigger: %w", err)
+	}
+	if err := ensureDefaultDistributionProfile(database); err != nil {
+		return fmt.Errorf("ensure default distribution profile: %w", err)
+	}
+	return nil
+}
+
+func ensureDefaultDistributionProfile(database *gorm.DB) error {
+	return database.Transaction(func(tx *gorm.DB) error {
+		var defaults []models.DistributionProfile
+		if err := tx.Where("is_default = ?", true).Find(&defaults).Error; err != nil {
+			return err
+		}
+		if len(defaults) > 1 {
+			return fmt.Errorf("distribution invariant violated: %d default profiles", len(defaults))
+		}
+		if len(defaults) == 1 {
+			if defaults[0].Enabled {
+				return nil
+			}
+			return tx.Model(&models.DistributionProfile{}).
+				Where("id = ?", defaults[0].ID).
+				Update("enabled", true).Error
+		}
+
+		var official models.DistributionProfile
+		err := tx.Where("release_index_url = ?", officialDistributionReleaseIndexURL).First(&official).Error
+		if err == nil {
+			return tx.Model(&models.DistributionProfile{}).
+				Where("id = ?", official.ID).
+				Updates(map[string]any{"enabled": true, "is_default": true}).Error
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		official = models.DistributionProfile{
+			Name:                      "Harzcloud Stable",
+			Enabled:                   true,
+			IsDefault:                 true,
+			SourceMode:                "manifest",
+			Channel:                   "stable",
+			ProjectURL:                officialDistributionProjectURL,
+			ReleaseIndexURL:           officialDistributionReleaseIndexURL,
+			ReleasePageURL:            officialDistributionReleasePageURL,
+			ExpectedPackageName:       officialDistributionPackageName,
+			ExpectedSigningCertSHA256: officialDistributionSigningCertSHA256,
+		}
+		return tx.Create(&official).Error
+	})
+}
+
+func SetDefaultDistributionProfile(database *gorm.DB, profileID uint, incrementTargetRevision bool) error {
+	if profileID == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return database.Transaction(func(tx *gorm.DB) error {
+		var next models.DistributionProfile
+		if err := tx.First(&next, profileID).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.DistributionProfile{}).
+			Where("is_default = ? AND id <> ?", true, profileID).
+			Updates(map[string]any{"is_default": false, "revision": gorm.Expr("revision + 1")}).Error; err != nil {
+			return err
+		}
+		targetUpdates := map[string]any{"enabled": true, "is_default": true}
+		if incrementTargetRevision {
+			targetUpdates["revision"] = gorm.Expr("revision + 1")
+		}
+		if err := tx.Model(&models.DistributionProfile{}).
+			Where("id = ?", profileID).
+			Updates(targetUpdates).Error; err != nil {
+			return err
+		}
+		var activeDefaults int64
+		if err := tx.Model(&models.DistributionProfile{}).
+			Where("is_default = ? AND enabled = ?", true, true).
+			Count(&activeDefaults).Error; err != nil {
+			return err
+		}
+		if activeDefaults != 1 {
+			return fmt.Errorf("distribution invariant violated: active defaults=%d", activeDefaults)
+		}
+		return nil
+	})
 }
 
 func ensureEmailSchema(database *gorm.DB) error {
@@ -165,6 +405,7 @@ func configureSQLite(database *gorm.DB) error {
 
 func applySQLitePragmas(sqlDB *sql.DB) error {
 	pragmas := []string{
+		"PRAGMA foreign_keys=ON;",
 		"PRAGMA journal_mode=WAL;",
 		"PRAGMA synchronous=NORMAL;",
 		"PRAGMA temp_store=MEMORY;",

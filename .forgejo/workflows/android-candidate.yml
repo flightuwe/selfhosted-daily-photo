@@ -16,6 +16,10 @@ jobs:
       DAILY_API_BASE_URL: https://daily.harzcloud.de/api/
       DAILY_APP_LINK_HOST_PRIMARY: daily.harzcloud.de
       DAILY_APP_LINK_HOST_SECONDARY: daily.broutschek.de
+      DAILY_RELEASE_APK_URL_TEMPLATE: https://releases.daily.harzcloud.de/apk/{tag}/app-release.apk
+      DAILY_RELEASE_CHANGELOG_URL_TEMPLATE: https://releases.daily.harzcloud.de/apk/{tag}/changelog.json
+      DAILY_RELEASE_PAGE_URL_TEMPLATE: https://code.harzcloud.de/daily-harzcloud/daily/releases/tag/{tag}
+      DAILY_RELEASE_CHANNEL: stable
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
         with:
@@ -31,8 +35,10 @@ jobs:
           mkdir -p dist
           cp android/app/build/outputs/apk/release/*-unsigned.apk dist/app-release-unsigned.apk
           sha256sum dist/app-release-unsigned.apk > dist/SHA256SUMS
-          printf '{"commit":"%s","ref":"%s","builtAt":"%s","signed":false}\n' \
-            "$GITHUB_SHA" "$GITHUB_REF" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/provenance.json
+          printf '{"commit":"%s","ref":"%s","builtAt":"%s","signed":false,"releaseMetadata":{"apkUrlTemplate":"%s","changelogUrlTemplate":"%s","releaseUrlTemplate":"%s","channel":"%s"}}\n' \
+            "$GITHUB_SHA" "$GITHUB_REF" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "$DAILY_RELEASE_APK_URL_TEMPLATE" "$DAILY_RELEASE_CHANGELOG_URL_TEMPLATE" \
+            "$DAILY_RELEASE_PAGE_URL_TEMPLATE" "$DAILY_RELEASE_CHANNEL" > dist/provenance.json
       - name: Upload unsigned candidate
         # Forgejo 11 implements the v3 artifact protocol. GitHub's v4 action
         # intentionally rejects non-GitHub servers, so use Forgejo's mirror.

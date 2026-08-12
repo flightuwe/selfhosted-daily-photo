@@ -18,9 +18,18 @@ class UpdateCheckWorker(
         val prefs = applicationContext.getSharedPreferences("app", Context.MODE_PRIVATE)
         val enabled = prefs.getBoolean(PREF_AUTO_UPDATE_ENABLED, false)
         if (!enabled) return Result.success()
+        val session = AuthSessionCoordinator.snapshot(applicationContext)
+        if (!session.hasAccessToken() || session.userId <= 0) {
+            UpdateCheckScheduler.scheduleNext(applicationContext, delayMinutes = 10)
+            return Result.success()
+        }
 
         runCatching {
-            val update = UpdateReleaseChecker.checkForUpdate(BuildConfig.VERSION_NAME, allowNetwork = true)
+            val repo = AppRepo(
+                applicationContext,
+                buildStandardHttpClient(applicationContext, usageContext = "update_worker")
+            )
+            val update = repo.checkForUpdate(BuildConfig.VERSION_NAME)
             if (update != null) {
                 val lastNotified = prefs.getString(PREF_LAST_NOTIFIED_VERSION, "") ?: ""
                 if (lastNotified != update.latestVersion) {

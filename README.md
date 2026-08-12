@@ -24,6 +24,7 @@ Private, selfhosted Daily-Moment App (Android + Admin Web + Go Backend) fuer kle
 - `admin/` React/Vite Admin-Panel
 - `android/` Kotlin/Compose App
 - `deploy/` Compose/Portainer/Nginx Vorlagen
+- Providerneutrale App-Verteilung mit server-/nutzerspezifischen Android-Updateprofilen
 
 Datenhaltung:
 - DB: `backend-data/app.db`
@@ -132,6 +133,8 @@ Ein veroeffentlichbares Update muss weiterhin mit der bestehenden Produktionside
 5. Signatur-Fingerprint und SHA-256 pruefen; danach Tag und Forgejo-Release mit `app-release.apk` und `changelog.json` veroeffentlichen.
 6. Den Release-Index unter `releases.daily.harzcloud.de` zuletzt atomar aktualisieren.
 
+Format, Admin-Konfiguration und APK-Prüfkette: `docs/app-distribution.md`.
+
 Hinweis:
 - Releases verwenden semantische Tags `vX.Y.Z`.
 - Neue Release-Notes bleiben aus Kompatibilitaetsgruenden unter `.github/release-notes/vX.Y.Z.json`; der Verzeichnisname bezeichnet kein aktives Hosting.
@@ -198,6 +201,10 @@ Siehe `backend/.env.example`:
 - `FCM_ENABLED`
 - `FCM_PROJECT_ID`
 - `FCM_SERVICE_ACCOUNT_FILE`
+- `ALLOW_INSECURE_DISTRIBUTION_URLS`
+- `DISTRIBUTION_PRIVATE_HOST_ALLOWLIST`
+- `DISTRIBUTION_MANIFEST_MAX_BYTES`
+- `DISTRIBUTION_APK_MAX_BYTES`
 
 ## Troubleshooting
 

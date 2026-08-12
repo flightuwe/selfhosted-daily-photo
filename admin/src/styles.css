@@ -178,6 +178,13 @@ button:active {
   transform: translateY(0);
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+  box-shadow: none;
+}
+
 button.accent {
   background: var(--btn-accent);
 }
@@ -383,6 +390,104 @@ button.compact {
 
 .table tbody tr:nth-child(2n) {
   background: color-mix(in srgb, var(--soft-card) 72%, transparent);
+}
+
+.distribution-panel {
+  gap: 1rem;
+}
+
+.distribution-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.32fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.distribution-profile-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.distribution-profile-button {
+  display: grid;
+  gap: 0.22rem;
+  text-align: left;
+  background: var(--tab-bg);
+  color: var(--tab-fg);
+  border: 1px solid var(--table-border);
+}
+
+.distribution-profile-button.active {
+  background: var(--tab-active);
+  color: #fff;
+}
+
+.distribution-profile-button span {
+  font-size: 0.78rem;
+  opacity: 0.84;
+}
+
+.distribution-editor,
+.distribution-preview {
+  padding: 1rem;
+  border: 1px solid var(--table-border);
+  border-radius: 14px;
+  background: var(--soft-card);
+}
+
+.distribution-presets {
+  justify-content: flex-start;
+}
+
+.distribution-checks {
+  justify-content: flex-start;
+  align-content: center;
+}
+
+.distribution-wide {
+  grid-column: 1 / -1;
+}
+
+.distribution-warnings {
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, #d97706 55%, var(--table-border));
+  border-radius: 12px;
+  background: color-mix(in srgb, #f59e0b 12%, var(--soft-card));
+}
+
+.distribution-warnings p {
+  margin: 0.2rem 0;
+}
+
+.distribution-test-result {
+  display: flex;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  padding: 0.72rem;
+  border-radius: 12px;
+  border: 1px solid var(--table-border);
+}
+
+.distribution-test-result.ok {
+  background: color-mix(in srgb, #16a34a 12%, var(--soft-card));
+}
+
+.distribution-test-result.failed {
+  background: color-mix(in srgb, #dc2626 12%, var(--soft-card));
+}
+
+.distribution-preview pre {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.distribution-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .user-admin-toolbar {
@@ -1101,6 +1206,16 @@ button.compact {
     display: block;
     overflow-x: auto;
     white-space: nowrap;
+  }
+}
+
+@media (max-width: 900px) {
+  .distribution-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .distribution-profile-list {
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   }
 }
 

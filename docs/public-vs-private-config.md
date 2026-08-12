@@ -52,20 +52,26 @@ Use this checklist before every real deploy or release.
 - `ANDROID_APP_PACKAGE` and `ANDROID_APP_CERT_SHA256`: values served via `assetlinks.json`.
 - Configure/test Posteo in Admin → Konfiguration → E-Mail before enabling delivery.
 
+10. App distribution safety controls
+- `ALLOW_INSECURE_DISTRIBUTION_URLS=false` unless an operator has approved an HTTP-only target.
+- `DISTRIBUTION_PRIVATE_HOST_ALLOWLIST` remains empty unless exact private hosts/CIDRs are required.
+- `DISTRIBUTION_MANIFEST_MAX_BYTES` and `DISTRIBUTION_APK_MAX_BYTES` remain bounded.
+- These values are deployment policy, not Admin UI toggles.
+
 ## Android Release-specific Checks
 
-10. Android repository variables
+11. Android repository variables
 - `DAILY_API_BASE_URL`
 - `DAILY_APP_LINK_HOST_PRIMARY`
 - `DAILY_APP_LINK_HOST_SECONDARY`
 - Defaults in the public repository remain non-production placeholders.
 
-11. `android/app/build.gradle.kts`
+12. `android/app/build.gradle.kts`
 - `versionName` matches release tag (`vX.Y.Z` <-> `X.Y.Z`).
 - `versionCode` increases vs previous release.
 - `BuildConfig.API_BASE_URL` points to intended environment for this release track.
 
-12. Protected Android release-signing secrets
+13. Protected Android release-signing secrets
 - `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEYSTORE_PASSWORD`
@@ -74,17 +80,17 @@ Use this checklist before every real deploy or release.
 
 ## Post-Deploy Verification (Minimum)
 
-13. Health
+14. Health
 - `GET /api/health` returns `ok: true`.
 
-14. Auth and admin
+15. Auth and admin
 - Admin login works.
 - Token flows are healthy.
 
-15. Storage paths
+16. Storage paths
 - Upload succeeds and file is retrievable.
 
-16. Runtime controls
+17. Runtime controls
 - Trigger/scheduler runtime endpoints are healthy.
 - No abnormal lock/duplicate trend.
 

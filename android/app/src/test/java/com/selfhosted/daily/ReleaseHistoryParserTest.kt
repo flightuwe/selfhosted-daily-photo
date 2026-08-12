@@ -12,6 +12,7 @@ class ReleaseHistoryParserTest {
         assertFalse(ReleaseHistoryParser.isStableVersion("v0.8.16-beta"))
         assertTrue(ReleaseHistoryParser.compareVersions("0.8.10", "0.8.9") > 0)
         assertTrue(ReleaseHistoryParser.compareVersions("0.9.0", "0.8.99") > 0)
+        assertTrue(ReleaseHistoryParser.compareVersions("0.9.1-beta.1", "0.9.0") > 0)
     }
 
     @Test

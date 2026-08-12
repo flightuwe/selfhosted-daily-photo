@@ -1308,13 +1308,14 @@ data class SpecialMomentStatus(
     val nextAllowedAt: String? = null,
     val lastRequestedAt: String? = null
 )
-data class UpdateInfo(val latestVersion: String, val releaseUrl: String, val apkUrl: String?)
 data class HealthFeatures(val chatDelete: Boolean = false, val commentDelete: Boolean = false)
 data class MediaCapabilities(val renditions: Boolean = false, val formats: List<String> = emptyList(), val avifEnabled: Boolean = false)
+data class PublicDailyConfig(val projectUrl: String = "", val downloadUrl: String = "")
 data class HealthResponse(
     val ok: Boolean,
     val version: String = "unknown",
     val provider: String = "unknown",
+    val publicConfig: PublicDailyConfig = PublicDailyConfig(),
     val features: HealthFeatures = HealthFeatures(),
     val mediaCapabilities: MediaCapabilities = MediaCapabilities()
 )
@@ -1640,6 +1641,9 @@ private fun extractJsonIntField(raw: String, field: String): Int? {
 interface Api {
     @GET("health")
     suspend fun health(): HealthResponse
+
+    @GET("app-distribution")
+    suspend fun appDistribution(@Header("Authorization") token: String): DistributionConfigResponse
 
     @GET("migration/info")
     suspend fun migrationInfo(): MigrationInfoResponse
@@ -2096,7 +2100,17 @@ class AppRepo(
     }
     private val prefs = context.getSharedPreferences("app", Context.MODE_PRIVATE)
     private val gson = Gson()
-    private val releaseHistory by lazy { ReleaseHistoryRepository(context) }
+    private val distributionConfig by lazy {
+        DistributionConfigRepository(
+            context = context,
+            fetcher = {
+                authorizedCall("/api/app-distribution") { token -> api.appDistribution(token) }
+            }
+        )
+    }
+    private val distributionReleases by lazy { DistributionReleaseSource(context, httpClient) }
+    private val updateDownloader by lazy { UpdateApkDownloader(File(context.cacheDir, "updates"), httpClient) }
+    private val apkIntegrityVerifier by lazy { ApkIntegrityVerifier(context) }
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(context) }
     @Volatile
     private var api: Api = buildApiService(resolveApiBaseUrl(context), httpClient)
@@ -3465,6 +3479,7 @@ class AppRepo(
     suspend fun probeHealth(baseUrl: String): HealthResponse =
         buildApiService(baseUrl, httpClient).health()
     suspend fun me(): MeResponse = authorizedCall("/api/me") { token -> api.me(token) }
+        .also { response -> AuthSessionCoordinator.persistUserId(context, response.user.id) }
     suspend fun evaluateUserPrompts(appVersion: String): UserPromptEvaluationResponse =
         authorizedCall("/api/me/user-prompts/evaluate") { token -> api.evaluateUserPrompts(token, appVersion) }
 
@@ -4569,39 +4584,75 @@ class AppRepo(
         )
     }
 
-    suspend fun checkForUpdate(currentVersion: String): UpdateInfo? =
-        UpdateReleaseChecker.checkForUpdate(currentVersion, allowNetwork = !OfflineModeManager.isEnabled(context))
+    suspend fun checkForUpdate(currentVersion: String, currentVersionCode: Long = BuildConfig.VERSION_CODE.toLong()): UpdateInfo? {
+        val allowNetwork = !OfflineModeManager.isEnabled(context)
+        val resolved = distributionConfig.resolve(allowNetwork) ?: return null
+        if (!resolved.config.enabled) return null
+        val releases = distributionReleases.releases(resolved, allowNetwork).releases
+        return UpdateReleaseChecker.findUpdate(currentVersion, currentVersionCode, releases, resolved.config.minSupportedVersionCode)
+    }
 
-    suspend fun changelogLines(currentVersion: String): List<String> =
-        UpdateReleaseChecker.changelogLinesForVersion(currentVersion, allowNetwork = !OfflineModeManager.isEnabled(context))
+    suspend fun inviteDownloadUrl(): String? {
+        val offline = OfflineModeManager.isEnabled(context)
+        val resolved = distributionConfig.resolve(allowNetwork = !offline)
+        val session = AuthSessionCoordinator.snapshot(context)
+        if (!session.hasAccessToken() || session.userId <= 0) return null
+        val publicConfig = if (offline) null else runCatching { health().publicConfig }.getOrNull()
+        return InviteDownloadLinkResolver.resolve(resolved, publicConfig, resolveApiBaseUrl(context), offline)
+    }
+
+    suspend fun changelogLines(currentVersion: String): List<String> {
+        val allowNetwork = !OfflineModeManager.isEnabled(context)
+        val resolved = distributionConfig.resolve(allowNetwork) ?: return emptyList()
+        val releases = distributionReleases.releases(resolved, allowNetwork, forHistory = true).releases
+        return UpdateReleaseChecker.changelogLinesForVersion(currentVersion, releases)
+    }
 
     suspend fun changelogHistory(
         forceRefresh: Boolean = false,
         requiredVersion: String? = null
-    ): ChangelogHistoryResult = releaseHistory.history(
-        allowNetwork = !OfflineModeManager.isEnabled(context),
-        forceRefresh = forceRefresh,
-        requiredVersion = requiredVersion
-    )
+    ): ChangelogHistoryResult {
+        val allowNetwork = !OfflineModeManager.isEnabled(context)
+        val resolved = distributionConfig.resolve(allowNetwork)
+            ?: return ChangelogHistoryResult(emptyList(), ChangelogHistorySource.UNAVAILABLE)
+        val result = distributionReleases.releases(resolved, allowNetwork, forceRefresh, forHistory = true)
+        val entries = result.releases.map { release ->
+            ChangelogEntry(
+                version = release.version,
+                title = release.title.ifBlank { "Daily ${release.version}" },
+                highlights = release.highlights.ifEmpty { listOf("Keine Release-Details hinterlegt.") },
+                details = release.details,
+                releasedAt = release.releasedAt,
+                releaseUrl = release.releaseUrl
+            )
+        }
+        val required = requiredVersion?.trim()?.removePrefix("v").orEmpty()
+        val selected = if (required.isBlank() || entries.any { it.version == required }) entries else entries
+        return ChangelogHistoryResult(selected, result.source, result.cachedAt)
+    }
 
-    fun downloadLatestApk(update: UpdateInfo): Long {
+    suspend fun downloadLatestApk(update: UpdateInfo): File {
         OfflineModeManager.requireOnline(context)
-        val fallbackVersion = update.latestVersion.trim().removePrefix("v").ifBlank { "latest" }
-        val fallbackUrl = "https://releases.daily.harzcloud.de/apk/v$fallbackVersion/app-release.apk"
-        val apkUrl = update.apkUrl?.trim().takeUnless { it.isNullOrBlank() } ?: fallbackUrl
-        val safeVersion = update.latestVersion.trim().ifBlank { "latest" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
-        val request = DownloadManager.Request(Uri.parse(apkUrl))
-            .setTitle("Daily Update $safeVersion")
-            .setDescription("Neue APK wird heruntergeladen")
-            .setMimeType("application/vnd.android.package-archive")
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "daily-v$safeVersion.apk")
-            .setAllowedOverMetered(true)
-            .setAllowedOverRoaming(true)
-        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val id = dm.enqueue(request)
-        markUpdateInstallPending(update.latestVersion)
-        return id
+        val pending = updateDownloader.download(update)
+        val verifiedFile = try {
+            apkIntegrityVerifier.verify(pending.temporaryFile, update)
+            updateDownloader.finalizeVerified(pending, update.latestVersion)
+        } catch (error: Throwable) {
+            updateDownloader.discard(pending)
+            throw error
+        }
+        try {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", verifiedFile)
+            val installer = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(installer)
+            markUpdateInstallPending(update.latestVersion)
+        } catch (error: Throwable) {
+            verifiedFile.delete()
+            throw error
+        }
+        return verifiedFile
     }
 
     fun downloadPhotoToDownloads(photoUrl: String): Long {
@@ -11093,7 +11144,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         latestUpdateInfo = update,
                         updateCheckInFlight = false,
                         updateError = null,
-                        message = if (silent) state.message else "Neue Version ${update.latestVersion} gefunden"
+                        message = if (silent) state.message else if (update.required) {
+                            "Erforderliches Update ${update.latestVersion} verfuegbar"
+                        } else {
+                            "Neue Version ${update.latestVersion} gefunden"
+                        }
                     )
                 } else {
                     state.copy(
@@ -11394,14 +11449,34 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
             state = state.copy(message = "Keine Update-Information verfuegbar")
             return
         }
-        runCatching { repo.downloadLatestApk(update) }
-            .onSuccess {
-                state = state.copy(
-                    message = "Download gestartet: ${update.latestVersion}",
-                    updateAvailable = false
-                )
-            }
-            .onFailure { state = state.copy(message = apiError(it, "Download konnte nicht gestartet werden")) }
+        state = state.copy(updateInfo = update)
+    }
+
+    suspend fun inviteDownloadUrl(): String? = repo.inviteDownloadUrl()
+
+    fun confirmLatestUpdateDownload() {
+        val update = state.latestUpdateInfo ?: state.updateInfo
+        if (update == null) {
+            state = state.copy(message = "Keine Update-Information verfuegbar")
+            return
+        }
+        state = state.copy(updateInfo = null, loading = true, message = "Update wird sicher geladen und geprueft …")
+        viewModelScope.launch {
+            runCatching { repo.downloadLatestApk(update) }
+                .onSuccess {
+                    state = state.copy(
+                        loading = false,
+                        message = "Update ${update.latestVersion} geprueft. Android-Installer wurde geoeffnet.",
+                        updateAvailable = false
+                    )
+                }
+                .onFailure {
+                    state = state.copy(
+                        loading = false,
+                        message = apiError(it, "Update konnte nicht sicher geladen oder geprueft werden")
+                    )
+                }
+        }
     }
 
     suspend fun showChangelogDialog() {
@@ -12650,6 +12725,10 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         }
 
         when {
+            action == "open_update" || type == "app_update" -> {
+                checkForUpdate(silent = false)
+            }
+
             action == "open_chat" || type == "chat" || type == "chat_message" || type == "invite_registered" || type == "invite_registration" -> {
                 setTab(AppTab.CHAT)
             }
@@ -13448,15 +13527,20 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             onDismissRequest = { vm.dismissUpdateDialog() },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.dismissUpdateDialog()
-                    vm.downloadLatestUpdateFromBadge()
-                }) { Text("Download") }
+                    vm.confirmLatestUpdateDownload()
+                }) { Text("Sicher laden & installieren") }
             },
             dismissButton = {
                 TextButton(onClick = { vm.dismissUpdateDialog() }) { Text("Spaeter") }
             },
-            title = { Text("Update verfuegbar") },
-            text = { Text("Neue Version ${update.latestVersion}") }
+            title = { Text(if (update.required) "Update erforderlich" else "Update verfuegbar") },
+            text = {
+                Text(
+                    (if (update.required) "Diese Version wird nicht mehr unterstuetzt. Das Update startet erst nach deiner Bestaetigung."
+                    else "Neue Version ${update.latestVersion}") +
+                        "\nZielhost: ${update.targetHost.ifBlank { "unbekannt" }}"
+                )
+            }
         )
     }
 
@@ -13499,9 +13583,11 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                 TextButton(onClick = { vm.closeChangelogHistory() }) { Text("Zurueck") }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://code.harzcloud.de/daily-harzcloud/daily/releases")))
-                }) { Text("Releases") }
+                state.changelogHistoryEntries.firstOrNull()?.releaseUrl?.trim()?.takeIf { it.isNotBlank() }?.let { releaseUrl ->
+                    TextButton(onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(releaseUrl)))
+                    }) { Text("Releases") }
+                }
             },
             title = { Text("Gesamter Changelog") },
             text = {
@@ -14551,20 +14637,26 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onShareInviteCode = {
                         val code = state.myInviteCode.trim()
                         if (code.isNotBlank()) {
-                            val inviter = state.user?.username?.ifBlank { "ein Mitglied" } ?: "ein Mitglied"
-                            val apkUrl = "https://daily.harzcloud.de/#download"
-                            val shortGuide = "1) APK installieren  2) App oeffnen -> Registrieren  3) Invite-Code eingeben"
-                            val text = buildString {
-                                appendLine("Daily Invite von @$inviter")
-                                appendLine("Invite-Code: $code")
-                                appendLine(shortGuide)
-                                append("Neueste APK: $apkUrl")
+                            scope.launch {
+                                val downloadUrl = vm.inviteDownloadUrl()
+                                if (downloadUrl == null) {
+                                    vm.setMessage("Kein sicherer Downloadlink fuer diese Instanz verfuegbar.")
+                                    return@launch
+                                }
+                                val inviter = state.user?.username?.ifBlank { "ein Mitglied" } ?: "ein Mitglied"
+                                val shortGuide = "1) APK installieren  2) App oeffnen -> Registrieren  3) Invite-Code eingeben"
+                                val text = buildString {
+                                    appendLine("Daily Invite von @$inviter")
+                                    appendLine("Invite-Code: $code")
+                                    appendLine(shortGuide)
+                                    append("Download: $downloadUrl")
+                                }
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, text)
+                                }
+                                context.startActivity(Intent.createChooser(send, "Invite-Code teilen"))
                             }
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, text)
-                            }
-                            context.startActivity(Intent.createChooser(send, "Invite-Code teilen"))
                         }
                     },
                     onLogout = { vm.logout() },
@@ -18540,7 +18632,7 @@ private fun buildLocalAppUpdateTimelineItem(
         body = body,
         occurredAt = occurredAt,
         unread = unread,
-        targetUrl = "https://code.harzcloud.de/daily-harzcloud/daily/releases/tag/v$version"
+        targetUrl = ""
     )
 }
 
