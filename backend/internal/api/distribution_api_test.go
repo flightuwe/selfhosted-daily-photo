@@ -167,6 +167,102 @@ func TestDistributionClientEndpointNeverFetchesConfiguredSource(t *testing.T) {
 	}
 }
 
+func TestDistributionProfileCreatePersistsExplicitEnabledValue(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	router := server.Router()
+	adminToken := distributionToken(t, server, admin)
+	validHash := strings.Repeat("ab", 32)
+	tests := []struct {
+		name        string
+		payload     map[string]any
+		wantEnabled bool
+	}{
+		{
+			name: "disabled manifest",
+			payload: map[string]any{
+				"name": "Disabled manifest", "enabled": false, "isDefault": false,
+				"sourceMode": "manifest", "channel": "stable", "releaseIndexUrl": "https://example.org/index.json",
+				"expectedPackageName": "com.selfhosted.daily",
+			},
+		},
+		{
+			name: "disabled direct APK",
+			payload: map[string]any{
+				"name": "Disabled direct", "enabled": false, "isDefault": false,
+				"sourceMode": "direct", "channel": "stable", "directApkUrl": "https://example.org/app.apk",
+				"directApkVersionName": "1.2.3", "directApkVersionCode": 123, "directApkSha256": validHash,
+				"expectedPackageName": "com.selfhosted.daily",
+			},
+		},
+		{
+			name: "disabled mode overrides contradictory input",
+			payload: map[string]any{
+				"name": "Disabled mode", "enabled": true, "isDefault": false,
+				"sourceMode": "disabled", "channel": "stable", "expectedPackageName": "com.selfhosted.daily",
+			},
+		},
+		{
+			name: "enabled non-default",
+			payload: map[string]any{
+				"name": "Enabled manifest", "enabled": true, "isDefault": false,
+				"sourceMode": "manifest", "channel": "stable", "releaseIndexUrl": "https://example.org/index.json",
+				"expectedPackageName": "com.selfhosted.daily",
+			},
+			wantEnabled: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			response := distributionRequest(t, router, http.MethodPost, "/api/admin/distribution/profiles", adminToken, tc.payload)
+			if response.Code != http.StatusCreated {
+				t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+			}
+			var created struct {
+				Profile       models.DistributionProfile `json:"profile"`
+				ClientPreview map[string]any             `json:"clientPreview"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+				t.Fatal(err)
+			}
+			var stored models.DistributionProfile
+			if err := server.DB.First(&stored, created.Profile.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if created.Profile.Enabled != tc.wantEnabled || stored.Enabled != tc.wantEnabled {
+				t.Fatalf("enabled response=%v stored=%v want=%v", created.Profile.Enabled, stored.Enabled, tc.wantEnabled)
+			}
+			if got, ok := created.ClientPreview["enabled"].(bool); !ok || got != tc.wantEnabled {
+				t.Fatalf("client preview enabled=%v want=%v", created.ClientPreview["enabled"], tc.wantEnabled)
+			}
+			if stored.IsDefault {
+				t.Fatalf("non-default profile persisted as default: %+v", stored)
+			}
+		})
+	}
+}
+
+func TestDistributionProfileInsertSQLIncludesFalseEnabled(t *testing.T) {
+	server, _, _ := newDistributionAPITestServer(t)
+	profile := models.DistributionProfile{
+		Name: "Dry run", Enabled: false, IsDefault: true, SourceMode: "manifest", Channel: "stable",
+		AllowPrerelease:     true,
+		ExpectedPackageName: "com.selfhosted.daily",
+	}
+	result := insertDistributionProfile(server.DB.Session(&gorm.Session{DryRun: true}), &profile)
+	if result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	sql := strings.ToLower(result.Statement.SQL.String())
+	if !strings.Contains(sql, "enabled") || !strings.Contains(sql, "insert") {
+		t.Fatalf("INSERT does not explicitly include enabled: %s", sql)
+	}
+	explainedSQL := strings.ToLower(server.DB.Dialector.Explain(result.Statement.SQL.String(), result.Statement.Vars...))
+	if !strings.Contains(explainedSQL, "false") {
+		t.Fatalf("INSERT does not bind enabled=false: %s", explainedSQL)
+	}
+}
+
 func TestDistributionDefaultSwitchAndInvariantThroughAPI(t *testing.T) {
 	server, admin, _ := newDistributionAPITestServer(t)
 	router := server.Router()
@@ -192,6 +288,13 @@ func TestDistributionDefaultSwitchAndInvariantThroughAPI(t *testing.T) {
 	}
 	if defaults != 1 || !created.Profile.IsDefault {
 		t.Fatalf("default count=%d profile=%+v", defaults, created.Profile)
+	}
+	var storedDefault models.DistributionProfile
+	if err := server.DB.First(&storedDefault, created.Profile.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !storedDefault.Enabled || !storedDefault.IsDefault {
+		t.Fatalf("new default was not persisted enabled and default: %+v", storedDefault)
 	}
 	update := distributionRequest(t, router, http.MethodPut, "/api/admin/distribution/profiles/"+strconvUint(created.Profile.ID), adminToken, map[string]any{
 		"name": created.Profile.Name, "enabled": false, "isDefault": false,
@@ -246,6 +349,89 @@ func TestDistributionMutationRollsBackWhenAuditInsertFails(t *testing.T) {
 	}
 	if profiles != 0 {
 		t.Fatalf("profile mutation committed without audit: count=%d", profiles)
+	}
+}
+
+func TestDistributionCreateRollsBackWhenDefaultSwitchFails(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	if err := server.DB.Exec(`CREATE TRIGGER fail_distribution_default_switch
+		BEFORE UPDATE OF is_default ON distribution_profiles
+		WHEN OLD.is_default = 1 AND NEW.is_default = 0
+		BEGIN SELECT RAISE(ABORT, 'injected default switch failure'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	response := distributionRequest(t, server.Router(), http.MethodPost, "/api/admin/distribution/profiles", distributionToken(t, server, admin), map[string]any{
+		"name": "Must roll back default", "enabled": true, "isDefault": true,
+		"sourceMode": "manifest", "channel": "stable", "releaseIndexUrl": "https://example.org/index.json",
+		"expectedPackageName": "com.selfhosted.daily",
+	})
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("default switch failure status=%d body=%s", response.Code, response.Body.String())
+	}
+	var profiles int64
+	if err := server.DB.Model(&models.DistributionProfile{}).Where("name = ?", "Must roll back default").Count(&profiles).Error; err != nil {
+		t.Fatal(err)
+	}
+	if profiles != 0 {
+		t.Fatalf("profile remained after failed default switch: count=%d", profiles)
+	}
+	var defaults int64
+	if err := server.DB.Model(&models.DistributionProfile{}).Where("is_default = ? AND enabled = ?", true, true).Count(&defaults).Error; err != nil {
+		t.Fatal(err)
+	}
+	if defaults != 1 {
+		t.Fatalf("default invariant changed after rollback: %d", defaults)
+	}
+}
+
+func TestDistributionQueryURLsAreNeverPersisted(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	router := server.Router()
+	adminToken := distributionToken(t, server, admin)
+	createRejected := distributionRequest(t, router, http.MethodPost, "/api/admin/distribution/profiles", adminToken, map[string]any{
+		"name": "Rejected query create", "enabled": true, "isDefault": false,
+		"sourceMode": "manifest", "channel": "stable", "releaseIndexUrl": "https://example.org/index.json?api_key=placeholder",
+		"expectedPackageName": "com.selfhosted.daily",
+	})
+	if createRejected.Code != http.StatusBadRequest || !strings.Contains(createRejected.Body.String(), "url_query_not_allowed") {
+		t.Fatalf("query create status=%d body=%s", createRejected.Code, createRejected.Body.String())
+	}
+	var rejectedCount int64
+	if err := server.DB.Model(&models.DistributionProfile{}).Where("name = ?", "Rejected query create").Count(&rejectedCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rejectedCount != 0 {
+		t.Fatalf("rejected query profile persisted: %d", rejectedCount)
+	}
+
+	createAllowed := distributionRequest(t, router, http.MethodPost, "/api/admin/distribution/profiles", adminToken, map[string]any{
+		"name": "Stable existing profile", "enabled": true, "isDefault": false,
+		"sourceMode": "manifest", "channel": "stable", "releaseIndexUrl": "https://example.org/index.json",
+		"expectedPackageName": "com.selfhosted.daily",
+	})
+	if createAllowed.Code != http.StatusCreated {
+		t.Fatalf("allowed create status=%d body=%s", createAllowed.Code, createAllowed.Body.String())
+	}
+	var created struct {
+		Profile models.DistributionProfile `json:"profile"`
+	}
+	if err := json.Unmarshal(createAllowed.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	updateRejected := distributionRequest(t, router, http.MethodPut, "/api/admin/distribution/profiles/"+strconvUint(created.Profile.ID), adminToken, map[string]any{
+		"name": "Changed by rejected update", "enabled": true, "isDefault": false,
+		"sourceMode": "manifest", "channel": "stable", "releaseIndexUrl": "https://example.org/index.json?token=placeholder",
+		"expectedPackageName": "com.selfhosted.daily",
+	})
+	if updateRejected.Code != http.StatusBadRequest || !strings.Contains(updateRejected.Body.String(), "url_query_not_allowed") {
+		t.Fatalf("query update status=%d body=%s", updateRejected.Code, updateRejected.Body.String())
+	}
+	var stored models.DistributionProfile
+	if err := server.DB.First(&stored, created.Profile.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Name != created.Profile.Name || stored.ReleaseIndexURL != created.Profile.ReleaseIndexURL {
+		t.Fatalf("rejected query update changed profile: before=%+v after=%+v", created.Profile, stored)
 	}
 }
 

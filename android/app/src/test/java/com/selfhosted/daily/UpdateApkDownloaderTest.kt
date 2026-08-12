@@ -1,7 +1,9 @@
 package com.selfhosted.daily
 
 import kotlinx.coroutines.runBlocking
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -13,6 +15,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 
 class UpdateApkDownloaderTest {
     @get:Rule
@@ -47,8 +50,84 @@ class UpdateApkDownloaderTest {
     }
 
     @Test
+    fun productionDownloadClientOverridesBaseTimeoutsAndDisablesRedirects() {
+        val base = OkHttpClient.Builder()
+            .connectTimeout(1, TimeUnit.SECONDS)
+            .readTimeout(2, TimeUnit.SECONDS)
+            .writeTimeout(3, TimeUnit.SECONDS)
+            .callTimeout(20, TimeUnit.SECONDS)
+            .build()
+
+        val client = buildApkDownloadClient(base)
+
+        assertEquals(15_000, client.connectTimeoutMillis)
+        assertEquals(60_000, client.readTimeoutMillis)
+        assertEquals(30_000, client.writeTimeoutMillis)
+        assertEquals(30 * 60 * 1_000, client.callTimeoutMillis)
+        assertFalse(client.followRedirects)
+        assertFalse(client.followSslRedirects)
+    }
+
+    @Test
+    fun delayedStreamingSurvivesShortBaseCallTimeout() = runBlocking {
+        val bytes = "slow-signed-apk".toByteArray()
+        repeat(2) {
+            server.enqueue(
+                MockResponse()
+                    .setBody(okio.Buffer().write(bytes))
+                    .throttleBody(1, 50, TimeUnit.MILLISECONDS)
+            )
+        }
+        val dir = temporaryFolder.newFolder("slow-download")
+        val base = OkHttpClient.Builder().callTimeout(150, TimeUnit.MILLISECONDS).build()
+
+        val baseError = runCatching {
+            base.newCall(Request.Builder().url(server.url("/base-timeout")).build())
+                .execute()
+                .use { response -> response.body!!.bytes() }
+        }.exceptionOrNull()
+
+        assertTrue(baseError is java.io.InterruptedIOException)
+
+        val downloader = UpdateApkDownloader(
+            dir,
+            base,
+            maxBytes = 1024,
+            timeoutProfile = testTimeouts(readMillis = 500, callMillis = 3_000)
+        )
+
+        val pending = downloader.download(update(bytes))
+
+        assertEquals(bytes.size.toLong(), pending.sizeBytes)
+        assertEquals(sha256(bytes), pending.sha256)
+        assertTrue(pending.temporaryFile.exists())
+    }
+
+    @Test
+    fun readStallFailsAndDeletesPartialFile() = runBlocking {
+        val bytes = "stalled-apk".toByteArray()
+        server.enqueue(
+            MockResponse()
+                .setBody(okio.Buffer().write(bytes))
+                .setBodyDelay(500, TimeUnit.MILLISECONDS)
+        )
+        val dir = temporaryFolder.newFolder("read-timeout")
+        val downloader = UpdateApkDownloader(
+            dir,
+            OkHttpClient(),
+            maxBytes = 1024,
+            timeoutProfile = testTimeouts(readMillis = 100, callMillis = 2_000)
+        )
+
+        val error = runCatching { downloader.download(update(bytes)) }.exceptionOrNull()
+
+        assertTrue(error is java.io.IOException)
+        assertTrue(dir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
     fun hashMismatchDeletesIncompleteFile() = runBlocking {
-        server.enqueue(MockResponse().setBody("xxxxxxxx"))
+        server.enqueue(MockResponse().setChunkedBody("xxxxxxxx", 1).throttleBody(1, 5, TimeUnit.MILLISECONDS))
         val dir = temporaryFolder.newFolder("hash-mismatch")
         val downloader = UpdateApkDownloader(dir, OkHttpClient(), maxBytes = 1024)
 
@@ -60,7 +139,7 @@ class UpdateApkDownloaderTest {
 
     @Test
     fun streamedSizeLimitDeletesIncompleteFileEvenWithoutContentLength() = runBlocking {
-        server.enqueue(MockResponse().setChunkedBody("0123456789", 2))
+        server.enqueue(MockResponse().setChunkedBody("0123456789", 1).throttleBody(1, 5, TimeUnit.MILLISECONDS))
         val dir = temporaryFolder.newFolder("too-large")
         val downloader = UpdateApkDownloader(dir, OkHttpClient(), maxBytes = 5)
         val update = baseUpdate(apkSize = null, apkSha256 = sha256("0123456789".toByteArray()))
@@ -81,6 +160,18 @@ class UpdateApkDownloaderTest {
 
         assertEquals("redirect_limit", (error as UpdateDownloadException).errorClass)
         assertTrue(dir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun httpsToHttpRedirectIsRejected() {
+        val error = runCatching {
+            validateApkRedirect(
+                "https://downloads.example.org/app.apk".toHttpUrl(),
+                "http://downloads.example.org/app.apk".toHttpUrl()
+            )
+        }.exceptionOrNull()
+
+        assertEquals("redirect_downgrade", (error as UpdateDownloadException).errorClass)
     }
 
     @Test
@@ -115,4 +206,11 @@ class UpdateApkDownloaderTest {
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun testTimeouts(readMillis: Long, callMillis: Long) = ApkDownloadTimeoutProfile(
+        connectTimeoutMillis = 500,
+        readTimeoutMillis = readMillis,
+        writeTimeoutMillis = 500,
+        callTimeoutMillis = callMillis
+    )
 }

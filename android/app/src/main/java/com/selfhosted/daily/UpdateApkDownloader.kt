@@ -13,6 +13,7 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 data class PendingUpdateApk(
     val temporaryFile: File,
@@ -23,15 +24,45 @@ data class PendingUpdateApk(
 
 class UpdateDownloadException(val errorClass: String, message: String) : IOException(message)
 
-class UpdateApkDownloader(
+internal data class ApkDownloadTimeoutProfile(
+    val connectTimeoutMillis: Long,
+    val readTimeoutMillis: Long,
+    val writeTimeoutMillis: Long,
+    val callTimeoutMillis: Long
+)
+
+internal val ProductionApkDownloadTimeoutProfile = ApkDownloadTimeoutProfile(
+    connectTimeoutMillis = 15_000,
+    readTimeoutMillis = 60_000,
+    writeTimeoutMillis = 30_000,
+    callTimeoutMillis = 30L * 60L * 1_000L
+)
+
+internal fun buildApkDownloadClient(
+    baseClient: OkHttpClient,
+    timeoutProfile: ApkDownloadTimeoutProfile = ProductionApkDownloadTimeoutProfile
+): OkHttpClient = baseClient.newBuilder()
+    .connectTimeout(timeoutProfile.connectTimeoutMillis, TimeUnit.MILLISECONDS)
+    .readTimeout(timeoutProfile.readTimeoutMillis, TimeUnit.MILLISECONDS)
+    .writeTimeout(timeoutProfile.writeTimeoutMillis, TimeUnit.MILLISECONDS)
+    .callTimeout(timeoutProfile.callTimeoutMillis, TimeUnit.MILLISECONDS)
+    .followRedirects(false)
+    .followSslRedirects(false)
+    .build()
+
+internal fun validateApkRedirect(current: HttpUrl, next: HttpUrl) {
+    if (current.isHttps && !next.isHttps) {
+        throw UpdateDownloadException("redirect_downgrade", "HTTPS-zu-HTTP-Weiterleitung wurde blockiert.")
+    }
+}
+
+internal class UpdateApkDownloader(
     private val updatesDir: File,
     httpClient: OkHttpClient,
-    private val maxBytes: Long = DEFAULT_MAX_BYTES
+    private val maxBytes: Long = DEFAULT_MAX_BYTES,
+    timeoutProfile: ApkDownloadTimeoutProfile = ProductionApkDownloadTimeoutProfile
 ) {
-    private val client = httpClient.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .build()
+    private val client = buildApkDownloadClient(httpClient, timeoutProfile)
 
     suspend fun download(update: UpdateInfo): PendingUpdateApk = withContext(Dispatchers.IO) {
         val announcedUrl = update.apkUrl?.trim().orEmpty()
@@ -68,9 +99,7 @@ class UpdateApkDownloader(
                     }
                     val next = location?.let(current::resolve)
                         ?: throw UpdateDownloadException("invalid_redirect", "APK-Weiterleitung ohne gueltiges Ziel.")
-                    if (current.isHttps && !next.isHttps) {
-                        throw UpdateDownloadException("redirect_downgrade", "HTTPS-zu-HTTP-Weiterleitung wurde blockiert.")
-                    }
+                    validateApkRedirect(current, next)
                     current = validateUrl(next.toString())
                     redirects += 1
                     continue

@@ -27,7 +27,9 @@ func TestValidateDistributionURLSyntax(t *testing.T) {
 		{name: "credentials blocked", url: "https://user:pass@example.org/index.json", machine: true, wantClass: "url_credentials"},
 		{name: "fragment blocked for machine", url: "https://example.org/index.json#latest", machine: true, wantClass: "url_fragment"},
 		{name: "human fragment allowed", url: "https://example.org/project#releases"},
-		{name: "signed query blocked", url: "https://example.org/app.apk?X-Amz-Signature=secret", machine: true, wantClass: "signed_or_credential_url"},
+		{name: "ordinary query blocked", url: "https://example.org/app.apk?channel=stable", machine: true, wantClass: "url_query_not_allowed"},
+		{name: "signed query blocked", url: "https://example.org/app.apk?X-Amz-Signature=placeholder", machine: true, wantClass: "url_query_not_allowed"},
+		{name: "bare query marker blocked", url: "https://example.org/app.apk?", machine: true, wantClass: "url_query_not_allowed"},
 		{name: "ftp blocked", url: "ftp://example.org/app.apk", machine: true, wantClass: "invalid_scheme"},
 	}
 	for _, tc := range tests {
@@ -47,6 +49,61 @@ func TestValidateDistributionURLSyntax(t *testing.T) {
 	_, err := validateDistributionURLSyntax("https://example.org/"+strings.Repeat("a", 600), true, false)
 	if err == nil || distributionErrorClass(err) != "url_too_long" {
 		t.Fatalf("long URL error = %v", err)
+	}
+}
+
+func TestDistributionProfileRejectsQueriesInEveryURLField(t *testing.T) {
+	querySuffixes := []string{
+		"?channel=stable",
+		"?api_key=placeholder",
+		"?apikey=placeholder",
+		"?password=placeholder",
+		"?secret=placeholder",
+		"?token=placeholder",
+		"?x-amz-security-token=placeholder",
+		"?X-Amz-Signature=placeholder",
+		"?%61pi_key=placeholder%20value",
+		"?",
+	}
+	fields := []struct {
+		name string
+		set  func(*models.DistributionProfile, string)
+	}{
+		{name: "projectUrl", set: func(profile *models.DistributionProfile, value string) { profile.ProjectURL = value }},
+		{name: "releaseIndexUrl", set: func(profile *models.DistributionProfile, value string) { profile.ReleaseIndexURL = value }},
+		{name: "releaseHistoryUrl", set: func(profile *models.DistributionProfile, value string) { profile.ReleaseHistoryURL = value }},
+		{name: "releasePageUrl", set: func(profile *models.DistributionProfile, value string) { profile.ReleasePageURL = value }},
+		{name: "directApkUrl", set: func(profile *models.DistributionProfile, value string) { profile.DirectAPKURL = value }},
+	}
+
+	baseProfile := func() models.DistributionProfile {
+		return models.DistributionProfile{
+			Name: "Query-free", Enabled: true, SourceMode: "direct", Channel: "stable",
+			ProjectURL: "https://example.org/project", ReleaseIndexURL: "https://example.org/index.json",
+			ReleaseHistoryURL: "https://example.org/history.json", ReleasePageURL: "https://example.org/releases",
+			DirectAPKURL: "https://example.org/app.apk", DirectAPKVersionName: "1.2.3", DirectAPKVersionCode: 12,
+			DirectAPKSHA256: strings.Repeat("ab", 32), ExpectedPackageName: "com.selfhosted.daily",
+		}
+	}
+
+	for _, field := range fields {
+		t.Run(field.name+" clean HTTPS", func(t *testing.T) {
+			profile := baseProfile()
+			field.set(&profile, "https://downloads.example.org/public/path")
+			if err := validateDistributionProfile(&profile, config.Config{}); err != nil {
+				t.Fatalf("clean URL rejected: %v", err)
+			}
+		})
+		for _, suffix := range querySuffixes {
+			t.Run(field.name+" "+suffix, func(t *testing.T) {
+				profile := baseProfile()
+				field.set(&profile, "https://downloads.example.org/public/path"+suffix)
+				err := validateDistributionProfile(&profile, config.Config{})
+				if err == nil || distributionErrorClass(err) != "url_query_not_allowed" {
+					t.Fatalf("query URL error=%v class=%q", err, distributionErrorClass(err))
+				}
+			})
+		}
 	}
 }
 

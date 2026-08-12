@@ -38,6 +38,20 @@ type distributionProfileRequest struct {
 	AllowPrerelease           bool   `json:"allowPrerelease"`
 }
 
+var distributionProfileCreateFields = []string{
+	"Name", "Enabled", "IsDefault", "SourceMode", "Channel",
+	"ProjectURL", "ReleaseIndexURL", "ReleaseHistoryURL", "ReleasePageURL",
+	"DirectAPKURL", "DirectAPKVersionName", "DirectAPKVersionCode", "DirectAPKSHA256",
+	"DirectAPKSizeBytes", "ExpectedPackageName", "ExpectedSigningCertSHA256",
+	"MinSupportedVersionCode", "AllowPrerelease", "CreatedByUserID", "CreatedAt", "UpdatedAt",
+}
+
+func insertDistributionProfile(database *gorm.DB, profile *models.DistributionProfile) *gorm.DB {
+	// Select the complete persisted field set so GORM includes false boolean values
+	// in the original INSERT instead of replacing them with model defaults.
+	return database.Select(distributionProfileCreateFields).Create(profile)
+}
+
 func (request distributionProfileRequest) profile() models.DistributionProfile {
 	return models.DistributionProfile{
 		Name: request.Name, Enabled: request.Enabled, IsDefault: request.IsDefault,
@@ -158,7 +172,7 @@ func (s *Server) handleAdminCreateDistributionProfile(c *gin.Context) {
 	var previousDefault models.DistributionProfile
 	_ = s.DB.Where("is_default = ?", true).First(&previousDefault).Error
 	if err := s.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&profile).Error; err != nil {
+		if err := insertDistributionProfile(tx, &profile).Error; err != nil {
 			return err
 		}
 		if wantsDefault {

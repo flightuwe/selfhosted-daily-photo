@@ -23,14 +23,9 @@ import (
 const distributionURLMaxLength = 500
 
 var (
-	distributionSHA256Pattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	distributionChannelPattern     = regexp.MustCompile(`^[A-Za-z0-9._-]{1,40}$`)
-	distributionPackagePattern     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$`)
-	distributionSensitiveQueryKeys = map[string]struct{}{
-		"access_token": {}, "auth": {}, "authorization": {}, "credential": {}, "key": {},
-		"signature": {}, "sig": {}, "token": {}, "x-amz-credential": {}, "x-amz-signature": {},
-		"x-goog-credential": {}, "x-goog-signature": {},
-	}
+	distributionSHA256Pattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	distributionChannelPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,40}$`)
+	distributionPackagePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$`)
 )
 
 type distributionValidationError struct {
@@ -177,10 +172,8 @@ func validateDistributionURLSyntax(raw string, machineReadable bool, allowInsecu
 	if machineReadable && parsed.Fragment != "" {
 		return "", distributionError("url_fragment", "machine-readable URLs cannot contain fragments")
 	}
-	for key := range parsed.Query() {
-		if _, sensitive := distributionSensitiveQueryKeys[strings.ToLower(strings.TrimSpace(key))]; sensitive {
-			return "", distributionError("signed_or_credential_url", "credential-bearing or signed URLs are not allowed")
-		}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", distributionError("url_query_not_allowed", "distribution URLs must be stable, public and query-free")
 	}
 	parsed.Scheme = scheme
 	parsed.Host = strings.ToLower(parsed.Host)

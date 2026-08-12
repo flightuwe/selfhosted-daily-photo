@@ -119,7 +119,8 @@ DISTRIBUTION_APK_MAX_BYTES=262144000
 - Der Admin-Test prüft alle DNS-Antworten, blockiert private/Loopback/Link-local/Multicast-/unspecified Ziele, validiert jeden Redirect und verhindert HTTPS-Downgrades.
 - Proxy-Umgebungsvariablen werden für den Testclient nicht übernommen.
 - Direct-APK-Tests verwenden HEAD oder einen begrenzten Range-Abruf, nicht die vollständige APK.
-- Zugangsdaten, URL-Userinfo und kurzlebige Signatur-/Token-Queries gehören nicht in persistente Profile.
+- Distributions-URLs müssen stabil, öffentlich abrufbar und vollständig query-frei sein. URL-Userinfo und Credentials in URLs werden nicht unterstützt.
+- Private Artefakte benötigen künftig einen separat entworfenen Authentifizierungsmechanismus und sind nicht Teil dieser ersten providerneutralen Version.
 
 ## Android-Auflösung und Cache
 
