@@ -2,6 +2,8 @@ import type {
   DistributionAuditItem,
   DistributionProfile,
   DistributionProfilesResponse,
+  DistributionRollout,
+  DistributionRolloutResponse,
   DistributionTestResult,
 } from "./distribution/distributionTypes";
 
@@ -2904,6 +2906,30 @@ export async function getDistributionProfiles(
     headers: { Authorization: `Bearer ${token}` },
   });
   return parse<DistributionProfilesResponse>(res);
+}
+
+export async function getDistributionRollout(
+  token: string,
+): Promise<DistributionRolloutResponse> {
+  const res = await fetch(`${apiBase}/admin/distribution/rollout`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return parse<DistributionRolloutResponse>(res);
+}
+
+export async function updateDistributionRollout(
+  token: string,
+  rollout: DistributionRollout,
+): Promise<{ rollout: DistributionRollout }> {
+  const res = await fetch(`${apiBase}/admin/distribution/rollout`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ ...rollout, expectedRevision: rollout.revision }),
+  });
+  return parse<{ rollout: DistributionRollout }>(res);
 }
 
 export async function createDistributionProfile(

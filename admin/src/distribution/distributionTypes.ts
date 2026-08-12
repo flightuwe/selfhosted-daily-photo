@@ -95,6 +95,33 @@ export type DistributionAuditItem = {
   createdAt: string;
 };
 
+export type DistributionRollout = {
+  id: number;
+  enabled: boolean;
+  migrationProfileId: number;
+  stableProfileId: number;
+  entryVersionCode: number;
+  stableVersionCode: number;
+  revision: number;
+  updatedByUserId?: number | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type DistributionClientState = {
+  userId: number;
+  versionName: string;
+  versionCode: number;
+  phase: string;
+  lastSeenAt: string;
+};
+
+export type DistributionRolloutResponse = {
+  rollout: DistributionRollout;
+  summary: Record<string, number>;
+  clients: DistributionClientState[];
+};
+
 export const emptyDistributionProfile = (): DistributionProfile => ({
   id: 0,
   name: "",

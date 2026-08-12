@@ -125,6 +125,18 @@ func (s *Server) handleAppDistribution(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user"})
 		return
 	}
+	report, err := distributionClientVersionFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "errorClass": "invalid_client_version"})
+		return
+	}
+	if report != nil {
+		user, err = s.applyDistributionRollout(user, *report)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "distribution rollout failed"})
+			return
+		}
+	}
 	profile, err := s.effectiveDistributionProfile(user)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -396,6 +408,16 @@ func (s *Server) handleAdminDeleteDistributionProfile(c *gin.Context) {
 	var assigned int64
 	if err := s.DB.Model(&models.User{}).Where("distribution_profile_id = ?", id).Count(&assigned).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "assignment check failed"})
+		return
+	}
+	var rolloutReferences int64
+	if err := s.DB.Model(&models.DistributionRollout{}).
+		Where("migration_profile_id = ? OR stable_profile_id = ?", id, id).Count(&rolloutReferences).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "rollout reference query failed"})
+		return
+	}
+	if rolloutReferences > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "profile is referenced by rollout automation", "errorClass": "profile_rollout_referenced"})
 		return
 	}
 	if profile.IsDefault || assigned > 0 {

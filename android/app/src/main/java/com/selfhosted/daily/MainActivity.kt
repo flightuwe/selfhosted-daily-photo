@@ -1643,7 +1643,11 @@ interface Api {
     suspend fun health(): HealthResponse
 
     @GET("app-distribution")
-    suspend fun appDistribution(@Header("Authorization") token: String): DistributionConfigResponse
+    suspend fun appDistribution(
+        @Header("Authorization") token: String,
+        @Query("versionName") versionName: String,
+        @Query("versionCode") versionCode: Long
+    ): DistributionConfigResponse
 
     @GET("migration/info")
     suspend fun migrationInfo(): MigrationInfoResponse
@@ -2104,7 +2108,13 @@ class AppRepo(
         DistributionConfigRepository(
             context = context,
             fetcher = {
-                authorizedCall("/api/app-distribution") { token -> api.appDistribution(token) }
+                authorizedCall("/api/app-distribution") { token ->
+                    api.appDistribution(
+                        token = token,
+                        versionName = BuildConfig.VERSION_NAME,
+                        versionCode = BuildConfig.VERSION_CODE.toLong()
+                    )
+                }
             }
         )
     }

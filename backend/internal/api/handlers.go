@@ -54,26 +54,26 @@ type userPromptRule struct {
 }
 
 type Server struct {
-	DB                 *gorm.DB
-	Config             config.Config
-	Auth               *auth.Manager
-	Store              *storage.LocalStore
-	Notifier           notify.Sender
-	Prompt             *scheduler.DailyPromptService
-	Location           *time.Location
-	Monitor            *Monitor
-	FeedCache          *FeedDayCache
-	FeedLimiter        *FeedPollLimiter
-	activityTouchMu    sync.Mutex
-	activityTouchLast  map[uint]time.Time
-	photoSearchMu      sync.Mutex
-	photoSearchReady   bool
-	performanceCacheMu sync.Mutex
-	performanceCache   map[string]performanceCacheEntry
+	DB                  *gorm.DB
+	Config              config.Config
+	Auth                *auth.Manager
+	Store               *storage.LocalStore
+	Notifier            notify.Sender
+	Prompt              *scheduler.DailyPromptService
+	Location            *time.Location
+	Monitor             *Monitor
+	FeedCache           *FeedDayCache
+	FeedLimiter         *FeedPollLimiter
+	activityTouchMu     sync.Mutex
+	activityTouchLast   map[uint]time.Time
+	photoSearchMu       sync.Mutex
+	photoSearchReady    bool
+	performanceCacheMu  sync.Mutex
+	performanceCache    map[string]performanceCacheEntry
 	distributionWriteMu sync.Mutex
-	EmailSecrets       *mailservice.Secrets
-	EmailSender        mailservice.Sender
-	EmailWorkerID      string
+	EmailSecrets        *mailservice.Secrets
+	EmailSender         mailservice.Sender
+	EmailWorkerID       string
 }
 
 const photoTimeShiftThreshold = 5 * time.Minute
@@ -446,6 +446,8 @@ func (s *Server) Router() *gin.Engine {
 			admin.PUT("/users/:id/distribution-profile", s.handleAdminUserDistributionProfile)
 			admin.DELETE("/users/:id", s.handleAdminDeleteUser)
 			admin.GET("/distribution/profiles", s.handleAdminDistributionProfiles)
+			admin.GET("/distribution/rollout", s.handleAdminDistributionRollout)
+			admin.PUT("/distribution/rollout", s.handleAdminDistributionRolloutUpdate)
 			admin.POST("/distribution/profiles", s.handleAdminCreateDistributionProfile)
 			admin.PUT("/distribution/profiles/:id", s.handleAdminUpdateDistributionProfile)
 			admin.DELETE("/distribution/profiles/:id", s.handleAdminDeleteDistributionProfile)

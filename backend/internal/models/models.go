@@ -104,6 +104,37 @@ func (DistributionAuditEvent) TableName() string {
 	return "distribution_profile_audit"
 }
 
+// DistributionRollout is the singleton policy used to move authenticated
+// clients through a bridge profile and back to the default stable profile.
+// Profile references are deliberately validated in the API instead of being
+// GORM relations, so adding this table can never rebuild the production users
+// table during AutoMigrate.
+type DistributionRollout struct {
+	ID                 uint      `gorm:"primaryKey" json:"id"`
+	Enabled            bool      `gorm:"not null;default:false" json:"enabled"`
+	MigrationProfileID uint      `gorm:"index;not null;default:0" json:"migrationProfileId"`
+	StableProfileID    uint      `gorm:"index;not null;default:0" json:"stableProfileId"`
+	EntryVersionCode   int64     `gorm:"not null;default:0" json:"entryVersionCode"`
+	StableVersionCode  int64     `gorm:"not null;default:0" json:"stableVersionCode"`
+	Revision           int64     `gorm:"not null;default:1" json:"revision"`
+	UpdatedByUserID    *uint     `gorm:"index" json:"updatedByUserId,omitempty"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+}
+
+// DistributionClientState stores the last authenticated app version report
+// separately from users. This keeps rollout observability additive and avoids
+// a schema rewrite of the security-sensitive users table.
+type DistributionClientState struct {
+	UserID      uint      `gorm:"primaryKey" json:"userId"`
+	VersionName string    `gorm:"size:80;not null;default:''" json:"versionName"`
+	VersionCode int64     `gorm:"index;not null" json:"versionCode"`
+	Phase       string    `gorm:"size:32;not null;index" json:"phase"`
+	LastSeenAt  time.Time `gorm:"index;not null" json:"lastSeenAt"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 type InviteCode struct {
 	ID        uint       `gorm:"primaryKey" json:"id"`
 	UserID    uint       `gorm:"index;index:idx_invite_user_active_unused_created,priority:1;not null" json:"userId"`

@@ -168,6 +168,169 @@ func TestDistributionClientEndpointNeverFetchesConfiguredSource(t *testing.T) {
 	}
 }
 
+func createRolloutTestProfile(t *testing.T, server *Server, name string) models.DistributionProfile {
+	t.Helper()
+	profile := models.DistributionProfile{
+		Name: name, Enabled: true, SourceMode: "manifest", Channel: "stable",
+		ReleaseIndexURL:     "https://updates.invalid/" + strings.ToLower(strings.ReplaceAll(name, " ", "-")) + "/index.json",
+		ExpectedPackageName: "com.selfhosted.daily", Revision: 1,
+	}
+	if err := server.DB.Create(&profile).Error; err != nil {
+		t.Fatal(err)
+	}
+	return profile
+}
+
+func configureRolloutForTest(t *testing.T, server *Server, migration models.DistributionProfile, stable models.DistributionProfile) {
+	t.Helper()
+	if err := server.DB.Model(&models.DistributionRollout{}).Where("id = ?", distributionRolloutSingletonID).Updates(map[string]any{
+		"enabled": true, "migration_profile_id": migration.ID, "stable_profile_id": stable.ID,
+		"entry_version_code": int64(142030), "stable_version_code": int64(142031),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDistributionRolloutAutomaticallyMovesBridgeAndStableClients(t *testing.T) {
+	server, _, user := newDistributionAPITestServer(t)
+	var stable models.DistributionProfile
+	if err := server.DB.Where("is_default = ?", true).First(&stable).Error; err != nil {
+		t.Fatal(err)
+	}
+	migration := createRolloutTestProfile(t, server, "Migration 0.8.31")
+	configureRolloutForTest(t, server, migration, stable)
+	token := distributionToken(t, server, user)
+
+	bridge := distributionRequest(t, server.Router(), http.MethodGet, "/api/app-distribution?versionName=0.8.30&versionCode=142030", token, nil)
+	if bridge.Code != http.StatusOK || !strings.Contains(bridge.Body.String(), `"profileId":`+strconvUint(migration.ID)) {
+		t.Fatalf("bridge response status=%d body=%s", bridge.Code, bridge.Body.String())
+	}
+	var stored models.User
+	if err := server.DB.First(&stored, user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.DistributionProfileID == nil || *stored.DistributionProfileID != migration.ID {
+		t.Fatalf("bridge assignment = %v, want %d", stored.DistributionProfileID, migration.ID)
+	}
+	var state models.DistributionClientState
+	if err := server.DB.First(&state, user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.VersionCode != 142030 || state.VersionName != "0.8.30" || state.Phase != "migration" {
+		t.Fatalf("bridge state = %+v", state)
+	}
+
+	// Repeated checks update last-seen state but never duplicate transition audit.
+	distributionRequest(t, server.Router(), http.MethodGet, "/api/app-distribution?versionName=0.8.30&versionCode=142030", token, nil)
+	var auditCount int64
+	if err := server.DB.Model(&models.DistributionAuditEvent{}).Where("target_user_id = ?", user.ID).Count(&auditCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("bridge audit count = %d, want 1", auditCount)
+	}
+
+	stableResponse := distributionRequest(t, server.Router(), http.MethodGet, "/api/app-distribution?versionName=0.8.31&versionCode=142031", token, nil)
+	if stableResponse.Code != http.StatusOK || !strings.Contains(stableResponse.Body.String(), `"profileId":`+strconvUint(stable.ID)) {
+		t.Fatalf("stable response status=%d body=%s", stableResponse.Code, stableResponse.Body.String())
+	}
+	if err := server.DB.First(&stored, user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.DistributionProfileID != nil {
+		t.Fatalf("stable client retained override: %v", *stored.DistributionProfileID)
+	}
+	if err := server.DB.First(&state, user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.VersionCode != 142031 || state.Phase != "stable" {
+		t.Fatalf("stable state = %+v", state)
+	}
+	distributionRequest(t, server.Router(), http.MethodGet, "/api/app-distribution?versionName=0.8.31&versionCode=142031", token, nil)
+	if err := server.DB.Model(&models.DistributionAuditEvent{}).Where("target_user_id = ?", user.ID).Count(&auditCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 2 {
+		t.Fatalf("transition audit count = %d, want 2", auditCount)
+	}
+}
+
+func TestDistributionRolloutPreservesManualOverridesAndRejectsInvalidReports(t *testing.T) {
+	server, _, user := newDistributionAPITestServer(t)
+	var stable models.DistributionProfile
+	if err := server.DB.Where("is_default = ?", true).First(&stable).Error; err != nil {
+		t.Fatal(err)
+	}
+	migration := createRolloutTestProfile(t, server, "Migration")
+	manual := createRolloutTestProfile(t, server, "Manual")
+	configureRolloutForTest(t, server, migration, stable)
+	if err := server.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("distribution_profile_id", manual.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	token := distributionToken(t, server, user)
+
+	response := distributionRequest(t, server.Router(), http.MethodGet, "/api/app-distribution?versionName=0.8.30&versionCode=142030", token, nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"profileId":`+strconvUint(manual.ID)) {
+		t.Fatalf("manual response status=%d body=%s", response.Code, response.Body.String())
+	}
+	var state models.DistributionClientState
+	if err := server.DB.First(&state, user.ID).Error; err != nil || state.Phase != "manual_override" {
+		t.Fatalf("manual state err=%v state=%+v", err, state)
+	}
+
+	invalid := distributionRequest(t, server.Router(), http.MethodGet, "/api/app-distribution?versionName=bad&versionCode=0", token, nil)
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "invalid_client_version") {
+		t.Fatalf("invalid report status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	missingCode := distributionRequest(t, server.Router(), http.MethodGet, "/api/app-distribution?versionName=0.8.31", token, nil)
+	if missingCode.Code != http.StatusBadRequest {
+		t.Fatalf("missing code status=%d body=%s", missingCode.Code, missingCode.Body.String())
+	}
+	var stored models.User
+	if err := server.DB.First(&stored, user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.DistributionProfileID == nil || *stored.DistributionProfileID != manual.ID {
+		t.Fatalf("invalid report changed manual assignment: %v", stored.DistributionProfileID)
+	}
+}
+
+func TestDistributionRolloutAdminConfigurationIsValidatedAndRevisionGuarded(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	var stable models.DistributionProfile
+	if err := server.DB.Where("is_default = ?", true).First(&stable).Error; err != nil {
+		t.Fatal(err)
+	}
+	migration := createRolloutTestProfile(t, server, "Migration")
+	token := distributionToken(t, server, admin)
+	router := server.Router()
+
+	bad := distributionRequest(t, router, http.MethodPut, "/api/admin/distribution/rollout", token, map[string]any{
+		"enabled": true, "migrationProfileId": migration.ID, "stableProfileId": stable.ID,
+		"entryVersionCode": 142031, "stableVersionCode": 142030, "expectedRevision": 1,
+	})
+	if bad.Code != http.StatusBadRequest || !strings.Contains(bad.Body.String(), "invalid_rollout") {
+		t.Fatalf("invalid rollout status=%d body=%s", bad.Code, bad.Body.String())
+	}
+
+	goodPayload := map[string]any{
+		"enabled": true, "migrationProfileId": migration.ID, "stableProfileId": stable.ID,
+		"entryVersionCode": 142030, "stableVersionCode": 142031, "expectedRevision": 1,
+	}
+	good := distributionRequest(t, router, http.MethodPut, "/api/admin/distribution/rollout", token, goodPayload)
+	if good.Code != http.StatusOK || !strings.Contains(good.Body.String(), `"revision":2`) {
+		t.Fatalf("valid rollout status=%d body=%s", good.Code, good.Body.String())
+	}
+	conflict := distributionRequest(t, router, http.MethodPut, "/api/admin/distribution/rollout", token, goodPayload)
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "revision_conflict") {
+		t.Fatalf("rollout conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+	status := distributionRequest(t, router, http.MethodGet, "/api/admin/distribution/rollout", token, nil)
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"unknown":2`) {
+		t.Fatalf("rollout status=%d body=%s", status.Code, status.Body.String())
+	}
+}
+
 func TestDistributionProfileCreatePersistsExplicitEnabledValue(t *testing.T) {
 	server, admin, _ := newDistributionAPITestServer(t)
 	router := server.Router()
