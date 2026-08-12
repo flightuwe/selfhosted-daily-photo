@@ -114,7 +114,7 @@ python scripts/build_release_index.py \
 
 Der Fingerprint ist ein öffentlicher Zertifikatswert, kein Signiersecret. Er muss aus der fertig signierten APK ermittelt werden.
 
-Die Forgejo-Candidate-Pipeline trägt die offiziellen Harzcloud-Templates ausdrücklich in ihrer Provenienz. Sie erzeugt absichtlich keinen veröffentlichbaren Index, weil ihr APK-Artefakt unsigniert ist. Der spätere, separat freigegebene Signier-/Publishing-Schritt muss dieselben expliziten Parameter an den Generator übergeben.
+Die Forgejo-Candidate-Pipeline trägt die offiziellen Harzcloud-Templates ausdrücklich nur als Candidate-Metadaten in ihrer Provenienz. Sie ruft `build_release_index.py` nicht auf und erzeugt absichtlich keinen veröffentlichbaren Index, weil ihr APK-Artefakt unsigniert ist. Im aktuellen Forgejo-Bestand existiert somit noch kein integrierter signierter Index-Publisher. Der spätere, separat freizugebende Signing-/Release-Workflow muss nach der Signaturprüfung alle verpflichtenden Generatorparameter (`version`, `versionCode`, Kanal, Prerelease-Status, Paketname, öffentlicher Zertifikatfingerprint, APK-Hash und -Größe sowie alle drei URL-Templates) explizit übergeben und den externen Index zuletzt atomar publizieren.
 
 ## URL- und Netzwerkgrenzen
 
@@ -135,7 +135,9 @@ DISTRIBUTION_APK_MAX_BYTES=262144000
 - Distributions-URLs müssen stabil, öffentlich abrufbar und vollständig query-frei sein. URL-Userinfo und Credentials in URLs werden nicht unterstützt.
 - Private Artefakte benötigen künftig einen separat entworfenen Authentifizierungsmechanismus und sind nicht Teil dieser ersten providerneutralen Version.
 
-Android deaktiviert automatische Redirects für Index, History und APK. Ein ausdrücklich vom Backend konfigurierter Selfhosting-Host darf selbst lokal sein; ein erst durch Redirect oder Manifest eingeführter Host muss HTTPS verwenden und öffentlich auflösbar sein. Jeder Redirect wird erneut geprüft und nach drei Schritten beendet.
+Android deaktiviert automatische Redirects für Index, History und APK. Ein unveränderter Origin besteht aus Schema, kanonischem Hostnamen und effektivem Port. Ein ausdrücklich vom Backend konfigurierter Selfhosting-Origin darf selbst lokal sein; diese Freigabe geht nicht auf einen anderen Port oder Host über. Als einzige Schema-/Port-Ausnahme darf derselbe explizit konfigurierte Host von HTTP auf HTTPS und dabei ausschließlich vom Standardport 80 auf 443 aufgewertet werden. HTTPS→HTTP und beliebige Portwechsel bleiben gesperrt. Eine Manifest-APK ist im Gegensatz zu einer administrativ konfigurierten Direct-APK niemals ein explizit vertrautes Ausgangsziel. Jeder Redirect wird erneut geprüft und nach drei Schritten beendet.
+
+Die App koppelt die Policyprüfung an den tatsächlichen Verbindungsaufbau: Die bei der URL-Prüfung erhaltene und normalisierte Adressliste wird einem dedizierten OkHttp-`Dns` übergeben. Dieser liefert nur für exakt den erwarteten Host genau diese Liste und lehnt zusätzliche Hostauflösungen ab. Pro Index-, History-, APK- und Redirectrequest wird ein isolierter `ConnectionPool` verwendet, sodass keine frühere ungeprüfte Verbindung wiederverwendet werden kann. `Proxy.NO_PROXY` verhindert eine Umgehung des Ziel-Pinnings durch Systemproxy-Einstellungen. URL, TLS-SNI und HTTP-Host bleiben auf dem geprüften Originalhost; IPv4-mapped IPv6 wird vor der Netzklassifizierung auf IPv4 normalisiert.
 
 ## Android-Auflösung und Cache
 
