@@ -1,0 +1,14 @@
+{
+  "version": "0.8.29",
+  "releasedAt": "2026-08-12T00:00:00Z",
+  "title": "Provider-neutrale App-Verteilung",
+  "highlights": [
+    "Daily bezieht kuenftige APK-, Index-, Changelog- und Projektlinks aus der vom Backend bereitgestellten Distributionskonfiguration.",
+    "Forgejo- und Harzcloud-Quellen koennen damit ohne fest verdrahtete Provider-API verwendet werden.",
+    "Bestehende, ueber GitHub installierte Daily-Versionen bleiben fuer den kontrollierten Wechsel auf die neue Verteilung kompatibel."
+  ],
+  "details": [
+    "Die vorgesehenen offiziellen Harzcloud-Fallbacks bleiben erhalten, falls fuer die bekannte offizielle Instanz voruebergehend keine aktuelle Backendkonfiguration verfuegbar ist.",
+    "Diese Release-Vorbereitung behauptet weder eine bereits erfolgte Veroeffentlichung noch eine abgeschlossene produktive Migration."
+  ]
+}
