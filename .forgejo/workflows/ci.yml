@@ -47,5 +47,5 @@ jobs:
         run: |
           cp android/app/google-services.json.example android/app/google-services.json
           echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
-      - name: Build debug APK
-        run: gradle -p android :app:assembleDebug --no-daemon --stacktrace --console=plain
+      - name: Test and build debug APK
+        run: gradle -p android :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace --console=plain
