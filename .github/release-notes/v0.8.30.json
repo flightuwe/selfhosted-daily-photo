@@ -1,0 +1,14 @@
+{
+  "version": "0.8.30",
+  "releasedAt": "2026-08-13T00:00:00Z",
+  "title": "Automatische Harzcloud-Bridge",
+  "highlights": [
+    "Bestehende Daily-Sitzungen uebernehmen ihre serverbestaetigte Nutzer-ID automatisch in die neue Distributionskonfiguration.",
+    "Die App meldet VersionName und VersionCode authentifiziert an das Daily-Backend, damit der Wechsel auf die naechste Harzcloud-Version automatisch erfolgt.",
+    "Update-, Changelog-, Download- und Projektquellen werden danach aus der provider-neutralen Backendkonfiguration bezogen."
+  ],
+  "details": [
+    "Das Backend ordnet 0.8.30 automatisch dem Migrationsprofil zu, ohne bewusst gesetzte andere Nutzerprofile zu ueberschreiben.",
+    "Nach erfolgreicher Installation des Harzcloud-Nachfolgers entfernt das Backend nur seinen eigenen Migrations-Override und der Nutzer erbt wieder Harzcloud Stable."
+  ]
+}
