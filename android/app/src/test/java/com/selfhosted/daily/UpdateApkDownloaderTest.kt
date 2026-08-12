@@ -1,6 +1,8 @@
 package com.selfhosted.daily
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.Dispatchers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -42,11 +44,35 @@ class UpdateApkDownloaderTest {
         val downloader = UpdateApkDownloader(dir, OkHttpClient(), maxBytes = 1024)
 
         val pending = downloader.download(update(bytes))
+        java.io.File(dir, "daily-v0.8.29.apk").writeText("old")
         val final = downloader.finalizeVerified(pending, "0.8.29")
 
         assertEquals(bytes.size.toLong(), final.length())
         assertEquals("daily-v0.8.29.apk", final.name)
         assertFalse(pending.temporaryFile.exists())
+        assertEquals("signed-apk-placeholder", final.readText())
+    }
+
+    @Test
+    fun startupRemovesOrphanPartsButConcurrentDownloadsKeepEachOtherActive() = runBlocking {
+        val slow = ByteArray(32 * 1024) { 1 }
+        val fast = "fast-apk".toByteArray()
+        server.enqueue(MockResponse().setBody(okio.Buffer().write(slow)).throttleBody(512, 10, TimeUnit.MILLISECONDS))
+        server.enqueue(MockResponse().setBody(okio.Buffer().write(fast)))
+        val dir = temporaryFolder.newFolder("parallel-downloads")
+        val orphan = java.io.File(dir, ".update-orphan.part").apply { writeText("orphan") }
+        val downloader = UpdateApkDownloader(dir, OkHttpClient(), maxBytes = 64 * 1024)
+
+        val first = async(Dispatchers.IO) { downloader.download(update(slow)) }
+        assertTrue(server.takeRequest(2, TimeUnit.SECONDS) != null)
+        val second = downloader.download(update(fast))
+        val firstPending = first.await()
+
+        assertFalse(orphan.exists())
+        assertTrue(firstPending.temporaryFile.exists())
+        assertTrue(second.temporaryFile.exists())
+        downloader.discard(firstPending)
+        downloader.discard(second)
     }
 
     @Test

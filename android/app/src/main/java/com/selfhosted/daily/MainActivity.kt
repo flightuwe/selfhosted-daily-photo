@@ -4582,12 +4582,12 @@ class AppRepo(
         )
     }
 
-    suspend fun checkForUpdate(currentVersion: String): UpdateInfo? {
+    suspend fun checkForUpdate(currentVersion: String, currentVersionCode: Long = BuildConfig.VERSION_CODE.toLong()): UpdateInfo? {
         val allowNetwork = !OfflineModeManager.isEnabled(context)
         val resolved = distributionConfig.resolve(allowNetwork) ?: return null
         if (!resolved.config.enabled) return null
         val releases = distributionReleases.releases(resolved, allowNetwork).releases
-        return UpdateReleaseChecker.findUpdate(currentVersion, releases)
+        return UpdateReleaseChecker.findUpdate(currentVersion, currentVersionCode, releases, resolved.config.minSupportedVersionCode)
     }
 
     suspend fun changelogLines(currentVersion: String): List<String> {
@@ -11133,7 +11133,11 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
                         latestUpdateInfo = update,
                         updateCheckInFlight = false,
                         updateError = null,
-                        message = if (silent) state.message else "Neue Version ${update.latestVersion} gefunden"
+                        message = if (silent) state.message else if (update.required) {
+                            "Erforderliches Update ${update.latestVersion} verfuegbar"
+                        } else {
+                            "Neue Version ${update.latestVersion} gefunden"
+                        }
                     )
                 } else {
                     state.copy(
@@ -13516,9 +13520,13 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
             dismissButton = {
                 TextButton(onClick = { vm.dismissUpdateDialog() }) { Text("Spaeter") }
             },
-            title = { Text("Update verfuegbar") },
+            title = { Text(if (update.required) "Update erforderlich" else "Update verfuegbar") },
             text = {
-                Text("Neue Version ${update.latestVersion}\nZielhost: ${update.targetHost.ifBlank { "unbekannt" }}")
+                Text(
+                    (if (update.required) "Diese Version wird nicht mehr unterstuetzt. Das Update startet erst nach deiner Bestaetigung."
+                    else "Neue Version ${update.latestVersion}") +
+                        "\nZielhost: ${update.targetHost.ifBlank { "unbekannt" }}"
+                )
             }
         )
     }

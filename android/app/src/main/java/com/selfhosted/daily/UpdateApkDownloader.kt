@@ -80,8 +80,9 @@ internal class UpdateApkDownloader(
 
         updatesDir.mkdirs()
         if (!updatesDir.isDirectory) throw UpdateDownloadException("storage_unavailable", "Privater Update-Speicher ist nicht verfuegbar.")
-        cleanupTemporaryFiles()
         val temporary = File(updatesDir, ".update-${UUID.randomUUID()}.part")
+        markActive(temporary)
+        cleanupTemporaryFiles()
         try {
             val announcedOrigin = if (update.apkUrlExplicitlyConfigured) {
                 urlPolicy.configured(announcedUrl)
@@ -160,6 +161,7 @@ internal class UpdateApkDownloader(
             @Suppress("UNREACHABLE_CODE")
             throw UpdateDownloadException("download_state", "APK-Download wurde unerwartet beendet.")
         } catch (error: Throwable) {
+            unmarkActive(temporary)
             temporary.delete()
             throw error
         }
@@ -173,39 +175,52 @@ internal class UpdateApkDownloader(
             .trim('.')
             .ifBlank { "update" }
         val finalFile = File(updatesDir, "daily-v$safeVersion.apk")
-        if (finalFile.exists() && !finalFile.delete()) {
-            throw UpdateDownloadException("storage_finalize", "Vorherige Update-Datei konnte nicht ersetzt werden.")
-        }
         try {
-            Files.move(
-                pending.temporaryFile.toPath(),
-                finalFile.toPath(),
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING
-            )
-        } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(pending.temporaryFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            try {
+                Files.move(
+                    pending.temporaryFile.toPath(),
+                    finalFile.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(pending.temporaryFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
+            unmarkActive(pending.temporaryFile)
         }
         return finalFile
     }
 
     fun discard(pending: PendingUpdateApk) {
+        unmarkActive(pending.temporaryFile)
         pending.temporaryFile.delete()
     }
 
     private fun cleanupTemporaryFiles() {
-        val staleBefore = System.currentTimeMillis() - TEMP_FILE_MAX_AGE_MS
         updatesDir.listFiles()?.filter {
-            it.isFile && it.name.startsWith(".update-") && it.name.endsWith(".part") && it.lastModified() < staleBefore
+            it.isFile && it.name.startsWith(".update-") && it.name.endsWith(".part") && !isActive(it)
         }
             ?.forEach(File::delete)
+    }
+
+    private fun markActive(file: File) = synchronized(activeTemporaryFiles) {
+        activeTemporaryFiles += file.absoluteFile.toPath().normalize().toString()
+    }
+
+    private fun unmarkActive(file: File) = synchronized(activeTemporaryFiles) {
+        activeTemporaryFiles -= file.absoluteFile.toPath().normalize().toString()
+    }
+
+    private fun isActive(file: File): Boolean = synchronized(activeTemporaryFiles) {
+        file.absoluteFile.toPath().normalize().toString() in activeTemporaryFiles
     }
 
     companion object {
         const val DEFAULT_MAX_BYTES = 250L * 1024L * 1024L
         private const val LEGACY_OFFICIAL_HOST = "releases.daily.harzcloud.de"
-        private const val TEMP_FILE_MAX_AGE_MS = 24L * 60L * 60L * 1000L
         private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
         private val SHA256 = Regex("^[a-f0-9]{64}$")
+        private val activeTemporaryFiles = mutableSetOf<String>()
     }
 }

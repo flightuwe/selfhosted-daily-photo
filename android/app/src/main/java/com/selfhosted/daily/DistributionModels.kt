@@ -81,7 +81,8 @@ data class UpdateInfo(
     val profilePackageName: String = "",
     val profileSigningCertSha256: String = "",
     val apkUrlExplicitlyConfigured: Boolean = false,
-    val legacyOfficialArtifact: Boolean = false
+    val legacyOfficialArtifact: Boolean = false,
+    val required: Boolean = false
 ) {
     val targetHost: String
         get() = runCatching { java.net.URI(apkUrl ?: releaseUrl).host.orEmpty() }.getOrDefault("")

@@ -101,7 +101,7 @@ class DistributionReleaseSource(
         val latestVersion = clean(root.optString("latest")).removePrefix("v")
         if (latestVersion.isBlank()) return emptyList()
         val rootChannel = clean(root.optString("channel")).lowercase().ifBlank { DEFAULT_CHANNEL }
-        val configuredChannel = config.channel.trim().lowercase()
+        val configuredChannel = config.channel.trim().lowercase().ifBlank { DEFAULT_CHANNEL }
         val items = root.optJSONArray("releases") ?: return emptyList()
         return buildList {
             for (index in 0 until minOf(items.length(), MAX_RELEASES)) {
@@ -151,8 +151,11 @@ class DistributionReleaseSource(
                     isLatest = version == latestVersion
                 ))
             }
-        }.distinctBy { it.version }
-            .sortedWith { left, right -> ReleaseHistoryParser.compareVersions(right.version, left.version) }
+        }.distinctBy { it.versionCode?.let { code -> "code:$code" } ?: "version:${it.version}" }
+            .sortedWith { left, right ->
+                val codeOrder = (right.versionCode ?: Long.MIN_VALUE).compareTo(left.versionCode ?: Long.MIN_VALUE)
+                if (codeOrder != 0) codeOrder else ReleaseHistoryParser.compareVersions(right.version, left.version)
+            }
     }
 
     private fun get(url: String): String? {

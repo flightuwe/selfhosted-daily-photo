@@ -91,7 +91,7 @@ class DistributionReleaseSourceTest {
     @Test
     fun pureSelectorNeverInventsAnApkFallback() {
         val release = DistributionRelease(version = "0.9.0", releaseUrl = "https://project.invalid/release")
-        val update = UpdateReleaseChecker.findUpdate("0.8.28", listOf(release))
+        val update = UpdateReleaseChecker.findUpdate("0.8.28", 142028, listOf(release))
 
         assertNull(update)
         assertFalse(UpdateReleaseChecker.isVersionNewer("0.8.27", "0.8.28"))
@@ -111,7 +111,7 @@ class DistributionReleaseSourceTest {
 
         assertEquals(listOf("0.9.1", "0.9.0"), releases.map { it.version })
         assertTrue(releases.none { it.installable })
-        assertNull(UpdateReleaseChecker.findUpdate("0.8.28", releases))
+        assertNull(UpdateReleaseChecker.findUpdate("0.8.28", 142028, releases))
     }
 
     @Test
@@ -137,7 +137,7 @@ class DistributionReleaseSourceTest {
 
         assertTrue(release.installable)
         assertFalse(release.legacyOfficialArtifact)
-        assertEquals("0.9.2", UpdateReleaseChecker.findUpdate("0.8.28", listOf(release))?.latestVersion)
+        assertEquals("0.9.2", UpdateReleaseChecker.findUpdate("0.8.28", 142028, listOf(release))?.latestVersion)
     }
 
     @Test
@@ -181,6 +181,11 @@ class DistributionReleaseSourceTest {
 
         assertTrue(source.parseIndex(raw, beta).isEmpty())
         assertEquals("1.0.0-beta.1", source.parseIndex(raw, beta.copy(allowPrerelease = true)).single().version)
+        assertEquals(listOf("0.9.2"), source.parseIndex(
+            """{"schemaVersion":1,"latest":"0.9.2","releases":[{"version":"0.9.2","channel":"stable"}]}""",
+            config(1).copy(channel = "")
+        ).map { it.version })
+        assertTrue(source.parseIndex(raw, beta.copy(channel = "nightly", allowPrerelease = true)).isEmpty())
     }
 
     @Test
@@ -198,17 +203,41 @@ class DistributionReleaseSourceTest {
     }
 
     @Test
-    fun updateSelectionHonorsManifestLatestInsteadOfHighestHistoricalEntry() {
-        val base = DistributionRelease(
-            version = "0.9.1",
-            apkUrl = "https://downloads.invalid/app.apk",
-            installable = true,
-            isLatest = true
-        )
-        val historicalHigher = base.copy(version = "0.9.2", isLatest = false)
+    fun updateSelectionUsesHighestVersionCodeInsteadOfRootLatestOrCoreSemver() {
+        val base = installable("1.0.0-beta.1", 100, isLatest = true)
+        val betaTwo = installable("1.0.0-beta.2", 101)
+        val stable = installable("1.0.0", 102)
+        val sameNameHigherCode = installable("1.0.0", 103)
+        val misleadingVersion = installable("9.0.0", 99)
 
-        assertEquals("0.9.1", UpdateReleaseChecker.findUpdate("0.8.28", listOf(historicalHigher, base))?.latestVersion)
+        assertEquals("1.0.0-beta.2", UpdateReleaseChecker.findUpdate("1.0.0-beta.1", 100, listOf(base, betaTwo))?.latestVersion)
+        assertEquals(102L, UpdateReleaseChecker.findUpdate("1.0.0-beta.2", 101, listOf(betaTwo, stable))?.versionCode)
+        assertEquals(103L, UpdateReleaseChecker.findUpdate("1.0.0", 102, listOf(stable, sameNameHigherCode))?.versionCode)
+        assertNull(UpdateReleaseChecker.findUpdate("1.0.0", 100, listOf(misleadingVersion)))
+        assertEquals(103L, UpdateReleaseChecker.findUpdate("0.8.28", 90, listOf(base, sameNameHigherCode))?.versionCode)
     }
+
+    @Test
+    fun minimumSupportedVersionOnlyMarksACompleteAvailableCandidateAsRequired() {
+        val verified = installable("1.2.0", 120)
+        val required = UpdateReleaseChecker.findUpdate("1.0.0", 100, listOf(verified), minSupportedVersionCode = 110)
+        val unavailable = UpdateReleaseChecker.findUpdate("1.0.0", 100, listOf(verified.copy(versionCode = 105)), minSupportedVersionCode = 110)
+
+        assertTrue(required?.required == true)
+        assertTrue(unavailable?.required == false)
+    }
+
+    private fun installable(version: String, versionCode: Long, isLatest: Boolean = false) = DistributionRelease(
+        version = version,
+        versionCode = versionCode,
+        apkUrl = "https://downloads.invalid/app.apk",
+        apkSha256 = "ab".repeat(32),
+        apkSize = 1234,
+        packageName = "com.selfhosted.daily",
+        signingCertSha256 = DistributionConfigRepository.OFFICIAL_SIGNING_CERT_SHA256,
+        installable = true,
+        isLatest = isLatest
+    )
 
     private fun resolved(profileId: Long) = ResolvedDistributionConfig(
         apiOrigin = "https://tenant.invalid",
