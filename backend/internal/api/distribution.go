@@ -38,18 +38,52 @@ type distributionProfileRequest struct {
 	AllowPrerelease           bool   `json:"allowPrerelease"`
 }
 
-var distributionProfileCreateFields = []string{
-	"Name", "Enabled", "IsDefault", "SourceMode", "Channel",
-	"ProjectURL", "ReleaseIndexURL", "ReleaseHistoryURL", "ReleasePageURL",
-	"DirectAPKURL", "DirectAPKVersionName", "DirectAPKVersionCode", "DirectAPKSHA256",
-	"DirectAPKSizeBytes", "ExpectedPackageName", "ExpectedSigningCertSHA256",
-	"MinSupportedVersionCode", "AllowPrerelease", "CreatedByUserID", "CreatedAt", "UpdatedAt",
+type distributionProfileInsert struct {
+	ID                        uint `gorm:"primaryKey"`
+	Name                      string
+	Enabled                   bool
+	IsDefault                 bool
+	SourceMode                string
+	Channel                   string
+	ProjectURL                string
+	ReleaseIndexURL           string
+	ReleaseHistoryURL         string
+	ReleasePageURL            string
+	DirectAPKURL              string
+	DirectAPKVersionName      string
+	DirectAPKVersionCode      int64
+	DirectAPKSHA256           string
+	DirectAPKSizeBytes        *int64
+	ExpectedPackageName       string
+	ExpectedSigningCertSHA256 string
+	MinSupportedVersionCode   *int64
+	AllowPrerelease           bool
+	CreatedByUserID           *uint
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
 }
 
 func insertDistributionProfile(database *gorm.DB, profile *models.DistributionProfile) *gorm.DB {
-	// Select the complete persisted field set so GORM includes false boolean values
-	// in the original INSERT instead of replacing them with model defaults.
-	return database.Select(distributionProfileCreateFields).Create(profile)
+	// Use an insert-only representation without model default tags. GORM otherwise
+	// replaces false booleans with the schema defaults before binding the INSERT.
+	row := distributionProfileInsert{
+		Name: profile.Name, Enabled: profile.Enabled, IsDefault: profile.IsDefault,
+		SourceMode: profile.SourceMode, Channel: profile.Channel, ProjectURL: profile.ProjectURL,
+		ReleaseIndexURL: profile.ReleaseIndexURL, ReleaseHistoryURL: profile.ReleaseHistoryURL,
+		ReleasePageURL: profile.ReleasePageURL, DirectAPKURL: profile.DirectAPKURL,
+		DirectAPKVersionName: profile.DirectAPKVersionName, DirectAPKVersionCode: profile.DirectAPKVersionCode,
+		DirectAPKSHA256: profile.DirectAPKSHA256, DirectAPKSizeBytes: profile.DirectAPKSizeBytes,
+		ExpectedPackageName: profile.ExpectedPackageName, ExpectedSigningCertSHA256: profile.ExpectedSigningCertSHA256,
+		MinSupportedVersionCode: profile.MinSupportedVersionCode, AllowPrerelease: profile.AllowPrerelease,
+		CreatedByUserID: profile.CreatedByUserID, CreatedAt: profile.CreatedAt, UpdatedAt: profile.UpdatedAt,
+	}
+	result := database.Table("distribution_profiles").Create(&row)
+	if result.Error == nil {
+		profile.ID = row.ID
+		profile.CreatedAt = row.CreatedAt
+		profile.UpdatedAt = row.UpdatedAt
+	}
+	return result
 }
 
 func (request distributionProfileRequest) profile() models.DistributionProfile {
