@@ -60,9 +60,11 @@ internal class UpdateApkDownloader(
     httpClient: OkHttpClient,
     private val maxBytes: Long = DEFAULT_MAX_BYTES,
     timeoutProfile: ApkDownloadTimeoutProfile = ProductionApkDownloadTimeoutProfile,
-    private val urlPolicy: DistributionUrlPolicy = DistributionUrlPolicy()
+    private val urlPolicy: DistributionUrlPolicy = DistributionUrlPolicy(),
+    private val pinnedClientBuilder: (OkHttpClient, ValidatedDistributionDestination) -> OkHttpClient =
+        ::buildPinnedDistributionClient
 ) {
-    private val client = buildApkDownloadClient(httpClient, timeoutProfile)
+    private val clientTemplate = buildApkDownloadClient(httpClient, timeoutProfile)
 
     suspend fun download(update: UpdateInfo): PendingUpdateApk = withContext(Dispatchers.IO) {
         val announcedUrl = update.apkUrl?.trim().orEmpty()
@@ -93,26 +95,28 @@ internal class UpdateApkDownloader(
             var redirects = 0
             while (true) {
                 val request = Request.Builder()
-                    .url(current)
+                    .url(current.url)
                     .header("Accept", "application/vnd.android.package-archive, application/octet-stream")
                     .build()
-                val response = client.newCall(request).execute()
+                val response = pinnedClientBuilder(clientTemplate, current).newCall(request).execute()
                 if (response.code in REDIRECT_CODES) {
                     val location = response.header("Location")
                     response.close()
-                    val next = runCatching { urlPolicy.redirect(announcedOrigin, current, location, redirects) }
+                    val next = runCatching {
+                        urlPolicy.redirect(announcedOrigin.url, current.url, location, redirects)
+                    }
                         .getOrElse {
                             val errorClass = (it as? DistributionUrlException)?.errorClass ?: "invalid_redirect"
                             throw UpdateDownloadException(errorClass, "APK-Weiterleitung hat ein unzulaessiges Ziel.")
                         }
-                    validateApkRedirect(current, next)
+                    validateApkRedirect(current.url, next.url)
                     current = next
                     redirects += 1
                     continue
                 }
 
                 response.use { finalResponse ->
-                    if (update.legacyOfficialArtifact && current.host != LEGACY_OFFICIAL_HOST) {
+                    if (update.legacyOfficialArtifact && current.url.host != LEGACY_OFFICIAL_HOST) {
                         throw UpdateDownloadException("legacy_host_mismatch", "Die temporaere Legacy-Ausnahme gilt nur fuer den offiziellen APK-Host.")
                     }
                     if (!finalResponse.isSuccessful) {
@@ -155,7 +159,7 @@ internal class UpdateApkDownloader(
                     if (expectedHash.isNotBlank() && actualHash != expectedHash) {
                         throw UpdateDownloadException("hash_mismatch", "SHA-256-Pruefung der APK ist fehlgeschlagen.")
                     }
-                    return@withContext PendingUpdateApk(temporary, actualHash, total, current.toString())
+                    return@withContext PendingUpdateApk(temporary, actualHash, total, current.url.toString())
                 }
             }
             @Suppress("UNREACHABLE_CODE")

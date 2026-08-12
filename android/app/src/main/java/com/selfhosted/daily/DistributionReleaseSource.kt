@@ -7,6 +7,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.InetAddress
 
 data class DistributionReleaseResult(
     val releases: List<DistributionRelease>,
@@ -18,14 +19,11 @@ class DistributionReleaseSource(
     context: Context,
     private val httpClient: OkHttpClient,
     private val responseFetcher: ((String) -> String?)? = null,
-    private val nowMillis: () -> Long = System::currentTimeMillis
+    private val nowMillis: () -> Long = System::currentTimeMillis,
+    addressResolver: (String) -> Array<InetAddress> = InetAddress::getAllByName
 ) {
     private val prefs = context.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-    private val urlPolicy = DistributionUrlPolicy()
-    private val distributionClient = httpClient.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .build()
+    private val urlPolicy = DistributionUrlPolicy(addressResolver)
 
     suspend fun releases(
         resolved: ResolvedDistributionConfig,
@@ -165,10 +163,12 @@ class DistributionReleaseSource(
             var current = configuredOrigin
             var redirects = 0
             while (true) {
-                val request = Request.Builder().url(current).header("Accept", "application/json").build()
-                val response = distributionClient.newCall(request).execute()
+                val request = Request.Builder().url(current.url).header("Accept", "application/json").build()
+                val response = buildPinnedDistributionClient(httpClient, current).newCall(request).execute()
                 if (response.code in REDIRECT_CODES) {
-                    val next = response.use { urlPolicy.redirect(configuredOrigin, current, it.header("Location"), redirects) }
+                    val next = response.use {
+                        urlPolicy.redirect(configuredOrigin.url, current.url, it.header("Location"), redirects)
+                    }
                     current = next
                     redirects += 1
                     continue

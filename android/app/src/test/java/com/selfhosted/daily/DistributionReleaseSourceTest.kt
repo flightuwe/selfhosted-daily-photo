@@ -3,6 +3,10 @@ package com.selfhosted.daily
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
+import okhttp3.Dns
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -11,6 +15,8 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import java.net.InetAddress
+import java.net.UnknownHostException
 
 @RunWith(RobolectricTestRunner::class)
 class DistributionReleaseSourceTest {
@@ -86,6 +92,50 @@ class DistributionReleaseSourceTest {
 
         assertEquals(1, fetches)
         assertEquals(ChangelogHistorySource.OFFLINE_CACHE, offline.source)
+    }
+
+    @Test
+    fun indexAndHistoryConnectionsUseTheirValidatedPinnedAddresses() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            server.enqueue(MockResponse().setBody(index("0.9.1")))
+            server.enqueue(MockResponse().setBody(index("0.9.0")))
+            var policyLookups = 0
+            var baseLookups = 0
+            val base = OkHttpClient.Builder().dns(object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> {
+                    baseLookups += 1
+                    throw UnknownHostException("base DNS must not be used")
+                }
+            }).build()
+            val source = DistributionReleaseSource(
+                context,
+                base,
+                addressResolver = { host ->
+                    policyLookups += 1
+                    arrayOf(InetAddress.getByAddress(host, byteArrayOf(127, 0, 0, 1)))
+                }
+            )
+            val config = config(33).copy(
+                releaseIndexUrl = "http://index.example:${server.port}/index.json",
+                releaseHistoryUrl = "http://history.example:${server.port}/history.json"
+            )
+            val resolved = resolved(profileId = 33).copy(config = config)
+
+            assertEquals("0.9.1", source.releases(resolved, allowNetwork = true).releases.single().version)
+            assertEquals(
+                "0.9.0",
+                source.releases(resolved, allowNetwork = true, forHistory = true).releases.single().version
+            )
+
+            assertEquals("/index.json", server.takeRequest().path)
+            assertEquals("/history.json", server.takeRequest().path)
+            assertEquals(2, policyLookups)
+            assertEquals(0, baseLookups)
+        } finally {
+            server.shutdown()
+        }
     }
 
     @Test

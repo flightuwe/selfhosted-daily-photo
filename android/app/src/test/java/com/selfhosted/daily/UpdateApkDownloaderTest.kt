@@ -16,6 +16,8 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.IOException
+import java.net.InetAddress
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -37,7 +39,7 @@ class UpdateApkDownloaderTest {
     }
 
     @Test
-    fun validDownloadStreamsHashAndFinalizesPrivately() = runBlocking {
+    fun explicitlyConfiguredPrivateDirectApkStreamsHashAndFinalizesPrivately() = runBlocking {
         val bytes = "signed-apk-placeholder".toByteArray()
         server.enqueue(MockResponse().setResponseCode(200).setBody(okio.Buffer().write(bytes)))
         val dir = temporaryFolder.newFolder("updates")
@@ -92,6 +94,37 @@ class UpdateApkDownloaderTest {
         assertEquals(30 * 60 * 1_000, client.callTimeoutMillis)
         assertFalse(client.followRedirects)
         assertFalse(client.followSslRedirects)
+    }
+
+    @Test
+    fun manifestApkBuildsItsRequestClientFromTheValidatedPinnedDestination() = runBlocking {
+        val dir = temporaryFolder.newFolder("manifest-pinning")
+        val publicAddress = InetAddress.getByAddress(
+            "downloads.example",
+            byteArrayOf(93.toByte(), 184.toByte(), 216.toByte(), 34.toByte())
+        )
+        var captured: ValidatedDistributionDestination? = null
+        val downloader = UpdateApkDownloader(
+            dir,
+            OkHttpClient(),
+            maxBytes = 1024,
+            urlPolicy = DistributionUrlPolicy { arrayOf(publicAddress) },
+            pinnedClientBuilder = { _, destination ->
+                captured = destination
+                throw IOException("stop before external network")
+            }
+        )
+        val update = baseUpdate(apkSize = null).copy(
+            apkUrl = "https://downloads.example/app.apk",
+            apkUrlExplicitlyConfigured = false
+        )
+
+        val error = runCatching { downloader.download(update) }.exceptionOrNull()
+
+        assertEquals("stop before external network", error?.message)
+        assertEquals("https://downloads.example/app.apk", captured?.url.toString())
+        assertEquals(listOf(publicAddress), captured?.addresses)
+        assertTrue(dir.listFiles().orEmpty().isEmpty())
     }
 
     @Test
