@@ -3,6 +3,9 @@ name: Android unsigned candidate
 on:
   workflow_dispatch:
   push:
+    branches:
+      - "release/bridge-v0.8.29-candidate"
+      - "release/harzcloud-v0.8.30-candidate"
     tags:
       - "v*"
 
