@@ -292,7 +292,7 @@ func TestDistributionDefaultUniqueIndexAndTransactionalSwitch(t *testing.T) {
 		t.Fatal("partial unique index accepted a second default profile")
 	}
 
-	if err := SetDefaultDistributionProfile(database, second.ID); err != nil {
+	if err := SetDefaultDistributionProfile(database, second.ID, true); err != nil {
 		t.Fatalf("switch default: %v", err)
 	}
 	var defaults []models.DistributionProfile
@@ -335,7 +335,7 @@ func TestDistributionDefaultSwitchRollsBackCompletelyOnFailure(t *testing.T) {
 	}
 	defer database.Exec(`DROP TRIGGER IF EXISTS fail_distribution_default_switch`)
 
-	if err := SetDefaultDistributionProfile(database, next.ID); err == nil {
+	if err := SetDefaultDistributionProfile(database, next.ID, true); err == nil {
 		t.Fatal("injected default switch failure was ignored")
 	}
 	var storedOriginal, storedNext models.DistributionProfile

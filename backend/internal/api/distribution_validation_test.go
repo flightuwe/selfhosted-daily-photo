@@ -228,7 +228,7 @@ func TestDistributionManifestTestSuccessAndFailures(t *testing.T) {
 			name: "valid",
 			handler: func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"schemaVersion":1,"latest":"1.2.3","releases":[{"version":"1.2.3"}]}`))
+				_, _ = w.Write([]byte(`{"schemaVersion":1,"latest":"1.2.3","releases":[{"version":"1.2.3","versionCode":123,"apkUrl":"https://downloads.example.org/app.apk","sha256":"` + strings.Repeat("ab", 32) + `","size":42,"packageName":"com.selfhosted.daily"}]}`))
 			},
 			wantOK: true,
 		},

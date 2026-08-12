@@ -257,6 +257,16 @@ func ensureDistributionSchema(database *gorm.DB) error {
 		BEGIN SELECT RAISE(ABORT, 'default distribution profile must be enabled'); END`).Error; err != nil {
 		return fmt.Errorf("create distribution default update trigger: %w", err)
 	}
+	if err := database.Exec(`CREATE TRIGGER IF NOT EXISTS trg_distribution_audit_append_only_update
+		BEFORE UPDATE ON distribution_profile_audit
+		BEGIN SELECT RAISE(ABORT, 'distribution audit is append-only'); END`).Error; err != nil {
+		return fmt.Errorf("create distribution audit update trigger: %w", err)
+	}
+	if err := database.Exec(`CREATE TRIGGER IF NOT EXISTS trg_distribution_audit_append_only_delete
+		BEFORE DELETE ON distribution_profile_audit
+		BEGIN SELECT RAISE(ABORT, 'distribution audit is append-only'); END`).Error; err != nil {
+		return fmt.Errorf("create distribution audit delete trigger: %w", err)
+	}
 	if err := ensureDefaultDistributionProfile(database); err != nil {
 		return fmt.Errorf("ensure default distribution profile: %w", err)
 	}
@@ -308,7 +318,7 @@ func ensureDefaultDistributionProfile(database *gorm.DB) error {
 	})
 }
 
-func SetDefaultDistributionProfile(database *gorm.DB, profileID uint) error {
+func SetDefaultDistributionProfile(database *gorm.DB, profileID uint, incrementTargetRevision bool) error {
 	if profileID == 0 {
 		return gorm.ErrRecordNotFound
 	}
@@ -319,12 +329,16 @@ func SetDefaultDistributionProfile(database *gorm.DB, profileID uint) error {
 		}
 		if err := tx.Model(&models.DistributionProfile{}).
 			Where("is_default = ? AND id <> ?", true, profileID).
-			Update("is_default", false).Error; err != nil {
+			Updates(map[string]any{"is_default": false, "revision": gorm.Expr("revision + 1")}).Error; err != nil {
 			return err
+		}
+		targetUpdates := map[string]any{"enabled": true, "is_default": true}
+		if incrementTargetRevision {
+			targetUpdates["revision"] = gorm.Expr("revision + 1")
 		}
 		if err := tx.Model(&models.DistributionProfile{}).
 			Where("id = ?", profileID).
-			Updates(map[string]any{"enabled": true, "is_default": true}).Error; err != nil {
+			Updates(targetUpdates).Error; err != nil {
 			return err
 		}
 		var activeDefaults int64

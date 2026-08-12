@@ -36,6 +36,7 @@ type distributionProfileRequest struct {
 	ExpectedSigningCertSHA256 string `json:"expectedSigningCertSha256"`
 	MinSupportedVersionCode   *int64 `json:"minSupportedVersionCode"`
 	AllowPrerelease           bool   `json:"allowPrerelease"`
+	ExpectedRevision          int64  `json:"expectedRevision"`
 }
 
 type distributionProfileInsert struct {
@@ -58,6 +59,7 @@ type distributionProfileInsert struct {
 	ExpectedSigningCertSHA256 string
 	MinSupportedVersionCode   *int64
 	AllowPrerelease           bool
+	Revision                  int64
 	CreatedByUserID           *uint
 	CreatedAt                 time.Time
 	UpdatedAt                 time.Time
@@ -75,6 +77,7 @@ func insertDistributionProfile(database *gorm.DB, profile *models.DistributionPr
 		DirectAPKSHA256: profile.DirectAPKSHA256, DirectAPKSizeBytes: profile.DirectAPKSizeBytes,
 		ExpectedPackageName: profile.ExpectedPackageName, ExpectedSigningCertSHA256: profile.ExpectedSigningCertSHA256,
 		MinSupportedVersionCode: profile.MinSupportedVersionCode, AllowPrerelease: profile.AllowPrerelease,
+		Revision:        profile.Revision,
 		CreatedByUserID: profile.CreatedByUserID, CreatedAt: profile.CreatedAt, UpdatedAt: profile.UpdatedAt,
 	}
 	result := database.Table("distribution_profiles").Create(&row)
@@ -84,6 +87,22 @@ func insertDistributionProfile(database *gorm.DB, profile *models.DistributionPr
 		profile.UpdatedAt = row.UpdatedAt
 	}
 	return result
+}
+
+const distributionAdminBodyLimit = 64 << 10
+
+func bindDistributionJSON(c *gin.Context, target any) bool {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, distributionAdminBodyLimit)
+	if err := c.ShouldBindJSON(target); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "payload too large", "errorClass": "payload_too_large"})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		}
+		return false
+	}
+	return true
 }
 
 func (request distributionProfileRequest) profile() models.DistributionProfile {
@@ -96,6 +115,7 @@ func (request distributionProfileRequest) profile() models.DistributionProfile {
 		DirectAPKSHA256: request.DirectAPKSHA256, DirectAPKSizeBytes: request.DirectAPKSizeBytes,
 		ExpectedPackageName: request.ExpectedPackageName, ExpectedSigningCertSHA256: request.ExpectedSigningCertSHA256,
 		MinSupportedVersionCode: request.MinSupportedVersionCode, AllowPrerelease: request.AllowPrerelease,
+		Revision: 1,
 	}
 }
 
@@ -119,7 +139,7 @@ func (s *Server) handleAppDistribution(c *gin.Context) {
 	if user.DistributionProfileID != nil {
 		assignment = *user.DistributionProfileID
 	}
-	etagInput := fmt.Sprintf("%d:%d:%d:%d", user.ID, assignment, profile.ID, profile.UpdatedAt.UnixNano())
+	etagInput := fmt.Sprintf("%d:%d:%d:%d", user.ID, assignment, profile.ID, profile.Revision)
 	etagDigest := sha256.Sum256([]byte(etagInput))
 	etag := `"` + hex.EncodeToString(etagDigest[:16]) + `"`
 	c.Header("Cache-Control", "private, max-age=300")
@@ -191,8 +211,7 @@ func (s *Server) handleAdminDistributionProfiles(c *gin.Context) {
 func (s *Server) handleAdminCreateDistributionProfile(c *gin.Context) {
 	actor, _ := userFromContext(c)
 	var request distributionProfileRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+	if !bindDistributionJSON(c, &request) {
 		return
 	}
 	profile := request.profile()
@@ -204,13 +223,15 @@ func (s *Server) handleAdminCreateDistributionProfile(c *gin.Context) {
 		return
 	}
 	var previousDefault models.DistributionProfile
-	_ = s.DB.Where("is_default = ?", true).First(&previousDefault).Error
 	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("is_default = ?", true).First(&previousDefault).Error; err != nil {
+			return err
+		}
 		if err := insertDistributionProfile(tx, &profile).Error; err != nil {
 			return err
 		}
 		if wantsDefault {
-			if err := dailydb.SetDefaultDistributionProfile(tx, profile.ID); err != nil {
+			if err := dailydb.SetDefaultDistributionProfile(tx, profile.ID, false); err != nil {
 				return err
 			}
 			profile.IsDefault = true
@@ -244,8 +265,15 @@ func (s *Server) handleAdminUpdateDistributionProfile(c *gin.Context) {
 		return
 	}
 	var request distributionProfileRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+	if !bindDistributionJSON(c, &request) {
+		return
+	}
+	if request.ExpectedRevision < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "expectedRevision is required", "errorClass": "revision_required"})
+		return
+	}
+	if before.Revision != request.ExpectedRevision {
+		c.JSON(http.StatusConflict, gin.H{"error": "profile changed concurrently", "errorClass": "revision_conflict", "currentRevision": before.Revision, "currentProfile": before})
 		return
 	}
 	candidate := request.profile()
@@ -253,7 +281,10 @@ func (s *Server) handleAdminUpdateDistributionProfile(c *gin.Context) {
 	candidate.CreatedAt = before.CreatedAt
 	candidate.CreatedByUserID = before.CreatedByUserID
 	if before.IsDefault && (!candidate.IsDefault || !candidate.Enabled || candidate.SourceMode == "disabled") {
-		_ = appendDistributionAudit(s.DB, actor, "profile_update_attempt", &before.ID, nil, distributionProfileAuditSnapshot(before), distributionProfileAuditSnapshot(candidate), nil, "default_invariant")
+		if err := appendDistributionAudit(s.DB, actor, "profile_update_attempt", &before.ID, nil, distributionProfileAuditSnapshot(before), distributionProfileAuditSnapshot(candidate), nil, "default_invariant"); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "audit failed"})
+			return
+		}
 		c.JSON(http.StatusConflict, gin.H{"error": "default profile cannot be disabled or unset without a replacement", "errorClass": "default_invariant"})
 		return
 	}
@@ -262,28 +293,52 @@ func (s *Server) handleAdminUpdateDistributionProfile(c *gin.Context) {
 		candidate.IsDefault = false
 	}
 	if err := validateDistributionProfile(&candidate, s.Config); err != nil {
-		_ = appendDistributionAudit(s.DB, actor, "profile_update_attempt", &before.ID, nil, distributionProfileAuditSnapshot(before), distributionProfileAuditSnapshot(candidate), nil, distributionErrorClass(err))
+		if auditErr := appendDistributionAudit(s.DB, actor, "profile_update_attempt", &before.ID, nil, distributionProfileAuditSnapshot(before), distributionProfileAuditSnapshot(candidate), nil, distributionErrorClass(err)); auditErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "audit failed"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "errorClass": distributionErrorClass(err)})
 		return
 	}
-	var previousDefault models.DistributionProfile
-	_ = s.DB.Where("is_default = ?", true).First(&previousDefault).Error
+	var conflict *models.DistributionProfile
 	if err := s.DB.Transaction(func(tx *gorm.DB) error {
-		updates := map[string]any{
-			"name": candidate.Name, "enabled": candidate.Enabled, "source_mode": candidate.SourceMode, "channel": candidate.Channel,
-			"project_url": candidate.ProjectURL, "release_index_url": candidate.ReleaseIndexURL,
-			"release_history_url": candidate.ReleaseHistoryURL, "release_page_url": candidate.ReleasePageURL,
-			"direct_apk_url": candidate.DirectAPKURL, "direct_apk_version_name": candidate.DirectAPKVersionName,
-			"direct_apk_version_code": candidate.DirectAPKVersionCode, "direct_apk_sha256": candidate.DirectAPKSHA256,
-			"direct_apk_size_bytes": candidate.DirectAPKSizeBytes, "expected_package_name": candidate.ExpectedPackageName,
-			"expected_signing_cert_sha256": candidate.ExpectedSigningCertSHA256,
-			"min_supported_version_code":   candidate.MinSupportedVersionCode, "allow_prerelease": candidate.AllowPrerelease,
-		}
-		if err := tx.Model(&models.DistributionProfile{}).Where("id = ?", before.ID).Updates(updates).Error; err != nil {
+		var current models.DistributionProfile
+		if err := tx.First(&current, before.ID).Error; err != nil {
 			return err
 		}
+		if current.Revision != request.ExpectedRevision {
+			conflict = &current
+			return nil
+		}
+		before = current
+		var previousDefault models.DistributionProfile
+		if err := tx.Where("is_default = ?", true).First(&previousDefault).Error; err != nil {
+			return err
+		}
+		updates := map[string]any{
+			"Name": candidate.Name, "Enabled": candidate.Enabled, "SourceMode": candidate.SourceMode, "Channel": candidate.Channel,
+			"ProjectURL": candidate.ProjectURL, "ReleaseIndexURL": candidate.ReleaseIndexURL,
+			"ReleaseHistoryURL": candidate.ReleaseHistoryURL, "ReleasePageURL": candidate.ReleasePageURL,
+			"DirectAPKURL": candidate.DirectAPKURL, "DirectAPKVersionName": candidate.DirectAPKVersionName,
+			"DirectAPKVersionCode": candidate.DirectAPKVersionCode, "DirectAPKSHA256": candidate.DirectAPKSHA256,
+			"DirectAPKSizeBytes": candidate.DirectAPKSizeBytes, "ExpectedPackageName": candidate.ExpectedPackageName,
+			"ExpectedSigningCertSHA256": candidate.ExpectedSigningCertSHA256,
+			"MinSupportedVersionCode":   candidate.MinSupportedVersionCode, "AllowPrerelease": candidate.AllowPrerelease,
+		}
+		updates["Revision"] = gorm.Expr("revision + 1")
+		updated := tx.Model(&models.DistributionProfile{}).Where("id = ? AND revision = ?", before.ID, request.ExpectedRevision).Updates(updates)
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			if err := tx.First(&current, before.ID).Error; err != nil {
+				return err
+			}
+			conflict = &current
+			return nil
+		}
 		if wantsDefault && !before.IsDefault {
-			if err := dailydb.SetDefaultDistributionProfile(tx, before.ID); err != nil {
+			if err := dailydb.SetDefaultDistributionProfile(tx, before.ID, false); err != nil {
 				return err
 			}
 		}
@@ -308,6 +363,10 @@ func (s *Server) handleAdminUpdateDistributionProfile(c *gin.Context) {
 		return nil
 	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save failed"})
+		return
+	}
+	if conflict != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "profile changed concurrently", "errorClass": "revision_conflict", "currentRevision": conflict.Revision, "currentProfile": conflict})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"profile": candidate, "clientPreview": distributionClientResponse(candidate)})
@@ -335,7 +394,10 @@ func (s *Server) handleAdminDeleteDistributionProfile(c *gin.Context) {
 		if profile.IsDefault {
 			errorClass = "default_invariant"
 		}
-		_ = appendDistributionAudit(s.DB, actor, "profile_delete_attempt", &profile.ID, nil, distributionProfileAuditSnapshot(profile), nil, nil, errorClass)
+		if err := appendDistributionAudit(s.DB, actor, "profile_delete_attempt", &profile.ID, nil, distributionProfileAuditSnapshot(profile), nil, nil, errorClass); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "audit failed"})
+			return
+		}
 		c.JSON(http.StatusConflict, gin.H{"error": "default or assigned profile cannot be deleted", "errorClass": errorClass, "assignedUserCount": assigned})
 		return
 	}
@@ -364,7 +426,29 @@ func (s *Server) handleAdminTestDistributionProfile(c *gin.Context) {
 		return
 	}
 	result := testDistributionProfile(c.Request.Context(), s.Config, profile)
-	_ = appendDistributionAudit(s.DB, actor, "profile_tested", &profile.ID, nil, nil, nil, result, result.ErrorClass)
+	if err := appendDistributionAudit(s.DB, actor, "profile_tested", &profile.ID, nil, nil, nil, result, result.ErrorClass); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "audit failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"result": result})
+}
+
+func (s *Server) handleAdminTestDistributionDraft(c *gin.Context) {
+	actor, _ := userFromContext(c)
+	var request distributionProfileRequest
+	if !bindDistributionJSON(c, &request) {
+		return
+	}
+	profile := request.profile()
+	result := testDistributionProfile(c.Request.Context(), s.Config, profile)
+	var profileID *uint
+	if profile.ID > 0 {
+		profileID = &profile.ID
+	}
+	if err := appendDistributionAudit(s.DB, actor, "profile_draft_tested", profileID, nil, nil, distributionProfileAuditSnapshot(profile), result, result.ErrorClass); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "audit failed"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"result": result})
 }
 
@@ -411,8 +495,7 @@ func (s *Server) handleAdminUserDistributionProfile(c *gin.Context) {
 	var request struct {
 		DistributionProfileID *uint `json:"distributionProfileId"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+	if !bindDistributionJSON(c, &request) {
 		return
 	}
 	var user models.User

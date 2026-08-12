@@ -80,6 +80,7 @@ type DistributionProfile struct {
 	ExpectedSigningCertSHA256 string    `gorm:"size:64" json:"expectedSigningCertSha256"`
 	MinSupportedVersionCode   *int64    `json:"minSupportedVersionCode"`
 	AllowPrerelease           bool      `gorm:"not null;default:false" json:"allowPrerelease"`
+	Revision                  int64     `gorm:"not null;default:1" json:"revision"`
 	CreatedByUserID           *uint     `gorm:"index" json:"createdByUserId"`
 	CreatedAt                 time.Time `json:"createdAt"`
 	UpdatedAt                 time.Time `json:"updatedAt"`

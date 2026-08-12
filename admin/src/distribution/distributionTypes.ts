@@ -20,6 +20,7 @@ export type DistributionProfile = {
   expectedSigningCertSha256: string;
   minSupportedVersionCode: number | null;
   allowPrerelease: boolean;
+  revision: number;
   createdByUserId?: number | null;
   createdAt?: string;
   updatedAt?: string;
@@ -114,4 +115,5 @@ export const emptyDistributionProfile = (): DistributionProfile => ({
   expectedSigningCertSha256: "",
   minSupportedVersionCode: null,
   allowPrerelease: false,
+  revision: 1,
 });

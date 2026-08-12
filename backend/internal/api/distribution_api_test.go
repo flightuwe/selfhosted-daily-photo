@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -297,7 +298,8 @@ func TestDistributionDefaultSwitchAndInvariantThroughAPI(t *testing.T) {
 		t.Fatalf("new default was not persisted enabled and default: %+v", storedDefault)
 	}
 	update := distributionRequest(t, router, http.MethodPut, "/api/admin/distribution/profiles/"+strconvUint(created.Profile.ID), adminToken, map[string]any{
-		"name": created.Profile.Name, "enabled": false, "isDefault": false,
+		"expectedRevision": created.Profile.Revision,
+		"name":             created.Profile.Name, "enabled": false, "isDefault": false,
 		"sourceMode": "disabled", "channel": created.Profile.Channel,
 		"expectedPackageName": created.Profile.ExpectedPackageName,
 	})
@@ -419,7 +421,8 @@ func TestDistributionQueryURLsAreNeverPersisted(t *testing.T) {
 		t.Fatal(err)
 	}
 	updateRejected := distributionRequest(t, router, http.MethodPut, "/api/admin/distribution/profiles/"+strconvUint(created.Profile.ID), adminToken, map[string]any{
-		"name": "Changed by rejected update", "enabled": true, "isDefault": false,
+		"expectedRevision": created.Profile.Revision,
+		"name":             "Changed by rejected update", "enabled": true, "isDefault": false,
 		"sourceMode": "manifest", "channel": "stable", "releaseIndexUrl": "https://example.org/index.json?token=placeholder",
 		"expectedPackageName": "com.selfhosted.daily",
 	})
@@ -432,6 +435,195 @@ func TestDistributionQueryURLsAreNeverPersisted(t *testing.T) {
 	}
 	if stored.Name != created.Profile.Name || stored.ReleaseIndexURL != created.Profile.ReleaseIndexURL {
 		t.Fatalf("rejected query update changed profile: before=%+v after=%+v", created.Profile, stored)
+	}
+}
+
+func TestDistributionUpdateRejectsStaleRevisionWithoutLostUpdate(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	router := server.Router()
+	token := distributionToken(t, server, admin)
+	create := distributionRequest(t, router, http.MethodPost, "/api/admin/distribution/profiles", token, map[string]any{
+		"name": "Concurrent", "enabled": true, "isDefault": false, "sourceMode": "manifest", "channel": "stable",
+		"releaseIndexUrl": "https://example.org/index.json", "expectedPackageName": "com.selfhosted.daily",
+	})
+	var created struct {
+		Profile models.DistributionProfile `json:"profile"`
+	}
+	if create.Code != http.StatusCreated || json.Unmarshal(create.Body.Bytes(), &created) != nil {
+		t.Fatalf("create=%d %s", create.Code, create.Body.String())
+	}
+	payload := func(name string) map[string]any {
+		return map[string]any{
+			"expectedRevision": created.Profile.Revision, "name": name, "enabled": true, "isDefault": false,
+			"sourceMode": "manifest", "channel": "stable", "releaseIndexUrl": "https://example.org/index.json",
+			"expectedPackageName": "com.selfhosted.daily",
+		}
+	}
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	var wait sync.WaitGroup
+	for _, name := range []string{"Writer A", "Writer B"} {
+		name := name
+		encoded, err := json.Marshal(payload(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			request := httptest.NewRequest(http.MethodPut, "/api/admin/distribution/profiles/"+strconvUint(created.Profile.ID), bytes.NewReader(encoded))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			responses <- response
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(responses)
+	statusCounts := map[int]int{}
+	for response := range responses {
+		statusCounts[response.Code]++
+		if response.Code == http.StatusConflict && !strings.Contains(response.Body.String(), "revision_conflict") {
+			t.Fatalf("conflict body=%s", response.Body.String())
+		}
+	}
+	if statusCounts[http.StatusOK] != 1 || statusCounts[http.StatusConflict] != 1 {
+		t.Fatalf("status counts=%v", statusCounts)
+	}
+	var stored models.DistributionProfile
+	if err := server.DB.First(&stored, created.Profile.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if (stored.Name != "Writer A" && stored.Name != "Writer B") || stored.Revision != created.Profile.Revision+1 {
+		t.Fatalf("stored=%+v", stored)
+	}
+	var audit models.DistributionAuditEvent
+	if err := server.DB.Where("action = ? AND profile_id = ?", "profile_updated", stored.ID).Order("id desc").First(&audit).Error; err != nil {
+		t.Fatal(err)
+	}
+	before := distributionAuditJSON(audit.BeforeJSON).(map[string]any)
+	if before["name"] != "Concurrent" {
+		t.Fatalf("audit before=%v", before)
+	}
+}
+
+func TestDistributionConcurrentDefaultSwitchKeepsSingleEnabledDefault(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	router := server.Router()
+	token := distributionToken(t, server, admin)
+	profiles := make([]models.DistributionProfile, 0, 2)
+	for _, name := range []string{"Default A", "Default B"} {
+		created := distributionRequest(t, router, http.MethodPost, "/api/admin/distribution/profiles", token, map[string]any{
+			"name": name, "enabled": true, "isDefault": false, "sourceMode": "manifest", "channel": "stable",
+			"releaseIndexUrl": "https://example.org/index.json", "expectedPackageName": "com.selfhosted.daily",
+		})
+		var response struct {
+			Profile models.DistributionProfile `json:"profile"`
+		}
+		if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &response) != nil {
+			t.Fatalf("create=%d %s", created.Code, created.Body.String())
+		}
+		profiles = append(profiles, response.Profile)
+	}
+	start := make(chan struct{})
+	statuses := make(chan int, 2)
+	var wait sync.WaitGroup
+	for _, profile := range profiles {
+		profile := profile
+		payload, _ := json.Marshal(map[string]any{
+			"expectedRevision": profile.Revision, "name": profile.Name, "enabled": true, "isDefault": true,
+			"sourceMode": "manifest", "channel": "stable", "releaseIndexUrl": profile.ReleaseIndexURL,
+			"expectedPackageName": profile.ExpectedPackageName,
+		})
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			request := httptest.NewRequest(http.MethodPut, "/api/admin/distribution/profiles/"+strconvUint(profile.ID), bytes.NewReader(payload))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			statuses <- response.Code
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(statuses)
+	for status := range statuses {
+		if status != http.StatusOK && status != http.StatusConflict {
+			t.Fatalf("unexpected concurrent default status=%d", status)
+		}
+	}
+	var defaults int64
+	if err := server.DB.Model(&models.DistributionProfile{}).Where("is_default = ? AND enabled = ?", true, true).Count(&defaults).Error; err != nil {
+		t.Fatal(err)
+	}
+	if defaults != 1 {
+		t.Fatalf("enabled defaults=%d", defaults)
+	}
+}
+
+func TestDistributionDraftTestAndRejectedAttemptFailWhenAuditFails(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	token := distributionToken(t, server, admin)
+	if err := server.DB.Exec(`CREATE TRIGGER fail_distribution_audit_p2 BEFORE INSERT ON distribution_profile_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	draft := distributionRequest(t, server.Router(), http.MethodPost, "/api/admin/distribution/test", token, map[string]any{
+		"name": "Draft", "enabled": false, "sourceMode": "disabled", "channel": "stable", "expectedPackageName": "com.selfhosted.daily",
+	})
+	if draft.Code != http.StatusInternalServerError || strings.Contains(draft.Body.String(), `"result"`) {
+		t.Fatalf("draft=%d %s", draft.Code, draft.Body.String())
+	}
+	var current models.DistributionProfile
+	if err := server.DB.Where("is_default = ?", true).First(&current).Error; err != nil {
+		t.Fatal(err)
+	}
+	rejected := distributionRequest(t, server.Router(), http.MethodPut, "/api/admin/distribution/profiles/"+strconvUint(current.ID), token, map[string]any{
+		"expectedRevision": current.Revision, "name": current.Name, "enabled": false, "isDefault": false,
+		"sourceMode": "disabled", "channel": current.Channel, "expectedPackageName": current.ExpectedPackageName,
+	})
+	if rejected.Code != http.StatusInternalServerError {
+		t.Fatalf("rejected=%d %s", rejected.Code, rejected.Body.String())
+	}
+}
+
+func TestDistributionAuditIsAppendOnlyAndReadable(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	token := distributionToken(t, server, admin)
+	created := distributionRequest(t, server.Router(), http.MethodPost, "/api/admin/distribution/profiles", token, map[string]any{
+		"name": "Audited", "enabled": false, "sourceMode": "disabled", "channel": "stable", "expectedPackageName": "com.selfhosted.daily",
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	var row models.DistributionAuditEvent
+	if err := server.DB.Order("id desc").First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := server.DB.Model(&row).Update("error_class", "tampered").Error; err == nil {
+		t.Fatal("audit UPDATE succeeded")
+	}
+	if err := server.DB.Delete(&row).Error; err == nil {
+		t.Fatal("audit DELETE succeeded")
+	}
+	read := distributionRequest(t, server.Router(), http.MethodGet, "/api/admin/distribution/audit", token, nil)
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), "profile_created") {
+		t.Fatalf("read=%d %s", read.Code, read.Body.String())
+	}
+}
+
+func TestDistributionAdminBodyLimit(t *testing.T) {
+	server, admin, _ := newDistributionAPITestServer(t)
+	response := distributionRequest(t, server.Router(), http.MethodPost, "/api/admin/distribution/test", distributionToken(t, server, admin), map[string]any{
+		"name": strings.Repeat("x", distributionAdminBodyLimit), "enabled": false, "sourceMode": "disabled", "channel": "stable",
+	})
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), "payload_too_large") {
+		t.Fatalf("response=%d %s", response.Code, response.Body.String())
 	}
 }
 

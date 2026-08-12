@@ -41,7 +41,7 @@ export function DistributionPanel({ token }: Props) {
   const [selectedId, setSelectedId] = useState<number>(0);
   const selectedIdRef = useRef(0);
   const [draft, setDraft] = useState<DistributionProfile>(emptyDistributionProfile());
-  const [testResults, setTestResults] = useState<Record<number, DistributionTestResult>>({});
+  const [testResult, setTestResult] = useState<DistributionTestResult>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -84,6 +84,7 @@ export function DistributionPanel({ token }: Props) {
     selectedIdRef.current = item.profile.id;
     setDraft({ ...item.profile });
     setMessage("");
+    setTestResult(undefined);
   }
 
   function startNewProfile() {
@@ -91,6 +92,7 @@ export function DistributionPanel({ token }: Props) {
     selectedIdRef.current = 0;
     setDraft(emptyDistributionProfile());
     setMessage("");
+    setTestResult(undefined);
   }
 
   async function saveProfile() {
@@ -132,12 +134,10 @@ export function DistributionPanel({ token }: Props) {
   }
 
   async function runTest() {
-    if (!draft.id) return;
     setBusy(true);
     try {
-      const response = await testDistributionProfile(token, draft.id);
-      setTestResults((current) => ({ ...current, [draft.id]: response.result }));
-      await refresh(draft.id);
+      const response = await testDistributionProfile(token, draft);
+      setTestResult(response.result);
       setMessage(response.result.success ? "Quellentest erfolgreich." : "Quellentest fehlgeschlagen.");
     } catch (error) {
       setMessage((error as Error).message);
@@ -217,9 +217,9 @@ export function DistributionPanel({ token }: Props) {
             originalProfile={selectedItem?.profile}
             assignedUserCount={selectedItem?.assignedUserCount || 0}
             policy={policy}
-            testResult={draft.id ? testResults[draft.id] : undefined}
+            testResult={testResult}
             busy={busy}
-            onChange={setDraft}
+            onChange={(profile) => { setDraft(profile); setTestResult(undefined); }}
             onSave={() => void saveProfile()}
             onDelete={() => void removeProfile()}
             onTest={() => void runTest()}

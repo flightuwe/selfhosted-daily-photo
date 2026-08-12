@@ -449,6 +449,7 @@ func (s *Server) Router() *gin.Engine {
 			admin.PUT("/distribution/profiles/:id", s.handleAdminUpdateDistributionProfile)
 			admin.DELETE("/distribution/profiles/:id", s.handleAdminDeleteDistributionProfile)
 			admin.POST("/distribution/profiles/:id/test", s.handleAdminTestDistributionProfile)
+			admin.POST("/distribution/test", s.handleAdminTestDistributionDraft)
 			admin.GET("/distribution/audit", s.handleAdminDistributionAudit)
 			admin.GET("/users/:id/email", s.handleAdminGetUserEmail)
 			admin.DELETE("/users/:id/email", s.handleAdminDeleteUserEmail)

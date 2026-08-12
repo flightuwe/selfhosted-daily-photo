@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net"
@@ -294,7 +296,7 @@ func testDistributionProfile(ctx context.Context, cfg config.Config, profile mod
 	client := newDistributionHTTPClient(cfg)
 	var err error
 	if manifest {
-		err = testDistributionManifest(ctx, client, cfg, target, &result)
+		err = testDistributionManifest(ctx, client, cfg, profile, target, &result)
 	} else {
 		err = testDistributionDirectAPK(ctx, client, cfg, target, &result)
 	}
@@ -350,39 +352,15 @@ func newDistributionHTTPClient(cfg config.Config) *http.Client {
 	}
 }
 
-func testDistributionManifest(ctx context.Context, client *http.Client, cfg config.Config, target string, result *distributionTestResult) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return distributionError("invalid_url", "manifest request could not be created")
-	}
-	req.Header.Set("Accept", "application/json")
-	response, err := client.Do(req)
+func testDistributionManifest(ctx context.Context, client *http.Client, cfg config.Config, profile models.DistributionProfile, target string, result *distributionTestResult) error {
+	body, finalURL, statusClass, err := fetchDistributionJSON(ctx, client, cfg, target)
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
-	result.FinalHost = response.Request.URL.Hostname()
-	result.HTTPStatusClass = strconv.Itoa(response.StatusCode/100) + "xx"
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return distributionError("http_status", "manifest endpoint returned a non-success status")
-	}
-	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || (mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json")) {
-		return distributionError("content_type", "manifest endpoint did not return JSON")
-	}
-	limit := cfg.DistributionManifestMaxBytes
-	if limit <= 0 {
-		limit = 1024 * 1024
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil {
-		return distributionError("response_read", "manifest response could not be read")
-	}
-	if int64(len(body)) > limit {
-		return distributionError("manifest_too_large", "manifest exceeds the deployment size limit")
-	}
+	result.FinalHost = finalURL.Hostname()
+	result.HTTPStatusClass = statusClass
 	var root map[string]any
-	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	if err := decoder.Decode(&root); err != nil {
 		return distributionError("invalid_schema", "manifest is not valid JSON")
@@ -397,9 +375,112 @@ func testDistributionManifest(ctx context.Context, client *http.Client, cfg conf
 	if !ok || len(releases) == 0 || latest == "" {
 		return distributionError("invalid_schema", "manifest must contain latest and releases")
 	}
+	validLatest := false
+	for _, rawRelease := range releases {
+		release, ok := rawRelease.(map[string]any)
+		if !ok {
+			continue
+		}
+		version := strings.TrimPrefix(strings.TrimSpace(fmt.Sprint(release["version"])), "v")
+		if version != latest {
+			continue
+		}
+		versionCode, versionCodeOK := distributionPositiveInt64(release["versionCode"])
+		size, sizeOK := distributionPositiveInt64(firstDistributionValue(release, "apkSize", "size"))
+		apkURL := strings.TrimSpace(fmt.Sprint(release["apkUrl"]))
+		sha := strings.ToLower(strings.TrimSpace(fmt.Sprint(firstDistributionValue(release, "apkSha256", "sha256"))))
+		packageName := strings.TrimSpace(fmt.Sprint(release["packageName"]))
+		signer := strings.ToLower(strings.TrimSpace(fmt.Sprint(release["signingCertSha256"])))
+		_, urlErr := validateDistributionURLSyntax(apkURL, true, cfg.AllowInsecureDistributionURLs)
+		validLatest = versionCodeOK && versionCode > 0 && sizeOK && size > 0 && urlErr == nil &&
+			distributionSHA256Pattern.MatchString(sha) && packageName != "<nil>" && packageName != "" &&
+			(signer == "" || signer == "<nil>" || distributionSHA256Pattern.MatchString(signer))
+		break
+	}
+	if !validLatest {
+		return distributionError("invalid_schema", "manifest latest release is incomplete")
+	}
 	result.SchemaVersion = schema
 	result.DetectedVersion = latest
+	if historyURL := strings.TrimSpace(profile.ReleaseHistoryURL); historyURL != "" && historyURL != target {
+		historyBody, _, _, historyErr := fetchDistributionJSON(ctx, client, cfg, historyURL)
+		if historyErr != nil {
+			return historyErr
+		}
+		var history any
+		if json.Unmarshal(historyBody, &history) != nil {
+			return distributionError("invalid_history", "release history is not valid JSON")
+		}
+		switch value := history.(type) {
+		case []any:
+			if len(value) == 0 {
+				return distributionError("invalid_history", "release history is empty")
+			}
+		case map[string]any:
+			entries, ok := value["releases"].([]any)
+			if !ok || len(entries) == 0 {
+				return distributionError("invalid_history", "release history has no releases")
+			}
+		default:
+			return distributionError("invalid_history", "release history has an unsupported structure")
+		}
+	}
 	return nil
+}
+
+func fetchDistributionJSON(ctx context.Context, client *http.Client, cfg config.Config, target string) ([]byte, *url.URL, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, nil, "", distributionError("invalid_url", "manifest request could not be created")
+	}
+	req.Header.Set("Accept", "application/json")
+	response, err := client.Do(req)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	defer response.Body.Close()
+	statusClass := strconv.Itoa(response.StatusCode/100) + "xx"
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, response.Request.URL, statusClass, distributionError("http_status", "manifest endpoint returned a non-success status")
+	}
+	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || (mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json")) {
+		return nil, response.Request.URL, statusClass, distributionError("content_type", "manifest endpoint did not return JSON")
+	}
+	limit := cfg.DistributionManifestMaxBytes
+	if limit <= 0 {
+		limit = 1024 * 1024
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, response.Request.URL, statusClass, distributionError("response_read", "manifest response could not be read")
+	}
+	if int64(len(body)) > limit {
+		return nil, response.Request.URL, statusClass, distributionError("manifest_too_large", "manifest exceeds the deployment size limit")
+	}
+	return body, response.Request.URL, statusClass, nil
+}
+
+func firstDistributionValue(values map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := values[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func distributionPositiveInt64(raw any) (int64, bool) {
+	switch value := raw.(type) {
+	case json.Number:
+		n, err := value.Int64()
+		return n, err == nil && n > 0
+	case float64:
+		return int64(value), value == float64(int64(value)) && value > 0
+	default:
+		n, err := strconv.ParseInt(strings.TrimSpace(fmt.Sprint(value)), 10, 64)
+		return n, err == nil && n > 0
+	}
 }
 
 func distributionSchemaVersion(raw any) (int, bool) {
@@ -476,7 +557,7 @@ func redactDistributionURL(raw string) string {
 
 func distributionProfileAuditSnapshot(profile models.DistributionProfile) map[string]any {
 	return map[string]any{
-		"id": profile.ID, "name": profile.Name, "enabled": profile.Enabled, "isDefault": profile.IsDefault,
+		"id": profile.ID, "revision": profile.Revision, "name": profile.Name, "enabled": profile.Enabled, "isDefault": profile.IsDefault,
 		"sourceMode": profile.SourceMode, "channel": profile.Channel,
 		"projectUrl": redactDistributionURL(profile.ProjectURL), "releaseIndexUrl": redactDistributionURL(profile.ReleaseIndexURL),
 		"releaseHistoryUrl": redactDistributionURL(profile.ReleaseHistoryURL), "releasePageUrl": redactDistributionURL(profile.ReleasePageURL),

@@ -117,11 +117,9 @@ export function DistributionProfileEditor({
           <button disabled={busy} onClick={onSave} className="accent">
             Speichern
           </button>
-          {profile.id > 0 && (
-            <button disabled={busy} onClick={onTest}>
+          <button disabled={busy} onClick={onTest}>
               Quelle testen
             </button>
-          )}
           {profile.id > 0 && (
             <button
               disabled={busy || profile.isDefault || assignedUserCount > 0}

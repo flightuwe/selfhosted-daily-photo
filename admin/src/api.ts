@@ -2933,7 +2933,7 @@ export async function updateDistributionProfile(
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(profile),
+      body: JSON.stringify({ ...profile, expectedRevision: profile.revision }),
     },
   );
   return parse<{ profile: DistributionProfile }>(res);
@@ -2955,15 +2955,13 @@ export async function deleteDistributionProfile(
 
 export async function testDistributionProfile(
   token: string,
-  profileId: number,
+  profile: DistributionProfile,
 ): Promise<{ result: DistributionTestResult }> {
-  const res = await fetch(
-    `${apiBase}/admin/distribution/profiles/${profileId}/test`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-    },
-  );
+  const res = await fetch(`${apiBase}/admin/distribution/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(profile),
+  });
   return parse<{ result: DistributionTestResult }>(res);
 }
 
