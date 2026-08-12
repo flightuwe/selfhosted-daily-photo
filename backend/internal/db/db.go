@@ -35,6 +35,8 @@ func Connect(path string) (*gorm.DB, error) {
 	if err := database.AutoMigrate(
 		&models.User{},
 		&models.DistributionAuditEvent{},
+		&models.DistributionRollout{},
+		&models.DistributionClientState{},
 		&models.InviteCode{},
 		&models.DeviceToken{},
 		&models.UserSession{},
@@ -92,6 +94,9 @@ func Connect(path string) (*gorm.DB, error) {
 	if err := ensureDistributionSchema(database); err != nil {
 		return nil, err
 	}
+	if err := ensureDistributionRollout(database); err != nil {
+		return nil, err
+	}
 	if err := ensureDefaultSettings(database); err != nil {
 		return nil, err
 	}
@@ -130,6 +135,17 @@ func Connect(path string) (*gorm.DB, error) {
 	}
 
 	return database, nil
+}
+
+func ensureDistributionRollout(database *gorm.DB) error {
+	var count int64
+	if err := database.Model(&models.DistributionRollout{}).Where("id = ?", 1).Count(&count).Error; err != nil {
+		return fmt.Errorf("inspect distribution rollout: %w", err)
+	}
+	if count > 0 {
+		return nil
+	}
+	return database.Create(&models.DistributionRollout{ID: 1, Enabled: false, Revision: 1}).Error
 }
 
 type sqliteForeignKey struct {

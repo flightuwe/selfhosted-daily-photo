@@ -52,7 +52,18 @@ Beispiel einer Manifest-Antwort:
 }
 ```
 
-Die Antwort ist privat cachebar und besitzt einen ETag aus Nutzerzuordnung und Profilstand. Der Endpunkt macht keinen externen Abruf.
+Die Antwort ist privat cachebar und besitzt einen ETag aus Nutzerzuordnung und Profilstand. Der Endpunkt macht keinen externen Abruf. Authentifizierte Android-Clients melden dabei ihre installierte `versionName` und ihren `versionCode` als Queryparameter. Fuer Rollout-Entscheidungen wird ausschliesslich der numerische VersionCode verwendet; der letzte Bericht wird nutzerbezogen in `distribution_client_states` gespeichert.
+
+## Automatische Bridge-Migration
+
+Im Adminbereich kann eine Singleton-Rollout-Policy aus Einstiegsversion, Stable-Zielversion, Migrationsprofil und aktiviertem Defaultprofil konfiguriert werden.
+
+- Unterhalb der Einstiegsversion wird der Client nur beobachtet und nicht neu zugeordnet.
+- Ab Einstiegsversion bis vor das Stable-Ziel erhaelt er das Migrationsprofil, sofern kein anderes manuelles Override besteht.
+- Sobald das Stable-Ziel gemeldet wird, entfernt das Backend nur ein exakt von der Automatik verwendetes Migrationsprofil. Danach erbt der Nutzer wieder das Defaultprofil.
+- Wiederholte Abrufe sind idempotent; echte Wechsel laufen in einer Transaktion und landen im unveraenderbaren Distributions-Audit.
+
+Bei einer zweistufigen oeffentlichen Migration bleibt der Legacy-Index zunaechst auf der Bridge-Version, waehrend das Migrationsprofil bereits auf die naechste Harzcloud-Version zeigt. So koennen alte Clients die Kompatibilitaets-Bridge nicht ueberspringen. Der oeffentliche Stable-Zeiger wird erst nach der gewuenschten Migration auf den Nachfolger gesetzt.
 
 Adminrouten:
 
@@ -61,6 +72,7 @@ Adminrouten:
 - `POST /api/admin/distribution/profiles/:id/test`
 - `POST /api/admin/distribution/test` testet den sichtbaren, noch nicht gespeicherten Entwurf
 - `GET /api/admin/distribution/audit`
+- `GET|PUT /api/admin/distribution/rollout`
 - `PUT /api/admin/users/:id/distribution-profile`
 
 ## Providerneutraler Release-Index

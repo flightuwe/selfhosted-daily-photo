@@ -5,9 +5,11 @@ import {
   deleteDistributionProfile,
   getDistributionAudit,
   getDistributionProfiles,
+  getDistributionRollout,
   listUsers,
   testDistributionProfile,
   updateDistributionProfile,
+  updateDistributionRollout,
   type AdminUser,
 } from "../api";
 import { DistributionAudit } from "./DistributionAudit";
@@ -19,6 +21,7 @@ import {
   type DistributionDeploymentPolicy,
   type DistributionProfile,
   type DistributionProfileItem,
+  type DistributionRolloutResponse,
   type DistributionTestResult,
 } from "./distributionTypes";
 
@@ -38,6 +41,7 @@ export function DistributionPanel({ token }: Props) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [audit, setAudit] = useState<DistributionAuditItem[]>([]);
   const [policy, setPolicy] = useState<DistributionDeploymentPolicy>(emptyPolicy);
+  const [rollout, setRollout] = useState<DistributionRolloutResponse>();
   const [selectedId, setSelectedId] = useState<number>(0);
   const selectedIdRef = useRef(0);
   const [draft, setDraft] = useState<DistributionProfile>(emptyDistributionProfile());
@@ -51,15 +55,17 @@ export function DistributionPanel({ token }: Props) {
   );
 
   const refresh = useCallback(async (preferredId?: number) => {
-    const [profiles, currentUsers, currentAudit] = await Promise.all([
+    const [profiles, currentUsers, currentAudit, currentRollout] = await Promise.all([
       getDistributionProfiles(token),
       listUsers(token),
       getDistributionAudit(token),
+      getDistributionRollout(token),
     ]);
     setItems(profiles.items);
     setPolicy(profiles.deploymentPolicy);
     setUsers(currentUsers);
     setAudit(currentAudit.items);
+    setRollout(currentRollout);
     const nextId = preferredId ?? selectedIdRef.current;
     const selected = profiles.items.find((item) => item.profile.id === nextId)
       || profiles.items.find((item) => item.profile.isDefault)
@@ -159,6 +165,22 @@ export function DistributionPanel({ token }: Props) {
     }
   }
 
+  async function saveRollout() {
+    if (!rollout) return;
+    if (rollout.rollout.enabled && !window.confirm("Automatische Profilumschaltung mit diesen Versionsgrenzen aktivieren?")) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await updateDistributionRollout(token, rollout.rollout);
+      await refresh(draft.id || undefined);
+      setMessage("Rollout-Automatik gespeichert.");
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const preview = {
         schemaVersion: 1,
         enabled: draft.enabled && draft.sourceMode !== "disabled",
@@ -195,6 +217,57 @@ export function DistributionPanel({ token }: Props) {
         </div>
       </div>
       {message && <p className="message">{message}</p>}
+
+      {rollout && (
+        <section className="stack distribution-preview">
+          <div className="row">
+            <div>
+              <h3>Automatische Bridge-Migration</h3>
+              <p className="small">Clients ab Einstiegsversion erhalten das Migrationsprofil. Nach Erreichen der Stable-Version wird nur der automatisch gesetzte Override entfernt.</p>
+            </div>
+            <button disabled={busy} onClick={() => void saveRollout()}>Automatik speichern</button>
+          </div>
+          <div className="settings-grid">
+            <label>
+              <input
+                type="checkbox"
+                checked={rollout.rollout.enabled}
+                onChange={(event) => setRollout({ ...rollout, rollout: { ...rollout.rollout, enabled: event.target.checked } })}
+              /> Aktiv
+            </label>
+            <label>Migrationsprofil
+              <select value={rollout.rollout.migrationProfileId} onChange={(event) => setRollout({ ...rollout, rollout: { ...rollout.rollout, migrationProfileId: Number(event.target.value) } })}>
+                <option value={0}>Bitte wählen</option>
+                {items.map((item) => <option key={item.profile.id} value={item.profile.id}>{item.profile.name}</option>)}
+              </select>
+            </label>
+            <label>Stable-/Defaultprofil
+              <select value={rollout.rollout.stableProfileId} onChange={(event) => setRollout({ ...rollout, rollout: { ...rollout.rollout, stableProfileId: Number(event.target.value) } })}>
+                <option value={0}>Bitte wählen</option>
+                {items.map((item) => <option key={item.profile.id} value={item.profile.id}>{item.profile.name}</option>)}
+              </select>
+            </label>
+            <label>Einstiegs-versionCode
+              <input type="number" min={1} value={rollout.rollout.entryVersionCode} onChange={(event) => setRollout({ ...rollout, rollout: { ...rollout.rollout, entryVersionCode: Number(event.target.value) } })} />
+            </label>
+            <label>Stable erreicht ab versionCode
+              <input type="number" min={1} value={rollout.rollout.stableVersionCode} onChange={(event) => setRollout({ ...rollout, rollout: { ...rollout.rollout, stableVersionCode: Number(event.target.value) } })} />
+            </label>
+          </div>
+          <div className="grid4">
+            <article className="stat"><h3>Unbekannt</h3><p>{rollout.summary.unknown || 0}</p></article>
+            <article className="stat"><h3>Migration</h3><p>{rollout.summary.migration || 0}</p></article>
+            <article className="stat"><h3>Stable erreicht</h3><p>{rollout.summary.stable || 0}</p></article>
+            <article className="stat"><h3>Manuell</h3><p>{rollout.summary.manual_override || 0}</p></article>
+          </div>
+          {rollout.clients.length > 0 && (
+            <table>
+              <thead><tr><th>Nutzer-ID</th><th>App</th><th>versionCode</th><th>Phase</th><th>Zuletzt gesehen</th></tr></thead>
+              <tbody>{rollout.clients.map((client) => <tr key={client.userId}><td>{client.userId}</td><td>{client.versionName || "-"}</td><td>{client.versionCode}</td><td>{client.phase}</td><td>{client.lastSeenAt}</td></tr>)}</tbody>
+            </table>
+          )}
+        </section>
+      )}
 
       <div className="distribution-layout">
         <aside className="distribution-profile-list">
