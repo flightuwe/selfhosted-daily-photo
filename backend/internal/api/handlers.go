@@ -9463,6 +9463,10 @@ func (s *Server) handleHealth(c *gin.Context) {
 		"ok":       true,
 		"version":  s.Config.AppVersion,
 		"provider": s.Notifier.Name(),
+		"publicConfig": gin.H{
+			"projectUrl":  strings.TrimSpace(s.Config.PublicProjectURL),
+			"downloadUrl": strings.TrimSpace(s.Config.PublicDownloadURL),
+		},
 		"features": gin.H{
 			"chatDelete":           true,
 			"commentDelete":        true,

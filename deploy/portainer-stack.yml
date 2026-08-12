@@ -24,6 +24,8 @@ services:
       - TOKEN_TTL_HOURS=24
       - REFRESH_TOKEN_TTL_DAYS=3650
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://daily.example.tld}
+      - PUBLIC_PROJECT_URL=${PUBLIC_PROJECT_URL:-}
+      - PUBLIC_DOWNLOAD_URL=${PUBLIC_DOWNLOAD_URL:-}
       - ADMIN_BASE_URL=${ADMIN_BASE_URL:-http://admin.daily.local:13379}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://admin.daily.local:13379,https://daily.example.tld}
       - APP_TIMEZONE=Europe/Berlin

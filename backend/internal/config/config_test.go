@@ -45,3 +45,12 @@ func TestLoadDistributionSecurityPolicy(t *testing.T) {
 		t.Fatalf("distribution limits = manifest:%d apk:%d", cfg.DistributionManifestMaxBytes, cfg.DistributionAPKMaxBytes)
 	}
 }
+
+func TestLoadPublicDailyLinks(t *testing.T) {
+	t.Setenv("PUBLIC_PROJECT_URL", "https://forge.example.net/team/daily")
+	t.Setenv("PUBLIC_DOWNLOAD_URL", "https://downloads.example.net/daily")
+	cfg := Load()
+	if cfg.PublicProjectURL != "https://forge.example.net/team/daily" || cfg.PublicDownloadURL != "https://downloads.example.net/daily" {
+		t.Fatalf("public links = project:%q download:%q", cfg.PublicProjectURL, cfg.PublicDownloadURL)
+	}
+}

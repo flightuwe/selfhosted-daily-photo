@@ -1310,10 +1310,12 @@ data class SpecialMomentStatus(
 )
 data class HealthFeatures(val chatDelete: Boolean = false, val commentDelete: Boolean = false)
 data class MediaCapabilities(val renditions: Boolean = false, val formats: List<String> = emptyList(), val avifEnabled: Boolean = false)
+data class PublicDailyConfig(val projectUrl: String = "", val downloadUrl: String = "")
 data class HealthResponse(
     val ok: Boolean,
     val version: String = "unknown",
     val provider: String = "unknown",
+    val publicConfig: PublicDailyConfig = PublicDailyConfig(),
     val features: HealthFeatures = HealthFeatures(),
     val mediaCapabilities: MediaCapabilities = MediaCapabilities()
 )
@@ -4588,6 +4590,15 @@ class AppRepo(
         if (!resolved.config.enabled) return null
         val releases = distributionReleases.releases(resolved, allowNetwork).releases
         return UpdateReleaseChecker.findUpdate(currentVersion, currentVersionCode, releases, resolved.config.minSupportedVersionCode)
+    }
+
+    suspend fun inviteDownloadUrl(): String? {
+        val offline = OfflineModeManager.isEnabled(context)
+        val resolved = distributionConfig.resolve(allowNetwork = !offline)
+        val session = AuthSessionCoordinator.snapshot(context)
+        if (!session.hasAccessToken() || session.userId <= 0) return null
+        val publicConfig = if (offline) null else runCatching { health().publicConfig }.getOrNull()
+        return InviteDownloadLinkResolver.resolve(resolved, publicConfig, resolveApiBaseUrl(context), offline)
     }
 
     suspend fun changelogLines(currentVersion: String): List<String> {
@@ -11441,6 +11452,8 @@ class MainVm(private val repo: AppRepo) : ViewModel() {
         state = state.copy(updateInfo = update)
     }
 
+    suspend fun inviteDownloadUrl(): String? = repo.inviteDownloadUrl()
+
     fun confirmLatestUpdateDownload() {
         val update = state.latestUpdateInfo ?: state.updateInfo
         if (update == null) {
@@ -14624,20 +14637,26 @@ fun AppScreen(vm: MainVm, launchIntentTick: Int = 0) {
                     onShareInviteCode = {
                         val code = state.myInviteCode.trim()
                         if (code.isNotBlank()) {
-                            val inviter = state.user?.username?.ifBlank { "ein Mitglied" } ?: "ein Mitglied"
-                            val apkUrl = "https://daily.harzcloud.de/#download"
-                            val shortGuide = "1) APK installieren  2) App oeffnen -> Registrieren  3) Invite-Code eingeben"
-                            val text = buildString {
-                                appendLine("Daily Invite von @$inviter")
-                                appendLine("Invite-Code: $code")
-                                appendLine(shortGuide)
-                                append("Neueste APK: $apkUrl")
+                            scope.launch {
+                                val downloadUrl = vm.inviteDownloadUrl()
+                                if (downloadUrl == null) {
+                                    vm.setMessage("Kein sicherer Downloadlink fuer diese Instanz verfuegbar.")
+                                    return@launch
+                                }
+                                val inviter = state.user?.username?.ifBlank { "ein Mitglied" } ?: "ein Mitglied"
+                                val shortGuide = "1) APK installieren  2) App oeffnen -> Registrieren  3) Invite-Code eingeben"
+                                val text = buildString {
+                                    appendLine("Daily Invite von @$inviter")
+                                    appendLine("Invite-Code: $code")
+                                    appendLine(shortGuide)
+                                    append("Download: $downloadUrl")
+                                }
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, text)
+                                }
+                                context.startActivity(Intent.createChooser(send, "Invite-Code teilen"))
                             }
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, text)
-                            }
-                            context.startActivity(Intent.createChooser(send, "Invite-Code teilen"))
                         }
                     },
                     onLogout = { vm.logout() },

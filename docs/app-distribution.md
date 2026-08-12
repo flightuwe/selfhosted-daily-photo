@@ -19,6 +19,9 @@ Im Adminbereich `Konfiguration -> App-Verteilung` lassen sich Profile anlegen, t
 - Ein Default-Profil und ein noch zugeordnetes Profil können nicht gelöscht werden.
 - Default-Wechsel und Zuordnungen werden auditiert.
 - Audit-Snapshots redigieren Querywerte; Tokens, Cookies, Authorization-Header und fremde Antwortkörper werden nicht gespeichert.
+- Profile starten mit Revision 1. Updates senden `expectedRevision`; ein veralteter Stand erhält HTTP 409 samt aktueller Revision und Serverfassung.
+- SQLite-Trigger verhindern UPDATE und DELETE auf Auditzeilen. Das ist ein lokaler Append-only-Schutz, keine kryptografische Versiegelung.
+- JSON-Payloads der schreibenden und testenden Distribution-Adminrouten sind auf 64 KiB begrenzt.
 
 Die Modi sind:
 
@@ -56,6 +59,7 @@ Adminrouten:
 - `GET|POST /api/admin/distribution/profiles`
 - `PUT|DELETE /api/admin/distribution/profiles/:id`
 - `POST /api/admin/distribution/profiles/:id/test`
+- `POST /api/admin/distribution/test` testet den sichtbaren, noch nicht gespeicherten Entwurf
 - `GET /api/admin/distribution/audit`
 - `PUT /api/admin/users/:id/distribution-profile`
 
@@ -88,20 +92,29 @@ Adminrouten:
 
 Die bestehenden Felder `sha256` und `size` bleiben unverändert. Historische Einträge ohne Installationsmetadaten bleiben als Changelog sichtbar, werden aber nicht als installierbares Update angeboten. Die vorübergehende Altindex-Ausnahme gilt ausschließlich für APK-URLs auf `releases.daily.harzcloud.de`; Paket und Zertifikat werden auch dort gegen Profil und installierte App geprüft.
 
-Der Indexgenerator verlangt die Installationsidentität explizit:
+Der Indexgenerator verlangt Installationsidentität, Kanal, Prerelease-Status und sämtliche providerbezogenen URL-Templates explizit. Er sortiert deterministisch nach `versionCode`; SemVer-Suffixe wie `1.0.0-beta.1` werden nicht numerisch zerlegt:
 
 ```text
 python scripts/build_release_index.py \
   --version 0.8.29 \
   --version-code 142029 \
+  --channel stable \
+  --prerelease false \
   --package-name com.selfhosted.daily \
   --signing-cert-sha256 <PUBLIC_CERT_SHA256> \
+  --apk-sha256 <APK_SHA256> \
+  --apk-size <APK_SIZE_BYTES> \
+  --apk-url-template 'https://downloads.example.org/daily/{tag}/app-release.apk' \
+  --changelog-url-template 'https://downloads.example.org/daily/{tag}/changelog.json' \
+  --release-url-template 'https://code.example.org/team/daily/releases/tag/{tag}' \
   --apk dist/app-release.apk \
   --notes .github/release-notes/v0.8.29.json \
   --output dist/index.json
 ```
 
 Der Fingerprint ist ein öffentlicher Zertifikatswert, kein Signiersecret. Er muss aus der fertig signierten APK ermittelt werden.
+
+Die Forgejo-Candidate-Pipeline trägt die offiziellen Harzcloud-Templates ausdrücklich in ihrer Provenienz. Sie erzeugt absichtlich keinen veröffentlichbaren Index, weil ihr APK-Artefakt unsigniert ist. Der spätere, separat freigegebene Signier-/Publishing-Schritt muss dieselben expliziten Parameter an den Generator übergeben.
 
 ## URL- und Netzwerkgrenzen
 
@@ -122,6 +135,8 @@ DISTRIBUTION_APK_MAX_BYTES=262144000
 - Distributions-URLs müssen stabil, öffentlich abrufbar und vollständig query-frei sein. URL-Userinfo und Credentials in URLs werden nicht unterstützt.
 - Private Artefakte benötigen künftig einen separat entworfenen Authentifizierungsmechanismus und sind nicht Teil dieser ersten providerneutralen Version.
 
+Android deaktiviert automatische Redirects für Index, History und APK. Ein ausdrücklich vom Backend konfigurierter Selfhosting-Host darf selbst lokal sein; ein erst durch Redirect oder Manifest eingeführter Host muss HTTPS verwenden und öffentlich auflösbar sein. Jeder Redirect wird erneut geprüft und nach drei Schritten beendet.
+
 ## Android-Auflösung und Cache
 
 Auflösungsreihenfolge:
@@ -130,6 +145,8 @@ Auflösungsreihenfolge:
 2. höchstens sieben Tage alte Last-known-good-Konfiguration für exakt diesen Server und Nutzer,
 3. Build-Fallback nur für die bekannte offizielle Instanz,
 4. sichere Deaktivierung der Updateprüfung.
+
+Scheitert der Backendabruf und Token, Nutzer-ID oder API-Origin wurden währenddessen gelöscht oder verändert, endet die Auflösung sofort. LKG wird nur bei temporären Transport-/Serverfehlern und unveränderter Sitzung verwendet.
 
 Konfiguration und Release-Cache sind nach normalisierter API-Origin, Nutzer-ID, Profil-ID, Kanal und `profileUpdatedAt` getrennt. Der alte globale `github_release_history_*`-Cache wird bewusst ignoriert. Offline-Modus und ein Worker ohne angemeldeten Nutzer erzeugen keine Distribution-, Manifest-, Release- oder Changeloganfragen.
 
@@ -148,6 +165,10 @@ Nach einer bewussten Nutzerbestätigung zeigt Daily Version und Zielhost und fü
 9. atomare Finalisierung und Übergabe per `FileProvider` an den Android Package Installer.
 
 Bei jedem Fehler wird die temporäre Datei gelöscht. Es gibt weder automatischen Download noch stille Installation.
+
+Die Updateauswahl filtert zuerst Kanal (leer bedeutet `stable`) und Prerelease-Freigabe und wählt danach den höchsten `versionCode`, unabhängig vom globalen Root-`latest`. `minSupportedVersionCode` kennzeichnet ein Update nur dann als erforderlich, wenn ein vollständiger, installierbarer Kandidat mindestens diesen Code erreicht. Auch dann bleiben Download und Installer an eine sichtbare Nutzerbestätigung gebunden; ohne verifizierbaren Kandidaten wird die App nicht gesperrt.
+
+Einladungslinks verwenden zuerst die effektive Release-/Projekt-URL des Nutzerprofils, danach `PUBLIC_DOWNLOAD_URL` beziehungsweise `PUBLIC_PROJECT_URL` aus `/api/health` und zuletzt eine sichere `/#download`-Ableitung aus der API-Origin. Offline wird ausschließlich eine LKG-Konfiguration derselben Origin und Nutzeridentität verwendet.
 
 ## Rollout und Rücknahme
 

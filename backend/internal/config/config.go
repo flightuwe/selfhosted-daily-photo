@@ -17,6 +17,8 @@ type Config struct {
 	RefreshTokenTTL                  time.Duration
 	AllowedOrigins                   []string
 	PublicBaseURL                    string
+	PublicProjectURL                 string
+	PublicDownloadURL                string
 	AdminBaseURL                     string
 	Timezone                         string
 	SchedulerEnabled                 bool
@@ -63,6 +65,8 @@ func Load() Config {
 		RefreshTokenTTL:                  time.Duration(getInt("REFRESH_TOKEN_TTL_DAYS", 3650)) * 24 * time.Hour,
 		AllowedOrigins:                   allowedOrigins,
 		PublicBaseURL:                    publicBaseURL,
+		PublicProjectURL:                 getEnv("PUBLIC_PROJECT_URL", ""),
+		PublicDownloadURL:                getEnv("PUBLIC_DOWNLOAD_URL", ""),
 		AdminBaseURL:                     adminBaseURL,
 		Timezone:                         getEnv("APP_TIMEZONE", "Europe/Berlin"),
 		SchedulerEnabled:                 getBool("SCHEDULER_ENABLED", true),
