@@ -70,6 +70,7 @@ type Server struct {
 	photoSearchReady   bool
 	performanceCacheMu sync.Mutex
 	performanceCache   map[string]performanceCacheEntry
+	distributionWriteMu sync.Mutex
 	EmailSecrets       *mailservice.Secrets
 	EmailSender        mailservice.Sender
 	EmailWorkerID      string

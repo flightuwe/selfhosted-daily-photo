@@ -554,7 +554,7 @@ func TestDistributionConcurrentDefaultSwitchKeepsSingleEnabledDefault(t *testing
 	wait.Wait()
 	close(statuses)
 	for status := range statuses {
-		if status != http.StatusOK && status != http.StatusConflict {
+		if status != http.StatusOK {
 			t.Fatalf("unexpected concurrent default status=%d", status)
 		}
 	}
