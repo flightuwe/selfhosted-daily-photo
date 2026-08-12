@@ -209,6 +209,9 @@ func (s *Server) handleAdminDistributionProfiles(c *gin.Context) {
 }
 
 func (s *Server) handleAdminCreateDistributionProfile(c *gin.Context) {
+	s.distributionWriteMu.Lock()
+	defer s.distributionWriteMu.Unlock()
+
 	actor, _ := userFromContext(c)
 	var request distributionProfileRequest
 	if !bindDistributionJSON(c, &request) {
@@ -253,6 +256,9 @@ func (s *Server) handleAdminCreateDistributionProfile(c *gin.Context) {
 }
 
 func (s *Server) handleAdminUpdateDistributionProfile(c *gin.Context) {
+	s.distributionWriteMu.Lock()
+	defer s.distributionWriteMu.Unlock()
+
 	id, err := parseUintParam(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid profile id"})
@@ -373,6 +379,9 @@ func (s *Server) handleAdminUpdateDistributionProfile(c *gin.Context) {
 }
 
 func (s *Server) handleAdminDeleteDistributionProfile(c *gin.Context) {
+	s.distributionWriteMu.Lock()
+	defer s.distributionWriteMu.Unlock()
+
 	id, err := parseUintParam(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid profile id"})
@@ -486,6 +495,9 @@ func distributionAuditJSON(raw string) any {
 }
 
 func (s *Server) handleAdminUserDistributionProfile(c *gin.Context) {
+	s.distributionWriteMu.Lock()
+	defer s.distributionWriteMu.Unlock()
+
 	userID, err := parseUintParam(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
