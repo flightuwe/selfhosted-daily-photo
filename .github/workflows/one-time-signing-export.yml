@@ -1,0 +1,159 @@
+name: One-time encrypted Daily Android signing export
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
+
+    steps:
+      - name: Build and encrypt migration payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          export EXPORT_ROOT="$RUNNER_TEMP/daily-android-signing-export"
+          export PLAIN_ROOT="$EXPORT_ROOT/plain"
+          export OUTPUT_ROOT="$EXPORT_ROOT/output"
+          rm -rf -- "$EXPORT_ROOT"
+          mkdir -p -- "$PLAIN_ROOT" "$OUTPUT_ROOT"
+
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+
+          required = [
+              "ANDROID_KEYSTORE_BASE64",
+              "ANDROID_KEY_ALIAS",
+              "ANDROID_KEYSTORE_PASSWORD",
+              "ANDROID_KEY_PASSWORD",
+              "ANDROID_GOOGLE_SERVICES_JSON_BASE64",
+          ]
+          missing = [name for name in required if not os.environ.get(name)]
+          if missing:
+              raise SystemExit("Missing required GitHub Actions secrets: " + ", ".join(missing))
+
+          root = Path(os.environ["PLAIN_ROOT"])
+          keystore_b64 = "".join(os.environ["ANDROID_KEYSTORE_BASE64"].split())
+          google_b64 = "".join(os.environ["ANDROID_GOOGLE_SERVICES_JSON_BASE64"].split())
+          keystore = base64.b64decode(keystore_b64, validate=True)
+          google_raw = base64.b64decode(google_b64, validate=True)
+          if len(keystore) < 512:
+              raise SystemExit("Decoded keystore is unexpectedly small")
+          google = json.loads(google_raw.decode("utf-8"))
+
+          (root / "release.keystore").write_bytes(keystore)
+          (root / "google-services.json").write_text(
+              json.dumps(google, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          (root / "signing.json").write_text(
+              json.dumps(
+                  {
+                      "alias": os.environ["ANDROID_KEY_ALIAS"],
+                      "keystorePassword": os.environ["ANDROID_KEYSTORE_PASSWORD"],
+                      "keyPassword": os.environ["ANDROID_KEY_PASSWORD"],
+                  },
+                  ensure_ascii=False,
+                  sort_keys=True,
+                  indent=2,
+              ) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          cat > "$EXPORT_ROOT/recipient.pem" <<'PEM'
+          -----BEGIN PUBLIC KEY-----
+          MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAvgi8F6RNcnzjCU5MYQmE
+          7GObOMmE5wAPzuetolW6YBMexISsZeC9M/9NGG404LZmXoyGvvlz+9raDMHNQXjS
+          cCrLlMg6QIwauFPQbO3MHjtf2R8w4BZZQ5KrAh9x+ZPae1zJf5742adOkCIy75nx
+          6h55+MTJb+3c8XKL2fd4OoReBBSuWgcyxk413F3tTAUYwwp7z2Aw/WJpQinBDrWC
+          2nk+Pkux1TplOrSJNq2nqYWToQBQmry+KB3uXLXgqhOHRGAD9OvMxw4cq7p+I6kr
+          EJpymIFDwErokQj2hnaqHPlnbGGRlNSsFtkJ+EyuQAfM8vcuIdNuPYfrwQL1v4I4
+          qonOlmAYHBjfaoi3oQa/mEOQD74cKQsXVbkxSCcwlWAloT37a0mt/Oid88TnGjtM
+          Lw65IDfKjjBFpXu0il1qyH65RFSYSnfOQCq0CXZyrpS69XWKN1otoHymZYfZMNWO
+          zMzI9+RPtLJnO4VqJSTNh5DSKP8jEKeEkZMBjX/RxzWpAgMBAAE=
+          -----END PUBLIC KEY-----
+          PEM
+
+          tar -C "$PLAIN_ROOT" -cf "$EXPORT_ROOT/payload.tar" \
+            release.keystore google-services.json signing.json
+          PAYLOAD_SHA256="$(sha256sum "$EXPORT_ROOT/payload.tar" | awk '{print $1}')"
+
+          ENC_KEY_HEX="$(openssl rand -hex 32)"
+          MAC_KEY_HEX="$(openssl rand -hex 32)"
+          IV_HEX="$(openssl rand -hex 16)"
+          openssl enc -aes-256-cbc \
+            -K "$ENC_KEY_HEX" -iv "$IV_HEX" \
+            -in "$EXPORT_ROOT/payload.tar" \
+            -out "$OUTPUT_ROOT/payload.enc"
+          openssl dgst -sha256 -mac HMAC -macopt "hexkey:$MAC_KEY_HEX" -binary \
+            "$OUTPUT_ROOT/payload.enc" > "$OUTPUT_ROOT/payload.enc.hmac"
+          printf '%s:%s:%s' "$ENC_KEY_HEX" "$MAC_KEY_HEX" "$IV_HEX" | \
+            openssl pkeyutl -encrypt \
+              -pubin -inkey "$EXPORT_ROOT/recipient.pem" \
+              -pkeyopt rsa_padding_mode:oaep \
+              -pkeyopt rsa_oaep_md:sha256 \
+              -pkeyopt rsa_mgf1_md:sha256 \
+              -out "$OUTPUT_ROOT/key-material.enc"
+          unset ENC_KEY_HEX MAC_KEY_HEX IV_HEX
+
+          export PAYLOAD_SHA256
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["OUTPUT_ROOT"])
+          digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          manifest = {
+              "schemaVersion": 1,
+              "source": "GitHub Actions encrypted secret migration",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "commit": os.environ["GITHUB_SHA"],
+              "publicKeySpkiSha256": "228425aa33b7fe74ea994d16ed6bb19f443f6ce423345a28f7c954d42cfeb3be",
+              "payloadPlaintextSha256": os.environ["PAYLOAD_SHA256"],
+              "payloadCiphertextSha256": digest(root / "payload.enc"),
+              "payloadHmacSha256": digest(root / "payload.enc.hmac"),
+              "wrappedKeyMaterialSha256": digest(root / "key-material.enc"),
+              "cipher": "AES-256-CBC+HMAC-SHA256",
+              "keyWrap": "RSA-3072-OAEP-SHA256-MGF1-SHA256",
+          }
+          (root / "manifest.json").write_text(
+              json.dumps(manifest, sort_keys=True, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          rm -rf -- "$PLAIN_ROOT" "$EXPORT_ROOT/payload.tar" "$EXPORT_ROOT/recipient.pem"
+
+      - name: Upload encrypted migration payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-android-signing-encrypted
+          path: ${{ runner.temp }}/daily-android-signing-export/output/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Remove migration files
+        if: always()
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/daily-android-signing-export"
